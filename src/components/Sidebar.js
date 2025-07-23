@@ -1,21 +1,21 @@
 import React from "react";
-import { AppStateContext } from "../context/AppStateContext";
-
-function useAppState() {
-  const context = React.useContext(AppStateContext);
-  if (!context) throw new Error("useAppState must be used within AppStateProvider");
-  return context;
-}
+import { useAppState } from "../context/AppStateContext";
 
 export default function Sidebar() {
   const {
+    rootNotes,
+    createNoteUniversal,
+    renameRootNote,
+    deleteRootNote,
+    shareRootNote,
+    setCurrentNoteId,
+    // Project/folder logic
     state,
     activeProjectId,
     activeFolderId,
     expandedProjectId,
     setActiveSelection,
     clearActiveSelection,
-    setExpandedProjectId,
     createProject,
     renameProject,
     deleteProject,
@@ -27,7 +27,6 @@ export default function Sidebar() {
     addNoteToFolder,
   } = useAppState();
 
-  // Hide sidebar toggle
   const [hidden, setHidden] = React.useState(false);
   if (hidden) {
     return (
@@ -69,13 +68,53 @@ export default function Sidebar() {
       >
         + New Folder
       </button>
-      {/* Optional: Root Note button */}
       <button
         className="bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded text-white text-sm"
-        onClick={() => alert("Root note logic coming soon.")}
+        onClick={() => createNoteUniversal(activeProjectId, activeFolderId)}
       >
         + New Note
       </button>
+      <ul className="space-y-1 text-sm mt-2">
+        {rootNotes.map(note => (
+          <li
+            key={note.id}
+            className="bg-[#252525] text-white p-2 rounded flex justify-between items-center hover:bg-gray-700"
+            onClick={() => {
+              setCurrentNoteId(note.id);
+              clearActiveSelection();
+            }}
+          >
+            <span className="flex-1 cursor-pointer">{note.title}</span>
+            <div className="space-x-2 text-xs flex-shrink-0">
+              <i
+                className="fas fa-pen cursor-pointer"
+                title="Rename"
+                onClick={e => {
+                  e.stopPropagation();
+                  renameRootNote(note.id);
+                }}
+              />
+              <i
+                className="fas fa-trash cursor-pointer"
+                title="Delete"
+                onClick={e => {
+                  e.stopPropagation();
+                  deleteRootNote(note.id);
+                }}
+              />
+              <i
+                className="fas fa-share cursor-pointer"
+                title="Share"
+                onClick={e => {
+                  e.stopPropagation();
+                  shareRootNote(note.id);
+                }}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
+      {/* Project/folder tree as before */}
       <ul className="space-y-1 text-sm mt-4">
         {state.projectData.map((proj) => {
           const pid = proj.id;
@@ -92,9 +131,9 @@ export default function Sidebar() {
                   className="cursor-pointer font-semibold flex items-center"
                   onClick={() => {
                     if (activeProjectId === pid && !activeFolderId) {
-                      clearActiveSelection(); // Deselect/collapse if already selected
+                      clearActiveSelection();
                     } else {
-                      setActiveSelection(pid, null); // Select/expand
+                      setActiveSelection(pid, null);
                     }
                   }}
                   style={{ userSelect: "none" }}

@@ -1,16 +1,53 @@
 import React, { createContext, useContext, useState } from "react";
 
-// --- CONTEXT CREATION ---
 export const AppStateContext = createContext();
 
 export function AppStateProvider({ children }) {
-  // Top-level state
+  // State
   const [projectData, setProjectData] = useState([]);
   const [folderMap, setFolderMap] = useState({});
   const [activeProjectId, setActiveProjectId] = useState(null);
   const [activeFolderId, setActiveFolderId] = useState(null);
   const [expandedProjectId, setExpandedProjectId] = useState(null);
   const [currentNoteId, setCurrentNoteId] = useState(null);
+  const [rootNotes, setRootNotes] = useState([]);
+
+  // --- UNIVERSAL NEW NOTE BUTTON ---
+  function createNoteUniversal(activeProjectId, activeFolderId) {
+    if (activeProjectId && activeFolderId) {
+      addNoteToFolder(activeProjectId, activeFolderId);
+    } else if (!activeProjectId && !activeFolderId) {
+      createRootNote();
+    } else {
+      alert("Select a folder to add a note, or unselect to create a root note.");
+    }
+  }
+
+  // --- ROOT NOTES ---
+  function createRootNote() {
+    const title = prompt("Note title:", "Untitled Note");
+    if (!title) return;
+    const id = `root-note-${Date.now()}`;
+    setRootNotes(prev => [...prev, { id, title }]);
+    setCurrentNoteId(id);
+  }
+  function renameRootNote(nid) {
+    setRootNotes(prev =>
+      prev.map(note =>
+        note.id === nid
+          ? { ...note, title: prompt("New note title:", note.title) || note.title }
+          : note
+      )
+    );
+  }
+  function deleteRootNote(nid) {
+    if (!window.confirm("Delete this note?")) return;
+    setRootNotes(prev => prev.filter(note => note.id !== nid));
+    setCurrentNoteId(null);
+  }
+  function shareRootNote(nid) {
+    alert(`Share/export root note ${nid} (placeholder).`);
+  }
 
   // --- PROJECTS ---
   function createProject() {
@@ -96,6 +133,7 @@ export function AppStateProvider({ children }) {
     setActiveProjectId(pid);
     setActiveFolderId(fid);
     setExpandedProjectId(pid);
+    setCurrentNoteId(null); // Clear root note selection if changing
   }
 
   function clearActiveSelection() {
@@ -121,7 +159,6 @@ export function AppStateProvider({ children }) {
   }
 
   function renameNote(fid, nid) {
-    // Find correct folder
     setFolderMap((prev) => {
       const copy = { ...prev };
       Object.keys(copy).forEach((pid) => {
@@ -168,10 +205,16 @@ export function AppStateProvider({ children }) {
     alert(`Share/export note ${nid} (placeholder).`);
   }
 
-  // --- PROVIDER VALUE ---
   return (
     <AppStateContext.Provider
       value={{
+        // Note logic
+        rootNotes,
+        createNoteUniversal,
+        renameRootNote,
+        deleteRootNote,
+        shareRootNote,
+        // Project/Folder logic
         state: { projectData, folderMap },
         activeProjectId,
         activeFolderId,
@@ -198,4 +241,7 @@ export function AppStateProvider({ children }) {
       {children}
     </AppStateContext.Provider>
   );
+}
+export function useAppState() {
+  return useContext(AppStateContext);
 }
