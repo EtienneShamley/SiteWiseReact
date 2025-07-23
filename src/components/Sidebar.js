@@ -1,7 +1,6 @@
 import React from "react";
 import { AppStateContext } from "../context/AppStateContext";
 
-// Custom hook for cleaner context usage
 function useAppState() {
   const context = React.useContext(AppStateContext);
   if (!context) throw new Error("useAppState must be used within AppStateProvider");
@@ -11,6 +10,9 @@ function useAppState() {
 export default function Sidebar() {
   const {
     state,
+    activeProjectId,
+    activeFolderId,
+    expandedProjectId,
     setActiveSelection,
     clearActiveSelection,
     setExpandedProjectId,
@@ -23,13 +25,9 @@ export default function Sidebar() {
     deleteFolder,
     shareFolder,
     addNoteToFolder,
-    setCurrentNoteId,
-    activeProjectId,
-    activeFolderId,
-    expandedProjectId,
   } = useAppState();
 
-  // Hide logic
+  // Hide sidebar toggle
   const [hidden, setHidden] = React.useState(false);
   if (hidden) {
     return (
@@ -71,13 +69,10 @@ export default function Sidebar() {
       >
         + New Folder
       </button>
-      {/* New Note at root (optional, or move to MiddlePane) */}
+      {/* Optional: Root Note button */}
       <button
         className="bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded text-white text-sm"
-        onClick={() => {
-          // You may want to implement root note creation in context
-          alert("New Note at root (not in folder)—hook up this logic next.");
-        }}
+        onClick={() => alert("Root note logic coming soon.")}
       >
         + New Note
       </button>
@@ -89,12 +84,19 @@ export default function Sidebar() {
 
           return (
             <li key={pid} className="bg-[#252525] text-white p-2 rounded mb-1">
+              {/* Project row */}
               <div
                 className={`flex justify-between items-center rounded ${isProjectActive ? "bg-gray-400 text-black font-semibold" : ""}`}
               >
                 <span
                   className="cursor-pointer font-semibold flex items-center"
-                  onClick={() => setActiveSelection(pid, null)}
+                  onClick={() => {
+                    if (activeProjectId === pid && !activeFolderId) {
+                      clearActiveSelection(); // Deselect/collapse if already selected
+                    } else {
+                      setActiveSelection(pid, null); // Select/expand
+                    }
+                  }}
                   style={{ userSelect: "none" }}
                 >
                   <i className={`fas fa-chevron-${isExpanded ? "down" : "right"} mr-2 text-xs`} />
@@ -135,12 +137,11 @@ export default function Sidebar() {
                   />
                 </div>
               </div>
-              {/* Folders dropdown */}
+              {/* Folder dropdown */}
               {isExpanded && (
                 <ul className="folder-dropdown ml-4 mt-2 space-y-1">
                   {(state.folderMap[pid] || []).map((folder) => {
-                    const isFolderActive =
-                      activeFolderId === folder.id && activeProjectId === pid;
+                    const isFolderActive = activeFolderId === folder.id && activeProjectId === pid;
                     return (
                       <li key={folder.id} className="bg-[#222] p-2 rounded">
                         <div
@@ -148,7 +149,13 @@ export default function Sidebar() {
                         >
                           <span
                             className="cursor-pointer font-semibold"
-                            onClick={() => setActiveSelection(pid, folder.id)}
+                            onClick={() => {
+                              if (activeFolderId === folder.id && activeProjectId === pid) {
+                                clearActiveSelection();
+                              } else {
+                                setActiveSelection(pid, folder.id);
+                              }
+                            }}
                           >
                             {folder.name}
                           </span>
