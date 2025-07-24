@@ -1,5 +1,6 @@
 import React from "react";
 import { useAppState } from "../context/AppStateContext";
+import { FaPlus, FaPen, FaTrash, FaShare } from "react-icons/fa";
 
 export default function Sidebar() {
   const {
@@ -9,7 +10,6 @@ export default function Sidebar() {
     deleteRootNote,
     shareRootNote,
     setCurrentNoteId,
-    // Project/folder logic
     state,
     activeProjectId,
     activeFolderId,
@@ -74,6 +74,7 @@ export default function Sidebar() {
       >
         + New Note
       </button>
+      {/* Root Notes (outside projects/folders) */}
       <ul className="space-y-1 text-sm mt-2">
         {rootNotes.map(note => (
           <li
@@ -85,36 +86,39 @@ export default function Sidebar() {
             }}
           >
             <span className="flex-1 cursor-pointer">{note.title}</span>
-            <div className="space-x-2 text-xs flex-shrink-0">
-              <i
-                className="fas fa-pen cursor-pointer"
-                title="Rename"
-                onClick={e => {
-                  e.stopPropagation();
-                  renameRootNote(note.id);
-                }}
-              />
-              <i
-                className="fas fa-trash cursor-pointer"
-                title="Delete"
-                onClick={e => {
-                  e.stopPropagation();
-                  deleteRootNote(note.id);
-                }}
-              />
-              <i
-                className="fas fa-share cursor-pointer"
-                title="Share"
-                onClick={e => {
-                  e.stopPropagation();
-                  shareRootNote(note.id);
-                }}
-              />
+            <div className="space-x-2 text-xs flex-shrink-0 flex items-center">
+              <span title="Rename">
+                <FaPen
+                  className="cursor-pointer"
+                  onClick={e => {
+                    e.stopPropagation();
+                    renameRootNote(note.id);
+                  }}
+                />
+              </span>
+              <span title="Delete">
+                <FaTrash
+                  className="cursor-pointer"
+                  onClick={e => {
+                    e.stopPropagation();
+                    deleteRootNote(note.id);
+                  }}
+                />
+              </span>
+              <span title="Share">
+                <FaShare
+                  className="cursor-pointer"
+                  onClick={e => {
+                    e.stopPropagation();
+                    shareRootNote(note.id);
+                  }}
+                />
+              </span>
             </div>
           </li>
         ))}
       </ul>
-      {/* Project/folder tree as before */}
+      {/* Projects and Folders */}
       <ul className="space-y-1 text-sm mt-4">
         {state.projectData.map((proj) => {
           const pid = proj.id;
@@ -129,7 +133,8 @@ export default function Sidebar() {
               >
                 <span
                   className="cursor-pointer font-semibold flex items-center"
-                  onClick={() => {
+                  onClick={e => {
+                    // Only select/deselect project on click here!
                     if (activeProjectId === pid && !activeFolderId) {
                       clearActiveSelection();
                     } else {
@@ -141,39 +146,43 @@ export default function Sidebar() {
                   <i className={`fas fa-chevron-${isExpanded ? "down" : "right"} mr-2 text-xs`} />
                   {proj.name}
                 </span>
-                <div className="space-x-2 text-xs flex-shrink-0">
-                  <i
-                    className="fas fa-plus cursor-pointer"
-                    title="Add Folder"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      createFolder(pid);
-                    }}
-                  />
-                  <i
-                    className="fas fa-pen cursor-pointer"
-                    title="Rename"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      renameProject(pid);
-                    }}
-                  />
-                  <i
-                    className="fas fa-trash cursor-pointer"
-                    title="Delete"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteProject(pid);
-                    }}
-                  />
-                  <i
-                    className="fas fa-share cursor-pointer"
-                    title="Share"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      shareProject(pid);
-                    }}
-                  />
+                <div className="space-x-2 text-xs flex-shrink-0 flex items-center">
+                  <span title="Add Folder">
+                    <FaPlus
+                      className="cursor-pointer"
+                      onClick={e => {
+                        e.stopPropagation();
+                        createFolder(pid);
+                      }}
+                    />
+                  </span>
+                  <span title="Rename">
+                    <FaPen
+                      className="cursor-pointer"
+                      onClick={e => {
+                        e.stopPropagation();
+                        renameProject(pid);
+                      }}
+                    />
+                  </span>
+                  <span title="Delete">
+                    <FaTrash
+                      className="cursor-pointer"
+                      onClick={e => {
+                        e.stopPropagation();
+                        deleteProject(pid);
+                      }}
+                    />
+                  </span>
+                  <span title="Share">
+                    <FaShare
+                      className="cursor-pointer"
+                      onClick={e => {
+                        e.stopPropagation();
+                        shareProject(pid);
+                      }}
+                    />
+                  </span>
                 </div>
               </div>
               {/* Folder dropdown */}
@@ -188,7 +197,8 @@ export default function Sidebar() {
                         >
                           <span
                             className="cursor-pointer font-semibold"
-                            onClick={() => {
+                            onClick={e => {
+                              // Only select/deselect folder on click here!
                               if (activeFolderId === folder.id && activeProjectId === pid) {
                                 clearActiveSelection();
                               } else {
@@ -198,37 +208,43 @@ export default function Sidebar() {
                           >
                             {folder.name}
                           </span>
-                          <div className="space-x-2 text-xs">
-                            <i
-                              className="fas fa-plus cursor-pointer"
-                              title="Add Note"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                addNoteToFolder(pid, folder.id);
-                              }}
-                            />
-                            <i
-                              className="fas fa-pen cursor-pointer"
-                              title="Rename"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                renameFolder(pid, folder.id);
-                              }}
-                            />
-                            <i
-                              className="fas fa-trash cursor-pointer"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                deleteFolder(pid, folder.id);
-                              }}
-                            />
-                            <i
-                              className="fas fa-share cursor-pointer"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                shareFolder(pid, folder.id);
-                              }}
-                            />
+                          <div className="space-x-2 text-xs flex-shrink-0 flex items-center">
+                            <span title="Add Note">
+                              <FaPlus
+                                className="cursor-pointer"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  addNoteToFolder(pid, folder.id);
+                                }}
+                              />
+                            </span>
+                            <span title="Rename">
+                              <FaPen
+                                className="cursor-pointer"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  renameFolder(pid, folder.id);
+                                }}
+                              />
+                            </span>
+                            <span title="Delete">
+                              <FaTrash
+                                className="cursor-pointer"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  deleteFolder(pid, folder.id);
+                                }}
+                              />
+                            </span>
+                            <span title="Share">
+                              <FaShare
+                                className="cursor-pointer"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  shareFolder(pid, folder.id);
+                                }}
+                              />
+                            </span>
                           </div>
                         </div>
                       </li>

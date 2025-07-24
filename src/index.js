@@ -8,13 +8,13 @@ import { AppStateProvider } from './context/AppStateContext';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
-  <React.StrictMode>
+  //<React.StrictMode>
     <ThemeProvider>
       <AppStateProvider>
         <App />
       </AppStateProvider>
     </ThemeProvider>
-  </React.StrictMode>
+  //</React.StrictMode>
 );
 
 // Service worker remains the same

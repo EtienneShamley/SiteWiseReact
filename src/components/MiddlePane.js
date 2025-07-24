@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { useAppState } from "../context/AppStateContext";
+import { FaPen, FaTrash, FaShare } from "react-icons/fa";
 
 export default function MiddlePane() {
   const {
@@ -13,19 +14,14 @@ export default function MiddlePane() {
     addNoteToFolder,
   } = useAppState();
 
-  // Hide/show state for the middle pane
   const [hidden, setHidden] = useState(false);
 
-  // Get notes for the selected folder
   const notes =
     activeProjectId && activeFolderId
       ? state.folderMap[activeProjectId]?.find(f => f.id === activeFolderId)?.notes || []
       : [];
 
-  // If no folder selected, hide the pane and floating button
   if (!activeProjectId || !activeFolderId) return null;
-
-  // If pane is hidden, show the floating "Notes" button
   if (hidden) {
     return (
       <button
@@ -49,7 +45,6 @@ export default function MiddlePane() {
           Hide
         </button>
       </div>
-      {/* + New Note for this folder */}
       <button
         className="bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded text-white text-sm mb-2"
         onClick={() => addNoteToFolder(activeProjectId, activeFolderId)}
@@ -64,31 +59,34 @@ export default function MiddlePane() {
             onClick={() => setCurrentNoteId(note.id)}
           >
             <span className="flex-1 cursor-pointer">{note.title}</span>
-            <div className="space-x-2 text-xs flex-shrink-0">
-              <i
-                className="fas fa-pen cursor-pointer"
-                title="Rename"
-                onClick={e => {
-                  e.stopPropagation();
-                  renameNote(activeFolderId, note.id);
-                }}
-              />
-              <i
-                className="fas fa-trash cursor-pointer"
-                title="Delete"
-                onClick={e => {
-                  e.stopPropagation();
-                  deleteNote(activeFolderId, note.id);
-                }}
-              />
-              <i
-                className="fas fa-share cursor-pointer"
-                title="Share"
-                onClick={e => {
-                  e.stopPropagation();
-                  shareNote(note.id);
-                }}
-              />
+            <div className="space-x-2 text-xs flex-shrink-0 flex items-center">
+              <span title="Rename">
+                <FaPen
+                  className="cursor-pointer"
+                  onClick={e => {
+                    e.stopPropagation();
+                    renameNote(activeFolderId, note.id);
+                  }}
+                />
+              </span>
+              <span title="Delete">
+                <FaTrash
+                  className="cursor-pointer"
+                  onClick={e => {
+                    e.stopPropagation();
+                    deleteNote(activeFolderId, note.id);
+                  }}
+                />
+              </span>
+              <span title="Share">
+                <FaShare
+                  className="cursor-pointer"
+                  onClick={e => {
+                    e.stopPropagation();
+                    shareNote(note.id);
+                  }}
+                />
+              </span>
             </div>
           </li>
         ))}
