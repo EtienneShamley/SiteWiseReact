@@ -29,7 +29,7 @@ export function AppStateProvider({ children }) {
     const title = prompt("Note title:", "Untitled Note");
     if (!title) return;
     const id = `root-note-${Date.now()}`;
-    setRootNotes((prev) => [...prev, { id, title }]);
+    setRootNotes((prev) => [...prev, { id, title, content: "" }]);
     setCurrentNoteId(id);
   }
 
@@ -167,7 +167,9 @@ export function AppStateProvider({ children }) {
     setFolderMap((prev) => ({
       ...prev,
       [pid]: prev[pid].map((f) =>
-        f.id === fid ? { ...f, notes: [...f.notes, { id: nid, title }] } : f
+        f.id === fid
+          ? { ...f, notes: [...f.notes, { id: nid, title, content: "" }] }
+          : f
       ),
     }));
     setCurrentNoteId(nid);
@@ -228,6 +230,8 @@ export function AppStateProvider({ children }) {
         renameRootNote,
         deleteRootNote,
         shareRootNote,
+        setRootNotes,
+        setFolderMap,
         state: { projectData, folderMap },
         activeProjectId,
         activeFolderId,

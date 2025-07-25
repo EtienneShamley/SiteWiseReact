@@ -31,7 +31,7 @@ export default function Sidebar() {
   if (hidden) {
     return (
       <button
-        className="fixed top-4 left-4 bg-gray-800 text-white px-2 py-1 rounded z-50"
+        className="fixed top-4 left-4 bg-gray-200 dark:bg-gray-800 text-black dark:text-white px-2 py-1 rounded z-50"
         onClick={() => setHidden(false)}
       >
         Projects
@@ -40,24 +40,24 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="w-64 bg-[#111] text-white p-4 border-r border-gray-700 flex flex-col space-y-2" id="leftPane">
+    <aside className="w-64 bg-white dark:bg-[#111] text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-700 flex flex-col space-y-2" id="leftPane">
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-lg font-semibold">Projects</h2>
         <button
-          className="bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-white text-xs"
+          className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-2 py-1 rounded text-black dark:text-white text-xs"
           onClick={() => setHidden(true)}
         >
           Hide
         </button>
       </div>
       <button
-        className="bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded text-white text-sm"
+        className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
         onClick={createProject}
       >
         + New Project
       </button>
       <button
-        className="bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded text-white text-sm"
+        className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
         onClick={() => {
           if (activeProjectId && !activeFolderId) {
             createFolder(activeProjectId);
@@ -69,7 +69,7 @@ export default function Sidebar() {
         + New Folder
       </button>
       <button
-        className="bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded text-white text-sm"
+        className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
         onClick={() => createNoteUniversal(activeProjectId, activeFolderId)}
       >
         + New Note
@@ -79,7 +79,7 @@ export default function Sidebar() {
         {rootNotes.map(note => (
           <li
             key={note.id}
-            className="bg-[#252525] text-white p-2 rounded flex justify-between items-center hover:bg-gray-700"
+            className="bg-gray-100 dark:bg-[#252525] text-black dark:text-white p-2 rounded flex justify-between items-center hover:bg-gray-200 dark:hover:bg-gray-700"
             onClick={() => {
               setCurrentNoteId(note.id);
               clearActiveSelection();
@@ -126,15 +126,18 @@ export default function Sidebar() {
           const isExpanded = expandedProjectId === pid;
 
           return (
-            <li key={pid} className="bg-[#252525] text-white p-2 rounded mb-1">
+            <li key={pid} className="bg-gray-100 dark:bg-[#252525] text-black dark:text-white p-2 rounded mb-1">
               {/* Project row */}
               <div
-                className={`flex justify-between items-center rounded ${isProjectActive ? "bg-gray-400 text-black font-semibold" : ""}`}
+                className={`flex justify-between items-center rounded ${
+                  isProjectActive
+                    ? "bg-gray-300 dark:bg-gray-400 text-black font-semibold"
+                    : ""
+                }`}
               >
                 <span
                   className="cursor-pointer font-semibold flex items-center"
                   onClick={e => {
-                    // Only select/deselect project on click here!
                     if (activeProjectId === pid && !activeFolderId) {
                       clearActiveSelection();
                     } else {
@@ -191,14 +194,15 @@ export default function Sidebar() {
                   {(state.folderMap[pid] || []).map((folder) => {
                     const isFolderActive = activeFolderId === folder.id && activeProjectId === pid;
                     return (
-                      <li key={folder.id} className="bg-[#222] p-2 rounded">
+                      <li key={folder.id} className="bg-gray-50 dark:bg-[#222] p-2 rounded">
                         <div
-                          className={`flex justify-between items-center rounded ${isFolderActive ? "bg-gray-600 font-semibold" : ""}`}
+                          className={`flex justify-between items-center rounded ${
+                            isFolderActive ? "bg-gray-200 dark:bg-gray-600 font-semibold" : ""
+                          }`}
                         >
                           <span
                             className="cursor-pointer font-semibold"
                             onClick={e => {
-                              // Only select/deselect folder on click here!
                               if (activeFolderId === folder.id && activeProjectId === pid) {
                                 clearActiveSelection();
                               } else {
