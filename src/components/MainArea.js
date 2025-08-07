@@ -1,16 +1,12 @@
 import React, { useEffect, useState, useRef } from "react";
 import { useAppState } from "../context/AppStateContext";
 import { useTheme } from "../context/ThemeContext";
-import { FaMicrophone, FaPlus, FaFilePdf } from "react-icons/fa";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
 import Link from "@tiptap/extension-link";
 import {
-  Table,
-  TableRow,
-  TableHeader,
-  TableCell,
+  Table, TableRow, TableHeader, TableCell,
 } from "@tiptap/extension-table";
 import Image from "@tiptap/extension-image";
 import Highlight from "@tiptap/extension-highlight";
@@ -22,17 +18,18 @@ import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import { createLowlight } from "lowlight";
 import EditorToolbar from "./EditorToolbar";
 import BottomBar from "./BottomBar";
+import FontFamily from "@tiptap/extension-font-family";
+import { TextStyle } from "@tiptap/extension-text-style";
+import Color from "@tiptap/extension-color";
 
 const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
 const STORAGE_KEY = "sitewise-notes";
 
 export default function MainArea() {
-  const { currentNoteId, rootNotes, state, activeProjectId, activeFolderId } =
-    useAppState();
+  const { currentNoteId, rootNotes, state, activeProjectId, activeFolderId } = useAppState();
   const { theme } = useTheme();
 
-  // Per-note storage, persisted in localStorage
   const [docState, setDocState] = useState(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     return saved ? JSON.parse(saved) : {};
@@ -41,7 +38,6 @@ export default function MainArea() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(docState));
   }, [docState]);
 
-  // Get selected note
   let noteTitle = null;
   let noteKey = null;
   if (currentNoteId) {
@@ -62,7 +58,6 @@ export default function MainArea() {
     }
   }
 
-  // Tiptap Editor instance
   const editor = useEditor(
     {
       extensions: [
@@ -80,6 +75,9 @@ export default function MainArea() {
         TaskList,
         TaskItem,
         CodeBlockLowlight.configure({ lowlight }),
+        FontFamily,
+        TextStyle,
+        Color,
       ],
       content: noteKey && docState[noteKey] ? docState[noteKey] : EMPTY_DOC,
       editable: !!noteTitle,
@@ -101,7 +99,6 @@ export default function MainArea() {
     [noteKey]
   );
 
-  // When user switches notes, update editor content
   useEffect(() => {
     if (!editor) return;
     if (noteKey && docState[noteKey]) {
@@ -111,44 +108,31 @@ export default function MainArea() {
     }
   }, [editor, noteKey]);
 
-  // --- Insert logic for BottomBar ---
-  // Insert plain text at cursor
+  // Insert logic for BottomBar
   function handleInsertTextAtCursor(text) {
     if (editor && text) {
       editor.chain().focus().insertContent(text).run();
     }
   }
-
-  // Insert image at cursor (base64 or url)
   function handleInsertImageAtCursor(imgSrc) {
     if (editor && imgSrc) {
       editor.chain().focus().setImage({ src: imgSrc }).run();
     }
   }
-
-  // Insert PDF at cursor (as link for now, or implement preview later)
   function handleInsertPDFAtCursor(pdfUrl) {
     if (editor && pdfUrl) {
-      editor.chain().focus().insertContent(`<a href="${pdfUrl}" target="_blank">[PDF]</a>`).run();
+      editor
+        .chain()
+        .focus()
+        .insertContent(`<a href="${pdfUrl}" target="_blank">[PDF]</a>`)
+        .run();
     }
   }
 
   return (
     <main className="flex-1 flex flex-col min-h-screen">
       {/* Toolbar */}
-      <div className="flex items-center gap-2 mb-2 px-6">
-        {/* Example buttons (your full toolbar may be in EditorToolbar) */}
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => editor?.chain().focus().toggleBold().run()}
-          disabled={!editor}
-          title="Bold"
-        >
-          <b>B</b>
-        </button>
-        {/* ... other toolbar buttons as before ... */}
-        {/* (Or just <EditorToolbar editor={editor} /> here) */}
-      </div>
+      <EditorToolbar editor={editor} />
 
       {/* Main Editor */}
       <div className="flex-1 flex flex-col min-h-0">
@@ -158,13 +142,11 @@ export default function MainArea() {
           style={{ minHeight: 0, minHeight: 400 }}
         >
           {noteTitle ? (
-            <>
-              {/* Toolbar above the editor */}
-              {editor && <EditorToolbar editor={editor} />}
-              <EditorContent editor={editor} />
-            </>
+            <EditorContent editor={editor} />
           ) : (
-            <div className="text-gray-400">No note selected.</div>
+            <div className="text-gray-400 px-4 py-10 text-center">
+              No note selected.
+            </div>
           )}
         </div>
         {/* --- BottomBar: textarea + buttons for file/voice/AI --- */}

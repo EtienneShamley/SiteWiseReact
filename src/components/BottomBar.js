@@ -41,7 +41,6 @@ export default function BottomBar({ onInsertText, onInsertImage, onPDF, onVoice 
           }
         }}
       />
-      <button title="PDF Editor" onClick={onPDF}><FaFilePdf /></button>
       <button title="Insert/Send" onClick={handleSend}><FaPlus /></button>
     </div>
   );
