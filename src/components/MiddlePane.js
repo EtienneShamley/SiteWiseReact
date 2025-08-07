@@ -1,6 +1,8 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useAppState } from "../context/AppStateContext";
-import { FaPen, FaTrash, FaShare } from "react-icons/fa";
+import { FaEllipsisV, FaPen, FaShare, FaTrash } from "react-icons/fa";
+import ThreeDotMenu from "./ThreeDotMenu";
+import { useTheme } from "../context/ThemeContext";
 
 export default function MiddlePane() {
   const {
@@ -13,8 +15,11 @@ export default function MiddlePane() {
     shareNote,
     addNoteToFolder,
   } = useAppState();
+  const { theme } = useTheme();
 
   const [hidden, setHidden] = useState(false);
+  const [menu, setMenu] = useState({ noteId: null });
+  const noteRefs = useRef({});
 
   const notes =
     activeProjectId && activeFolderId
@@ -59,35 +64,41 @@ export default function MiddlePane() {
             onClick={() => setCurrentNoteId(note.id)}
           >
             <span className="flex-1 cursor-pointer">{note.title}</span>
-            <div className="space-x-2 text-xs flex-shrink-0 flex items-center">
-              <span title="Rename">
-                <FaPen
-                  className="cursor-pointer"
-                  onClick={e => {
-                    e.stopPropagation();
-                    renameNote(activeFolderId, note.id);
-                  }}
-                />
-              </span>
-              <span title="Delete">
-                <FaTrash
-                  className="cursor-pointer"
-                  onClick={e => {
-                    e.stopPropagation();
-                    deleteNote(activeFolderId, note.id);
-                  }}
-                />
-              </span>
-              <span title="Share">
-                <FaShare
-                  className="cursor-pointer"
-                  onClick={e => {
-                    e.stopPropagation();
-                    shareNote(note.id);
-                  }}
-                />
-              </span>
-            </div>
+            <button
+              ref={el => (noteRefs.current[note.id] = el)}
+              className="ml-2 p-1 rounded hover:bg-gray-300 dark:hover:bg-gray-800"
+              onClick={e => {
+                e.stopPropagation();
+                setMenu({ noteId: note.id });
+              }}
+            >
+              <FaEllipsisV />
+            </button>
+            {menu.noteId === note.id && (
+              <ThreeDotMenu
+                anchorRef={noteRefs.current[note.id]}
+                onClose={() => setMenu({ noteId: null })}
+                options={[
+                  {
+                    icon: <FaPen className="mr-2" />,
+                    label: "Rename",
+                    onClick: () => { renameNote(activeFolderId, note.id); setMenu({ noteId: null }); },
+                  },
+                  {
+                    icon: <FaShare className="mr-2" />,
+                    label: "Share",
+                    onClick: () => { shareNote(note.id); setMenu({ noteId: null }); },
+                  },
+                  {
+                    icon: <FaTrash className="mr-2" />,
+                    label: "Delete",
+                    onClick: () => { deleteNote(activeFolderId, note.id); setMenu({ noteId: null }); },
+                    danger: true,
+                  },
+                ]}
+                theme={theme}
+              />
+            )}
           </li>
         ))}
       </ul>

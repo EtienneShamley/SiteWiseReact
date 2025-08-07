@@ -1,6 +1,8 @@
-import React from "react";
+import React, { useRef, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
-import { FaPlus, FaPen, FaTrash, FaShare } from "react-icons/fa";
+import { FaPlus, FaEllipsisV } from "react-icons/fa";
+import ThreeDotMenu from "./ThreeDotMenu";
+import { useTheme } from "../context/ThemeContext";
 
 export default function Sidebar() {
   const {
@@ -24,10 +26,22 @@ export default function Sidebar() {
     renameFolder,
     deleteFolder,
     shareFolder,
-    addNoteToFolder,
   } = useAppState();
 
-  const [hidden, setHidden] = React.useState(false);
+  const { theme } = useTheme();
+  const [hidden, setHidden] = useState(false);
+  const projRefs = useRef({});
+  const folderRefs = useRef({});
+  const rootNoteRefs = useRef({});
+  const [menu, setMenu] = useState({ type: null, id: null });
+
+  function openMenu(type, id) {
+    setMenu({ type, id });
+  }
+  function closeMenu() {
+    setMenu({ type: null, id: null });
+  }
+
   if (hidden) {
     return (
       <button
@@ -74,7 +88,7 @@ export default function Sidebar() {
       >
         + New Note
       </button>
-      {/* Root Notes (outside projects/folders) */}
+      {/* Root Notes */}
       <ul className="space-y-1 text-sm mt-2">
         {rootNotes.map(note => (
           <li
@@ -86,35 +100,26 @@ export default function Sidebar() {
             }}
           >
             <span className="flex-1 cursor-pointer">{note.title}</span>
-            <div className="space-x-2 text-xs flex-shrink-0 flex items-center">
-              <span title="Rename">
-                <FaPen
-                  className="cursor-pointer"
-                  onClick={e => {
-                    e.stopPropagation();
-                    renameRootNote(note.id);
-                  }}
-                />
-              </span>
-              <span title="Delete">
-                <FaTrash
-                  className="cursor-pointer"
-                  onClick={e => {
-                    e.stopPropagation();
-                    deleteRootNote(note.id);
-                  }}
-                />
-              </span>
-              <span title="Share">
-                <FaShare
-                  className="cursor-pointer"
-                  onClick={e => {
-                    e.stopPropagation();
-                    shareRootNote(note.id);
-                  }}
-                />
-              </span>
-            </div>
+            <button
+              ref={el => (rootNoteRefs.current[note.id] = el)}
+              className="ml-2 p-1 rounded hover:bg-gray-300 dark:hover:bg-gray-800"
+              onClick={e => {
+                e.stopPropagation();
+                openMenu("root", note.id);
+              }}
+            >
+              <FaEllipsisV />
+            </button>
+            {menu.type === "root" && menu.id === note.id && (
+              <ThreeDotMenu
+                anchorRef={rootNoteRefs.current[note.id]}
+                onClose={closeMenu}
+                onShare={() => { shareRootNote(note.id); closeMenu(); }}
+                onRename={() => { renameRootNote(note.id); closeMenu(); }}
+                onDelete={() => { deleteRootNote(note.id); closeMenu(); }}
+                theme={theme}
+              />
+            )}
           </li>
         ))}
       </ul>
@@ -130,9 +135,7 @@ export default function Sidebar() {
               {/* Project row */}
               <div
                 className={`flex justify-between items-center rounded ${
-                  isProjectActive
-                    ? "bg-gray-300 dark:bg-gray-400 text-black font-semibold"
-                    : ""
+                  isProjectActive ? "bg-gray-300 dark:bg-gray-400 text-black font-semibold" : ""
                 }`}
               >
                 <span
@@ -149,44 +152,26 @@ export default function Sidebar() {
                   <i className={`fas fa-chevron-${isExpanded ? "down" : "right"} mr-2 text-xs`} />
                   {proj.name}
                 </span>
-                <div className="space-x-2 text-xs flex-shrink-0 flex items-center">
-                  <span title="Add Folder">
-                    <FaPlus
-                      className="cursor-pointer"
-                      onClick={e => {
-                        e.stopPropagation();
-                        createFolder(pid);
-                      }}
-                    />
-                  </span>
-                  <span title="Rename">
-                    <FaPen
-                      className="cursor-pointer"
-                      onClick={e => {
-                        e.stopPropagation();
-                        renameProject(pid);
-                      }}
-                    />
-                  </span>
-                  <span title="Delete">
-                    <FaTrash
-                      className="cursor-pointer"
-                      onClick={e => {
-                        e.stopPropagation();
-                        deleteProject(pid);
-                      }}
-                    />
-                  </span>
-                  <span title="Share">
-                    <FaShare
-                      className="cursor-pointer"
-                      onClick={e => {
-                        e.stopPropagation();
-                        shareProject(pid);
-                      }}
-                    />
-                  </span>
-                </div>
+                <button
+                  ref={el => (projRefs.current[pid] = el)}
+                  className="ml-2 p-1 rounded hover:bg-gray-300 dark:hover:bg-gray-800"
+                  onClick={e => {
+                    e.stopPropagation();
+                    openMenu("project", pid);
+                  }}
+                >
+                  <FaEllipsisV />
+                </button>
+                {menu.type === "project" && menu.id === pid && (
+                  <ThreeDotMenu
+                    anchorRef={projRefs.current[pid]}
+                    onClose={closeMenu}
+                    onShare={() => { shareProject(pid); closeMenu(); }}
+                    onRename={() => { renameProject(pid); closeMenu(); }}
+                    onDelete={() => { deleteProject(pid); closeMenu(); }}
+                    theme={theme}
+                  />
+                )}
               </div>
               {/* Folder dropdown */}
               {isExpanded && (
@@ -212,44 +197,26 @@ export default function Sidebar() {
                           >
                             {folder.name}
                           </span>
-                          <div className="space-x-2 text-xs flex-shrink-0 flex items-center">
-                            <span title="Add Note">
-                              <FaPlus
-                                className="cursor-pointer"
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  addNoteToFolder(pid, folder.id);
-                                }}
-                              />
-                            </span>
-                            <span title="Rename">
-                              <FaPen
-                                className="cursor-pointer"
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  renameFolder(pid, folder.id);
-                                }}
-                              />
-                            </span>
-                            <span title="Delete">
-                              <FaTrash
-                                className="cursor-pointer"
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  deleteFolder(pid, folder.id);
-                                }}
-                              />
-                            </span>
-                            <span title="Share">
-                              <FaShare
-                                className="cursor-pointer"
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  shareFolder(pid, folder.id);
-                                }}
-                              />
-                            </span>
-                          </div>
+                          <button
+                            ref={el => (folderRefs.current[folder.id] = el)}
+                            className="ml-2 p-1 rounded hover:bg-gray-300 dark:hover:bg-gray-800"
+                            onClick={e => {
+                              e.stopPropagation();
+                              openMenu("folder", folder.id);
+                            }}
+                          >
+                            <FaEllipsisV />
+                          </button>
+                          {menu.type === "folder" && menu.id === folder.id && (
+                            <ThreeDotMenu
+                              anchorRef={folderRefs.current[folder.id]}
+                              onClose={closeMenu}
+                              onShare={() => { shareFolder(pid, folder.id); closeMenu(); }}
+                              onRename={() => { renameFolder(pid, folder.id); closeMenu(); }}
+                              onDelete={() => { deleteFolder(pid, folder.id); closeMenu(); }}
+                              theme={theme}
+                            />
+                          )}
                         </div>
                       </li>
                     );
