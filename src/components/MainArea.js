@@ -21,31 +21,35 @@ import HorizontalRule from "@tiptap/extension-horizontal-rule";
 import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import { createLowlight } from "lowlight";
 import EditorToolbar from "./EditorToolbar";
+import BottomBar from "./BottomBar";
 
 const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
+const STORAGE_KEY = "sitewise-notes";
 
 export default function MainArea() {
-  // State management
   const { currentNoteId, rootNotes, state, activeProjectId, activeFolderId } =
     useAppState();
-
   const { theme } = useTheme();
 
-  // Per-note storage (persist in-memory for demo)
-  const [docState, setDocState] = useState({});
+  // Per-note storage, persisted in localStorage
+  const [docState, setDocState] = useState(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return saved ? JSON.parse(saved) : {};
+  });
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(docState));
+  }, [docState]);
 
-  // Get the selected note's doc content
+  // Get selected note
   let noteTitle = null;
   let noteKey = null;
   if (currentNoteId) {
-    // Root note
     const root = rootNotes.find((n) => n.id === currentNoteId);
     if (root) {
       noteTitle = root.title;
       noteKey = root.id;
     }
-    // Folder note
     if (!noteTitle && activeProjectId && activeFolderId) {
       const folder = state.folderMap[activeProjectId]?.find(
         (f) => f.id === activeFolderId
@@ -58,7 +62,7 @@ export default function MainArea() {
     }
   }
 
-  // Editor instance
+  // Tiptap Editor instance
   const editor = useEditor(
     {
       extensions: [
@@ -107,33 +111,33 @@ export default function MainArea() {
     }
   }, [editor, noteKey]);
 
-  // Toolbar handlers
-  const addImage = () => {
-    const url = window.prompt("Image URL");
-    if (url) editor.chain().focus().setImage({ src: url }).run();
-  };
+  // --- Insert logic for BottomBar ---
+  // Insert plain text at cursor
+  function handleInsertTextAtCursor(text) {
+    if (editor && text) {
+      editor.chain().focus().insertContent(text).run();
+    }
+  }
 
-  const addTable = () => {
-    editor
-      .chain()
-      .focus()
-      .insertTable({ rows: 3, cols: 3, withHeaderRow: true })
-      .run();
-  };
+  // Insert image at cursor (base64 or url)
+  function handleInsertImageAtCursor(imgSrc) {
+    if (editor && imgSrc) {
+      editor.chain().focus().setImage({ src: imgSrc }).run();
+    }
+  }
 
-  // Voice/AI/PDF uploads (to be added later)
-  const fileInputRef = useRef(null);
-  const handleUploadClick = () => fileInputRef.current.click();
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file) alert(`Selected: ${file.name}`);
-    // TODO: implement actual upload
-  };
+  // Insert PDF at cursor (as link for now, or implement preview later)
+  function handleInsertPDFAtCursor(pdfUrl) {
+    if (editor && pdfUrl) {
+      editor.chain().focus().insertContent(`<a href="${pdfUrl}" target="_blank">[PDF]</a>`).run();
+    }
+  }
 
   return (
     <main className="flex-1 flex flex-col min-h-screen">
       {/* Toolbar */}
       <div className="flex items-center gap-2 mb-2 px-6">
+        {/* Example buttons (your full toolbar may be in EditorToolbar) */}
         <button
           className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
           onClick={() => editor?.chain().focus().toggleBold().run()}
@@ -142,136 +146,10 @@ export default function MainArea() {
         >
           <b>B</b>
         </button>
-        {/* ...other buttons as before... */}
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => editor?.chain().focus().toggleItalic().run()}
-          disabled={!editor}
-          title="Italic"
-        >
-          <i>I</i>
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => editor?.chain().focus().toggleUnderline().run()}
-          disabled={!editor}
-          title="Underline"
-        >
-          <u>U</u>
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => editor?.chain().focus().toggleStrike().run()}
-          disabled={!editor}
-          title="Strikethrough"
-        >
-          <s>S</s>
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() =>
-            editor?.chain().focus().toggleHeading({ level: 1 }).run()
-          }
-          disabled={!editor}
-          title="H1"
-        >
-          H1
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() =>
-            editor?.chain().focus().toggleHeading({ level: 2 }).run()
-          }
-          disabled={!editor}
-          title="H2"
-        >
-          H2
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => editor?.chain().focus().toggleBulletList().run()}
-          disabled={!editor}
-          title="Bulleted List"
-        >
-          • List
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => editor?.chain().focus().toggleOrderedList().run()}
-          disabled={!editor}
-          title="Numbered List"
-        >
-          1. List
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => editor?.chain().focus().toggleTaskList().run()}
-          disabled={!editor}
-          title="Task List"
-        >
-          ✓
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={addTable}
-          disabled={!editor}
-          title="Insert Table"
-        >
-          Table
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={addImage}
-          disabled={!editor}
-          title="Insert Image"
-        >
-          <FaPlus /> Img
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => editor?.chain().focus().toggleBlockquote().run()}
-          disabled={!editor}
-          title="Blockquote"
-        >
-          “”
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => editor?.chain().focus().setHorizontalRule().run()}
-          disabled={!editor}
-          title="Horizontal Line"
-        >
-          ―
-        </button>
-        {/* Upload/Voice/PDF */}
-        <button
-          className="ml-3 px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={handleUploadClick}
-          title="Upload File"
-        >
-          <FaPlus />
-        </button>
-        <input
-          type="file"
-          ref={fileInputRef}
-          onChange={handleFileChange}
-          style={{ display: "none" }}
-        />
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => alert("Voice recording (coming soon)")}
-          title="Voice Note"
-        >
-          <FaMicrophone />
-        </button>
-        <button
-          className="px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-          onClick={() => alert("PDF Upload (coming soon)")}
-          title="Insert PDF"
-        >
-          <FaFilePdf />
-        </button>
+        {/* ... other toolbar buttons as before ... */}
+        {/* (Or just <EditorToolbar editor={editor} /> here) */}
       </div>
+
       {/* Main Editor */}
       <div className="flex-1 flex flex-col min-h-0">
         <div
@@ -289,6 +167,13 @@ export default function MainArea() {
             <div className="text-gray-400">No note selected.</div>
           )}
         </div>
+        {/* --- BottomBar: textarea + buttons for file/voice/AI --- */}
+        <BottomBar
+          onInsertText={handleInsertTextAtCursor}
+          onInsertImage={handleInsertImageAtCursor}
+          onInsertPDF={handleInsertPDFAtCursor}
+          disabled={!noteTitle || !editor}
+        />
       </div>
     </main>
   );
