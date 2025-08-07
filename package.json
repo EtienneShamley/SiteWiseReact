@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@heroicons/react": "^2.2.0",
     "@tiptap/extension-blockquote": "^3.0.7",
     "@tiptap/extension-code-block-lowlight": "^3.0.7",
     "@tiptap/extension-color": "^3.0.9",
