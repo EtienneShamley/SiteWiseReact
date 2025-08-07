@@ -6,7 +6,10 @@ import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
 import Link from "@tiptap/extension-link";
 import {
-  Table, TableRow, TableHeader, TableCell,
+  Table,
+  TableRow,
+  TableHeader,
+  TableCell,
 } from "@tiptap/extension-table";
 import Image from "@tiptap/extension-image";
 import Highlight from "@tiptap/extension-highlight";
@@ -27,7 +30,8 @@ const EMPTY_DOC = "<p></p>";
 const STORAGE_KEY = "sitewise-notes";
 
 export default function MainArea() {
-  const { currentNoteId, rootNotes, state, activeProjectId, activeFolderId } = useAppState();
+  const { currentNoteId, rootNotes, state, activeProjectId, activeFolderId } =
+    useAppState();
   const { theme } = useTheme();
 
   const [docState, setDocState] = useState(() => {
@@ -138,7 +142,7 @@ export default function MainArea() {
       <div className="flex-1 flex flex-col min-h-0">
         <div
           id="chatWindow"
-          className={`overflow-y-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg mb-4 bg-white dark:bg-[#2a2a2a] flex-1 transition-colors`}
+          className="overflow-y-auto overflow-x-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg mb-4 bg-white dark:bg-[#2a2a2a] flex-1 transition-colors"
           style={{ minHeight: 0, minHeight: 400 }}
         >
           {noteTitle ? (

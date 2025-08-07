@@ -1,0 +1,32 @@
+/* Tiptap Table Styling: Responsive & Theme-aware */
+.ProseMirror table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+  margin-bottom: 1rem;
+  background: inherit;
+}
+
+.ProseMirror th,
+.ProseMirror td {
+  border: 1px solid #d1d5db; /* Tailwind gray-300 */
+  padding: 0.5rem;
+  min-width: 40px;
+  word-break: break-word;
+  background: inherit;
+  color: inherit;
+}
+
+/* Responsive on overflow */
+.ProseMirror {
+  overflow-x: auto;
+  width: 100%;
+}
+
+/* Adjust for dark mode */
+@media (prefers-color-scheme: dark) {
+  .ProseMirror th,
+  .ProseMirror td {
+    border-color: #444;
+  }
+}
