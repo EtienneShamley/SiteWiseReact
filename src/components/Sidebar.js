@@ -1,6 +1,6 @@
 import React, { useRef, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
-import { FaPlus, FaEllipsisV } from "react-icons/fa";
+import { FaPlus, FaEllipsisV, FaPen, FaTrash, FaShare } from "react-icons/fa";
 import ThreeDotMenu from "./ThreeDotMenu";
 import { useTheme } from "../context/ThemeContext";
 
@@ -41,6 +41,13 @@ export default function Sidebar() {
   function closeMenu() {
     setMenu({ type: null, id: null });
   }
+
+  // Dot style
+  const dotBase = "ml-2 p-1 rounded transition";
+  const dotColor =
+    theme === "dark"
+      ? "text-white hover:bg-[#353535] active:bg-[#232323]"
+      : "text-black hover:bg-gray-200 active:bg-gray-300";
 
   if (hidden) {
     return (
@@ -102,7 +109,7 @@ export default function Sidebar() {
             <span className="flex-1 cursor-pointer">{note.title}</span>
             <button
               ref={el => (rootNoteRefs.current[note.id] = el)}
-              className="ml-2 p-1 rounded hover:bg-gray-300 dark:hover:bg-gray-800"
+              className={`${dotBase} ${dotColor}`}
               onClick={e => {
                 e.stopPropagation();
                 openMenu("root", note.id);
@@ -114,9 +121,24 @@ export default function Sidebar() {
               <ThreeDotMenu
                 anchorRef={rootNoteRefs.current[note.id]}
                 onClose={closeMenu}
-                onShare={() => { shareRootNote(note.id); closeMenu(); }}
-                onRename={() => { renameRootNote(note.id); closeMenu(); }}
-                onDelete={() => { deleteRootNote(note.id); closeMenu(); }}
+                options={[
+                  {
+                    icon: <FaPen className="mr-2" />,
+                    label: "Rename",
+                    onClick: () => { renameRootNote(note.id); closeMenu(); },
+                  },
+                  {
+                    icon: <FaShare className="mr-2" />,
+                    label: "Share",
+                    onClick: () => { shareRootNote(note.id); closeMenu(); },
+                  },
+                  {
+                    icon: <FaTrash className="mr-2" />,
+                    label: "Delete",
+                    onClick: () => { deleteRootNote(note.id); closeMenu(); },
+                    danger: true,
+                  },
+                ]}
                 theme={theme}
               />
             )}
@@ -132,7 +154,6 @@ export default function Sidebar() {
 
           return (
             <li key={pid} className="bg-gray-100 dark:bg-[#252525] text-black dark:text-white p-2 rounded mb-1">
-              {/* Project row */}
               <div
                 className={`flex justify-between items-center rounded ${
                   isProjectActive ? "bg-gray-300 dark:bg-gray-400 text-black font-semibold" : ""
@@ -154,7 +175,7 @@ export default function Sidebar() {
                 </span>
                 <button
                   ref={el => (projRefs.current[pid] = el)}
-                  className="ml-2 p-1 rounded hover:bg-gray-300 dark:hover:bg-gray-800"
+                  className={`${dotBase} ${dotColor}`}
                   onClick={e => {
                     e.stopPropagation();
                     openMenu("project", pid);
@@ -166,9 +187,24 @@ export default function Sidebar() {
                   <ThreeDotMenu
                     anchorRef={projRefs.current[pid]}
                     onClose={closeMenu}
-                    onShare={() => { shareProject(pid); closeMenu(); }}
-                    onRename={() => { renameProject(pid); closeMenu(); }}
-                    onDelete={() => { deleteProject(pid); closeMenu(); }}
+                    options={[
+                      {
+                        icon: <FaPen className="mr-2" />,
+                        label: "Rename",
+                        onClick: () => { renameProject(pid); closeMenu(); },
+                      },
+                      {
+                        icon: <FaShare className="mr-2" />,
+                        label: "Share",
+                        onClick: () => { shareProject(pid); closeMenu(); },
+                      },
+                      {
+                        icon: <FaTrash className="mr-2" />,
+                        label: "Delete",
+                        onClick: () => { deleteProject(pid); closeMenu(); },
+                        danger: true,
+                      },
+                    ]}
                     theme={theme}
                   />
                 )}
@@ -199,7 +235,7 @@ export default function Sidebar() {
                           </span>
                           <button
                             ref={el => (folderRefs.current[folder.id] = el)}
-                            className="ml-2 p-1 rounded hover:bg-gray-300 dark:hover:bg-gray-800"
+                            className={`${dotBase} ${dotColor}`}
                             onClick={e => {
                               e.stopPropagation();
                               openMenu("folder", folder.id);
@@ -211,9 +247,24 @@ export default function Sidebar() {
                             <ThreeDotMenu
                               anchorRef={folderRefs.current[folder.id]}
                               onClose={closeMenu}
-                              onShare={() => { shareFolder(pid, folder.id); closeMenu(); }}
-                              onRename={() => { renameFolder(pid, folder.id); closeMenu(); }}
-                              onDelete={() => { deleteFolder(pid, folder.id); closeMenu(); }}
+                              options={[
+                                {
+                                  icon: <FaPen className="mr-2" />,
+                                  label: "Rename",
+                                  onClick: () => { renameFolder(pid, folder.id); closeMenu(); },
+                                },
+                                {
+                                  icon: <FaShare className="mr-2" />,
+                                  label: "Share",
+                                  onClick: () => { shareFolder(pid, folder.id); closeMenu(); },
+                                },
+                                {
+                                  icon: <FaTrash className="mr-2" />,
+                                  label: "Delete",
+                                  onClick: () => { deleteFolder(pid, folder.id); closeMenu(); },
+                                  danger: true,
+                                },
+                              ]}
                               theme={theme}
                             />
                           )}

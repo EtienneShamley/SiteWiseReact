@@ -1,5 +1,4 @@
 import React, { useEffect, useRef } from "react";
-import { FaPen, FaTrash, FaShare, FaArchive } from "react-icons/fa";
 
 export default function ThreeDotMenu({
   anchorRef,
@@ -9,15 +8,16 @@ export default function ThreeDotMenu({
 }) {
   const menuRef = useRef();
 
-  // Positioning logic: position below anchor
+  // Position below anchor
   useEffect(() => {
     function positionMenu() {
       if (anchorRef && menuRef.current) {
         const rect = anchorRef.getBoundingClientRect();
-        menuRef.current.style.position = "fixed";
-        menuRef.current.style.top = `${rect.bottom + 4}px`;
-        menuRef.current.style.left = `${rect.left}px`;
-        menuRef.current.style.zIndex = 9999;
+        const menu = menuRef.current;
+        menu.style.position = "fixed";
+        menu.style.top = `${rect.bottom + 4}px`;
+        menu.style.left = `${rect.left}px`;
+        menu.style.zIndex = 9999;
       }
     }
     positionMenu();
@@ -25,7 +25,7 @@ export default function ThreeDotMenu({
     return () => window.removeEventListener("resize", positionMenu);
   }, [anchorRef]);
 
-  // Close on outside click
+  // Outside click
   useEffect(() => {
     function handleClick(e) {
       if (
@@ -41,7 +41,7 @@ export default function ThreeDotMenu({
     return () => document.removeEventListener("mousedown", handleClick);
   }, [onClose, anchorRef]);
 
-  // Escape key closes
+  // Escape closes
   useEffect(() => {
     function handleEsc(e) {
       if (e.key === "Escape") onClose();
@@ -50,30 +50,31 @@ export default function ThreeDotMenu({
     return () => document.removeEventListener("keydown", handleEsc);
   }, [onClose]);
 
+  // THEME (no default bg-white anywhere; only theme-driven)
+  const isDark = theme === "dark";
+  const menuBg = isDark ? "bg-[#232323]" : "bg-white";
+  const menuText = isDark ? "text-white" : "text-gray-900";
+  const menuBorder = isDark ? "border-[#333]" : "border-gray-200";
+  const itemHover = isDark ? "hover:bg-[#333]" : "hover:bg-gray-100";
+  const iconColor = isDark ? "text-white" : "text-gray-700";
+
   return (
     <div
       ref={menuRef}
-      className={`
-        min-w-[170px] py-1 shadow-lg rounded-xl border 
-        border-gray-200 dark:border-gray-700 
-        bg-white dark:bg-[#232323]
-        absolute
-      `}
+      className={`min-w-[170px] py-1 shadow-lg rounded-xl border ${menuBorder} ${menuBg} ${menuText} absolute`}
     >
       {options.map((opt, idx) => (
         <button
           key={opt.label}
-          className={`
-            flex items-center gap-2 px-4 py-2 w-full text-left text-sm
-            hover:bg-gray-100 dark:hover:bg-[#333]
-            transition-colors
-            ${opt.danger ? "text-red-600" : "text-gray-900 dark:text-gray-100"}
-            rounded-none
-            ${idx === options.length - 1 ? "rounded-b-xl" : ""}
-          `}
+          className={`flex items-center gap-2 px-4 py-2 w-full text-left text-sm ${itemHover} transition-colors ${
+            opt.danger ? "text-red-500" : menuText
+          } ${idx === options.length - 1 ? "rounded-b-xl" : ""}`}
           onClick={opt.onClick}
         >
-          <span>{opt.icon}</span>
+          {/* Make sure icons inherit the right color in dark mode */}
+          <span className={`${opt.danger ? "text-red-500" : iconColor}`}>
+            {opt.icon}
+          </span>
           <span>{opt.label}</span>
         </button>
       ))}
