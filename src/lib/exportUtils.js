@@ -39,7 +39,10 @@ export const suggestedTitle = (editor) => {
 };
 
 export const safeFilename = (base, ext) => {
-  const clean = (base || "sitewise-note").replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 80);
+  const clean = (base || "sitewise-note")
+    .replace(/[\\/:*?"<>|]+/g, " ")
+    .trim()
+    .slice(0, 80);
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   return `${clean || "sitewise-note"}_${ts}.${ext}`;
 };
@@ -59,16 +62,21 @@ export async function exportPDF(editor) {
 }
 
 export async function exportDOCX(editor) {
-  const [{ default: htmlToDocx }] = await Promise.all([import("html-to-docx")]);
+  // Use the ESM build shipped by your package version
+  const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
+  const htmlToDocx = mod.default || mod;
+
   const html = baseDocHTML(editor);
   const blob = await htmlToDocx(html, null, {
     table: { row: { cantSplit: true } },
     footer: true,
-    pageNumber: true
+    pageNumber: true,
   });
+
   const file = new Blob([blob], {
     type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   });
+
   const a = document.createElement("a");
   const url = URL.createObjectURL(file);
   a.href = url;
@@ -102,7 +110,10 @@ export async function exportMD(editor) {
     gfmPluginFn = mod.gfm || (mod.default && mod.default.gfm) || mod.default;
   }
   const raw = editor.getHTML();
-  const td = new TurndownServiceMod({ headingStyle: "atx", codeBlockStyle: "fenced" });
+  const td = new TurndownServiceMod({
+    headingStyle: "atx",
+    codeBlockStyle: "fenced",
+  });
   if (gfmPluginFn) td.use(gfmPluginFn);
   const md = td.turndown(raw);
   const file = new Blob([md], { type: "text/markdown;charset=utf-8" });

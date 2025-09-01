@@ -155,6 +155,7 @@ export default function MainArea() {
         </div>
         {/* --- BottomBar: textarea + buttons for file/voice/AI --- */}
         <BottomBar
+          editor={editor}
           onInsertText={handleInsertTextAtCursor}
           onInsertImage={handleInsertImageAtCursor}
           onInsertPDF={handleInsertPDFAtCursor}
