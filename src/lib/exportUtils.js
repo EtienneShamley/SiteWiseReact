@@ -126,3 +126,97 @@ export async function exportMD(editor) {
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+const buildHTMLDoc = (html) => `
+  <html><head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { --fg:#111; --muted:#555; --border:#ccc; }
+      @page { size: A4; margin: 12mm; }
+      * { box-sizing: border-box; }
+      body { font-family: Arial, sans-serif; color: var(--fg); background:#fff; }
+      .tiptap-content { max-width:820px; margin:0 auto; line-height:1.5; font-size:12pt; }
+      img { max-width:100%; height:auto; display:inline-block; }
+      table { border-collapse: collapse; width:100%; margin:10px 0; }
+      td, th { border:1px solid var(--border); padding:6px; vertical-align:top; }
+      blockquote { border-left:3px solid var(--muted); padding-left:10px; color:var(--muted); margin:8px 0; }
+      code, pre { font-family: ui-monospace, Menlo, Monaco, Consolas, "Courier New", monospace; font-size:0.95em; }
+      pre { background:#f5f5f5; padding:8px; overflow:auto; }
+      h1, h2, h3 { page-break-after: avoid; }
+      .page-break { page-break-before: always; }
+    </style>
+  </head>
+  <body><div class="tiptap-content">${html}</div></body></html>
+`;
+
+export const exportHTMLString = ({ title, html }) => {
+  const file = new Blob([buildHTMLDoc(html)], { type: "text/html;charset=utf-8" });
+  const a = document.createElement("a");
+  const url = URL.createObjectURL(file);
+  a.href = url;
+  a.download = safeFilename(title, "html");
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
+
+export const exportPDFString = async ({ title, html }) => {
+  const [{ default: html2pdf }] = await Promise.all([import("html2pdf.js")]);
+  const container = document.createElement("div");
+  container.innerHTML = buildHTMLDoc(html);
+  const opt = {
+    margin: 10,
+    filename: safeFilename(title, "pdf"),
+    image: { type: "jpeg", quality: 0.98 },
+    html2canvas: { scale: 2, useCORS: true },
+    jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+  };
+  return html2pdf().from(container).set(opt).save();
+};
+
+export const exportDOCXString = async ({ title, html }) => {
+  // ESM path (matches your installed package)
+  const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
+  const htmlToDocx = mod.default || mod;
+  const doc = buildHTMLDoc(html);
+  const blob = await htmlToDocx(doc, null, {
+    table: { row: { cantSplit: true } },
+    footer: true,
+    pageNumber: true
+  });
+  const file = new Blob([blob], {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+  const a = document.createElement("a");
+  const url = URL.createObjectURL(file);
+  a.href = url;
+  a.download = safeFilename(title, "docx");
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
+
+export const exportMDString = async ({ title, html }) => {
+  const modTD = await import("turndown");
+  const TurndownService = modTD.default || modTD;
+  const modGFM = await import("turndown-plugin-gfm");
+  const gfm = modGFM.gfm || (modGFM.default && modGFM.default.gfm) || modGFM.default;
+
+  const td = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
+  if (gfm) td.use(gfm);
+  const md = td.turndown(html);
+
+  const file = new Blob([md], { type: "text/markdown;charset=utf-8" });
+  const a = document.createElement("a");
+  const url = URL.createObjectURL(file);
+  a.href = url;
+  a.download = safeFilename(title, "md");
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
+

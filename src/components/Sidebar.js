@@ -10,7 +10,6 @@ export default function Sidebar() {
     createNoteUniversal,
     renameRootNote,
     deleteRootNote,
-    shareRootNote,
     setCurrentNoteId,
     state,
     activeProjectId,
@@ -21,11 +20,9 @@ export default function Sidebar() {
     createProject,
     renameProject,
     deleteProject,
-    shareProject,
     createFolder,
     renameFolder,
     deleteFolder,
-    shareFolder,
   } = useAppState();
 
   const { theme } = useTheme();
@@ -42,7 +39,6 @@ export default function Sidebar() {
     setMenu({ type: null, id: null });
   }
 
-  // Dot style
   const dotBase = "ml-2 p-1 rounded transition";
   const dotColor =
     theme === "dark"
@@ -95,6 +91,7 @@ export default function Sidebar() {
       >
         + New Note
       </button>
+
       {/* Root Notes */}
       <ul className="space-y-1 text-sm mt-2">
         {rootNotes.map(note => (
@@ -128,9 +125,18 @@ export default function Sidebar() {
                     onClick: () => { renameRootNote(note.id); closeMenu(); },
                   },
                   {
+                    type: "share",
+                    label: "Share / Export…",
                     icon: <FaShare className="mr-2" />,
-                    label: "Share",
-                    onClick: () => { shareRootNote(note.id); closeMenu(); },
+                    share: {
+                      scopeTitle: `Export: ${note.title}`,
+                      items: [{ id: note.id, type: "note", title: note.title }],
+                      defaultSelection: [note.id],
+                      getNoteContent: async (id) => ({
+                        title: note.title,
+                        html: note.html || "<p></p>",
+                      }),
+                    },
                   },
                   {
                     icon: <FaTrash className="mr-2" />,
@@ -145,6 +151,7 @@ export default function Sidebar() {
           </li>
         ))}
       </ul>
+
       {/* Projects and Folders */}
       <ul className="space-y-1 text-sm mt-4">
         {state.projectData.map((proj) => {
@@ -194,9 +201,20 @@ export default function Sidebar() {
                         onClick: () => { renameProject(pid); closeMenu(); },
                       },
                       {
+                        type: "share",
+                        label: "Share / Export…",
                         icon: <FaShare className="mr-2" />,
-                        label: "Share",
-                        onClick: () => { shareProject(pid); closeMenu(); },
+                        share: {
+                          scopeTitle: `Export: ${proj.name}`,
+                          items: [
+                            { id: proj.id, type: "project", title: proj.name },
+                          ],
+                          defaultSelection: [],
+                          getNoteContent: async (id) => {
+                            // TODO: build HTML for all notes in this project
+                            return { title: proj.name, html: "<p>Project export not yet wired</p>" };
+                          },
+                        },
                       },
                       {
                         icon: <FaTrash className="mr-2" />,
@@ -209,7 +227,6 @@ export default function Sidebar() {
                   />
                 )}
               </div>
-              {/* Folder dropdown */}
               {isExpanded && (
                 <ul className="folder-dropdown ml-4 mt-2 space-y-1">
                   {(state.folderMap[pid] || []).map((folder) => {
@@ -254,9 +271,20 @@ export default function Sidebar() {
                                   onClick: () => { renameFolder(pid, folder.id); closeMenu(); },
                                 },
                                 {
+                                  type: "share",
+                                  label: "Share / Export…",
                                   icon: <FaShare className="mr-2" />,
-                                  label: "Share",
-                                  onClick: () => { shareFolder(pid, folder.id); closeMenu(); },
+                                  share: {
+                                    scopeTitle: `Export: ${folder.name}`,
+                                    items: [
+                                      { id: folder.id, type: "folder", title: folder.name },
+                                    ],
+                                    defaultSelection: [],
+                                    getNoteContent: async (id) => {
+                                      // TODO: return note HTML for all notes in this folder
+                                      return { title: folder.name, html: "<p>Folder export not yet wired</p>" };
+                                    },
+                                  },
                                 },
                                 {
                                   icon: <FaTrash className="mr-2" />,

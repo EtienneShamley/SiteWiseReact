@@ -1,29 +1,41 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ShareDialog from "./ShareDialog";
 
 export default function ThreeDotMenu({
-  anchorRef,
+  anchorRef,         // Element OR ref to element
   onClose,
-  options = [],
+  options = [],      // [{ label, icon, onClick, danger }, { type: "share", label, icon, share: { items, getNoteContent, scopeTitle, defaultSelection } }, { type: "separator" }]
   theme = "light",
 }) {
-  const menuRef = useRef();
+  const menuRef = useRef(null);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareCfg, setShareCfg] = useState(null);
+
+  // Normalize anchor (supports DOM node or ref.current)
+  const anchorEl = useMemo(() => {
+    return anchorRef?.current ? anchorRef.current : anchorRef || null;
+  }, [anchorRef]);
 
   // Position below anchor
   useEffect(() => {
     function positionMenu() {
-      if (anchorRef && menuRef.current) {
-        const rect = anchorRef.getBoundingClientRect();
+      if (anchorEl && menuRef.current) {
+        const rect = anchorEl.getBoundingClientRect();
         const menu = menuRef.current;
         menu.style.position = "fixed";
         menu.style.top = `${rect.bottom + 4}px`;
-        menu.style.left = `${rect.left}px`;
+        menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`;
         menu.style.zIndex = 9999;
       }
     }
     positionMenu();
     window.addEventListener("resize", positionMenu);
-    return () => window.removeEventListener("resize", positionMenu);
-  }, [anchorRef]);
+    window.addEventListener("scroll", positionMenu, true);
+    return () => {
+      window.removeEventListener("resize", positionMenu);
+      window.removeEventListener("scroll", positionMenu, true);
+    };
+  }, [anchorEl]);
 
   // Outside click
   useEffect(() => {
@@ -31,26 +43,29 @@ export default function ThreeDotMenu({
       if (
         menuRef.current &&
         !menuRef.current.contains(e.target) &&
-        anchorRef &&
-        !anchorRef.contains(e.target)
+        anchorEl &&
+        !anchorEl.contains(e.target)
       ) {
-        onClose();
+        onClose?.();
       }
     }
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
-  }, [onClose, anchorRef]);
+  }, [onClose, anchorEl]);
 
   // Escape closes
   useEffect(() => {
     function handleEsc(e) {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        if (shareOpen) setShareOpen(false);
+        else onClose?.();
+      }
     }
     document.addEventListener("keydown", handleEsc);
     return () => document.removeEventListener("keydown", handleEsc);
-  }, [onClose]);
+  }, [onClose, shareOpen]);
 
-  // THEME (no default bg-white anywhere; only theme-driven)
+  // THEME
   const isDark = theme === "dark";
   const menuBg = isDark ? "bg-[#232323]" : "bg-white";
   const menuText = isDark ? "text-white" : "text-gray-900";
@@ -58,26 +73,64 @@ export default function ThreeDotMenu({
   const itemHover = isDark ? "hover:bg-[#333]" : "hover:bg-gray-100";
   const iconColor = isDark ? "text-white" : "text-gray-700";
 
+  const handleOptionClick = (opt) => {
+    if (!opt) return;
+    if (opt.type === "separator") return;
+    if (opt.type === "share" && opt.share) {
+      // Open ShareDialog; keep menu mounted so dialog can overlay
+      setShareCfg(opt.share);
+      setShareOpen(true);
+      return;
+    }
+    // Regular action
+    opt.onClick?.();
+    onClose?.();
+  };
+
   return (
-    <div
-      ref={menuRef}
-      className={`min-w-[170px] py-1 shadow-lg rounded-xl border ${menuBorder} ${menuBg} ${menuText} absolute`}
-    >
-      {options.map((opt, idx) => (
-        <button
-          key={opt.label}
-          className={`flex items-center gap-2 px-4 py-2 w-full text-left text-sm ${itemHover} transition-colors ${
-            opt.danger ? "text-red-500" : menuText
-          } ${idx === options.length - 1 ? "rounded-b-xl" : ""}`}
-          onClick={opt.onClick}
-        >
-          {/* Make sure icons inherit the right color in dark mode */}
-          <span className={`${opt.danger ? "text-red-500" : iconColor}`}>
-            {opt.icon}
-          </span>
-          <span>{opt.label}</span>
-        </button>
-      ))}
-    </div>
+    <>
+      <div
+        ref={menuRef}
+        role="menu"
+        className={`min-w-[180px] py-1 shadow-lg rounded-xl border ${menuBorder} ${menuBg} ${menuText} absolute`}
+      >
+        {options.map((opt, idx) => {
+          if (opt.type === "separator") {
+            return <div key={`sep-${idx}`} className={`my-1 border-t ${menuBorder}`} />;
+          }
+          return (
+            <button
+              key={opt.label || idx}
+              type="button"
+              className={`flex items-center gap-2 px-4 py-2 w-full text-left text-sm ${itemHover} transition-colors ${
+                opt?.danger ? "text-red-500" : menuText
+              } ${idx === options.length - 1 ? "rounded-b-xl" : ""}`}
+              onClick={() => handleOptionClick(opt)}
+            >
+              {opt?.icon && (
+                <span className={`${opt.danger ? "text-red-500" : iconColor}`}>
+                  {opt.icon}
+                </span>
+              )}
+              <span>{opt.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {shareOpen && shareCfg && (
+        <ShareDialog
+          scopeTitle={shareCfg.scopeTitle || "Share / Export"}
+          items={shareCfg.items || []}
+          defaultSelection={shareCfg.defaultSelection || []}
+          getNoteContent={shareCfg.getNoteContent}
+          onClose={() => {
+            setShareOpen(false);
+            // Optionally close the 3-dot menu after closing the dialog:
+            onClose?.();
+          }}
+        />
+      )}
+    </>
   );
 }
