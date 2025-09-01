@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import ShareDialog from "./ShareDialog";
 
 export default function ThreeDotMenu({
-  anchorRef,         // Element OR ref to element
+  anchorRef, // Element OR ref to element
   onClose,
-  options = [],      // [{ label, icon, onClick, danger }, { type: "share", label, icon, share: { items, getNoteContent, scopeTitle, defaultSelection } }, { type: "separator" }]
+  options = [], // [{ label, icon, onClick, danger }, { type: "share", label, icon, share: { items, getNoteContent, scopeTitle, defaultSelection } }, { type: "separator" }]
   theme = "light",
 }) {
   const menuRef = useRef(null);
@@ -24,7 +24,10 @@ export default function ThreeDotMenu({
         const menu = menuRef.current;
         menu.style.position = "fixed";
         menu.style.top = `${rect.bottom + 4}px`;
-        menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`;
+        menu.style.left = `${Math.max(
+          8,
+          Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8)
+        )}px`;
         menu.style.zIndex = 9999;
       }
     }
@@ -92,23 +95,47 @@ export default function ThreeDotMenu({
       <div
         ref={menuRef}
         role="menu"
-        className={`min-w-[180px] py-1 shadow-lg rounded-xl border ${menuBorder} ${menuBg} ${menuText} absolute`}
+        className={`min-w-[180px] py-1 shadow-lg rounded-xl border absolute
+    ${
+      isDark
+        ? "bg-[#232323] text-white border-[#333]"
+        : "bg-white text-gray-900 border-gray-200"
+    }`}
       >
         {options.map((opt, idx) => {
           if (opt.type === "separator") {
-            return <div key={`sep-${idx}`} className={`my-1 border-t ${menuBorder}`} />;
+            return (
+              <div
+                key={`sep-${idx}`}
+                className={`my-1 border-t ${menuBorder}`}
+              />
+            );
           }
           return (
             <button
               key={opt.label || idx}
               type="button"
-              className={`flex items-center gap-2 px-4 py-2 w-full text-left text-sm ${itemHover} transition-colors ${
-                opt?.danger ? "text-red-500" : menuText
-              } ${idx === options.length - 1 ? "rounded-b-xl" : ""}`}
+              className={`flex items-center gap-2 px-4 py-2 w-full text-left text-sm transition-colors
+      ${
+        opt?.danger
+          ? "text-red-500"
+          : isDark
+          ? "text-white hover:bg-[#333]"
+          : "text-gray-900 hover:bg-gray-100"
+      }
+      ${idx === options.length - 1 ? "rounded-b-xl" : ""}`}
               onClick={() => handleOptionClick(opt)}
             >
               {opt?.icon && (
-                <span className={`${opt.danger ? "text-red-500" : iconColor}`}>
+                <span
+                  className={
+                    opt.danger
+                      ? "text-red-500"
+                      : isDark
+                      ? "text-white"
+                      : "text-gray-700"
+                  }
+                >
                   {opt.icon}
                 </span>
               )}
