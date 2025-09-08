@@ -1,15 +1,22 @@
+// src/components/ThreeDotMenu.js
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ShareDialog from "./ShareDialog";
 
 export default function ThreeDotMenu({
-  anchorRef, // Element OR ref to element
+  anchorRef,         // Element OR ref to element
   onClose,
-  options = [], // [{ label, icon, onClick, danger }, { type: "share", label, icon, share: { items, getNoteContent, scopeTitle, defaultSelection } }, { type: "separator" }]
-  theme = "light",
+  options = [],      // [{ label, icon, onClick, danger } or { type: "share", share:{...} } or { type: "separator" }]
+  theme = "light",   // "dark" | "light"
 }) {
   const menuRef = useRef(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [shareCfg, setShareCfg] = useState(null);
+
+  // Fallback detection in case theme prop isn't passed correctly
+  const isDark =
+    theme === "dark" ||
+    (typeof document !== "undefined" &&
+      document.documentElement.classList.contains("dark"));
 
   // Normalize anchor (supports DOM node or ref.current)
   const anchorEl = useMemo(() => {
@@ -68,24 +75,14 @@ export default function ThreeDotMenu({
     return () => document.removeEventListener("keydown", handleEsc);
   }, [onClose, shareOpen]);
 
-  // THEME
-  const isDark = theme === "dark";
-  const menuBg = isDark ? "bg-[#232323]" : "bg-white";
-  const menuText = isDark ? "text-white" : "text-gray-900";
-  const menuBorder = isDark ? "border-[#333]" : "border-gray-200";
-  const itemHover = isDark ? "hover:bg-[#333]" : "hover:bg-gray-100";
-  const iconColor = isDark ? "text-white" : "text-gray-700";
-
   const handleOptionClick = (opt) => {
     if (!opt) return;
     if (opt.type === "separator") return;
     if (opt.type === "share" && opt.share) {
-      // Open ShareDialog; keep menu mounted so dialog can overlay
       setShareCfg(opt.share);
       setShareOpen(true);
       return;
     }
-    // Regular action
     opt.onClick?.();
     onClose?.();
   };
@@ -96,18 +93,14 @@ export default function ThreeDotMenu({
         ref={menuRef}
         role="menu"
         className={`min-w-[180px] py-1 shadow-lg rounded-xl border absolute
-    ${
-      isDark
-        ? "bg-[#232323] text-white border-[#333]"
-        : "bg-white text-gray-900 border-gray-200"
-    }`}
+          ${isDark ? "bg-[#232323] text-white border-[#333]" : "bg-white text-gray-900 border-gray-200"}`}
       >
         {options.map((opt, idx) => {
           if (opt.type === "separator") {
             return (
               <div
                 key={`sep-${idx}`}
-                className={`my-1 border-t ${menuBorder}`}
+                className={`my-1 border-t ${isDark ? "border-[#333]" : "border-gray-200"}`}
               />
             );
           }
@@ -116,26 +109,18 @@ export default function ThreeDotMenu({
               key={opt.label || idx}
               type="button"
               className={`flex items-center gap-2 px-4 py-2 w-full text-left text-sm transition-colors
-      ${
-        opt?.danger
-          ? "text-red-500"
-          : isDark
-          ? "text-white hover:bg-[#333]"
-          : "text-gray-900 hover:bg-gray-100"
-      }
-      ${idx === options.length - 1 ? "rounded-b-xl" : ""}`}
+                ${
+                  opt?.danger
+                    ? "text-red-500 hover:bg-red-500/10"
+                    : isDark
+                    ? "text-white hover:bg-[#333]"
+                    : "text-gray-900 hover:bg-gray-100"
+                }
+                ${idx === options.length - 1 ? "rounded-b-xl" : ""}`}
               onClick={() => handleOptionClick(opt)}
             >
               {opt?.icon && (
-                <span
-                  className={
-                    opt.danger
-                      ? "text-red-500"
-                      : isDark
-                      ? "text-white"
-                      : "text-gray-700"
-                  }
-                >
+                <span className={opt.danger ? "text-red-500" : isDark ? "text-white" : "text-gray-700"}>
                   {opt.icon}
                 </span>
               )}
@@ -153,7 +138,6 @@ export default function ThreeDotMenu({
           getNoteContent={shareCfg.getNoteContent}
           onClose={() => {
             setShareOpen(false);
-            // Optionally close the 3-dot menu after closing the dialog:
             onClose?.();
           }}
         />
