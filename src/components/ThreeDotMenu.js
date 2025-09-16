@@ -3,10 +3,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import ShareDialog from "./ShareDialog";
 
 export default function ThreeDotMenu({
-  anchorRef,         // Element OR ref to element
+  anchorRef, // Element OR ref to element
   onClose,
-  options = [],      // [{ label, icon, onClick, danger } or { type: "share", share:{...} } or { type: "separator" }]
-  theme = "light",   // "dark" | "light"
+  options = [], // [{ label, icon, onClick, danger } or { type: "share", share:{...} } or { type: "separator" }]
+  theme = "light", // "dark" | "light"
 }) {
   const menuRef = useRef(null);
   const [shareOpen, setShareOpen] = useState(false);
@@ -93,14 +93,20 @@ export default function ThreeDotMenu({
         ref={menuRef}
         role="menu"
         className={`min-w-[180px] py-1 shadow-lg rounded-xl border absolute
-          ${isDark ? "bg-[#232323] text-white border-[#333]" : "bg-white text-gray-900 border-gray-200"}`}
+          ${
+            isDark
+              ? "bg-[#232323] text-white border-[#333]"
+              : "bg-white text-gray-900 border-gray-200"
+          }`}
       >
         {options.map((opt, idx) => {
           if (opt.type === "separator") {
             return (
               <div
                 key={`sep-${idx}`}
-                className={`my-1 border-t ${isDark ? "border-[#333]" : "border-gray-200"}`}
+                className={`my-1 border-t ${
+                  isDark ? "border-[#333]" : "border-gray-200"
+                }`}
               />
             );
           }
@@ -120,7 +126,15 @@ export default function ThreeDotMenu({
               onClick={() => handleOptionClick(opt)}
             >
               {opt?.icon && (
-                <span className={opt.danger ? "text-red-500" : isDark ? "text-white" : "text-gray-700"}>
+                <span
+                  className={
+                    opt.danger
+                      ? "text-red-500"
+                      : isDark
+                      ? "text-white"
+                      : "text-gray-700"
+                  }
+                >
                   {opt.icon}
                 </span>
               )}
@@ -136,6 +150,7 @@ export default function ThreeDotMenu({
           items={shareCfg.items || []}
           defaultSelection={shareCfg.defaultSelection || []}
           getNoteContent={shareCfg.getNoteContent}
+          theme={isDark ? "dark" : "light"} // pass theme explicitly
           onClose={() => {
             setShareOpen(false);
             onClose?.();

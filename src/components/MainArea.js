@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
 import { useTheme } from "../context/ThemeContext";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -38,6 +38,7 @@ export default function MainArea() {
     const saved = localStorage.getItem(STORAGE_KEY);
     return saved ? JSON.parse(saved) : {};
   });
+
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(docState));
   }, [docState]);
@@ -87,7 +88,8 @@ export default function MainArea() {
       editable: !!noteTitle,
       editorProps: {
         attributes: {
-          class: `prose prose-invert dark:prose-invert bg-white dark:bg-[#1a1a1a] min-h-[400px] rounded-lg border border-gray-400 dark:border-gray-700 px-6 py-4 focus:outline-none transition-colors`,
+          class:
+            "prose dark:prose-invert bg-white dark:bg-[#1a1a1a] rounded-lg border border-gray-400 dark:border-gray-700 px-6 py-4 focus:outline-none transition-colors",
           spellCheck: "true",
         },
       },
@@ -110,7 +112,9 @@ export default function MainArea() {
     } else if (noteKey) {
       editor.commands.setContent(EMPTY_DOC);
     }
-  }, [editor, noteKey]);
+    // toggle editability when selection changes
+    editor.setEditable(!!noteTitle);
+  }, [editor, noteKey, noteTitle]); // include noteTitle so editable flips immediately
 
   // Insert logic for BottomBar
   function handleInsertTextAtCursor(text) {
@@ -128,7 +132,7 @@ export default function MainArea() {
       editor
         .chain()
         .focus()
-        .insertContent(`<a href="${pdfUrl}" target="_blank">[PDF]</a>`)
+        .insertContent(`<a href="${pdfUrl}" target="_blank" rel="noreferrer noopener">[PDF]</a>`)
         .run();
     }
   }
@@ -138,29 +142,32 @@ export default function MainArea() {
       {/* Toolbar */}
       <EditorToolbar editor={editor} />
 
-      {/* Main Editor */}
+      {/* Main Editor area */}
       <div className="flex-1 flex flex-col min-h-0">
-        <div
-          id="chatWindow"
-          className="overflow-y-auto overflow-x-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg mb-4 bg-white dark:bg-[#2a2a2a] flex-1 transition-colors"
-          style={{ minHeight: 0, minHeight: 400 }}
-        >
-          {noteTitle ? (
-            <EditorContent editor={editor} />
-          ) : (
-            <div className="text-gray-400 px-4 py-10 text-center">
-              No note selected.
-            </div>
-          )}
+        {/* Outer must be min-h-0 to allow shrinking; inner sets visual min height */}
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div
+            id="chatWindow"
+            className="overflow-y-auto overflow-x-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg mb-4 bg-white dark:bg-[#2a2a2a] transition-colors min-h-[400px]"
+          >
+            {noteTitle ? (
+              <EditorContent editor={editor} />
+            ) : (
+              <div className="text-gray-400 px-4 py-10 text-center">
+                No note selected.
+              </div>
+            )}
+          </div>
+
+          {/* Bottom bar */}
+          <BottomBar
+            editor={editor}
+            onInsertText={handleInsertTextAtCursor}
+            onInsertImage={handleInsertImageAtCursor}
+            onInsertPDF={handleInsertPDFAtCursor}
+            disabled={!noteTitle || !editor}
+          />
         </div>
-        {/* --- BottomBar: textarea + buttons for file/voice/AI --- */}
-        <BottomBar
-          editor={editor}
-          onInsertText={handleInsertTextAtCursor}
-          onInsertImage={handleInsertImageAtCursor}
-          onInsertPDF={handleInsertPDFAtCursor}
-          disabled={!noteTitle || !editor}
-        />
       </div>
     </main>
   );

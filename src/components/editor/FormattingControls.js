@@ -9,11 +9,22 @@ import { FONT_FAMILIES, FONT_SIZES } from "../../constants/editorOptions";
 export default function FormattingControls({ editor }) {
   const fileInputRef = useRef();
 
-  const setFontSize = (size) =>
-    editor?.chain().focus().setMark("textStyle", { fontSize: size }).run();
+  // Font size: default to 1em when blank (prevents empty mark attrs lingering)
+  const setFontSize = (size) => {
+    if (!editor) return;
+    const val = size || "1em";
+    editor.chain().focus().setMark("textStyle", { fontSize: val }).run();
+  };
 
-  const setFontFamily = (family) =>
-    editor?.chain().focus().setFontFamily(family).run();
+  // Font family: unset when blank if command exists; else default stack
+  const setFontFamily = (family) => {
+    if (!editor) return;
+    if (!family && editor.commands?.unsetFontFamily) {
+      editor.chain().focus().unsetFontFamily().run();
+    } else {
+      editor.chain().focus().setFontFamily(family || "Arial, sans-serif").run();
+    }
+  };
 
   const handleImageUpload = (e) => {
     const file = e.target.files?.[0];
@@ -29,6 +40,7 @@ export default function FormattingControls({ editor }) {
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {/* Font Family */}
       <select
         onChange={(e) => setFontFamily(e.target.value)}
         value={editor.getAttributes("fontFamily").fontFamily || ""}
@@ -42,6 +54,7 @@ export default function FormattingControls({ editor }) {
         ))}
       </select>
 
+      {/* Font Size */}
       <select
         onChange={(e) => setFontSize(e.target.value)}
         value={editor.getAttributes("textStyle").fontSize || ""}
@@ -55,6 +68,7 @@ export default function FormattingControls({ editor }) {
         ))}
       </select>
 
+      {/* Text Color */}
       <input
         type="color"
         onInput={(e) => editor.chain().focus().setColor(e.target.value).run()}
@@ -64,6 +78,7 @@ export default function FormattingControls({ editor }) {
         className="w-6 h-6 border border-gray-300 dark:border-gray-700 rounded"
       />
 
+      {/* Highlight Color */}
       <input
         type="color"
         onInput={(e) =>
@@ -75,6 +90,7 @@ export default function FormattingControls({ editor }) {
         className="w-6 h-6 border border-gray-300 dark:border-gray-700 rounded"
       />
 
+      {/* Formatting buttons */}
       <button onClick={() => editor.chain().focus().toggleBold().run()} className={`p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 ${editor.isActive("bold") ? "font-bold text-blue-600" : ""}`} title="Bold" aria-label="Bold"><FaBold /></button>
       <button onClick={() => editor.chain().focus().toggleItalic().run()} className={`p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 ${editor.isActive("italic") ? "italic text-blue-600" : ""}`} title="Italic" aria-label="Italic"><FaItalic /></button>
       <button onClick={() => editor.chain().focus().toggleUnderline().run()} className={`p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 ${editor.isActive("underline") ? "underline text-blue-600" : ""}`} title="Underline" aria-label="Underline"><FaUnderline /></button>
@@ -87,23 +103,62 @@ export default function FormattingControls({ editor }) {
       <button onClick={() => editor.chain().focus().toggleCodeBlock().run()} className={`p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 ${editor.isActive("codeBlock") ? "text-yellow-600" : ""}`} title="Code" aria-label="Code block"><FaCode /></button>
       <button onClick={() => editor.chain().focus().toggleHighlight().run()} className={`p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 ${editor.isActive("highlight") ? "bg-yellow-300" : ""}`} title="Highlight" aria-label="Highlight"><FaHighlighter /></button>
 
+      {/* Link */}
       <button
-        onClick={() => { const url = window.prompt("Enter URL"); if (url) editor.chain().focus().setLink({ href: url }).run(); }}
+        onClick={() => {
+          const url = window.prompt("Enter URL");
+          if (url) editor.chain().focus().setLink({ href: url }).run();
+        }}
         className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-        title="Link" aria-label="Insert link"
-      ><FaLink /></button>
+        title="Link"
+        aria-label="Insert link"
+      >
+        <FaLink />
+      </button>
 
-      <input type="file" accept="image/*" style={{ display: "none" }} ref={fileInputRef} onChange={handleImageUpload} />
-      <button title="Insert Photo" aria-label="Insert photo" onClick={() => fileInputRef.current?.click()} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"><FaCamera /></button>
-
+      {/* Image Upload (hidden input) */}
+      <input
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        ref={fileInputRef}
+        onChange={handleImageUpload}
+      />
       <button
-        onClick={() => { const url = window.prompt("Enter image URL"); if (url) editor.chain().focus().setImage({ src: url }).run(); }}
+        title="Insert Photo"
+        aria-label="Insert photo"
+        onClick={() => fileInputRef.current?.click()}
         className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
-        title="Insert Image by URL" aria-label="Insert image by URL"
-      ><FaImage /></button>
+      >
+        <FaCamera />
+      </button>
 
-      <button onClick={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700" title="Table" aria-label="Insert table"><FaTable /></button>
+      {/* Image by URL */}
+      <button
+        onClick={() => {
+          const url = window.prompt("Enter image URL");
+          if (url) editor.chain().focus().setImage({ src: url }).run();
+        }}
+        className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+        title="Insert Image by URL"
+        aria-label="Insert image by URL"
+      >
+        <FaImage />
+      </button>
 
+      {/* Table */}
+      <button
+        onClick={() =>
+          editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+        }
+        className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+        title="Table"
+        aria-label="Insert table"
+      >
+        <FaTable />
+      </button>
+
+      {/* Undo / Redo */}
       <button onClick={() => editor.chain().focus().undo().run()} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700" title="Undo" aria-label="Undo"><FaUndo /></button>
       <button onClick={() => editor.chain().focus().redo().run()} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700" title="Redo" aria-label="Redo"><FaRedo /></button>
     </div>

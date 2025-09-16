@@ -1,13 +1,19 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { FaMicrophone, FaStop } from "react-icons/fa";
 import useMediaRecorder from "../hooks/useMediaRecorder";
 
-export default function VoiceButton({ editor }) {
-  const { isRecording, start, stop, error, mimeType } = useMediaRecorder();
+export default function VoiceButton({ editor, disabled = false }) {
+  const { isRecording, start, stop, error } = useMediaRecorder();
   const [saving, setSaving] = useState(false);
 
+  const hasMediaDevices = useMemo(() => {
+    return typeof navigator !== "undefined" &&
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === "function";
+  }, []);
+
   const onClick = async () => {
-    if (!editor) return;
+    if (disabled || !editor) return;
     if (!isRecording) {
       await start();
       return;
@@ -16,7 +22,6 @@ export default function VoiceButton({ editor }) {
     const blob = await stop();
     if (blob) {
       const url = URL.createObjectURL(blob);
-      // Insert an audio player into the document
       editor
         .chain()
         .focus()
@@ -26,20 +31,15 @@ export default function VoiceButton({ editor }) {
     setSaving(false);
   };
 
-  const disabled = !!error || saving || !navigator.mediaDevices;
-  const title = error
-    ? "Microphone unavailable or permission denied"
-    : isRecording
-      ? "Stop recording"
-      : "Start voice recording";
+  const isDisabled = disabled || !!error || !hasMediaDevices || saving;
 
   return (
     <button
       onClick={onClick}
-      title={title}
+      title={isRecording ? "Stop recording" : "Start voice recording"}
       aria-label="Voice record"
       className={`p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 ${isRecording ? "text-red-600" : ""}`}
-      disabled={disabled}
+      disabled={isDisabled}
     >
       {isRecording ? <FaStop /> : <FaMicrophone />}
     </button>
