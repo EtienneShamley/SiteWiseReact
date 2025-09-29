@@ -22,7 +22,7 @@ export default function ShareDialog({
   defaultSelection = [],
   theme = "light",            // ✅ accept theme
 }) {
-  const isDark = theme === "dark";   // ✅ compute once
+  const isDark = theme === "dark";   //compute once
 
   const [selected, setSelected] = useState(new Set(defaultSelection));
   const [format, setFormat] = useState("pdf");
