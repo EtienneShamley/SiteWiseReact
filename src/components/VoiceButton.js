@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import { FaMicrophone, FaStop } from "react-icons/fa";
+import { useTranscription } from "../hooks/useTranscription";
 
 export default function VoiceButton({ editor, disabled = false }) {
   const [isRecording, setIsRecording] = useState(false);
   const [saving, setSaving] = useState(false);
   const mediaRecorderRef = useRef(null);
   const chunksRef = useRef([]);
+  const { transcribeBlob } = useTranscription();
 
-  // Detect if browser supports mediaDevices
   const hasMediaDevices = useMemo(() => {
     return (
       typeof navigator !== "undefined" &&
@@ -16,7 +17,6 @@ export default function VoiceButton({ editor, disabled = false }) {
     );
   }, []);
 
-  // Stop tracks when unmounted
   useEffect(() => {
     return () => {
       try {
@@ -25,7 +25,6 @@ export default function VoiceButton({ editor, disabled = false }) {
     };
   }, []);
 
-  // Start recording
   const start = async () => {
     if (!hasMediaDevices || disabled || isRecording) return;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -39,7 +38,6 @@ export default function VoiceButton({ editor, disabled = false }) {
     setIsRecording(true);
   };
 
-  // Stop recording and return blob
   const stop = async () => {
     if (!isRecording || !mediaRecorderRef.current) return null;
     return new Promise((resolve) => {
@@ -53,30 +51,42 @@ export default function VoiceButton({ editor, disabled = false }) {
     });
   };
 
-  // Click handler toggles recording
   const onClick = async () => {
     if (disabled || !editor) return;
     if (!hasMediaDevices) {
       alert("Microphone not available in this browser.");
       return;
     }
+
     if (!isRecording) {
       await start();
       return;
     }
+
     setSaving(true);
-    const blob = await stop();
-    if (blob) {
-      const url = URL.createObjectURL(blob);
-      editor
-        .chain()
-        .focus()
-        .insertContent(
-          `<p><audio controls src="${url}" preload="metadata"></audio></p>`
-        )
-        .run();
+    try {
+      const blob = await stop();
+      if (blob) {
+        // Insert audio player first
+        const url = URL.createObjectURL(blob);
+        editor
+          .chain()
+          .focus()
+          .insertContent(`<p><audio controls src="${url}" preload="metadata"></audio></p>`)
+          .run();
+
+        // Then transcribe and insert text
+        const text = await transcribeBlob(blob);
+        if (text) {
+          editor.chain().focus().insertContent(`<p>${text}</p>`).run();
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Transcription failed.");
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const isDisabled = disabled || saving || !hasMediaDevices;
@@ -88,6 +98,7 @@ export default function VoiceButton({ editor, disabled = false }) {
       className={`p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 ${
         isRecording ? "text-red-600" : ""
       } disabled:opacity-60`}
+      title={isRecording ? "Stop recording" : "Start recording"}
     >
       {isRecording ? <FaStop /> : <FaMicrophone />}
     </button>
