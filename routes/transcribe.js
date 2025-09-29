@@ -1,32 +1,58 @@
+// routes/transcribe.js
 const express = require("express");
 const multer = require("multer");
 const OpenAI = require("openai");
 const { toFile } = require("openai/uploads");
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage() });
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
 });
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 router.post("/transcribe", upload.single("audio"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No audio uploaded" });
 
-    // Convert the uploaded buffer into a file-like object for the SDK
-    const file = await toFile(req.file.buffer, "audio.webm", { type: "audio/webm" });
+    const mime = req.file.mimetype || "application/octet-stream";
+    const ext =
+      mime.includes("webm") ? "webm" :
+      mime.includes("mp4") || mime.includes("m4a") ? "m4a" :
+      mime.includes("wav") ? "wav" :
+      mime.includes("mpeg") ? "mp3" : "bin";
 
-    const result = await openai.audio.transcriptions.create({
-      model: "whisper-1",
-      file,
-      // Optional: language: "en",
-    });
+    const file = await toFile(req.file.buffer, `audio.${ext}`, { type: mime });
 
-    res.json({ text: result.text || "" });
+    let text = "";
+    try {
+      const r1 = await openai.audio.transcriptions.create({
+        model: "gpt-4o-mini-transcribe",
+        file,
+      });
+      text = r1?.text || r1?.data?.text || "";
+    } catch {
+      const r2 = await openai.audio.transcriptions.create({
+        model: "whisper-1",
+        file,
+      });
+      text = r2?.text || r2?.data?.text || "";
+    }
+
+    return res.json({ text });
   } catch (err) {
-    console.error("Transcription failed:", err);
-    res.status(500).json({ error: "Transcription failed" });
+    const apiMsg =
+      err?.response?.data?.error?.message ||
+      err?.error?.message ||
+      err?.message ||
+      "Transcription failed";
+    console.error("[transcribe] error:", apiMsg, {
+      status: err?.status || err?.response?.status,
+      data: err?.response?.data,
+    });
+    return res.status(500).json({ error: apiMsg });
   }
 });
 

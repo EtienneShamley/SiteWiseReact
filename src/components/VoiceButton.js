@@ -2,7 +2,12 @@ import React, { useEffect, useRef, useState, useMemo } from "react";
 import { FaMicrophone, FaStop } from "react-icons/fa";
 import { useTranscription } from "../hooks/useTranscription";
 
-export default function VoiceButton({ editor, disabled = false }) {
+export default function VoiceButton({
+  editor,
+  disabled = false,
+  onTranscribed,           // new: put text into BottomBar textarea
+  insertAudioToEditor = true,
+}) {
   const [isRecording, setIsRecording] = useState(false);
   const [saving, setSaving] = useState(false);
   const mediaRecorderRef = useRef(null);
@@ -52,7 +57,7 @@ export default function VoiceButton({ editor, disabled = false }) {
   };
 
   const onClick = async () => {
-    if (disabled || !editor) return;
+    if (disabled) return;
     if (!hasMediaDevices) {
       alert("Microphone not available in this browser.");
       return;
@@ -67,23 +72,27 @@ export default function VoiceButton({ editor, disabled = false }) {
     try {
       const blob = await stop();
       if (blob) {
-        // Insert audio player first
-        const url = URL.createObjectURL(blob);
-        editor
-          .chain()
-          .focus()
-          .insertContent(`<p><audio controls src="${url}" preload="metadata"></audio></p>`)
-          .run();
+        if (insertAudioToEditor && editor) {
+          const url = URL.createObjectURL(blob);
+          editor
+            .chain()
+            .focus()
+            .insertContent(
+              `<p><audio controls src="${url}" preload="metadata"></audio></p>`
+            )
+            .run();
+          // Release later
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        }
 
-        // Then transcribe and insert text
         const text = await transcribeBlob(blob);
-        if (text) {
-          editor.chain().focus().insertContent(`<p>${text}</p>`).run();
+        if (text && typeof onTranscribed === "function") {
+          onTranscribed(text);
         }
       }
     } catch (e) {
       console.error(e);
-      alert("Transcription failed.");
+      alert(`Transcription failed: ${e?.message || "Unknown error"}`);
     } finally {
       setSaving(false);
     }
