@@ -1,8 +1,6 @@
-// src/components/MainArea.js
 import React, { useEffect, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
 import { useTheme } from "../context/ThemeContext";
-
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
@@ -26,21 +24,30 @@ import BottomBar from "./BottomBar";
 import FontFamily from "@tiptap/extension-font-family";
 import { TextStyle } from "@tiptap/extension-text-style";
 import Color from "@tiptap/extension-color";
+import FullNoteAIBar from "./FullNoteAIBar"; // NEW
 
 const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
 const STORAGE_KEY = "sitewise-notes";
 
 export default function MainArea() {
-  const { currentNoteId, rootNotes, state, activeProjectId, activeFolderId } = useAppState();
+  const { currentNoteId, rootNotes, state, activeProjectId, activeFolderId } =
+    useAppState();
   const { theme } = useTheme();
 
   const [docState, setDocState] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? JSON.parse(saved) : {};
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
   });
+
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(docState));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(docState));
+    } catch {}
   }, [docState]);
 
   let noteTitle = null;
@@ -52,7 +59,9 @@ export default function MainArea() {
       noteKey = root.id;
     }
     if (!noteTitle && activeProjectId && activeFolderId) {
-      const folder = state.folderMap[activeProjectId]?.find((f) => f.id === activeFolderId);
+      const folder = state.folderMap[activeProjectId]?.find(
+        (f) => f.id === activeFolderId
+      );
       const note = folder?.notes.find((n) => n.id === currentNoteId);
       if (note) {
         noteTitle = note.title;
@@ -61,43 +70,27 @@ export default function MainArea() {
     }
   }
 
-  // Build then de-duplicate by extension name (TipTap warns otherwise)
-  const rawExtensions = [
-    StarterKit.configure({
-      blockquote: false,
-      horizontalRule: false,
-      codeBlock: false,
-    }),
-    Underline,
-    Link,
-    Highlight,
-    Blockquote,
-    HorizontalRule,
-    Table.configure({ resizable: true }),
-    TableRow,
-    TableHeader,
-    TableCell,
-    Image,
-    TaskList,
-    TaskItem,
-    CodeBlockLowlight.configure({ lowlight }),
-    FontFamily,
-    TextStyle,
-    Color,
-  ];
-
-  const seen = new Set();
-  const extensions = rawExtensions.filter((ext) => {
-    const name = ext?.name || ext?.config?.name;
-    if (!name) return true;
-    if (seen.has(name)) return false;
-    seen.add(name);
-    return true;
-  });
-
   const editor = useEditor(
     {
-      extensions,
+      extensions: [
+        StarterKit,
+        Underline,
+        Link,
+        Highlight,
+        Blockquote,
+        HorizontalRule,
+        Table.configure({ resizable: true }),
+        TableRow,
+        TableHeader,
+        TableCell,
+        Image,
+        TaskList,
+        TaskItem,
+        CodeBlockLowlight.configure({ lowlight }),
+        FontFamily,
+        TextStyle,
+        Color,
+      ],
       content: noteKey && docState[noteKey] ? docState[noteKey] : EMPTY_DOC,
       editable: !!noteTitle,
       editorProps: {
@@ -126,49 +119,66 @@ export default function MainArea() {
     } else if (noteKey) {
       editor.commands.setContent(EMPTY_DOC);
     }
+    // no dependency on docState to avoid overwriting while typing
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, noteKey]);
 
   function handleInsertTextAtCursor(text) {
-    if (editor && text) editor.chain().focus().insertContent(text).run();
-  }
-  function handleInsertImageAtCursor(fileOrUrl) {
-    if (!editor || !fileOrUrl) return;
-    if (typeof fileOrUrl === "string") {
-      editor.chain().focus().setImage({ src: fileOrUrl }).run();
-      return;
+    if (editor && text) {
+      editor.chain().focus().insertContent(text).run();
     }
-    const reader = new FileReader();
-    reader.onload = (evt) =>
-      editor.chain().focus().setImage({ src: evt.target.result }).run();
-    reader.readAsDataURL(fileOrUrl);
+  }
+  function handleInsertImageAtCursor(imgSrc) {
+    if (editor && imgSrc) {
+      // if a File was passed in, convert to object URL here
+      if (imgSrc instanceof File) {
+        const url = URL.createObjectURL(imgSrc);
+        editor.chain().focus().setImage({ src: url }).run();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      } else {
+        editor.chain().focus().setImage({ src: imgSrc }).run();
+      }
+    }
   }
   function handleInsertPDFAtCursor(pdfUrl) {
     if (editor && pdfUrl) {
       editor
         .chain()
         .focus()
-        .insertContent(
-          `<a href="${pdfUrl}" target="_blank" rel="noopener noreferrer">[PDF]</a>`
-        )
+        .insertContent(`<a href="${pdfUrl}" target="_blank" rel="noopener noreferrer">[PDF]</a>`)
         .run();
     }
   }
 
   return (
     <main className="flex-1 flex flex-col min-h-screen">
+      {/* Toolbar */}
       <EditorToolbar editor={editor} />
+
+      {/* NEW: whole-note refine bar */}
+      <FullNoteAIBar
+        editor={editor}
+        disabled={!noteTitle || !editor}
+        language="auto"
+      />
+
+      {/* Main Editor */}
       <div className="flex-1 flex flex-col min-h-0">
         <div
           id="chatWindow"
           className="overflow-y-auto overflow-x-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg mb-4 bg-white dark:bg-[#2a2a2a] flex-1 transition-colors"
-          style={{ minHeight: 0 }}
+          style={{ minHeight: 0, minHeight: 400 }}
         >
           {noteTitle ? (
             <EditorContent editor={editor} />
           ) : (
-            <div className="text-gray-400 px-4 py-10 text-center">No note selected.</div>
+            <div className="text-gray-400 px-4 py-10 text-center">
+              No note selected.
+            </div>
           )}
         </div>
+
+        {/* Bottom composer */}
         <BottomBar
           editor={editor}
           onInsertText={handleInsertTextAtCursor}
