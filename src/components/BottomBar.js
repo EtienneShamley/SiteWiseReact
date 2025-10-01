@@ -1,7 +1,8 @@
 import React, { useRef, useState, useMemo } from "react";
-import { FaMicrophone, FaPlus, FaCamera, FaArrowUp, FaMagic } from "react-icons/fa";
+import { FaPlus, FaCamera, FaArrowUp, FaStar, FaUndo } from "react-icons/fa";
 import VoiceButton from "./VoiceButton";
-import { useRefinement } from "../hooks/useRefinement";
+import { useRefine } from "../hooks/useRefine";
+import { useTranscription } from "../hooks/useTranscription";
 
 export default function BottomBar({
   editor,
@@ -12,21 +13,33 @@ export default function BottomBar({
 }) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [refinedDraft, setRefinedDraft] = useState(null); // holds refined preview
+  const [refinedDraft, setRefinedDraft] = useState(null);
+  const [originalBeforeRefine, setOriginalBeforeRefine] = useState(null);
+
+  // Voice state and recorder refs are here in the parent now
+  // idle | recording | stopping | transcribing
+  const [voicePhase, setVoicePhase] = useState("idle");
+  const [transcribeError, setTranscribeError] = useState("");
+  const mediaRecorderRef = useRef(null);
+  const chunksRef = useRef([]);
+
   const fileInputRef = useRef();
   const cameraInputRef = useRef();
+  const { refineText } = useRefine();
+  const { transcribeBlob } = useTranscription();
 
-  const { refineText } = useRefinement();
-
-  const isDisabled = disabled || busy;
-
-  const hasText = useMemo(() => input.trim().length > 0, [input]);
+  const isDisabled = disabled || busy || voicePhase === "transcribing";
+  const currentText = refinedDraft ?? input;
+  const hasText = useMemo(() => currentText.trim().length > 0, [currentText]);
 
   const handleSend = () => {
-    if (!hasText || !onInsertText || !editor) return;
-    onInsertText(input.trim());
+    const text = currentText.trim();
+    if (!text || !onInsertText || !editor) return;
+    onInsertText(text);
     setInput("");
     setRefinedDraft(null);
+    setOriginalBeforeRefine(null);
+    setTranscribeError("");
   };
 
   const handleFilesSelected = async (e) => {
@@ -61,29 +74,144 @@ export default function BottomBar({
     e.target.value = "";
   };
 
-  const doRefine = async () => {
-    if (!hasText || isDisabled) return;
+  // Voice helpers (parent owns everything now)
+  const hasMediaDevices =
+    typeof navigator !== "undefined" &&
+    navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === "function";
+
+  const pickMimeType = () => {
+    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+    for (const type of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type))
+        return type;
+    }
+    return "";
+  };
+
+  const startRecording = async () => {
+    if (!hasMediaDevices || isDisabled || voicePhase !== "idle") return;
+    setTranscribeError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = pickMimeType();
+      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+
+      chunksRef.current = [];
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      mr.start();
+      mediaRecorderRef.current = mr;
+      setVoicePhase("recording");
+      // Optional audio tag insert will happen after stop (once we have a blob URL)
+    } catch (err) {
+      setVoicePhase("idle");
+      setTranscribeError(err?.message || "Microphone permission denied");
+    }
+  };
+
+  const stopRecording = async () => {
+    if (voicePhase !== "recording" || !mediaRecorderRef.current) return null;
+    setVoicePhase("stopping");
+    return new Promise((resolve) => {
+      mediaRecorderRef.current.onstop = () => {
+        try {
+          const type = mediaRecorderRef.current.mimeType || "audio/webm";
+          const blob = new Blob(chunksRef.current, { type });
+          resolve(blob);
+        } catch (err) {
+          setTranscribeError(err?.message || "Failed to capture audio");
+          resolve(null);
+        }
+      };
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
+    });
+  };
+
+  const onVoiceClick = async () => {
+    if (disabled || !editor || !hasMediaDevices) {
+      if (!hasMediaDevices)
+        setTranscribeError("Microphone not available in this browser.");
+      return;
+    }
+    if (voicePhase === "idle") {
+      await startRecording();
+      return;
+    }
+    if (voicePhase === "recording") {
+      const blob = await stopRecording();
+      if (!blob) {
+        setVoicePhase("idle");
+        setTranscribeError("No audio captured");
+        return;
+      }
+
+      // Insert audio player into editor
+      const url = URL.createObjectURL(blob);
+      editor
+        .chain()
+        .focus()
+        .insertContent(
+          `<p><audio controls src="${url}" preload="metadata"></audio></p>`
+        )
+        .run();
+
+      // Show transcribing state and call backend
+      setVoicePhase("transcribing");
+      try {
+        const text = await transcribeBlob(blob);
+        setVoicePhase("idle");
+        if (text) {
+          // Put transcription into the textarea (so user can edit first)
+          if (refinedDraft != null) {
+            setRefinedDraft((p) => (p ? `${p} ${text}` : text));
+          } else {
+            setInput((p) => (p ? `${p} ${text}` : text));
+          }
+        } else {
+          setTranscribeError("Empty transcription");
+        }
+      } catch (e) {
+        setVoicePhase("idle");
+        setTranscribeError(e?.message || "Transcription failed");
+      }
+      return;
+    }
+    // Ignore clicks during stopping/transcribing
+  };
+
+  // AI refine
+  const runRefine = async () => {
+    const text = currentText.trim();
+    if (!text) return;
+
     try {
       setBusy(true);
-      const refined = await refineText(input, "professional");
+      setTranscribeError("");
+      if (originalBeforeRefine == null) setOriginalBeforeRefine(currentText);
+
+      // You can tweak language/style here or make them user-selectable later
+      const refined = await refineText({
+        text,
+        language: "English",
+        style: "concise, professional",
+      });
+
       setRefinedDraft(refined);
     } catch (e) {
-      console.error(e);
-      alert(e?.message || "Refine failed");
+      alert(e.message || "Refine failed");
     } finally {
       setBusy(false);
     }
   };
 
-  const acceptRefined = () => {
-    if (refinedDraft != null) {
-      setInput(refinedDraft);
-      setRefinedDraft(null);
-    }
-  };
-
-  const revertOriginal = () => {
+  const revertRefine = () => {
+    if (refinedDraft == null) return;
     setRefinedDraft(null);
+    if (originalBeforeRefine != null) setInput(originalBeforeRefine);
+    setOriginalBeforeRefine(null);
   };
 
   return (
@@ -93,22 +221,22 @@ export default function BottomBar({
           "relative w-full rounded-2xl",
           "bg-gray-100 dark:bg-[#2a2a2a]",
           "border border-gray-300 dark:border-gray-700",
-          "px-3 pt-3 pb-10", // bottom padding makes room for the action row
+          "px-3 pt-3 pb-12",
         ].join(" ")}
       >
         <textarea
           className="w-full resize-none bg-transparent outline-none text-sm text-black dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-          placeholder="Type, dictate, or refine with AI…"
+          placeholder={
+            voicePhase === "transcribing"
+              ? "Transcribing…"
+              : "Type, dictate, or refine with AI…"
+          }
           rows={5}
-          disabled={isDisabled}
-          value={refinedDraft != null ? refinedDraft : input}
+          disabled={disabled}
+          value={currentText}
           onChange={(e) => {
-            if (refinedDraft != null) {
-              // if user types after refine, treat it as edited refined text
-              setRefinedDraft(e.target.value);
-            } else {
-              setInput(e.target.value);
-            }
+            if (refinedDraft != null) setRefinedDraft(e.target.value);
+            else setInput(e.target.value);
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
@@ -118,20 +246,22 @@ export default function BottomBar({
           }}
         />
 
-        {/* Action row inside the textbox (bottom-right) */}
-        <div className="absolute right-2 bottom-2 flex items-center gap-2">
-          {/* Refine with AI */}
-          <button
-            type="button"
-            onClick={doRefine}
-            disabled={!hasText || isDisabled}
-            title="Refine with AI"
-            className="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#1b1b1b] text-gray-800 dark:text-gray-200 disabled:opacity-60"
-          >
-            Refine
-          </button>
+        {/* Status row above buttons */}
+        <div className="absolute left-3 bottom-2 flex items-center gap-3">
+          {voicePhase === "transcribing" && (
+            <span className="text-xs px-2 py-1 rounded bg-yellow-100 text-yellow-900 dark:bg-yellow-900/40 dark:text-yellow-200 border border-yellow-300 dark:border-yellow-700">
+              Transcribing…
+            </span>
+          )}
+          {!!transcribeError && (
+            <span className="text-xs px-2 py-1 rounded bg-red-100 text-red-900 dark:bg-red-900/40 dark:text-red-200 border border-red-300 dark:border-red-700">
+              {transcribeError}
+            </span>
+          )}
+        </div>
 
-          {/* File add */}
+        {/* Controls */}
+        <div className="absolute right-2 bottom-2 flex items-center gap-2">
           <input
             type="file"
             multiple
@@ -150,7 +280,6 @@ export default function BottomBar({
             <FaPlus />
           </button>
 
-          {/* Camera capture (photos only) */}
           <input
             type="file"
             accept="image/*"
@@ -169,12 +298,35 @@ export default function BottomBar({
             <FaCamera />
           </button>
 
-          {/* Voice */}
           <div className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200">
-            <VoiceButton editor={editor} disabled={isDisabled} />
+            <VoiceButton
+              phase={voicePhase}
+              disabled={isDisabled}
+              onClick={onVoiceClick}
+            />
           </div>
 
-          {/* Send arrow (gray up arrow in white circle) */}
+          <button
+            type="button"
+            onClick={runRefine}
+            disabled={!hasText || isDisabled}
+            title="Refine with AI"
+            className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
+          >
+            <FaStar />
+          </button>
+
+          {refinedDraft != null && (
+            <button
+              type="button"
+              onClick={revertRefine}
+              title="Revert"
+              className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200"
+            >
+              <FaUndo />
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleSend}
@@ -186,24 +338,6 @@ export default function BottomBar({
           </button>
         </div>
       </div>
-
-      {/* Refine decision bar (only appears when a refined draft exists and differs) */}
-      {refinedDraft != null && refinedDraft !== input && (
-        <div className="mt-2 flex items-center justify-end gap-2">
-          <button
-            className="px-3 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#1b1b1b]"
-            onClick={revertOriginal}
-          >
-            Revert
-          </button>
-          <button
-            className="px-3 py-1.5 rounded bg-blue-600 text-white"
-            onClick={acceptRefined}
-          >
-            Use refined
-          </button>
-        </div>
-      )}
     </div>
   );
 }
