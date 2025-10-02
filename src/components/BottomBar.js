@@ -101,10 +101,13 @@ export default function BottomBar({
   async function getExifGeoAndTime(file) {
     try {
       const gps = await exifr.gps(file).catch(() => null);
-      const tags = await exifr.parse(file, ["DateTimeOriginal"]).catch(() => null);
+      const tags = await exifr
+        .parse(file, ["DateTimeOriginal"])
+        .catch(() => null);
       const lat = gps?.latitude ?? null;
       const lon = gps?.longitude ?? null;
-      const exifDate = tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
+      const exifDate =
+        tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
       return { lat, lon, exifDate, altitude: gps?.altitude ?? null };
     } catch {
       return { lat: null, lon: null, exifDate: null, altitude: null };
@@ -131,10 +134,15 @@ export default function BottomBar({
   function getBrowserGeo(timeoutMs = 8000) {
     return new Promise((resolve) => {
       if (!navigator?.geolocation?.getCurrentPosition) return resolve(null);
-      const opts = { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 };
+      const opts = {
+        enableHighAccuracy: true,
+        timeout: timeoutMs,
+        maximumAge: 0,
+      };
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const { latitude, longitude, accuracy, altitude, speed } = pos.coords || {};
+          const { latitude, longitude, accuracy, altitude, speed } =
+            pos.coords || {};
           if (typeof latitude === "number" && typeof longitude === "number") {
             resolve({
               lat: latitude,
@@ -161,7 +169,8 @@ export default function BottomBar({
       const data = await res.json();
       const a = data?.address || {};
 
-      const line1 = [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
+      const line1 =
+        [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
       const line2 = a.suburb || a.neighbourhood || a.locality || null;
       const line3 = a.city || a.town || a.village || a.county || null;
       const line4 = a.state || a.region || a.province || null;
@@ -213,26 +222,48 @@ export default function BottomBar({
     const networkStr = formatLocalWithTz(networkDt);
     const localStr = formatLocalWithTz(localDt);
 
+    // Reverse geocode
     let addrLines = null;
     if (lat != null && lon != null) addrLines = await reverseGeocode(lat, lon);
 
-    const altStr = typeof alt === "number" ? `${alt.toFixed(1)}m` : "0.0m";
-    const spdStr =
+    // If altitude missing, try Google Elevation API via server (terrain height)
+    if ((alt == null || isNaN(alt)) && lat != null && lon != null) {
+      try {
+        const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(
+          /\/$/,
+          ""
+        );
+        const resp = await fetch(
+          `${API_BASE}/api/map/elevation?lat=${lat}&lon=${lon}`
+        );
+        if (resp.ok) {
+          const { elevation_m } = await resp.json();
+          if (Number.isFinite(elevation_m)) alt = elevation_m;
+        }
+      } catch {
+        // ignore, keep alt as-is
+      }
+    }
+
+    // Coordinates (labelled) after address lines
+    const coordStr =
+      lat != null && lon != null
+        ? `${lat.toFixed(6)}, ${lon.toFixed(6)}`
+        : null;
+
+    // Format displays now that altitude may be filled
+    const altDisplay =
+      typeof alt === "number" && isFinite(alt) ? `${alt.toFixed(1)}m` : "n/a";
+    const spdDisplay =
       typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
 
-    const lines = [
-      `network: ${networkStr}`,
-      `Local: ${localStr}`,
-      ...(addrLines && addrLines.length ? addrLines : []),
-      `Altitude: ${altStr}`,
-      `speed: ${spdStr}`,
-      `index number ${indexNo}`,
-    ];
-
-    // If no address, insert lat/lon as a fallback after the two time lines
-    if ((!addrLines || addrLines.length === 0) && lat != null && lon != null) {
-      lines.splice(2, 0, `${lat.toFixed(6)}, ${lon.toFixed(6)}`);
-    }
+    // Build lines: coords AFTER address, BEFORE altitude
+    const lines = [`network: ${networkStr}`, `Local: ${localStr}`];
+    if (addrLines && addrLines.length) lines.push(...addrLines);
+    if (coordStr) lines.push(`Coordinates: ${coordStr}`);
+    lines.push(`Altitude: ${altDisplay}`);
+    lines.push(`speed: ${spdDisplay}`);
+    lines.push(`index number ${indexNo}`);
 
     // Prepare canvas
     const maxW = img.width;
@@ -241,13 +272,15 @@ export default function BottomBar({
     canvas.width = maxW;
     canvas.height = maxH;
     const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
 
     // Draw base image
     ctx.drawImage(img, 0, 0, maxW, maxH);
 
-    // Left info panel (BOTTOM-LEFT)
-    const padX = 10, padY = 10;
-    const boxW = Math.round(Math.min(0.6 * maxW, 520));
+    // Left panel styles (bottom-left)
+    const padX = 10,
+      padY = 10;
+    const boxW = Math.round(Math.min(0.35 * maxW, 450)); // narrower box
     const fontSize = Math.max(12, Math.round(maxW * 0.012));
     ctx.font = `${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
     ctx.textBaseline = "top";
@@ -261,9 +294,8 @@ export default function BottomBar({
     const textH = wrapped.length * lineHeight;
     const boxH = textH + padY * 2;
 
-    // Bottom-left placement
     const boxX = 10;
-    const boxY = Math.max(10, maxH - boxH - 10);
+    const boxY = Math.max(10, maxH - boxH - 10); // bottom-left
     ctx.save();
     roundRectPath(ctx, boxX, boxY, boxW, boxH, 8);
     ctx.fillStyle = "rgba(0,0,0,0.55)";
@@ -277,14 +309,19 @@ export default function BottomBar({
       ty += lineHeight;
     }
 
-    // Map (BOTTOM-RIGHT) via server proxy /api/map/static
+    // Bottom-right: larger Google Static Map via server proxy
     if (lat != null && lon != null) {
       try {
         const marker = `color:red%7C${lat},${lon}`;
-        const url = `/api/map/static?center=${lat},${lon}&zoom=16&size=220x220&maptype=roadmap&markers=${marker}`;
+        const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(
+          /\/$/,
+          ""
+        );
+        const url = `${API_BASE}/api/map/static?center=${lat},${lon}&zoom=10&size=220x220&maptype=roadmap&markers=${marker}`;
         const resp = await fetch(url);
         if (resp.ok) {
           const blob = await resp.blob();
+
           let bitmap = null;
           if ("createImageBitmap" in window) {
             bitmap = await createImageBitmap(blob);
@@ -292,19 +329,25 @@ export default function BottomBar({
             const mapURL = URL.createObjectURL(blob);
             const mapImg = await loadImageFromBlobURL(mapURL);
             URL.revokeObjectURL(mapURL);
-            bitmap = mapImg;
+            bitmap = mapImg; // HTMLImageElement fallback
           }
-          const mapSize = Math.round(Math.min(maxW, maxH) * 0.14);
-          const mapW = mapSize, mapH = mapSize;
-          const mx = Math.max(10, maxW - mapW - 10);
-          const my = Math.max(10, maxH - mapH - 10); // bottom-right Y
 
+          // Make it ~2–3× bigger (from ~14% to ~30% of the shorter side)
+          const MAP_REL = 0.15;
+          const mapSize = Math.round(Math.min(maxW, maxH) * MAP_REL);
+          const mapW = mapSize,
+            mapH = mapSize;
+          const mx = maxW - mapW - 10;
+          const my = Math.max(10, maxH - mapH - 10); // bottom-right
+
+          // Backplate
           ctx.save();
-          roundRectPath(ctx, mx - 4, my - 4, mapW + 8, mapH + 8, 8);
+          roundRectPath(ctx, mx - 6, my - 6, mapW + 12, mapH + 12, 10);
           ctx.fillStyle = "rgba(0,0,0,0.25)";
           ctx.fill();
           ctx.restore();
 
+          // Draw the map
           if (bitmap instanceof ImageBitmap) {
             ctx.drawImage(bitmap, mx, my, mapW, mapH);
             bitmap.close?.();
@@ -313,7 +356,7 @@ export default function BottomBar({
           }
         }
       } catch {
-        // ignore map failures; keep photo usable
+        // Ignore map failures to keep photo usable
       }
     }
 
