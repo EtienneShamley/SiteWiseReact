@@ -317,7 +317,7 @@ export default function BottomBar({
           /\/$/,
           ""
         );
-        const url = `${API_BASE}/api/map/static?center=${lat},${lon}&zoom=10&size=220x220&maptype=roadmap&markers=${marker}`;
+        const url = `${API_BASE}/api/map/static?center=${lat},${lon}&zoom=12&size=220x220&maptype=roadmap&markers=${marker}`;
         const resp = await fetch(url);
         if (resp.ok) {
           const blob = await resp.blob();
