@@ -6,7 +6,45 @@ import { useRefine } from "../hooks/useRefine";
 import { useTranscription } from "../hooks/useTranscription";
 import exifr from "exifr";
 
-const GOOGLE_STATIC_KEY = process.env.REACT_APP_GOOGLE_MAPS_KEY || "";
+// ---------- canvas helpers for stamped image ----------
+function roundRectPath(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+function wrapTextLines(ctx, text, maxWidth) {
+  const words = text.split(/\s+/);
+  const lines = [];
+  let line = "";
+  for (const w of words) {
+    const test = line ? line + " " + w : w;
+    if (ctx.measureText(test).width <= maxWidth) {
+      line = test;
+    } else {
+      if (line) lines.push(line);
+      line = w;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function loadImageFromBlobURL(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(e);
+    img.src = url;
+  });
+}
+// ------------------------------------------------------
 
 export default function BottomBar({
   editor,
@@ -63,13 +101,10 @@ export default function BottomBar({
   async function getExifGeoAndTime(file) {
     try {
       const gps = await exifr.gps(file).catch(() => null);
-      const tags = await exifr
-        .parse(file, ["DateTimeOriginal"])
-        .catch(() => null);
+      const tags = await exifr.parse(file, ["DateTimeOriginal"]).catch(() => null);
       const lat = gps?.latitude ?? null;
       const lon = gps?.longitude ?? null;
-      const exifDate =
-        tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
+      const exifDate = tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
       return { lat, lon, exifDate, altitude: gps?.altitude ?? null };
     } catch {
       return { lat: null, lon: null, exifDate: null, altitude: null };
@@ -96,22 +131,17 @@ export default function BottomBar({
   function getBrowserGeo(timeoutMs = 8000) {
     return new Promise((resolve) => {
       if (!navigator?.geolocation?.getCurrentPosition) return resolve(null);
-      const opts = {
-        enableHighAccuracy: true,
-        timeout: timeoutMs,
-        maximumAge: 0,
-      };
+      const opts = { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 };
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const { latitude, longitude, accuracy, altitude, speed } =
-            pos.coords || {};
+          const { latitude, longitude, accuracy, altitude, speed } = pos.coords || {};
           if (typeof latitude === "number" && typeof longitude === "number") {
             resolve({
               lat: latitude,
               lon: longitude,
               acc: accuracy ?? null,
-              alt: typeof altitude === "number" ? altitude : null, // meters
-              spd: typeof speed === "number" ? speed : null, // m/s
+              alt: typeof altitude === "number" ? altitude : null,
+              spd: typeof speed === "number" ? speed : null,
             });
           } else {
             resolve(null);
@@ -131,11 +161,8 @@ export default function BottomBar({
       const data = await res.json();
       const a = data?.address || {};
 
-      // Build a friendly multi-line address
-      const line1 =
-        [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
+      const line1 = [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
       const line2 = a.suburb || a.neighbourhood || a.locality || null;
-      // Prefer city/town/village over county
       const line3 = a.city || a.town || a.village || a.county || null;
       const line4 = a.state || a.region || a.province || null;
 
@@ -145,31 +172,29 @@ export default function BottomBar({
     }
   }
 
-  function staticMapURL(lat, lon) {
-    if (!lat || !lon) return "";
-    if (GOOGLE_STATIC_KEY) {
-      const size = "220x220";
-      const zoom = 16;
-      const marker = `color:red%7C${lat},${lon}`;
-      return `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lon}&zoom=${zoom}&size=${size}&maptype=roadmap&markers=${marker}&key=${GOOGLE_STATIC_KEY}`;
+  // Build a stamped image blob using canvas (stamp baked into pixels)
+  async function buildStampedImageBLOB(file) {
+    // Load original into an <img>
+    const originalURL = URL.createObjectURL(file);
+    let img;
+    try {
+      img = await loadImageFromBlobURL(originalURL);
+    } finally {
+      URL.revokeObjectURL(originalURL);
     }
-    // No key: return empty. UI will show a fallback link instead.
-    return "";
-  }
 
-  async function buildStampedImageHTML(file, objectUrl) {
+    // Gather EXIF + browser geo
     const {
       lat: exifLat,
       lon: exifLon,
       exifDate,
       altitude: exifAlt,
     } = await getExifGeoAndTime(file);
-
-    let lat = exifLat;
-    let lon = exifLon;
-    let acc = null;
-    let alt = exifAlt; // m
-    let spdMs = null; // m/s
+    let lat = exifLat,
+      lon = exifLon,
+      acc = null,
+      alt = exifAlt,
+      spdMs = null;
 
     if (lat == null || lon == null || alt == null) {
       const browserGeo = await getBrowserGeo(8000);
@@ -183,105 +208,120 @@ export default function BottomBar({
     }
 
     const indexNo = nextStampIndex();
-
-    // Times: EXIF date as “network”-like; device now as local
     const networkDt = exifDate || new Date();
     const localDt = new Date();
-
     const networkStr = formatLocalWithTz(networkDt);
     const localStr = formatLocalWithTz(localDt);
 
-    // Address (best-effort)
     let addrLines = null;
-    if (lat != null && lon != null) {
-      addrLines = await reverseGeocode(lat, lon);
-    }
-
-    // If no address, we’ll fall back to showing coordinates
-    const coordStr =
-      lat != null && lon != null
-        ? `${lat.toFixed(6)}, ${lon.toFixed(6)}`
-        : null;
+    if (lat != null && lon != null) addrLines = await reverseGeocode(lat, lon);
 
     const altStr = typeof alt === "number" ? `${alt.toFixed(1)}m` : "0.0m";
     const spdStr =
       typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
 
-    const lines = [`network: ${networkStr}`, `Local: ${localStr}`];
+    const lines = [
+      `network: ${networkStr}`,
+      `Local: ${localStr}`,
+      ...(addrLines && addrLines.length ? addrLines : []),
+      `Altitude: ${altStr}`,
+      `speed: ${spdStr}`,
+      `index number ${indexNo}`,
+    ];
 
-    // Prefer human-readable address; otherwise show coords
-    if (addrLines && addrLines.length) {
-      lines.push(...addrLines);
-    } else if (coordStr) {
-      lines.push(coordStr);
+    // If no address, insert lat/lon as a fallback after the two time lines
+    if ((!addrLines || addrLines.length === 0) && lat != null && lon != null) {
+      lines.splice(2, 0, `${lat.toFixed(6)}, ${lon.toFixed(6)}`);
     }
 
-    lines.push(`Altitude: ${altStr}`);
-    lines.push(`speed: ${spdStr}`);
-    lines.push(`index number ${indexNo}`);
+    // Prepare canvas
+    const maxW = img.width;
+    const maxH = img.height;
+    const canvas = document.createElement("canvas");
+    canvas.width = maxW;
+    canvas.height = maxH;
+    const ctx = canvas.getContext("2d");
 
-    // Right-corner map image or fallback link
-    const mapUrl = lat && lon ? staticMapURL(lat, lon) : "";
-    const mapsLink =
-      lat && lon ? `https://www.google.com/maps?q=${lat},${lon}` : "#";
+    // Draw base image
+    ctx.drawImage(img, 0, 0, maxW, maxH);
 
-    const leftBoxHTML = `
-      <div
-        class="absolute left-2 top-2"
-        style="
-          font-size:12px;
-          line-height:1.2;
-          background: rgba(0,0,0,0.55);
-          color: #fff;
-          padding: 6px 8px;
-          border-radius: 6px;
-          max-width: 60%;
-          white-space: pre-line;
-        "
-      >${lines.join("\n")}</div>
-    `;
+    // Left info panel (BOTTOM-LEFT)
+    const padX = 10, padY = 10;
+    const boxW = Math.round(Math.min(0.6 * maxW, 520));
+    const fontSize = Math.max(12, Math.round(maxW * 0.012));
+    ctx.font = `${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
+    ctx.textBaseline = "top";
 
-    const rightBoxHTML = mapUrl
-      ? `
-        <img
-          src="${mapUrl}"
-          alt="map"
-          class="absolute right-2 top-2"
-          style="
-            width: 110px;
-            height: 110px;
-            object-fit: cover;
-            border-radius: 8px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.25);
-            background: #eee;
-          "
-        />
-      `
-      : lat && lon
-      ? `
-          <a
-            href="${mapsLink}"
-            target="_blank" rel="noopener noreferrer"
-            class="absolute right-2 top-2"
-            style="
-              font-size:12px;
-              background:#fff;
-              color:#111;
-              padding:6px 8px;
-              border-radius:8px;
-              text-decoration:underline;
-            "
-          >Open in Google Maps</a>
-        `
-      : "";
+    const lineHeight = Math.round(fontSize * 1.25);
+    const wrapped = [];
+    for (const raw of lines) {
+      const parts = wrapTextLines(ctx, raw, boxW - padX * 2);
+      wrapped.push(...parts);
+    }
+    const textH = wrapped.length * lineHeight;
+    const boxH = textH + padY * 2;
 
-    return `
-      <figure class="relative inline-block my-2">
-        <img src="${objectUrl}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" />
-        ${leftBoxHTML}
-        ${rightBoxHTML}
-      </figure>
-    `;
+    // Bottom-left placement
+    const boxX = 10;
+    const boxY = Math.max(10, maxH - boxH - 10);
+    ctx.save();
+    roundRectPath(ctx, boxX, boxY, boxW, boxH, 8);
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = "#fff";
+    let ty = boxY + padY;
+    for (const l of wrapped) {
+      ctx.fillText(l, boxX + padX, ty);
+      ty += lineHeight;
+    }
+
+    // Map (BOTTOM-RIGHT) via server proxy /api/map/static
+    if (lat != null && lon != null) {
+      try {
+        const marker = `color:red%7C${lat},${lon}`;
+        const url = `/api/map/static?center=${lat},${lon}&zoom=16&size=220x220&maptype=roadmap&markers=${marker}`;
+        const resp = await fetch(url);
+        if (resp.ok) {
+          const blob = await resp.blob();
+          let bitmap = null;
+          if ("createImageBitmap" in window) {
+            bitmap = await createImageBitmap(blob);
+          } else {
+            const mapURL = URL.createObjectURL(blob);
+            const mapImg = await loadImageFromBlobURL(mapURL);
+            URL.revokeObjectURL(mapURL);
+            bitmap = mapImg;
+          }
+          const mapSize = Math.round(Math.min(maxW, maxH) * 0.14);
+          const mapW = mapSize, mapH = mapSize;
+          const mx = Math.max(10, maxW - mapW - 10);
+          const my = Math.max(10, maxH - mapH - 10); // bottom-right Y
+
+          ctx.save();
+          roundRectPath(ctx, mx - 4, my - 4, mapW + 8, mapH + 8, 8);
+          ctx.fillStyle = "rgba(0,0,0,0.25)";
+          ctx.fill();
+          ctx.restore();
+
+          if (bitmap instanceof ImageBitmap) {
+            ctx.drawImage(bitmap, mx, my, mapW, mapH);
+            bitmap.close?.();
+          } else {
+            ctx.drawImage(bitmap, mx, my, mapW, mapH);
+          }
+        }
+      } catch {
+        // ignore map failures; keep photo usable
+      }
+    }
+
+    // Export stamped image as PNG blob
+    const stampedBlob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/png", 0.92)
+    );
+    return stampedBlob;
   }
   // ----------------------------------------------------------
 
@@ -301,10 +341,15 @@ export default function BottomBar({
     const files = Array.from(e.target.files || []);
     for (const f of files) {
       if (f.type.startsWith("image/")) {
-        const url = URL.createObjectURL(f);
-        const stamped = await buildStampedImageHTML(f, url);
-        editor?.chain().focus().insertContent(stamped).run();
-        // do not revoke immediately; allow loading
+        const stampedBlob = await buildStampedImageBLOB(f);
+        const stampedURL = URL.createObjectURL(stampedBlob);
+        editor
+          ?.chain()
+          .focus()
+          .insertContent(
+            `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+          )
+          .run();
         continue;
       }
       if (f.type === "application/pdf") {
@@ -342,19 +387,21 @@ export default function BottomBar({
       e.target.value = "";
       return;
     }
-    const url = URL.createObjectURL(f);
-    const stamped = await buildStampedImageHTML(f, url);
-    editor?.chain().focus().insertContent(stamped).run();
+    const stampedBlob = await buildStampedImageBLOB(f);
+    const stampedURL = URL.createObjectURL(stampedBlob);
+    editor
+      ?.chain()
+      .focus()
+      .insertContent(
+        `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+      )
+      .run();
     e.target.value = "";
   };
 
   // ---------------- Recording owned by parent ----------------
   const pickMimeType = () => {
-    const candidates = [
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/mp4", // Safari sometimes uses this
-    ];
+    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
     for (const type of candidates) {
       if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type))
         return type;
@@ -415,7 +462,6 @@ export default function BottomBar({
         setTranscribeError("No audio captured");
         return;
       }
-      // Preview audio in editor
       const url = URL.createObjectURL(blob);
       editor
         .chain()
@@ -425,7 +471,6 @@ export default function BottomBar({
         )
         .run();
 
-      // Transcribe
       setTranscribeStatus("transcribing");
       try {
         const text = await transcribeBlob(blob);
