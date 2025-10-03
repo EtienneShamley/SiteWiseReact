@@ -1,49 +1,141 @@
-import React, { useRef, useState } from "react";
+import React, { useRef, useState, useMemo } from "react";
 import { useAppState } from "../context/AppStateContext";
-import { FaPlus, FaEllipsisV, FaPen, FaTrash, FaShare } from "react-icons/fa";
+import { FaEllipsisV, FaPen, FaTrash, FaShare } from "react-icons/fa";
 import ThreeDotMenu from "./ThreeDotMenu";
+import ShareDialog from "./ShareDialog";
 import { useTheme } from "../context/ThemeContext";
 
 export default function Sidebar() {
   const {
+    // root notes
     rootNotes,
-    createNoteUniversal,
+    createRootNote,
     renameRootNote,
     deleteRootNote,
     setCurrentNoteId,
+
+    // structure/state
     state,
     activeProjectId,
     activeFolderId,
     expandedProjectId,
     setActiveSelection,
     clearActiveSelection,
+
+    // projects
     createProject,
     renameProject,
     deleteProject,
-    createFolder,
+
+    // folders
+    createFolder, // project folder
     renameFolder,
     deleteFolder,
+
+    // root folders
+    createRootFolder,
+    renameRootFolder,
+    deleteRootFolder,
   } = useAppState();
 
   const { theme } = useTheme();
+
   const [hidden, setHidden] = useState(false);
   const projRefs = useRef({});
   const folderRefs = useRef({});
+  const rootFolderRefs = useRef({});
   const rootNoteRefs = useRef({});
   const [menu, setMenu] = useState({ type: null, id: null });
 
-  function openMenu(type, id) {
-    setMenu({ type, id });
-  }
-  function closeMenu() {
-    setMenu({ type: null, id: null });
-  }
+  const openMenu = (type, id) => setMenu({ type, id });
+  const closeMenu = () => setMenu({ type: null, id: null });
 
   const dotBase = "ml-2 p-1 rounded transition";
   const dotColor =
     theme === "dark"
       ? "text-white hover:bg-[#353535] active:bg-[#232323]"
       : "text-black hover:bg-gray-200 active:bg-gray-300";
+
+  // ---------- Share / Export helpers ----------
+  const STORAGE_KEY = "sitewise-notes";
+
+  const noteTitleMap = useMemo(() => {
+    const map = {};
+    // root notes
+    rootNotes.forEach(n => { map[n.id] = n.title; });
+    // root folder notes
+    (state.rootFolders || []).forEach(f => {
+      (state.rootFolderNotesMap?.[f.id] || []).forEach(n => { map[n.id] = n.title; });
+    });
+    // project folder notes
+    (state.projectData || []).forEach(p => {
+      (state.folderMap[p.id] || []).forEach(f => {
+        (f.notes || []).forEach(n => { map[n.id] = n.title; });
+      });
+    });
+    return map;
+  }, [rootNotes, state]);
+
+  const getNoteContent = async (noteId) => {
+    let html = "<p></p>";
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (parsed && typeof parsed === "object" && parsed[noteId]) {
+        html = parsed[noteId];
+      }
+    } catch {}
+    const title = noteTitleMap[noteId] || "Untitled";
+    return { title, html };
+  };
+
+  const buildItemsForRootNote = (note) => ([
+    { id: note.id, type: "note", title: note.title }
+  ]);
+
+  const buildItemsForRootFolder = (folder) => ([
+    {
+      id: folder.id,
+      type: "folder",
+      title: folder.name,
+      children: (state.rootFolderNotesMap?.[folder.id] || []).map(n => ({
+        id: n.id, type: "note", title: n.title
+      })),
+    }
+  ]);
+
+  const buildItemsForProject = (proj) => {
+    const folders = state.folderMap[proj.id] || [];
+    return [
+      {
+        id: proj.id,
+        type: "project",
+        title: proj.name,
+        children: folders.map(f => ({
+          id: f.id,
+          type: "folder",
+          title: f.name,
+          children: (f.notes || []).map(n => ({
+            id: n.id, type: "note", title: n.title
+          })),
+        })),
+      },
+    ];
+  };
+
+  const buildItemsForProjectFolder = (pid, folder) => ([
+    {
+      id: folder.id,
+      type: "folder",
+      title: folder.name,
+      children: (folder.notes || []).map(n => ({
+        id: n.id, type: "note", title: n.title
+      })),
+    }
+  ]);
+
+  const [shareCfg, setShareCfg] = useState(null);
+  // ---------- end share helpers ----------
 
   if (hidden) {
     return (
@@ -57,47 +149,214 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="w-64 bg-white dark:bg-[#111] text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-700 flex flex-col space-y-2" id="leftPane">
-      <div className="flex items-center justify-between mb-2">
-        <h2 className="text-lg font-semibold">Projects</h2>
-        <button
-          className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-2 py-1 rounded text-black dark:text-white text-xs"
-          onClick={() => setHidden(true)}
-        >
-          Hide
-        </button>
-      </div>
-      <button
-        className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
-        onClick={createProject}
+    <>
+      <aside
+        className="w-64 bg-white dark:bg-[#111] text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-700 flex flex-col space-y-2"
+        id="leftPane"
       >
-        + New Project
-      </button>
-      <button
-        className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
-        onClick={() => {
-          if (activeProjectId && !activeFolderId) {
-            createFolder(activeProjectId);
-          } else {
-            alert("Highlight a project to add a folder.");
-          }
-        }}
-      >
-        + New Folder
-      </button>
-      <button
-        className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
-        onClick={() => createNoteUniversal(activeProjectId, activeFolderId)}
-      >
-        + New Note
-      </button>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-lg font-semibold">Projects</h2>
+          <button
+            className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-2 py-1 rounded text-black dark:text-white text-xs"
+            onClick={() => setHidden(true)}
+          >
+            Hide
+          </button>
+        </div>
 
-      {/* Root Notes */}
-      <ul className="space-y-1 text-sm mt-2">
-        {rootNotes.map(note => (
+        {/* Create Project */}
+        <button
+          className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
+          onClick={createProject}
+        >
+          + New Project
+        </button>
+
+        {/* One button: project folder if a project is active; else ROOT folder */}
+        <button
+          className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
+          onClick={() => {
+            if (activeProjectId && !activeFolderId) {
+              // folder INSIDE highlighted project
+              createFolder(activeProjectId);
+            } else {
+              // ROOT-LEVEL folder: create & select (no note prompt)
+              const fid = createRootFolder();
+              if (fid) {
+                setActiveSelection(null, fid); // highlight root folder
+                setCurrentNoteId(null);        // no note yet
+              }
+            }
+          }}
+        >
+          + New Folder
+        </button>
+
+        {/* Always creates a root note */}
+        <button
+          className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
+          onClick={() => {
+            createRootNote(); // selects it; no middle pane
+          }}
+        >
+          + New Note
+        </button>
+
+        {/* Root Notes (lighter, full-row highlight) */}
+        <RootNotesList
+          rootNotes={rootNotes}
+          setCurrentNoteId={setCurrentNoteId}
+          clearActiveSelection={clearActiveSelection}
+          dotBase={dotBase}
+          dotColor={dotColor}
+          openMenu={openMenu}
+          closeMenu={closeMenu}
+          rootNoteRefs={rootNoteRefs}
+          menu={menu}
+          renameRootNote={renameRootNote}
+          deleteRootNote={deleteRootNote}
+          setShareCfg={setShareCfg}
+          state={state}
+          getNoteContent={getNoteContent}
+          theme={theme}
+        />
+
+        {/* Root Folders (lighter, full-row highlight) */}
+        <ul className="space-y-1 text-sm mt-3">
+          {(state.rootFolders || []).map((folder) => {
+            const isRootFolderActive = !activeProjectId && activeFolderId === folder.id;
+            return (
+              <li
+                key={folder.id}
+                className={`p-2 rounded flex justify-between items-center border transition-colors
+                  ${isRootFolderActive
+                    ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
+                    : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+                  }`}
+              >
+                <span
+                  className="flex-1 cursor-pointer font-semibold"
+                  onClick={() => setActiveSelection(null, folder.id)}
+                >
+                  {folder.name}
+                </span>
+                <button
+                  ref={(el) => (rootFolderRefs.current[folder.id] = el)}
+                  className={`${dotBase} ${dotColor}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openMenu("root-folder", folder.id);
+                  }}
+                >
+                  <FaEllipsisV />
+                </button>
+
+                {menu.type === "root-folder" && menu.id === folder.id && (
+                  <ThreeDotMenu
+                    anchorRef={rootFolderRefs.current[folder.id]}
+                    onClose={closeMenu}
+                    options={[
+                      {
+                        icon: <FaPen className="mr-2" />,
+                        label: "Rename",
+                        onClick: () => { renameRootFolder(folder.id); closeMenu(); },
+                      },
+                      {
+                        icon: <FaShare className="mr-2" />,
+                        label: "Share / Export…",
+                        onClick: () => {
+                          setShareCfg({
+                            scopeTitle: `Export: ${folder.name}`,
+                            items: buildItemsForRootFolder(folder),
+                            defaultSelection: [],
+                          });
+                          closeMenu();
+                        },
+                      },
+                      {
+                        icon: <FaTrash className="mr-2" />,
+                        label: "Delete",
+                        onClick: () => { deleteRootFolder(folder.id); closeMenu(); },
+                        danger: true,
+                      },
+                    ]}
+                    theme={theme}
+                  />
+                )}
+              </li>
+            );
+          })}
+        </ul>
+
+        {/* Projects + subfolders (lighter, full-row highlight for both) */}
+        <ProjectTree
+          state={state}
+          activeProjectId={activeProjectId}
+          activeFolderId={activeFolderId}
+          expandedProjectId={expandedProjectId}
+          setActiveSelection={setActiveSelection}
+          clearActiveSelection={clearActiveSelection}
+          projRefs={projRefs}
+          folderRefs={folderRefs}
+          menu={menu}
+          openMenu={openMenu}
+          closeMenu={closeMenu}
+          dotBase={dotBase}
+          dotColor={dotColor}
+          renameProject={renameProject}
+          deleteProject={deleteProject}
+          renameFolder={renameFolder}
+          deleteFolder={deleteFolder}
+          setShareCfg={setShareCfg}
+          buildItemsForProject={buildItemsForProject}
+          buildItemsForProjectFolder={buildItemsForProjectFolder}
+          theme={theme}
+        />
+      </aside>
+
+      {shareCfg && (
+        <ShareDialog
+          scopeTitle={shareCfg.scopeTitle}
+          items={shareCfg.items}
+          defaultSelection={shareCfg.defaultSelection}
+          getNoteContent={getNoteContent}
+          onClose={() => setShareCfg(null)}
+          theme={theme} // stays in sync with ThemeContext
+        />
+      )}
+    </>
+  );
+}
+
+/* ------- Root notes ------- */
+function RootNotesList({
+  rootNotes,
+  setCurrentNoteId,
+  clearActiveSelection,
+  dotBase,
+  dotColor,
+  openMenu,
+  closeMenu,
+  rootNoteRefs,
+  menu,
+  renameRootNote,
+  deleteRootNote,
+  setShareCfg,
+  theme,
+}) {
+  const { currentNoteId } = useAppState(); // selection
+  return (
+    <ul className="space-y-1 text-sm mt-2">
+      {rootNotes.map((note) => {
+        const isActive = currentNoteId === note.id;
+        return (
           <li
             key={note.id}
-            className="bg-gray-100 dark:bg-[#252525] text-black dark:text-white p-2 rounded flex justify-between items-center hover:bg-gray-200 dark:hover:bg-gray-700"
+            className={`p-2 rounded flex justify-between items-center border transition-colors
+              ${isActive
+                ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
+                : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+              }`}
             onClick={() => {
               setCurrentNoteId(note.id);
               clearActiveSelection();
@@ -105,16 +364,16 @@ export default function Sidebar() {
           >
             <span className="flex-1 cursor-pointer">{note.title}</span>
             <button
-              ref={el => (rootNoteRefs.current[note.id] = el)}
+              ref={(el) => (rootNoteRefs.current[note.id] = el)}
               className={`${dotBase} ${dotColor}`}
-              onClick={e => {
+              onClick={(e) => {
                 e.stopPropagation();
-                openMenu("root", note.id);
+                openMenu("root-note", note.id);
               }}
             >
               <FaEllipsisV />
             </button>
-            {menu.type === "root" && menu.id === note.id && (
+            {menu.type === "root-note" && menu.id === note.id && (
               <ThreeDotMenu
                 anchorRef={rootNoteRefs.current[note.id]}
                 onClose={closeMenu}
@@ -125,17 +384,15 @@ export default function Sidebar() {
                     onClick: () => { renameRootNote(note.id); closeMenu(); },
                   },
                   {
-                    type: "share",
-                    label: "Share / Export…",
                     icon: <FaShare className="mr-2" />,
-                    share: {
-                      scopeTitle: `Export: ${note.title}`,
-                      items: [{ id: note.id, type: "note", title: note.title }],
-                      defaultSelection: [note.id],
-                      getNoteContent: async (id) => ({
-                        title: note.title,
-                        html: note.html || "<p></p>",
-                      }),
+                    label: "Share / Export…",
+                    onClick: () => {
+                      setShareCfg({
+                        scopeTitle: `Export: ${note.title}`,
+                        items: [{ id: note.id, type: "note", title: note.title }],
+                        defaultSelection: [note.id],
+                      });
+                      closeMenu();
                     },
                   },
                   {
@@ -149,163 +406,189 @@ export default function Sidebar() {
               />
             )}
           </li>
-        ))}
-      </ul>
+        );
+      })}
+    </ul>
+  );
+}
 
-      {/* Projects and Folders */}
-      <ul className="space-y-1 text-sm mt-4">
-        {state.projectData.map((proj) => {
-          const pid = proj.id;
-          const isProjectActive = activeProjectId === pid && !activeFolderId;
-          const isExpanded = expandedProjectId === pid;
+/* ------- Project tree (projects + folders) ------- */
+function ProjectTree({
+  state,
+  activeProjectId,
+  activeFolderId,
+  expandedProjectId,
+  setActiveSelection,
+  clearActiveSelection,
+  projRefs,
+  folderRefs,
+  menu,
+  openMenu,
+  closeMenu,
+  dotBase,
+  dotColor,
+  renameProject,
+  deleteProject,
+  renameFolder,
+  deleteFolder,
+  setShareCfg,
+  buildItemsForProject,
+  buildItemsForProjectFolder,
+  theme,
+}) {
+  return (
+    <ul className="space-y-1 text-sm mt-4">
+      {state.projectData.map((proj) => {
+        const pid = proj.id;
+        const isProjectActive = activeProjectId === pid && !activeFolderId;
+        const isExpanded = expandedProjectId === pid;
 
-          return (
-            <li key={pid} className="bg-gray-100 dark:bg-[#252525] text-black dark:text-white p-2 rounded mb-1">
-              <div
-                className={`flex justify-between items-center rounded ${
-                  isProjectActive ? "bg-gray-300 dark:bg-gray-400 text-black font-semibold" : ""
-                }`}
+        return (
+          <li
+            key={pid}
+            className={`p-2 rounded border transition-colors
+              ${isProjectActive
+                ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
+                : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+              }`}
+          >
+            <div className="flex justify-between items-center rounded">
+              <span
+                className="cursor-pointer font-semibold flex items-center w-full"
+                onClick={() => {
+                  if (activeProjectId === pid && !activeFolderId) {
+                    clearActiveSelection();
+                  } else {
+                    setActiveSelection(pid, null);
+                  }
+                }}
+                style={{ userSelect: "none" }}
               >
-                <span
-                  className="cursor-pointer font-semibold flex items-center"
-                  onClick={e => {
-                    if (activeProjectId === pid && !activeFolderId) {
-                      clearActiveSelection();
-                    } else {
-                      setActiveSelection(pid, null);
-                    }
-                  }}
-                  style={{ userSelect: "none" }}
-                >
-                  <i className={`fas fa-chevron-${isExpanded ? "down" : "right"} mr-2 text-xs`} />
-                  {proj.name}
-                </span>
-                <button
-                  ref={el => (projRefs.current[pid] = el)}
-                  className={`${dotBase} ${dotColor}`}
-                  onClick={e => {
-                    e.stopPropagation();
-                    openMenu("project", pid);
-                  }}
-                >
-                  <FaEllipsisV />
-                </button>
-                {menu.type === "project" && menu.id === pid && (
-                  <ThreeDotMenu
-                    anchorRef={projRefs.current[pid]}
-                    onClose={closeMenu}
-                    options={[
-                      {
-                        icon: <FaPen className="mr-2" />,
-                        label: "Rename",
-                        onClick: () => { renameProject(pid); closeMenu(); },
-                      },
-                      {
-                        type: "share",
-                        label: "Share / Export…",
-                        icon: <FaShare className="mr-2" />,
-                        share: {
+                <i className={`fas fa-chevron-${isExpanded ? "down" : "right"} mr-2 text-xs`} />
+                {proj.name}
+              </span>
+              <button
+                ref={(el) => (projRefs.current[pid] = el)}
+                className={`${dotBase} ${dotColor}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openMenu("project", pid);
+                }}
+              >
+                <FaEllipsisV />
+              </button>
+              {menu.type === "project" && menu.id === pid && (
+                <ThreeDotMenu
+                  anchorRef={projRefs.current[pid]}
+                  onClose={closeMenu}
+                  options={[
+                    {
+                      icon: <FaPen className="mr-2" />,
+                      label: "Rename",
+                      onClick: () => { renameProject(pid); closeMenu(); },
+                    },
+                    {
+                      icon: <FaShare className="mr-2" />,
+                      label: "Share / Export…",
+                      onClick: () => {
+                        setShareCfg({
                           scopeTitle: `Export: ${proj.name}`,
-                          items: [
-                            { id: proj.id, type: "project", title: proj.name },
-                          ],
+                          items: buildItemsForProject(proj),
                           defaultSelection: [],
-                          getNoteContent: async (id) => {
-                            // TODO: build HTML for all notes in this project
-                            return { title: proj.name, html: "<p>Project export not yet wired</p>" };
-                          },
-                        },
+                        });
+                        closeMenu();
                       },
-                      {
-                        icon: <FaTrash className="mr-2" />,
-                        label: "Delete",
-                        onClick: () => { deleteProject(pid); closeMenu(); },
-                        danger: true,
-                      },
-                    ]}
-                    theme={theme}
-                  />
-                )}
-              </div>
-              {isExpanded && (
-                <ul className="folder-dropdown ml-4 mt-2 space-y-1">
-                  {(state.folderMap[pid] || []).map((folder) => {
-                    const isFolderActive = activeFolderId === folder.id && activeProjectId === pid;
-                    return (
-                      <li key={folder.id} className="bg-gray-50 dark:bg-[#222] p-2 rounded">
-                        <div
-                          className={`flex justify-between items-center rounded ${
-                            isFolderActive ? "bg-gray-200 dark:bg-gray-600 font-semibold" : ""
-                          }`}
-                        >
-                          <span
-                            className="cursor-pointer font-semibold"
-                            onClick={e => {
-                              if (activeFolderId === folder.id && activeProjectId === pid) {
-                                clearActiveSelection();
-                              } else {
-                                setActiveSelection(pid, folder.id);
-                              }
-                            }}
-                          >
-                            {folder.name}
-                          </span>
-                          <button
-                            ref={el => (folderRefs.current[folder.id] = el)}
-                            className={`${dotBase} ${dotColor}`}
-                            onClick={e => {
-                              e.stopPropagation();
-                              openMenu("folder", folder.id);
-                            }}
-                          >
-                            <FaEllipsisV />
-                          </button>
-                          {menu.type === "folder" && menu.id === folder.id && (
-                            <ThreeDotMenu
-                              anchorRef={folderRefs.current[folder.id]}
-                              onClose={closeMenu}
-                              options={[
-                                {
-                                  icon: <FaPen className="mr-2" />,
-                                  label: "Rename",
-                                  onClick: () => { renameFolder(pid, folder.id); closeMenu(); },
-                                },
-                                {
-                                  type: "share",
-                                  label: "Share / Export…",
-                                  icon: <FaShare className="mr-2" />,
-                                  share: {
-                                    scopeTitle: `Export: ${folder.name}`,
-                                    items: [
-                                      { id: folder.id, type: "folder", title: folder.name },
-                                    ],
-                                    defaultSelection: [],
-                                    getNoteContent: async (id) => {
-                                      // TODO: return note HTML for all notes in this folder
-                                      return { title: folder.name, html: "<p>Folder export not yet wired</p>" };
-                                    },
-                                  },
-                                },
-                                {
-                                  icon: <FaTrash className="mr-2" />,
-                                  label: "Delete",
-                                  onClick: () => { deleteFolder(pid, folder.id); closeMenu(); },
-                                  danger: true,
-                                },
-                              ]}
-                              theme={theme}
-                            />
-                          )}
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
+                    },
+                    {
+                      icon: <FaTrash className="mr-2" />,
+                      label: "Delete",
+                      onClick: () => { deleteProject(pid); closeMenu(); },
+                      danger: true,
+                    },
+                  ]}
+                  theme={theme}
+                />
               )}
-            </li>
-          );
-        })}
-      </ul>
-    </aside>
+            </div>
+
+            {isExpanded && (
+              <ul className="folder-dropdown ml-4 mt-2 space-y-1">
+                {(state.folderMap[pid] || []).map((folder) => {
+                  const isFolderActive = activeFolderId === folder.id && activeProjectId === pid;
+                  return (
+                    <li
+                      key={folder.id}
+                      className={`p-2 rounded border transition-colors
+                        ${isFolderActive
+                          ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
+                          : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+                        }`}
+                    >
+                      <div className="flex justify-between items-center rounded">
+                        <span
+                          className="cursor-pointer font-semibold w-full"
+                          onClick={() => {
+                            if (activeFolderId === folder.id && activeProjectId === pid) {
+                              clearActiveSelection();
+                            } else {
+                              setActiveSelection(pid, folder.id);
+                            }
+                          }}
+                        >
+                          {folder.name}
+                        </span>
+                        <button
+                          ref={(el) => (folderRefs.current[folder.id] = el)}
+                          className={`${dotBase} ${dotColor}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openMenu("project-folder", folder.id);
+                          }}
+                        >
+                          <FaEllipsisV />
+                        </button>
+
+                        {menu.type === "project-folder" && menu.id === folder.id && (
+                          <ThreeDotMenu
+                            anchorRef={folderRefs.current[folder.id]}
+                            onClose={closeMenu}
+                            options={[
+                              {
+                                icon: <FaPen className="mr-2" />,
+                                label: "Rename",
+                                onClick: () => { renameFolder(pid, folder.id); closeMenu(); },
+                              },
+                              {
+                                icon: <FaShare className="mr-2" />,
+                                label: "Share / Export…",
+                                onClick: () => {
+                                  setShareCfg({
+                                    scopeTitle: `Export: ${folder.name}`,
+                                    items: buildItemsForProjectFolder(pid, folder),
+                                    defaultSelection: [],
+                                  });
+                                  closeMenu();
+                                },
+                              },
+                              {
+                                icon: <FaTrash className="mr-2" />,
+                                label: "Delete",
+                                onClick: () => { deleteFolder(pid, folder.id); closeMenu(); },
+                                danger: true,
+                              },
+                            ]}
+                            theme={theme}
+                          />
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }

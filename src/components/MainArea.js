@@ -52,17 +52,31 @@ export default function MainArea() {
 
   let noteTitle = null;
   let noteKey = null;
+
   if (currentNoteId) {
+    // 1) root notes
     const root = rootNotes.find((n) => n.id === currentNoteId);
     if (root) {
       noteTitle = root.title;
       noteKey = root.id;
     }
+
+    // 2) project-folder notes
     if (!noteTitle && activeProjectId && activeFolderId) {
       const folder = state.folderMap[activeProjectId]?.find(
         (f) => f.id === activeFolderId
       );
       const note = folder?.notes.find((n) => n.id === currentNoteId);
+      if (note) {
+        noteTitle = note.title;
+        noteKey = note.id;
+      }
+    }
+
+    // 3) root-folder notes
+    if (!noteTitle && activeFolderId && !activeProjectId) {
+      const list = state.rootFolderNotesMap?.[activeFolderId] || [];
+      const note = list.find((n) => n.id === currentNoteId);
       if (note) {
         noteTitle = note.title;
         noteKey = note.id;
@@ -145,29 +159,27 @@ export default function MainArea() {
       editor
         .chain()
         .focus()
-        .insertContent(`<a href="${pdfUrl}" target="_blank" rel="noopener noreferrer">[PDF]</a>`)
+        .insertContent(
+          `<a href="${pdfUrl}" target="_blank" rel="noopener noreferrer">[PDF]</a>`
+        )
         .run();
     }
   }
 
   return (
     <main className="flex-1 flex flex-col min-h-screen">
-      {/* Toolbar */}
       <EditorToolbar editor={editor} />
-
-      {/* NEW: whole-note refine bar */}
       <FullNoteAIBar
         editor={editor}
         disabled={!noteTitle || !editor}
         language="auto"
       />
 
-      {/* Main Editor */}
-      <div className="flex-1 flex flex-col min-h-0">
+      {/* 2-row grid: row 1 scrolls, row 2 is the composer */}
+      <div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">
         <div
           id="chatWindow"
-          className="overflow-y-auto overflow-x-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg mb-4 bg-white dark:bg-[#2a2a2a] flex-1 transition-colors"
-          style={{ minHeight: 0, minHeight: 400 }}
+          className="overflow-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-[#2a2a2a] transition-colors m-0"
         >
           {noteTitle ? (
             <EditorContent editor={editor} />
@@ -178,14 +190,16 @@ export default function MainArea() {
           )}
         </div>
 
-        {/* Bottom composer */}
-        <BottomBar
-          editor={editor}
-          onInsertText={handleInsertTextAtCursor}
-          onInsertImage={handleInsertImageAtCursor}
-          onInsertPDF={handleInsertPDFAtCursor}
-          disabled={!noteTitle || !editor}
-        />
+        {/* Bottom composer (fixed second row) */}
+        <div className="bg-white dark:bg-[#2a2a2a] border-t border-gray-300 dark:border-gray-700">
+          <BottomBar
+            editor={editor}
+            onInsertText={handleInsertTextAtCursor}
+            onInsertImage={handleInsertImageAtCursor}
+            onInsertPDF={handleInsertPDFAtCursor}
+            disabled={!noteTitle || !editor}
+          />
+        </div>
       </div>
     </main>
   );

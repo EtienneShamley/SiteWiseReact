@@ -559,10 +559,11 @@ export default function BottomBar({
   };
 
   return (
-    <div className="px-2 pb-2">
+    <div className="border-t border-gray-300 dark:border-gray-700 bg-white dark:bg-[#1b1b1b]">
       <div
         className={[
-          "relative w-full rounded-2xl",
+          "relative w-full max-w-[1200px] mx-auto my-2",
+          "rounded-2xl",
           "bg-gray-100 dark:bg-[#2a2a2a]",
           "border border-gray-300 dark:border-gray-700",
           "px-3 pt-3 pb-12",
@@ -575,9 +576,15 @@ export default function BottomBar({
               ? "Transcribing…"
               : "Type, dictate, or refine with AI…"
           }
-          rows={5}
           disabled={disabled}
           value={currentText}
+          rows={1} // start small; will auto-grow
+          style={{ height: 120, maxHeight: 320, overflow: "auto" }}
+          onInput={(e) => {
+            const el = e.currentTarget;
+            el.style.height = "auto";
+            el.style.height = Math.min(el.scrollHeight, 320) + "px";
+          }}
           onChange={(e) => {
             if (refinedDraft != null) setRefinedDraft(e.target.value);
             else setInput(e.target.value);

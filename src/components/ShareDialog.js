@@ -11,7 +11,7 @@ const FORMAT_OPTS = [
   { label: "Markdown (.md)", value: "md" },
 ];
 
-// items: array of selectable nodes { id, type: 'note'|'folder', title, children? }
+// items: array of selectable nodes { id, type: 'note'|'folder'|'project', title, children? }
 // getNoteContent: (id) => Promise<{ title, html }>
 // defaultSelection: optional ids preselected
 export default function ShareDialog({
@@ -20,23 +20,24 @@ export default function ShareDialog({
   onClose,
   getNoteContent,
   defaultSelection = [],
-  theme = "light",            // ✅ accept theme
+  theme = "light",
 }) {
-  const isDark = theme === "dark";   //compute once
+  const isDark = theme === "dark";
 
   const [selected, setSelected] = useState(new Set(defaultSelection));
   const [format, setFormat] = useState("pdf");
   const [compress, setCompress] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // Detect simple single-note mode (e.g., root note share)
+  const simpleSingleNote = items && items.length === 1 && items[0].type === "note";
+
   const flatNotes = useMemo(() => {
     const out = [];
     const walk = (node, path = []) => {
       if (!node) return;
       const currPath = [...path, node.title || "Untitled"];
-      if (node.type === "note") {
-        out.push({ id: node.id, title: node.title, path: currPath });
-      }
+      if (node.type === "note") out.push({ id: node.id, title: node.title, path: currPath });
       (node.children || []).forEach((c) => walk(c, currPath));
     };
     (items || []).forEach((it) => walk(it, []));
@@ -101,6 +102,17 @@ export default function ShareDialog({
   const onExport = async () => {
     try {
       setBusy(true);
+
+      // SIMPLE SINGLE NOTE: no zip, no selection UI
+      if (simpleSingleNote) {
+        const id = items[0].id;
+        const { title, html } = await getNoteContent(id);
+        await exportOne({ title, html });
+        onClose?.();
+        return;
+      }
+
+      // Normal multi-select / zip flow
       const chosen = flatNotes.filter(n => selected.has(n.id));
       if (chosen.length === 0) return;
 
@@ -159,82 +171,121 @@ export default function ShareDialog({
             </button>
           </div>
 
-          {/* Body */}
-          <div className="mb-3">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium">Select notes</span>
-              <button
-                onClick={toggleAll}
-                className={`text-sm underline ${isDark ? "text-blue-300 hover:text-blue-200" : "text-blue-700 hover:text-blue-800"}`}
-              >
-                {allSelected ? "Clear all" : "Select all"}
-              </button>
-            </div>
+          {/* SIMPLE SINGLE NOTE UI */}
+          {simpleSingleNote ? (
+            <>
+              <div className="mb-4">
+                <label className="text-sm flex items-center gap-2">
+                  <span className="w-24">Format</span>
+                  <select
+                    className={`flex-1 border rounded px-2 py-1 ${
+                      isDark ? "bg-[#2a2a2a] border-[#444] text-white" : "bg-white border-gray-300 text-gray-900"
+                    }`}
+                    value={format}
+                    onChange={(e) => setFormat(e.target.value)}
+                  >
+                    {FORMAT_OPTS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                  </select>
+                </label>
+              </div>
 
-            <div
-              className={`max-h-60 overflow-auto border rounded p-2 space-y-1 ${
-                isDark ? "border-[#333] bg-[#181818]" : "border-gray-200 bg-white"
-              }`}
-            >
-              {flatNotes.length === 0 && (
-                <div className={`text-sm ${isDark ? "opacity-80" : "opacity-70"}`}>No notes found.</div>
-              )}
-              {flatNotes.map(n => (
-                <label key={n.id} className="flex items-center gap-2 text-sm">
+              <div className={`flex justify-end gap-2 border-t pt-3 ${isDark ? "border-[#333]" : "border-gray-200"}`}>
+                <button
+                  onClick={onClose}
+                  className={`px-3 py-1.5 rounded border ${
+                    isDark ? "border-[#444] hover:bg-[#2a2a2a]" : "border-gray-300 hover:bg-gray-100"
+                  }`}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={onExport}
+                  disabled={busy}
+                  className="px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-60"
+                >
+                  {busy ? "Exporting…" : "Export"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* FULL UI (multi-select + zip) */}
+              <div className="mb-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium">Select notes</span>
+                  <button
+                    onClick={toggleAll}
+                    className={`text-sm underline ${isDark ? "text-blue-300 hover:text-blue-200" : "text-blue-700 hover:text-blue-800"}`}
+                  >
+                    {allSelected ? "Clear all" : "Select all"}
+                  </button>
+                </div>
+
+                <div
+                  className={`max-h-60 overflow-auto border rounded p-2 space-y-1 ${
+                    isDark ? "border-[#333] bg-[#181818]" : "border-gray-200 bg-white"
+                  }`}
+                >
+                  {flatNotes.length === 0 && (
+                    <div className={`text-sm ${isDark ? "opacity-80" : "opacity-70"}`}>No notes found.</div>
+                  )}
+                  {flatNotes.map(n => (
+                    <label key={n.id} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(n.id)}
+                        onChange={() => toggle(n.id)}
+                      />
+                      <span className="truncate">{n.path.join(" / ")}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <label className="text-sm flex items-center gap-2">
+                  <span className="w-24">Format</span>
+                  <select
+                    className={`flex-1 border rounded px-2 py-1 ${
+                      isDark ? "bg-[#2a2a2a] border-[#444] text-white" : "bg-white border-gray-300 text-gray-900"
+                    }`}
+                    value={format}
+                    onChange={(e) => setFormat(e.target.value)}
+                  >
+                    {FORMAT_OPTS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                  </select>
+                </label>
+
+                <label className="text-sm flex items-center gap-2">
                   <input
                     type="checkbox"
-                    checked={selected.has(n.id)}
-                    onChange={() => toggle(n.id)}
+                    checked={compress || selected.size > 1}
+                    onChange={(e) => setCompress(e.target.checked)}
+                    disabled={selected.size > 1}
                   />
-                  <span className="truncate">{n.path.join(" / ")}</span>
+                  <span>Compress to .zip {selected.size > 1 && "(required for multi-file)"}</span>
                 </label>
-              ))}
-            </div>
-          </div>
+              </div>
 
-          <div className="grid grid-cols-2 gap-3 mb-4">
-            <label className="text-sm flex items-center gap-2">
-              <span className="w-24">Format</span>
-              <select
-                className={`flex-1 border rounded px-2 py-1 ${
-                  isDark ? "bg-[#2a2a2a] border-[#444] text-white" : "bg-white border-gray-300 text-gray-900"
-                }`}
-                value={format}
-                onChange={(e) => setFormat(e.target.value)}
-              >
-                {FORMAT_OPTS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-              </select>
-            </label>
-
-            <label className="text-sm flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={compress || selected.size > 1}
-                onChange={(e) => setCompress(e.target.checked)}
-                disabled={selected.size > 1}
-              />
-              <span>Compress to .zip {selected.size > 1 && "(required for multi-file)"}</span>
-            </label>
-          </div>
-
-          {/* Footer */}
-          <div className={`flex justify-end gap-2 border-t pt-3 ${isDark ? "border-[#333]" : "border-gray-200"}`}>
-            <button
-              onClick={onClose}
-              className={`px-3 py-1.5 rounded border ${
-                isDark ? "border-[#444] hover:bg-[#2a2a2a]" : "border-gray-300 hover:bg-gray-100"
-              }`}
-            >
-              Cancel
-            </button>
-            <button
-              onClick={onExport}
-              disabled={busy || selected.size === 0}
-              className="px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-60"
-            >
-              {busy ? "Exporting…" : "Export"}
-            </button>
-          </div>
+              <div className={`flex justify-end gap-2 border-t pt-3 ${isDark ? "border-[#333]" : "border-gray-200"}`}>
+                <button
+                  onClick={onClose}
+                  className={`px-3 py-1.5 rounded border ${
+                    isDark ? "border-[#444] hover:bg-[#2a2a2a]" : "border-gray-300 hover:bg-gray-100"
+                  }`}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={onExport}
+                  disabled={busy || selected.size === 0}
+                  className="px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-60"
+                >
+                  {busy ? "Exporting…" : "Export"}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
