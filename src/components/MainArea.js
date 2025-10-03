@@ -5,12 +5,7 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
 import Link from "@tiptap/extension-link";
-import {
-  Table,
-  TableRow,
-  TableHeader,
-  TableCell,
-} from "@tiptap/extension-table";
+import { Table, TableRow, TableHeader, TableCell } from "@tiptap/extension-table";
 import Image from "@tiptap/extension-image";
 import Highlight from "@tiptap/extension-highlight";
 import TaskList from "@tiptap/extension-task-list";
@@ -24,15 +19,14 @@ import BottomBar from "./BottomBar";
 import FontFamily from "@tiptap/extension-font-family";
 import { TextStyle } from "@tiptap/extension-text-style";
 import Color from "@tiptap/extension-color";
-import FullNoteAIBar from "./FullNoteAIBar"; // NEW
+import FullNoteAIBar from "./FullNoteAIBar";
 
 const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
 const STORAGE_KEY = "sitewise-notes";
 
 export default function MainArea() {
-  const { currentNoteId, rootNotes, state, activeProjectId, activeFolderId } =
-    useAppState();
+  const { currentNoteId } = useAppState();
   const { theme } = useTheme();
 
   const [docState, setDocState] = useState(() => {
@@ -50,39 +44,9 @@ export default function MainArea() {
     } catch {}
   }, [docState]);
 
-  let noteTitle = null;
-  let noteKey = null;
-
-  if (currentNoteId) {
-    // 1) root notes
-    const root = rootNotes.find((n) => n.id === currentNoteId);
-    if (root) {
-      noteTitle = root.title;
-      noteKey = root.id;
-    }
-
-    // 2) project-folder notes
-    if (!noteTitle && activeProjectId && activeFolderId) {
-      const folder = state.folderMap[activeProjectId]?.find(
-        (f) => f.id === activeFolderId
-      );
-      const note = folder?.notes.find((n) => n.id === currentNoteId);
-      if (note) {
-        noteTitle = note.title;
-        noteKey = note.id;
-      }
-    }
-
-    // 3) root-folder notes
-    if (!noteTitle && activeFolderId && !activeProjectId) {
-      const list = state.rootFolderNotesMap?.[activeFolderId] || [];
-      const note = list.find((n) => n.id === currentNoteId);
-      if (note) {
-        noteTitle = note.title;
-        noteKey = note.id;
-      }
-    }
-  }
+  // Treat ANY selected note as active
+  const noteKey = currentNoteId || null;
+  const hasActiveNote = !!noteKey;
 
   const editor = useEditor(
     {
@@ -105,8 +69,8 @@ export default function MainArea() {
         TextStyle,
         Color,
       ],
-      content: noteKey && docState[noteKey] ? docState[noteKey] : EMPTY_DOC,
-      editable: !!noteTitle,
+      content: hasActiveNote && docState[noteKey] ? docState[noteKey] : EMPTY_DOC,
+      editable: hasActiveNote,
       editorProps: {
         attributes: {
           class:
@@ -115,11 +79,8 @@ export default function MainArea() {
         },
       },
       onUpdate: ({ editor }) => {
-        if (noteKey) {
-          setDocState((prev) => ({
-            ...prev,
-            [noteKey]: editor.getHTML(),
-          }));
+        if (hasActiveNote) {
+          setDocState((prev) => ({ ...prev, [noteKey]: editor.getHTML() }));
         }
       },
     },
@@ -128,76 +89,59 @@ export default function MainArea() {
 
   useEffect(() => {
     if (!editor) return;
-    if (noteKey && docState[noteKey]) {
+    if (hasActiveNote && docState[noteKey]) {
       editor.commands.setContent(docState[noteKey]);
-    } else if (noteKey) {
+    } else if (hasActiveNote) {
       editor.commands.setContent(EMPTY_DOC);
     }
-    // no dependency on docState to avoid overwriting while typing
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, noteKey]);
+  }, [editor, noteKey, hasActiveNote]);
 
   function handleInsertTextAtCursor(text) {
-    if (editor && text) {
-      editor.chain().focus().insertContent(text).run();
-    }
+    if (editor && text) editor.chain().focus().insertContent(text).run();
   }
   function handleInsertImageAtCursor(imgSrc) {
-    if (editor && imgSrc) {
-      // if a File was passed in, convert to object URL here
-      if (imgSrc instanceof File) {
-        const url = URL.createObjectURL(imgSrc);
-        editor.chain().focus().setImage({ src: url }).run();
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-      } else {
-        editor.chain().focus().setImage({ src: imgSrc }).run();
-      }
+    if (!editor || !imgSrc) return;
+    if (imgSrc instanceof File) {
+      const url = URL.createObjectURL(imgSrc);
+      editor.chain().focus().setImage({ src: url }).run();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } else {
+      editor.chain().focus().setImage({ src: imgSrc }).run();
     }
   }
   function handleInsertPDFAtCursor(pdfUrl) {
     if (editor && pdfUrl) {
-      editor
-        .chain()
-        .focus()
-        .insertContent(
-          `<a href="${pdfUrl}" target="_blank" rel="noopener noreferrer">[PDF]</a>`
-        )
-        .run();
+      editor.chain().focus().insertContent(
+        `<a href="${pdfUrl}" target="_blank" rel="noopener noreferrer">[PDF]</a>`
+      ).run();
     }
   }
 
   return (
     <main className="flex-1 flex flex-col min-h-screen">
       <EditorToolbar editor={editor} />
-      <FullNoteAIBar
-        editor={editor}
-        disabled={!noteTitle || !editor}
-        language="auto"
-      />
+      <FullNoteAIBar editor={editor} disabled={!hasActiveNote || !editor} language="auto" />
 
-      {/* 2-row grid: row 1 scrolls, row 2 is the composer */}
       <div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">
         <div
           id="chatWindow"
           className="overflow-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-[#2a2a2a] transition-colors m-0"
         >
-          {noteTitle ? (
+          {hasActiveNote ? (
             <EditorContent editor={editor} />
           ) : (
-            <div className="text-gray-400 px-4 py-10 text-center">
-              No note selected.
-            </div>
+            <div className="text-gray-400 px-4 py-10 text-center">No note selected.</div>
           )}
         </div>
 
-        {/* Bottom composer (fixed second row) */}
         <div className="bg-white dark:bg-[#2a2a2a] border-t border-gray-300 dark:border-gray-700">
           <BottomBar
             editor={editor}
             onInsertText={handleInsertTextAtCursor}
             onInsertImage={handleInsertImageAtCursor}
             onInsertPDF={handleInsertPDFAtCursor}
-            disabled={!noteTitle || !editor}
+            disabled={!hasActiveNote || !editor}
           />
         </div>
       </div>

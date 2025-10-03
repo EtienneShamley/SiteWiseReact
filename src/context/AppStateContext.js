@@ -1,8 +1,15 @@
+// src/context/AppStateContext.js
 import React, { createContext, useContext, useState } from "react";
 
 export const AppStateContext = createContext();
 
+function uid(prefix) {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${prefix}-${Date.now()}-${rand}`;
+}
+
 export function AppStateProvider({ children }) {
+  // structure
   const [projectData, setProjectData] = useState([]);
   const [folderMap, setFolderMap] = useState({});
   const [activeProjectId, setActiveProjectId] = useState(null);
@@ -10,14 +17,52 @@ export function AppStateProvider({ children }) {
   const [expandedProjectId, setExpandedProjectId] = useState(null);
   const [currentNoteId, setCurrentNoteId] = useState(null);
 
-  // Root notes (standalone)
+  // root
   const [rootNotes, setRootNotes] = useState([]);
-
-  // Root folders + their notes
   const [rootFolders, setRootFolders] = useState([]);
   const [rootFolderNotesMap, setRootFolderNotesMap] = useState({});
 
-  // --- Universal Note Creation (kept) ---
+  // ---- auto-naming counters ----
+  const [projectCounter, setProjectCounter] = useState(0);
+  const [folderCounter, setFolderCounter] = useState(0);
+  const [noteCounter, setNoteCounter] = useState(0);
+
+  const autoProjectName = () => {
+    const n = projectCounter + 1;
+    setProjectCounter(n);
+    return `Project ${n}`;
+  };
+  const autoFolderName = () => {
+    const n = folderCounter + 1;
+    setFolderCounter(n);
+    return `Folder ${n}`;
+  };
+  const autoNoteName = () => {
+    const n = noteCounter + 1;
+    setNoteCounter(n);
+    return `Note ${n}`;
+  };
+
+  // ----- selection helpers -----
+  function selectRootNote(id) {
+    setActiveProjectId(null);
+    setActiveFolderId(null);
+    setExpandedProjectId(null);
+    setCurrentNoteId(id);
+  }
+  function clearActiveSelection() {
+    setActiveProjectId(null);
+    setActiveFolderId(null);
+    setExpandedProjectId(null);
+  }
+  function setActiveSelection(pid, fid) {
+    setActiveProjectId(pid);
+    setActiveFolderId(fid);
+    setExpandedProjectId(pid || null);
+    setCurrentNoteId(null);
+  }
+
+  // --- Universal Note Creation ---
   function createNoteUniversal(activeProjectIdArg, activeFolderIdArg) {
     if (activeProjectIdArg && activeFolderIdArg) {
       addNoteToFolder(activeProjectIdArg, activeFolderIdArg);
@@ -30,14 +75,13 @@ export function AppStateProvider({ children }) {
 
   // --- Root Notes ---
   function createRootNote() {
-    const title = prompt("Note title:", "Untitled Note");
-    if (!title) return;
-    const id = `root-note-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+    let title = prompt("Note title:", autoNoteName());
+    if (title === null) return; // cancel
+    title = (title || "").trim();
+    if (!title) title = autoNoteName();
+    const id = uid("root-note");
     setRootNotes((prev) => [...prev, { id, title, content: "" }]);
-    // select the new root note (no folder/project active)
-    setActiveProjectId(null);
-    setActiveFolderId(null);
-    setCurrentNoteId(id);
+    selectRootNote(id);
   }
 
   function renameRootNote(nid) {
@@ -47,11 +91,10 @@ export function AppStateProvider({ children }) {
           ? {
               ...note,
               title: (() => {
-                let newTitle = prompt("New note title:", note.title);
-                if (newTitle === null) return note.title;
-                newTitle = newTitle.trim();
-                if (!newTitle) return note.title;
-                return newTitle;
+                let next = prompt("New note title:", note.title);
+                if (next === null) return note.title;
+                next = next.trim();
+                return next || note.title;
               })(),
             }
           : note
@@ -61,7 +104,7 @@ export function AppStateProvider({ children }) {
 
   function deleteRootNote(nid) {
     if (!window.confirm("Delete this note?")) return;
-    setRootNotes((prev) => prev.filter((note) => note.id !== nid));
+    setRootNotes((prev) => prev.filter((n) => n.id !== nid));
     if (currentNoteId === nid) setCurrentNoteId(null);
   }
 
@@ -69,28 +112,85 @@ export function AppStateProvider({ children }) {
     alert(`Share/export root note ${nid} (placeholder).`);
   }
 
+  // --- Root Folders ---
+  function createRootFolder() {
+    let name = prompt("Folder name:", autoFolderName());
+    if (name === null) return null;
+    name = (name || "").trim();
+    if (!name) name = autoFolderName();
+
+    const fid = uid("root-folder");
+    setRootFolders((prev) => [...prev, { id: fid, name }]);
+    setRootFolderNotesMap((prev) => ({ ...prev, [fid]: [] }));
+    setActiveSelection(null, fid); // select the root folder (no auto note)
+    return fid;
+  }
+
+  function renameRootFolder(fid) {
+    setRootFolders((prev) =>
+      prev.map((f) =>
+        f.id === fid
+          ? {
+              ...f,
+              name: (() => {
+                let next = prompt("New folder name:", f.name);
+                if (next === null) return f.name;
+                next = next.trim();
+                return next || f.name;
+              })(),
+            }
+          : f
+      )
+    );
+  }
+
+  function deleteRootFolder(fid) {
+    if (!window.confirm("Delete this folder?")) return;
+    setRootFolders((prev) => prev.filter((f) => f.id !== fid));
+    setRootFolderNotesMap((prev) => {
+      const copy = { ...prev };
+      delete copy[fid];
+      return copy;
+    });
+    if (!activeProjectId && activeFolderId === fid) setActiveFolderId(null);
+  }
+
+  function addNoteToRootFolder(fid) {
+    let title = prompt("Note title:", autoNoteName());
+    if (title === null) return;
+    title = (title || "").trim();
+    if (!title) title = autoNoteName();
+
+    const nid = uid("note");
+    setRootFolderNotesMap((prev) => ({
+      ...prev,
+      [fid]: [...(prev[fid] || []), { id: nid, title, content: "" }],
+    }));
+    setActiveSelection(null, fid);
+    setCurrentNoteId(nid);
+  }
+
   // --- Projects ---
   function createProject() {
-    const name = prompt("Project name:", "Untitled Project");
-    if (!name) return;
-    const id = `project-${Date.now()}`;
+    let name = prompt("Project name:", autoProjectName());
+    if (name === null) return;
+    name = (name || "").trim();
+    if (!name) name = autoProjectName();
+
+    const id = uid("project");
     setProjectData((prev) => [...prev, { id, name }]);
     setFolderMap((prev) => ({ ...prev, [id]: [] }));
-    setActiveProjectId(id);
-    setActiveFolderId(null);
-    setExpandedProjectId(id);
-    setCurrentNoteId(null);
+    setActiveSelection(id, null);
   }
 
   function renameProject(pid) {
     setProjectData((prev) => {
-      const project = prev.find((p) => p.id === pid);
-      if (!project) return prev;
-      let newName = prompt("New project name:", project.name);
-      if (newName === null) return prev;
-      newName = newName.trim();
-      if (!newName) return prev;
-      return prev.map((p) => (p.id === pid ? { ...p, name: newName } : p));
+      const proj = prev.find((p) => p.id === pid);
+      if (!proj) return prev;
+      let next = prompt("New project name:", proj.name);
+      if (next === null) return prev;
+      next = next.trim();
+      return prev.map((p) => (p.id === pid ? { ...p, name: next || proj.name } : p));
     });
   }
 
@@ -103,48 +203,40 @@ export function AppStateProvider({ children }) {
       delete copy[pid];
       return copy;
     });
-    if (activeProjectId === pid) {
-      setActiveProjectId(null);
-      setActiveFolderId(null);
-      setExpandedProjectId(null);
-      setCurrentNoteId(null);
-    }
+    if (activeProjectId === pid) clearActiveSelection();
   }
 
   function shareProject(pid) {
     alert(`Export project ${pid} to ZIP (placeholder).`);
   }
 
-  // --- Folders (inside a project) ---
+  // --- Project Folders ---
   function createFolder(pid = activeProjectId) {
     if (!pid) return alert("Highlight a project first.");
-    const name = prompt("Folder name:", "Untitled Folder");
-    if (!name) return;
-    const fid = `folder-${Date.now()}`;
+    let name = prompt("Folder name:", autoFolderName());
+    if (name === null) return;
+    name = (name || "").trim();
+    if (!name) name = autoFolderName();
+
+    const fid = uid("folder");
     setFolderMap((prev) => ({
       ...prev,
       [pid]: [...(prev[pid] || []), { id: fid, name, notes: [] }],
     }));
-    setExpandedProjectId(pid);
-    setActiveProjectId(pid);
-    setActiveFolderId(fid);
-    setCurrentNoteId(null);
+    setActiveSelection(pid, fid);
   }
 
   function renameFolder(pid, fid) {
     setFolderMap((prev) => {
-      const folderList = prev[pid] || [];
-      const folder = folderList.find((f) => f.id === fid);
-      if (!folder) return prev;
-      let newName = prompt("New folder name:", folder.name);
-      if (newName === null) return prev;
-      newName = newName.trim();
-      if (!newName) return prev;
+      const list = prev[pid] || [];
+      const f = list.find((x) => x.id === fid);
+      if (!f) return prev;
+      let next = prompt("New folder name:", f.name);
+      if (next === null) return prev;
+      next = next.trim();
       return {
         ...prev,
-        [pid]: folderList.map((f) =>
-          f.id === fid ? { ...f, name: newName } : f
-        ),
+        [pid]: list.map((x) => (x.id === fid ? { ...x, name: next || f.name } : x)),
       };
     });
   }
@@ -153,117 +245,34 @@ export function AppStateProvider({ children }) {
     if (!window.confirm("Delete this folder?")) return;
     setFolderMap((prev) => ({
       ...prev,
-      [pid]: prev[pid].filter((f) => f.id !== fid),
+      [pid]: (prev[pid] || []).filter((f) => f.id !== fid),
     }));
-    if (activeFolderId === fid && activeProjectId === pid) {
-      setActiveFolderId(null);
-      setCurrentNoteId(null);
-    }
+    if (activeProjectId === pid && activeFolderId === fid) setActiveSelection(pid, null);
   }
 
   function shareFolder(pid, fid) {
     alert(`Share/export folder ${fid} (placeholder).`);
   }
 
-  // --- Root Folders ---
-  function createRootFolder() {
-    const name = prompt("Folder name:", "Untitled Folder");
-    if (!name) return null;
-    const fid = `root-folder-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-    setRootFolders((prev) => [...prev, { id: fid, name }]);
-    setRootFolderNotesMap((prev) => ({ ...prev, [fid]: [] }));
-    return fid; // let caller select it
-  }
-
-  // (kept for compatibility but not used now)
-  function createRootFolderAndFirstNote() {
-    const fid = createRootFolder();
-    if (!fid) return;
-    const noteTitle = prompt("First note title:", "Untitled Note");
-    if (noteTitle) {
-      const nid = `note-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-      setRootFolderNotesMap((prev) => ({
-        ...prev,
-        [fid]: [...(prev[fid] || []), { id: nid, title: noteTitle, content: "" }],
-      }));
-      setCurrentNoteId(nid);
-    } else {
-      setCurrentNoteId(null);
-    }
-    setActiveProjectId(null);
-    setActiveFolderId(fid);
-  }
-
-  function renameRootFolder(fid) {
-    setRootFolders((prev) => {
-      const folder = prev.find((f) => f.id === fid);
-      if (!folder) return prev;
-      let newName = prompt("New folder name:", folder.name);
-      if (newName === null) return prev;
-      newName = newName.trim();
-      if (!newName) return prev;
-      return prev.map((f) => (f.id === fid ? { ...f, name: newName } : f));
-    });
-  }
-
-  function deleteRootFolder(fid) {
-    if (!window.confirm("Delete this folder?")) return;
-    setRootFolders((prev) => prev.filter((f) => f.id !== fid));
-    setRootFolderNotesMap((prev) => {
-      const copy = { ...prev };
-      delete copy[fid];
-      return copy;
-    });
-    if (!activeProjectId && activeFolderId === fid) {
-      setActiveFolderId(null);
-      setCurrentNoteId(null);
-    }
-  }
-
-  function addNoteToRootFolder(fid) {
-    const title = prompt("Note title:", "Untitled Note");
-    if (!title) return;
-    const nid = `note-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-    setRootFolderNotesMap((prev) => ({
-      ...prev,
-      [fid]: [...(prev[fid] || []), { id: nid, title, content: "" }],
-    }));
-    setCurrentNoteId(nid);
-  }
-
-  // --- Selection / Highlight ---
-  function setActiveSelection(pid, fid) {
-    setActiveProjectId(pid || null);
-    setActiveFolderId(fid || null);
-    setExpandedProjectId(pid || null);
-    setCurrentNoteId(null);
-  }
-
-  function clearActiveSelection() {
-    setActiveProjectId(null);
-    setActiveFolderId(null);
-    setExpandedProjectId(null);
-  }
-
-  // --- Notes in a project folder ---
+  // --- Notes in (project) Folder ---
   function addNoteToFolder(pid, fid) {
-    const nid = `note-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-    const title = prompt("Note title:", "Untitled Note");
-    if (!title) return;
+    let title = prompt("Note title:", autoNoteName());
+    if (title === null) return;
+    title = (title || "").trim();
+    if (!title) title = autoNoteName();
+
+    const nid = uid("note");
     setFolderMap((prev) => ({
       ...prev,
-      [pid]: prev[pid].map((f) =>
-        f.id === fid
-          ? { ...f, notes: [...f.notes, { id: nid, title, content: "" }] }
-          : f
+      [pid]: (prev[pid] || []).map((f) =>
+        f.id === fid ? { ...f, notes: [...f.notes, { id: nid, title, content: "" }] } : f
       ),
     }));
+    setActiveSelection(pid, fid);
     setCurrentNoteId(nid);
   }
 
   function renameNote(folderId, noteId) {
-    // Try project folders
-    let changed = false;
     setFolderMap((prev) => {
       const updated = {};
       for (const pid in prev) {
@@ -271,72 +280,30 @@ export function AppStateProvider({ children }) {
           if (folder.id !== folderId) return folder;
           const noteObj = folder.notes.find((n) => n.id === noteId);
           if (!noteObj) return folder;
-          let newTitle = prompt("New note title:", noteObj.title);
-          if (newTitle === null) return folder;
-          newTitle = newTitle.trim();
-          if (!newTitle) return folder;
-          changed = true;
+          let next = prompt("New note title:", noteObj.title);
+          if (next === null) return folder;
+          next = next.trim();
           return {
             ...folder,
-            notes: folder.notes.map((note) =>
-              note.id === noteId ? { ...note, title: newTitle } : note
-            ),
+            notes: folder.notes.map((n) => (n.id === noteId ? { ...n, title: next || noteObj.title } : n)),
           };
         });
       }
       return updated;
     });
-    if (changed) return;
-
-    // Try root folders
-    setRootFolderNotesMap((prev) => {
-      const copy = { ...prev };
-      for (const fid in copy) {
-        const arr = copy[fid];
-        const idx = arr.findIndex((n) => n.id === noteId);
-        if (idx !== -1) {
-          let newTitle = prompt("New note title:", arr[idx].title);
-          if (newTitle === null) return prev;
-          newTitle = newTitle.trim();
-          if (!newTitle) return prev;
-          const next = [...arr];
-          next[idx] = { ...next[idx], title: newTitle };
-          copy[fid] = next;
-          return copy;
-        }
-      }
-      return prev;
-    });
   }
 
   function deleteNote(fid, nid) {
     if (!window.confirm("Delete this note?")) return;
-
-    // Project folders
     setFolderMap((prev) => {
       const updated = {};
       for (const pid in prev) {
         updated[pid] = prev[pid].map((folder) =>
-          folder.id === fid
-            ? { ...folder, notes: folder.notes.filter((note) => note.id !== nid) }
-            : folder
+          folder.id === fid ? { ...folder, notes: folder.notes.filter((n) => n.id !== nid) } : folder
         );
       }
       return updated;
     });
-
-    // Root folders
-    setRootFolderNotesMap((prev) => {
-      const copy = { ...prev };
-      for (const rfid in copy) {
-        if (copy[rfid].some((n) => n.id === nid)) {
-          copy[rfid] = copy[rfid].filter((n) => n.id !== nid);
-          break;
-        }
-      }
-      return copy;
-    });
-
     if (currentNoteId === nid) setCurrentNoteId(null);
   }
 
@@ -347,53 +314,53 @@ export function AppStateProvider({ children }) {
   return (
     <AppStateContext.Provider
       value={{
-        // root notes
-        rootNotes,
-        setRootNotes,
-        createRootNote,
-        renameRootNote,
-        deleteRootNote,
-        shareRootNote,
-
-        // root folders
-        rootFolders,
-        rootFolderNotesMap,
-        setRootFolders,
-        setRootFolderNotesMap,
-        createRootFolder,
-        createRootFolderAndFirstNote, // kept, not used
-        renameRootFolder,
-        deleteRootFolder,
-        addNoteToRootFolder,
-
-        // project structure
+        // state exposed
         state: { projectData, folderMap, rootFolders, rootFolderNotesMap },
         activeProjectId,
         activeFolderId,
         expandedProjectId,
         currentNoteId,
 
+        // selectors
         setActiveSelection,
         clearActiveSelection,
         setExpandedProjectId,
         setCurrentNoteId,
+        selectRootNote,
 
+        // root notes
+        rootNotes,
+        createRootNote,
+        renameRootNote,
+        deleteRootNote,
+        shareRootNote,
+        setRootNotes,
+
+        // root folders
+        createRootFolder,
+        renameRootFolder,
+        deleteRootFolder,
+        addNoteToRootFolder,
+        setRootFolders,
+        setRootFolderNotesMap,
+
+        // projects
         createProject,
         renameProject,
         deleteProject,
         shareProject,
 
+        // project folders
         createFolder,
         renameFolder,
         deleteFolder,
         shareFolder,
 
+        // notes in project folders
         addNoteToFolder,
         renameNote,
         deleteNote,
         shareNote,
-
-        createNoteUniversal,
       }}
     >
       {children}
