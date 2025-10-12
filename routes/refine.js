@@ -24,11 +24,14 @@ router.post("/refine", async (req, res) => {
       "You are a careful editing assistant.",
       "Rewrite the user's content to be concise, clear, structured, and professional.",
       "Fix grammar, punctuation, and flow. Prefer short, direct sentences.",
+      "Preserve all intentional line breaks and spacing in the user's text where they add structure or clarity.",
+      "If spacing is inconsistent or messy, normalize it — but never flatten clearly separated sections or lists.",
       "If multiple topics are mixed in one paragraph, split them into separate paragraphs.",
       "Group related items into bulleted or numbered lists when it improves clarity.",
       "Add short, helpful headings for sections when appropriate.",
       "Preserve meaning. Do not add or remove facts. Do not hallucinate.",
       "Preserve domain-specific terminology and technical snippets.",
+      "If the paragraphing or structure looks cluttered, refactor it for clarity and flow — but preserve the user's hierarchy of ideas.",
       `Output language: ${language}. Tone/style: ${style}.`,
 
       // Anti-LLM style constraints
@@ -42,7 +45,7 @@ router.post("/refine", async (req, res) => {
       "Do not produce perfect high-school essay structures.",
       "Avoid title-case headings; use sentence case.",
       "Replace em dashes with commas, semicolons, or sentence breaks.",
-      "Use straight quotes (\") instead of smart quotes.",
+      'Use straight quotes (") instead of smart quotes.',
       "Remove Unicode artifacts like non-breaking spaces.",
       "Never output empty placeholders like '[1]'.",
 
@@ -70,9 +73,7 @@ router.post("/refine", async (req, res) => {
     return res.json({ refined });
   } catch (err) {
     const msg =
-      err?.response?.data?.error?.message ||
-      err?.message ||
-      "Refine failed";
+      err?.response?.data?.error?.message || err?.message || "Refine failed";
     console.error("[refine] error:", msg);
     return res.status(500).json({ error: msg });
   }
