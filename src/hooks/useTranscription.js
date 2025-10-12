@@ -1,7 +1,6 @@
 // src/hooks/useTranscription.js
 const API_BASE = process.env.REACT_APP_API_BASE || "";
 
-// Fetch with a hard timeout
 async function fetchWithTimeout(resource, options = {}) {
   const { timeout = 60000, ...rest } = options;
   const controller = new AbortController();
@@ -15,9 +14,10 @@ async function fetchWithTimeout(resource, options = {}) {
 }
 
 export function useTranscription() {
-  const transcribeBlob = async (blob) => {
+  const transcribeBlob = async (blob, language = "auto") => {
     const form = new FormData();
     form.append("audio", blob, "audio.webm");
+    form.append("language", language); // ✅ send plain string
 
     let resp;
     try {
@@ -27,11 +27,11 @@ export function useTranscription() {
         timeout: 60000,
       });
     } catch (e) {
-      const msg = e?.name === "AbortError" ? "Request timed out" : "Network error";
+      const msg =
+        e?.name === "AbortError" ? "Request timed out" : "Network error";
       throw new Error(msg);
     }
 
-    // Try JSON first, then fall back to raw text
     let data;
     try {
       data = await resp.json();

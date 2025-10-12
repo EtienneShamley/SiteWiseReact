@@ -17,11 +17,8 @@ router.post("/transcribe", upload.single("audio"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No audio uploaded" });
 
-    // Debug log (commented out for production)
-    // console.log("[transcribe] received:", {
-    //   mimetype: req.file.mimetype,
-    //   sizeBytes: req.file.size,
-    // });
+    // Language hint from form-data, default "auto"
+    const language = (req.body?.language || "auto").trim();
 
     const mime = req.file.mimetype || "application/octet-stream";
     const ext =
@@ -37,17 +34,17 @@ router.post("/transcribe", upload.single("audio"), async (req, res) => {
       const r1 = await openai.audio.transcriptions.create({
         model: "gpt-4o-mini-transcribe",
         file,
+        // many OpenAI transcription models ignore unknown params; harmless if not supported
+        ...(language && language !== "auto" ? { language } : {}),
       });
       text = r1?.text || r1?.data?.text || "";
-      // console.log("[transcribe] 4o-mini-transcribe OK");
     } catch (e) {
-      // console.warn("[transcribe] 4o-mini-transcribe failed, falling back:", e?.message);
       const r2 = await openai.audio.transcriptions.create({
         model: "whisper-1",
         file,
+        ...(language && language !== "auto" ? { language } : {}),
       });
       text = r2?.text || r2?.data?.text || "";
-      // console.log("[transcribe] whisper-1 OK");
     }
 
     return res.json({ text });
@@ -57,10 +54,6 @@ router.post("/transcribe", upload.single("audio"), async (req, res) => {
       err?.error?.message ||
       err?.message ||
       "Transcription failed";
-    // console.error("[transcribe] error:", apiMsg, {
-    //   status: err?.status || err?.response?.status,
-    //   data: err?.response?.data,
-    // });
     return res.status(500).json({ error: apiMsg });
   }
 });
