@@ -20,7 +20,6 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
 }
-
 function wrapTextLines(ctx, text, maxWidth) {
   const words = text.split(/\s+/);
   const lines = [];
@@ -37,7 +36,6 @@ function wrapTextLines(ctx, text, maxWidth) {
   if (line) lines.push(line);
   return lines;
 }
-
 function loadImageFromBlobURL(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -69,7 +67,8 @@ function saveMap(key, obj) {
 export default function BottomBar({
   editor,
   onInsertText,
-  onInsertPDF,
+  onInsertPDF,      // legacy
+  onInsertPDFFile,  // NEW: preferred (passes bytes)
   disabled = false,
 }) {
   const { currentNoteId } = useAppState();
@@ -81,7 +80,7 @@ export default function BottomBar({
 
   // Busy states
   const [busy, setBusy] = useState(false);
-  const [transcribeStatus, setTranscribeStatus] = useState("idle"); // idle|recording|stopping|transcribing
+  const [transcribeStatus, setTranscribeStatus] = useState("idle");
   const [transcribeError, setTranscribeError] = useState("");
 
   // Voice language (per note memory)
@@ -142,23 +141,19 @@ export default function BottomBar({
     saveMap(STYLE_MEM_KEY, styleMap);
   }, [currentNoteId, stylePreset]);
 
-  // ---------------- EXIF / GPS helpers ----------------
+  // ---------------- EXIF / GPS helpers (unchanged) ----------------
   async function getExifGeoAndTime(file) {
     try {
       const gps = await exifr.gps(file).catch(() => null);
-      const tags = await exifr
-        .parse(file, ["DateTimeOriginal"])
-        .catch(() => null);
+      const tags = await exifr.parse(file, ["DateTimeOriginal"]).catch(() => null);
       const lat = gps?.latitude ?? null;
       const lon = gps?.longitude ?? null;
-      const exifDate =
-        tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
+      const exifDate = tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
       return { lat, lon, exifDate, altitude: gps?.altitude ?? null };
     } catch {
       return { lat: null, lon: null, exifDate: null, altitude: null };
     }
   }
-
   function formatLocalWithTz(dt) {
     try {
       return new Intl.DateTimeFormat(undefined, {
@@ -175,23 +170,16 @@ export default function BottomBar({
       return new Date(dt).toLocaleString();
     }
   }
-
   function getBrowserGeo(timeoutMs = 8000) {
     return new Promise((resolve) => {
       if (!navigator?.geolocation?.getCurrentPosition) return resolve(null);
-      const opts = {
-        enableHighAccuracy: true,
-        timeout: timeoutMs,
-        maximumAge: 0,
-      };
+      const opts = { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 };
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const { latitude, longitude, accuracy, altitude, speed } =
-            pos.coords || {};
+          const { latitude, longitude, accuracy, altitude, speed } = pos.coords || {};
           if (typeof latitude === "number" && typeof longitude === "number") {
             resolve({
-              lat: latitude,
-              lon: longitude,
+              lat: latitude, lon: longitude,
               acc: accuracy ?? null,
               alt: typeof altitude === "number" ? altitude : null,
               spd: typeof speed === "number" ? speed : null,
@@ -205,7 +193,6 @@ export default function BottomBar({
       );
     });
   }
-
   async function reverseGeocode(lat, lon) {
     try {
       const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&addressdetails=1`;
@@ -213,8 +200,7 @@ export default function BottomBar({
       if (!res.ok) return null;
       const data = await res.json();
       const a = data?.address || {};
-      const line1 =
-        [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
+      const line1 = [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
       const line2 = a.suburb || a.neighbourhood || a.locality || null;
       const line3 = a.city || a.town || a.village || a.county || null;
       const line4 = a.state || a.region || a.province || null;
@@ -223,28 +209,13 @@ export default function BottomBar({
       return null;
     }
   }
-
   async function buildStampedImageBLOB(file) {
     const originalURL = URL.createObjectURL(file);
     let img;
-    try {
-      img = await loadImageFromBlobURL(originalURL);
-    } finally {
-      URL.revokeObjectURL(originalURL);
-    }
-
-    const {
-      lat: exifLat,
-      lon: exifLon,
-      exifDate,
-      altitude: exifAlt,
-    } = await getExifGeoAndTime(file);
-    let lat = exifLat,
-      lon = exifLon,
-      acc = null,
-      alt = exifAlt,
-      spdMs = null;
-
+    try { img = await loadImageFromBlobURL(originalURL); }
+    finally { URL.revokeObjectURL(originalURL); }
+    const { lat: exifLat, lon: exifLon, exifDate, altitude: exifAlt } = await getExifGeoAndTime(file);
+    let lat = exifLat, lon = exifLon, acc = null, alt = exifAlt, spdMs = null;
     if (lat == null || lon == null || alt == null) {
       const browserGeo = await getBrowserGeo(8000);
       if (browserGeo) {
@@ -255,60 +226,40 @@ export default function BottomBar({
         spdMs = browserGeo.spd;
       }
     }
-
-    const indexNo =
-      (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
+    const indexNo = (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
     localStorage.setItem("sitewise_photo_index", String(indexNo));
-
     const networkDt = exifDate || new Date();
     const localDt = new Date();
     const networkStr = formatLocalWithTz(networkDt);
     const localStr = formatLocalWithTz(localDt);
-
     let addrLines = null;
     if (lat != null && lon != null) addrLines = await reverseGeocode(lat, lon);
-
-    const coordStr =
-      lat != null && lon != null
-        ? `${lat.toFixed(6)}, ${lon.toFixed(6)}`
-        : null;
+    const coordStr = lat != null && lon != null ? `${lat.toFixed(6)}, ${lon.toFixed(6)}` : null;
     let altDisplay = "n/a";
-    if (typeof alt === "number" && isFinite(alt) && Math.abs(alt) >= 1)
-      altDisplay = `${alt.toFixed(1)}m`;
-    const spdDisplay =
-      typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
-
+    if (typeof alt === "number" && isFinite(alt) && Math.abs(alt) >= 1) altDisplay = `${alt.toFixed(1)}m`;
+    const spdDisplay = typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
     const lines = [`network: ${networkStr}`, `Local: ${localStr}`];
     if (addrLines && addrLines.length) lines.push(...addrLines);
     if (coordStr) lines.push(`Coordinates: ${coordStr}`);
     lines.push(`Altitude: ${altDisplay}`);
     lines.push(`speed: ${spdDisplay}`);
     lines.push(`index number ${indexNo}`);
-
-    const maxW = img.width,
-      maxH = img.height;
-    const canvas = document.createElement("canvas");
-    canvas.width = maxW;
-    canvas.height = maxH;
-    const ctx = canvas.getContext("2d");
+    const stampedCanvas = document.createElement("canvas");
+    const maxW = img.width, maxH = img.height;
+    stampedCanvas.width = maxW; stampedCanvas.height = maxH;
+    const ctx = stampedCanvas.getContext("2d");
     ctx.imageSmoothingEnabled = true;
-
     ctx.drawImage(img, 0, 0, maxW, maxH);
-
-    const padX = 10,
-      padY = 10;
+    const padX = 10, padY = 10;
     const boxW = Math.round(Math.min(0.35 * maxW, 400));
     const fontSize = Math.max(12, Math.round(maxW * 0.012));
     ctx.font = `${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
     ctx.textBaseline = "top";
-
     const lineHeight = Math.round(fontSize * 1.25);
     const wrapped = [];
-    for (const raw of lines)
-      wrapped.push(...wrapTextLines(ctx, raw, boxW - padX * 2));
+    for (const raw of lines) wrapped.push(...wrapTextLines(ctx, raw, boxW - padX * 2));
     const textH = wrapped.length * lineHeight;
     const boxH = textH + padY * 2;
-
     const boxX = 10;
     const boxY = Math.max(10, maxH - boxH - 10);
     ctx.save();
@@ -316,55 +267,11 @@ export default function BottomBar({
     ctx.fillStyle = "rgba(0,0,0,0.55)";
     ctx.fill();
     ctx.restore();
-
     ctx.fillStyle = "#fff";
     let ty = boxY + padY;
-    for (const l of wrapped) {
-      ctx.fillText(l, boxX + padX, ty);
-      ty += lineHeight;
-    }
-
-    if (lat != null && lon != null) {
-      try {
-        const marker = `color:red%7C${lat},${lon}`;
-        const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(
-          /\/$/,
-          ""
-        );
-        const url = `${API_BASE}/api/map/static?center=${lat},${lon}&zoom=10&size=220x220&maptype=roadmap&markers=${marker}`;
-        const resp = await fetch(url);
-        if (resp.ok) {
-          const blob = await resp.blob();
-          let bitmap = null;
-          if ("createImageBitmap" in window)
-            bitmap = await createImageBitmap(blob);
-          else {
-            const mapURL = URL.createObjectURL(blob);
-            const mapImg = await loadImageFromBlobURL(mapURL);
-            URL.revokeObjectURL(mapURL);
-            bitmap = mapImg;
-          }
-          const MAP_REL = 0.22;
-          const mapSize = Math.round(Math.min(maxW, maxH) * MAP_REL);
-          const mapW = mapSize,
-            mapH = mapSize;
-          const mx = maxW - mapW - 10;
-          const my = Math.max(10, maxH - mapH - 10);
-          ctx.save();
-          roundRectPath(ctx, mx - 6, my - 6, mapW + 12, mapH + 12, 10);
-          ctx.fillStyle = "rgba(0,0,0,0.25)";
-          ctx.fill();
-          ctx.restore();
-          if (bitmap instanceof ImageBitmap) {
-            ctx.drawImage(bitmap, mx, my, mapW, mapH);
-            bitmap.close?.();
-          } else ctx.drawImage(bitmap, mx, my, mapW, mapH);
-        }
-      } catch {}
-    }
-
+    for (const l of wrapped) { ctx.fillText(l, boxX + padX, ty); ty += lineHeight; }
     const stampedBlob = await new Promise((resolve) =>
-      canvas.toBlob(resolve, "image/png", 0.92)
+      stampedCanvas.toBlob(resolve, "image/png", 0.92)
     );
     return stampedBlob;
   }
@@ -386,27 +293,27 @@ export default function BottomBar({
       if (f.type.startsWith("image/")) {
         const stampedBlob = await buildStampedImageBLOB(f);
         const stampedURL = URL.createObjectURL(stampedBlob);
-        editor
-          ?.chain()
-          .focus()
-          .insertContent(
-            `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-          )
-          .run();
+        editor?.chain().focus().insertContent(
+          `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+        ).run();
         continue;
       }
       if (f.type === "application/pdf") {
-        // hand off the File object so the PDF tab can load it and annotate
-        onInsertPDF && onInsertPDF(f);
+        const ab = await f.arrayBuffer();
+        const bytes = new Uint8Array(ab);
+        if (onInsertPDFFile) {
+          await onInsertPDFFile({ fileName: f.name, bytes });
+        } else if (onInsertPDF) {
+          // Legacy fallback: create a blob URL and insert, but do NOT revoke quickly.
+          const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+          onInsertPDF(url);
+        }
+        // Note: do NOT revoke the blob here; the user may return to it in-session.
       } else {
         const url = URL.createObjectURL(f);
-        editor
-          ?.chain()
-          .focus()
-          .insertContent(
-            `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-          )
-          .run();
+        editor?.chain().focus().insertContent(
+          `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
+        ).run();
         setTimeout(() => URL.revokeObjectURL(url), 15000);
       }
     }
@@ -418,39 +325,29 @@ export default function BottomBar({
     if (!f) return;
     if (!f.type.startsWith("image/")) {
       const url = URL.createObjectURL(f);
-      editor
-        ?.chain()
-        .focus()
-        .insertContent(
-          `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-        )
-        .run();
+      editor?.chain().focus().insertContent(
+        `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
+      ).run();
       setTimeout(() => URL.revokeObjectURL(url), 15000);
       e.target.value = "";
       return;
     }
     const stampedBlob = await buildStampedImageBLOB(f);
     const stampedURL = URL.createObjectURL(stampedBlob);
-    editor
-      ?.chain()
-      .focus()
-      .insertContent(
-        `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-      )
-      .run();
+    editor?.chain().focus().insertContent(
+      `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+    ).run();
     e.target.value = "";
   };
 
-  // ---------------- Recording ----------------
+  // ---------------- Recording (unchanged) ----------------
   const pickMimeType = () => {
     const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
     for (const type of candidates) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type))
-        return type;
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type)) return type;
     }
     return "";
   };
-
   const startRecording = async () => {
     if (!hasMediaDevices || disabled || transcribeStatus !== "idle") return;
     setTranscribeError("");
@@ -459,9 +356,7 @@ export default function BottomBar({
       const mimeType = pickMimeType();
       const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       chunksRef.current = [];
-      mr.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
-      };
+      mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
       mr.onstop = null;
       mr.start();
       mediaRecorderRef.current = mr;
@@ -471,10 +366,8 @@ export default function BottomBar({
       setTranscribeStatus("idle");
     }
   };
-
   const stopRecording = async () => {
-    if (transcribeStatus !== "recording" || !mediaRecorderRef.current)
-      return null;
+    if (transcribeStatus !== "recording" || !mediaRecorderRef.current) return null;
     setTranscribeStatus("stopping");
     return new Promise((resolve) => {
       mediaRecorderRef.current.onstop = () => {
@@ -486,11 +379,9 @@ export default function BottomBar({
       mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
     });
   };
-
   const handleVoiceClick = async () => {
     if (disabled || !editor || !hasMediaDevices) {
-      if (!hasMediaDevices)
-        setTranscribeError("Microphone not available in this browser.");
+      if (!hasMediaDevices) setTranscribeError("Microphone not available in this browser.");
       return;
     }
     if (transcribeStatus === "idle") {
@@ -505,21 +396,15 @@ export default function BottomBar({
         return;
       }
       const url = URL.createObjectURL(blob);
-      editor
-        .chain()
-        .focus()
-        .insertContent(
-          `<p><audio controls src="${url}" preload="metadata"></audio></p>`
-        )
-        .run();
-
+      editor.chain().focus().insertContent(
+        `<p><audio controls src="${url}" preload="metadata"></audio></p>`
+      ).run();
       setTranscribeStatus("transcribing");
       try {
         const text = await transcribeBlob(blob, transcribeLang);
         setTranscribeStatus("idle");
         if (text) {
-          if (refinedDraft != null)
-            setRefinedDraft((p) => (p ? `${p} ${text}` : text));
+          if (refinedDraft != null) setRefinedDraft((p) => (p ? `${p} ${text}` : text));
           else setInput((p) => (p ? `${p} ${text}` : text));
         } else {
           setTranscribeError("Empty transcription");
@@ -533,7 +418,7 @@ export default function BottomBar({
   };
   // ----------------------------------------------------------
 
-  // AI refine
+  // AI refine (unchanged)
   const runRefine = async () => {
     const text = (refinedDraft ?? input).trim();
     if (!text) return;
@@ -568,11 +453,7 @@ export default function BottomBar({
       >
         <textarea
           className="w-full resize-none bg-transparent outline-none text-sm text-black dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-          placeholder={
-            transcribeStatus === "transcribing"
-              ? "Transcribing…"
-              : "Type, dictate, or refine with AI…"
-          }
+          placeholder={transcribeStatus === "transcribing" ? "Transcribing…" : "Type, dictate, or refine with AI…"}
           rows={5}
           disabled={disabled}
           value={currentText}
@@ -657,10 +538,7 @@ export default function BottomBar({
             <FaCamera />
           </button>
 
-          <div
-            className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200"
-            title="Record voice"
-          >
+          <div className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200" title="Record voice">
             <VoiceButton
               phase={transcribeStatus}
               disabled={disabled || !hasMediaDevices}

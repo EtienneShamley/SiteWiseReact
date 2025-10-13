@@ -70,6 +70,29 @@ export function AppStateProvider({ children }) {
   const [noteVoiceLangMap, setNoteVoiceLangMap] = useState(loadVoiceLangMap);
   useEffect(() => { saveVoiceLangMap(noteVoiceLangMap); }, [noteVoiceLangMap]);
 
+  /** NEW: in-memory per-note PDF bytes (Uint8Array). Session-only. */
+  const [notePdfBytesMap, setNotePdfBytesMap] = useState(() => ({})); // { [noteId]: Uint8Array }
+
+  function getNotePdfBytes(nid) {
+    if (!nid) return null;
+    return notePdfBytesMap[nid] || null;
+  }
+  function setNotePdfBytes(nid, bytes) {
+    if (!nid || !bytes) return;
+    // Store a defensive copy to avoid accidental detachment by consumers
+    const clone = bytes instanceof Uint8Array ? bytes.slice(0) : new Uint8Array(bytes);
+    setNotePdfBytesMap(prev => ({ ...prev, [nid]: clone }));
+  }
+  function removeNotePdfBytes(nid) {
+    if (!nid) return;
+    setNotePdfBytesMap(prev => {
+      if (!(nid in prev)) return prev;
+      const next = { ...prev };
+      delete next[nid];
+      return next;
+    });
+  }
+
   /** NEW: read the saved language for a note (defaults to "auto") */
   function getNoteVoiceLanguage(nid) {
     return (nid && noteVoiceLangMap[nid]) || "auto";
@@ -177,6 +200,7 @@ export function AppStateProvider({ children }) {
     setRootNotes((prev) => prev.filter((note) => note.id !== nid));
     if (currentNoteId === nid) setCurrentNoteId(null);
     removeNoteVoiceLanguage(nid); // NEW: cleanup
+    removeNotePdfBytes(nid);      // NEW: cleanup cached pdf
   }
 
   function shareRootNote(nid) {
@@ -221,7 +245,10 @@ export function AppStateProvider({ children }) {
     try {
       const folders = folderMap[pid] || [];
       const allNotes = folders.flatMap(f => f.notes || []);
-      allNotes.forEach(n => removeNoteVoiceLanguage(n.id));
+      allNotes.forEach(n => {
+        removeNoteVoiceLanguage(n.id);
+        removeNotePdfBytes(n.id);
+      });
     } catch {}
     setProjectData((prev) => prev.filter((p) => p.id !== pid));
     setFolderMap((prev) => {
@@ -289,7 +316,10 @@ export function AppStateProvider({ children }) {
     try {
       const folders = folderMap[pid] || [];
       const folder = folders.find(f => f.id === fid);
-      (folder?.notes || []).forEach(n => removeNoteVoiceLanguage(n.id));
+      (folder?.notes || []).forEach(n => {
+        removeNoteVoiceLanguage(n.id);
+        removeNotePdfBytes(n.id);
+      });
     } catch {}
     setFolderMap((prev) => ({
       ...prev,
@@ -370,7 +400,10 @@ export function AppStateProvider({ children }) {
     // cleanup note voice languages within root folder
     try {
       const list = rootFolderNotesMap[fid] || [];
-      list.forEach(n => removeNoteVoiceLanguage(n.id));
+      list.forEach(n => {
+        removeNoteVoiceLanguage(n.id);
+        removeNotePdfBytes(n.id);
+      });
     } catch {}
     setRootFolders((prev) => prev.filter((f) => f.id !== fid));
     setRootFolderNotesMap((prev) => {
@@ -484,6 +517,7 @@ export function AppStateProvider({ children }) {
     // root notes handled by deleteRootNote
     if (currentNoteId === nid) setCurrentNoteId(null);
     removeNoteVoiceLanguage(nid); // NEW: cleanup
+    removeNotePdfBytes(nid);      // NEW: cleanup
   }
 
   function shareNote(nid) {
@@ -567,6 +601,11 @@ export function AppStateProvider({ children }) {
         // NEW: per-note voice language memory
         getNoteVoiceLanguage,
         setNoteVoiceLanguage,
+
+        // NEW: per-note PDF session cache
+        getNotePdfBytes,
+        setNotePdfBytes,
+        removeNotePdfBytes,
       }}
     >
       {children}

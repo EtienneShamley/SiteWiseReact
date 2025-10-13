@@ -2,11 +2,26 @@
 import * as pdfjsLib from "pdfjs-dist";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 
-// Worker served from /public
+// Point the worker to the copy placed in /public
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.js";
 
-export async function loadPdf(arrayBuffer) {
-  return pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+/**
+ * Accepts Uint8Array | ArrayBuffer | Blob, returns a PDF.js document
+ */
+export async function loadPdf(src) {
+  let bytes;
+  if (src instanceof Uint8Array) {
+    bytes = src;
+  } else if (src instanceof Blob) {
+    const ab = await src.arrayBuffer();
+    bytes = new Uint8Array(ab);
+  } else {
+    // ArrayBuffer or ArrayBuffer-like
+    // slice(0) ensures we have a fresh, non-detached copy
+    const ab = src?.slice ? src.slice(0) : src;
+    bytes = new Uint8Array(ab);
+  }
+  return pdfjsLib.getDocument({ data: bytes }).promise;
 }
 
 export async function renderPageToCanvas(pdfDoc, pageNumber, scale = 1.25) {
@@ -21,13 +36,24 @@ export async function renderPageToCanvas(pdfDoc, pageNumber, scale = 1.25) {
 }
 
 /**
- * annotations: { [pageNumber]: Array<Ann> }
- * Ann highlight => { type:'highlight', x,y,w,h }
- * Ann text      => { type:'text', x,y,text,fontSize }
- * Coordinates are in PDF pixels at renderScale=1 (we normalize in the editor).
+ * Flatten annotations onto the PDF using pdf-lib.
+ * src: Uint8Array | ArrayBuffer | Blob
+ * annotations: { [pageNo]: Array<{ type:'highlight'| 'text', ... }> }
  */
-export async function flattenAnnotations(originalArrayBuffer, annotations) {
-  const pdfDoc = await PDFDocument.load(originalArrayBuffer);
+export async function flattenAnnotations(src, annotations) {
+  let bytes;
+  if (src instanceof Uint8Array) {
+    bytes = src;
+  } else if (src instanceof Blob) {
+    const ab = await src.arrayBuffer();
+    bytes = new Uint8Array(ab);
+  } else {
+    const ab = src?.slice ? src.slice(0) : src;
+    bytes = new Uint8Array(ab);
+  }
+
+  // Load with a safe copy to avoid detached buffers
+  const pdfDoc = await PDFDocument.load(bytes);
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
   const pages = pdfDoc.getPages();
@@ -39,12 +65,11 @@ export async function flattenAnnotations(originalArrayBuffer, annotations) {
     const anns = annotations?.[pageNo] || [];
     for (const ann of anns) {
       if (ann.type === "highlight") {
-        // PDF origin is bottom-left; incoming coords are top-left
         const x = ann.x;
-        const y = height - (ann.y + ann.h);
+        const y = height - (ann.y + ann.h); // convert top-left to PDF coords
         page.drawRectangle({
           x, y, width: ann.w, height: ann.h,
-          color: rgb(1, 1, 0), // yellow
+          color: rgb(1, 1, 0),
           opacity: 0.25,
           borderOpacity: 0,
         });

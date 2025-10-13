@@ -16,10 +16,12 @@ function App() {
         <MiddlePane />
         <MainArea />
 
-        {/* Settings Button in Left Bottom Corner */}
+        {/* Settings Button in Left Bottom Corner (theme-aware) */}
         <button
           onClick={() => setSettingsOpen(true)}
-          className="fixed bottom-4 left-4 bg-gray-800 dark:bg-[#222] text-white rounded-full p-3 shadow-lg z-50 hover:bg-gray-700"
+          className="fixed bottom-4 left-4 rounded-full p-3 shadow-lg z-50
+                     bg-white text-black border border-gray-300 hover:bg-gray-100
+                     dark:bg-[#222] dark:text-white dark:border-gray-700 dark:hover:bg-[#2b2b2b]"
           title="Settings"
         >
           <Cog6ToothIcon className="w-7 h-7" />

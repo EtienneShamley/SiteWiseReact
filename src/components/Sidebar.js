@@ -1,4 +1,3 @@
-// src/components/Sidebar.js
 import React, { useRef, useState, useMemo } from "react";
 import { useAppState } from "../context/AppStateContext";
 import { FaEllipsisV, FaPen, FaTrash, FaShare } from "react-icons/fa";
@@ -147,7 +146,7 @@ export default function Sidebar() {
   if (hidden) {
     return (
       <button
-        className="fixed top-4 left-4 bg-gray-200 dark:bg-gray-800 text-black dark:text-white px-2 py-1 rounded z-50"
+        className="fixed top-2 left-2 bg-gray-200 dark:bg-gray-800 text-black dark:text-white px-2 py-1 rounded z-50"
         onClick={() => setHidden(false)}
       >
         Projects
@@ -204,7 +203,6 @@ export default function Sidebar() {
           + New Note
         </button>
 
-        {/* Root Notes */}
         <RootNotesList
           rootNotes={rootNotes}
           setCurrentNoteId={setCurrentNoteId}
@@ -296,7 +294,6 @@ export default function Sidebar() {
           })}
         </ul>
 
-        {/* Projects & project folders */}
         <ProjectTree
           state={state}
           activeProjectId={activeProjectId}
