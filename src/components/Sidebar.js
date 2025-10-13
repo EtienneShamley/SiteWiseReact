@@ -1,3 +1,4 @@
+// src/components/Sidebar.js
 import React, { useRef, useState, useMemo } from "react";
 import { useAppState } from "../context/AppStateContext";
 import { FaEllipsisV, FaPen, FaTrash, FaShare } from "react-icons/fa";
@@ -12,7 +13,6 @@ export default function Sidebar() {
     createRootNote,
     renameRootNote,
     deleteRootNote,
-    selectRootNote, // NEW helper (keeps root selection stable)
 
     // structure/state
     state,
@@ -21,6 +21,7 @@ export default function Sidebar() {
     expandedProjectId,
     setActiveSelection,
     clearActiveSelection,
+    setCurrentNoteId,
 
     // projects
     createProject,
@@ -61,13 +62,19 @@ export default function Sidebar() {
 
   const noteTitleMap = useMemo(() => {
     const map = {};
-    rootNotes.forEach((n) => { map[n.id] = n.title; });
+    rootNotes.forEach((n) => {
+      map[n.id] = n.title;
+    });
     (state.rootFolders || []).forEach((f) => {
-      (state.rootFolderNotesMap?.[f.id] || []).forEach((n) => { map[n.id] = n.title; });
+      (state.rootFolderNotesMap?.[f.id] || []).forEach((n) => {
+        map[n.id] = n.title;
+      });
     });
     (state.projectData || []).forEach((p) => {
       (state.folderMap[p.id] || []).forEach((f) => {
-        (f.notes || []).forEach((n) => { map[n.id] = n.title; });
+        (f.notes || []).forEach((n) => {
+          map[n.id] = n.title;
+        });
       });
     });
     return map;
@@ -86,7 +93,9 @@ export default function Sidebar() {
     return { title, html };
   };
 
-  const buildItemsForRootNote = (note) => [{ id: note.id, type: "note", title: note.title }];
+  const buildItemsForRootNote = (note) => [
+    { id: note.id, type: "note", title: note.title },
+  ];
   const buildItemsForRootFolder = (folder) => [
     {
       id: folder.id,
@@ -110,7 +119,11 @@ export default function Sidebar() {
           id: f.id,
           type: "folder",
           title: f.name,
-          children: (f.notes || []).map((n) => ({ id: n.id, type: "note", title: n.title })),
+          children: (f.notes || []).map((n) => ({
+            id: n.id,
+            type: "note",
+            title: n.title,
+          })),
         })),
       },
     ];
@@ -120,7 +133,11 @@ export default function Sidebar() {
       id: folder.id,
       type: "folder",
       title: folder.name,
-      children: (folder.notes || []).map((n) => ({ id: n.id, type: "note", title: n.title })),
+      children: (folder.notes || []).map((n) => ({
+        id: n.id,
+        type: "note",
+        title: n.title,
+      })),
     },
   ];
 
@@ -167,9 +184,9 @@ export default function Sidebar() {
           className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
           onClick={() => {
             if (activeProjectId && !activeFolderId) {
-              createFolder(activeProjectId); // in project
+              createFolder(activeProjectId);
             } else {
-              const fid = createRootFolder(); // at root (no auto note)
+              const fid = createRootFolder();
               if (fid) {
                 setActiveSelection(null, fid);
               }
@@ -190,7 +207,8 @@ export default function Sidebar() {
         {/* Root Notes */}
         <RootNotesList
           rootNotes={rootNotes}
-          selectRootNote={selectRootNote}
+          setCurrentNoteId={setCurrentNoteId}
+          clearActiveSelection={clearActiveSelection}
           dotBase={dotBase}
           dotColor={dotColor}
           openMenu={openMenu}
@@ -206,7 +224,8 @@ export default function Sidebar() {
         {/* Root Folders */}
         <ul className="space-y-1 text-sm mt-3">
           {(state.rootFolders || []).map((folder) => {
-            const isRootFolderActive = !activeProjectId && activeFolderId === folder.id;
+            const isRootFolderActive =
+              !activeProjectId && activeFolderId === folder.id;
             return (
               <li
                 key={folder.id}
@@ -239,7 +258,14 @@ export default function Sidebar() {
                     anchorRef={rootFolderRefs.current[folder.id]}
                     onClose={closeMenu}
                     options={[
-                      { icon: <FaPen className="mr-2" />, label: "Rename", onClick: () => { renameRootFolder(folder.id); closeMenu(); } },
+                      {
+                        icon: <FaPen className="mr-2" />,
+                        label: "Rename",
+                        onClick: () => {
+                          renameRootFolder(folder.id);
+                          closeMenu();
+                        },
+                      },
                       {
                         icon: <FaShare className="mr-2" />,
                         label: "Share / Export…",
@@ -252,7 +278,15 @@ export default function Sidebar() {
                           closeMenu();
                         },
                       },
-                      { icon: <FaTrash className="mr-2" />, label: "Delete", onClick: () => { deleteRootFolder(folder.id); closeMenu(); }, danger: true },
+                      {
+                        icon: <FaTrash className="mr-2" />,
+                        label: "Delete",
+                        onClick: () => {
+                          deleteRootFolder(folder.id);
+                          closeMenu();
+                        },
+                        danger: true,
+                      },
                     ]}
                     theme={theme}
                   />
@@ -305,7 +339,8 @@ export default function Sidebar() {
 /* ------- Root notes ------- */
 function RootNotesList({
   rootNotes,
-  selectRootNote,
+  setCurrentNoteId,
+  clearActiveSelection,
   dotBase,
   dotColor,
   openMenu,
@@ -331,7 +366,10 @@ function RootNotesList({
                   ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
                   : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
               }`}
-            onClick={() => selectRootNote(note.id)}
+            onClick={() => {
+              setCurrentNoteId(note.id);
+              clearActiveSelection();
+            }}
           >
             <span className="flex-1 cursor-pointer">{note.title}</span>
             <button
@@ -349,20 +387,37 @@ function RootNotesList({
                 anchorRef={rootNoteRefs.current[note.id]}
                 onClose={closeMenu}
                 options={[
-                  { icon: <FaPen className="mr-2" />, label: "Rename", onClick: () => { renameRootNote(note.id); closeMenu(); } },
+                  {
+                    icon: <FaPen className="mr-2" />,
+                    label: "Rename",
+                    onClick: () => {
+                      renameRootNote(note.id);
+                      closeMenu();
+                    },
+                  },
                   {
                     icon: <FaShare className="mr-2" />,
                     label: "Share / Export…",
                     onClick: () => {
                       setShareCfg({
                         scopeTitle: `Export: ${note.title}`,
-                        items: [{ id: note.id, type: "note", title: note.title }],
+                        items: [
+                          { id: note.id, type: "note", title: note.title },
+                        ],
                         defaultSelection: [note.id],
                       });
                       closeMenu();
                     },
                   },
-                  { icon: <FaTrash className="mr-2" />, label: "Delete", onClick: () => { deleteRootNote(note.id); closeMenu(); }, danger: true },
+                  {
+                    icon: <FaTrash className="mr-2" />,
+                    label: "Delete",
+                    onClick: () => {
+                      deleteRootNote(note.id);
+                      closeMenu();
+                    },
+                    danger: true,
+                  },
                 ]}
                 theme={theme}
               />
@@ -427,7 +482,11 @@ function ProjectTree({
                 }}
                 style={{ userSelect: "none" }}
               >
-                <i className={`fas fa-chevron-${isExpanded ? "down" : "right"} mr-2 text-xs`} />
+                <i
+                  className={`fas fa-chevron-${
+                    isExpanded ? "down" : "right"
+                  } mr-2 text-xs`}
+                />
                 {proj.name}
               </span>
               <button
@@ -445,7 +504,14 @@ function ProjectTree({
                   anchorRef={projRefs.current[pid]}
                   onClose={closeMenu}
                   options={[
-                    { icon: <FaPen className="mr-2" />, label: "Rename", onClick: () => { renameProject(pid); closeMenu(); } },
+                    {
+                      icon: <FaPen className="mr-2" />,
+                      label: "Rename",
+                      onClick: () => {
+                        renameProject(pid);
+                        closeMenu();
+                      },
+                    },
                     {
                       icon: <FaShare className="mr-2" />,
                       label: "Share / Export…",
@@ -458,7 +524,15 @@ function ProjectTree({
                         closeMenu();
                       },
                     },
-                    { icon: <FaTrash className="mr-2" />, label: "Delete", onClick: () => { deleteProject(pid); closeMenu(); }, danger: true },
+                    {
+                      icon: <FaTrash className="mr-2" />,
+                      label: "Delete",
+                      onClick: () => {
+                        deleteProject(pid);
+                        closeMenu();
+                      },
+                      danger: true,
+                    },
                   ]}
                   theme={theme}
                 />
@@ -468,7 +542,8 @@ function ProjectTree({
             {isExpanded && (
               <ul className="folder-dropdown ml-4 mt-2 space-y-1">
                 {(state.folderMap[pid] || []).map((folder) => {
-                  const isFolderActive = activeFolderId === folder.id && activeProjectId === pid;
+                  const isFolderActive =
+                    activeFolderId === folder.id && activeProjectId === pid;
                   return (
                     <li
                       key={folder.id}
@@ -483,7 +558,10 @@ function ProjectTree({
                         <span
                           className="cursor-pointer font-semibold w-full"
                           onClick={() => {
-                            if (activeFolderId === folder.id && activeProjectId === pid) {
+                            if (
+                              activeFolderId === folder.id &&
+                              activeProjectId === pid
+                            ) {
                               clearActiveSelection();
                             } else {
                               setActiveSelection(pid, folder.id);
@@ -503,29 +581,48 @@ function ProjectTree({
                           <FaEllipsisV />
                         </button>
 
-                        {menu.type === "project-folder" && menu.id === folder.id && (
-                          <ThreeDotMenu
-                            anchorRef={folderRefs.current[folder.id]}
-                            onClose={closeMenu}
-                            options={[
-                              { icon: <FaPen className="mr-2" />, label: "Rename", onClick: () => { renameFolder(pid, folder.id); closeMenu(); } },
-                              {
-                                icon: <FaShare className="mr-2" />,
-                                label: "Share / Export…",
-                                onClick: () => {
-                                  setShareCfg({
-                                    scopeTitle: `Export: ${folder.name}`,
-                                    items: buildItemsForProjectFolder(pid, folder),
-                                    defaultSelection: [],
-                                  });
-                                  closeMenu();
+                        {menu.type === "project-folder" &&
+                          menu.id === folder.id && (
+                            <ThreeDotMenu
+                              anchorRef={folderRefs.current[folder.id]}
+                              onClose={closeMenu}
+                              options={[
+                                {
+                                  icon: <FaPen className="mr-2" />,
+                                  label: "Rename",
+                                  onClick: () => {
+                                    renameFolder(pid, folder.id);
+                                    closeMenu();
+                                  },
                                 },
-                              },
-                              { icon: <FaTrash className="mr-2" />, label: "Delete", onClick: () => { deleteFolder(pid, folder.id); closeMenu(); }, danger: true },
-                            ]}
-                            theme={theme}
-                          />
-                        )}
+                                {
+                                  icon: <FaShare className="mr-2" />,
+                                  label: "Share / Export…",
+                                  onClick: () => {
+                                    setShareCfg({
+                                      scopeTitle: `Export: ${folder.name}`,
+                                      items: buildItemsForProjectFolder(
+                                        pid,
+                                        folder
+                                      ),
+                                      defaultSelection: [],
+                                    });
+                                    closeMenu();
+                                  },
+                                },
+                                {
+                                  icon: <FaTrash className="mr-2" />,
+                                  label: "Delete",
+                                  onClick: () => {
+                                    deleteFolder(pid, folder.id);
+                                    closeMenu();
+                                  },
+                                  danger: true,
+                                },
+                              ]}
+                              theme={theme}
+                            />
+                          )}
                       </div>
                     </li>
                   );

@@ -1,10 +1,11 @@
 // src/components/BottomBar.js
-import React, { useRef, useState, useMemo } from "react";
+import React, { useRef, useState, useMemo, useEffect } from "react";
 import { FaPlus, FaCamera, FaArrowUp, FaStar, FaUndo } from "react-icons/fa";
 import VoiceButton from "./VoiceButton";
 import VoiceLanguageSelect from "./VoiceLanguageSelect";
 import { useRefine } from "../hooks/useRefine";
 import { useTranscription } from "../hooks/useTranscription";
+import { useAppState } from "../context/AppStateContext"; // NEW
 import exifr from "exifr";
 
 // ---------- canvas helpers for stamped image ----------
@@ -63,8 +64,15 @@ export default function BottomBar({
   const [transcribeStatus, setTranscribeStatus] = useState("idle"); // idle|recording|stopping|transcribing
   const [transcribeError, setTranscribeError] = useState("");
 
-  // Voice language
+  // Voice language (component state mirrors per-note memory)
   const [transcribeLang, setTranscribeLang] = useState("auto");
+
+  // NEW: get current note id + per-note language memory helpers
+  const {
+    currentNoteId,
+    getNoteVoiceLanguage,
+    setNoteVoiceLanguage,
+  } = useAppState();
 
   // Refs
   const fileInputRef = useRef(null);
@@ -89,17 +97,35 @@ export default function BottomBar({
     );
   }, []);
 
+  // ---------- NEW: sync per-note language into/out of component ----------
+  useEffect(() => {
+    // When the selected note changes, load its saved language (default "auto")
+    if (currentNoteId) {
+      const saved = getNoteVoiceLanguage(currentNoteId) || "auto";
+      setTranscribeLang(saved);
+    } else {
+      // No note selected: keep the selector on "auto" visually
+      setTranscribeLang("auto");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentNoteId]);
+
+  const handleLanguageChange = (val) => {
+    setTranscribeLang(val);
+    if (currentNoteId) {
+      setNoteVoiceLanguage(currentNoteId, val); // persist per-note
+    }
+  };
+  // ---------------------------------------------------------------------
+
   // ---------------- EXIF / GPS helpers (unchanged content omitted for brevity) ----------------
   async function getExifGeoAndTime(file) {
     try {
       const gps = await exifr.gps(file).catch(() => null);
-      const tags = await exifr
-        .parse(file, ["DateTimeOriginal"])
-        .catch(() => null);
+      const tags = await exifr.parse(file, ["DateTimeOriginal"]).catch(() => null);
       const lat = gps?.latitude ?? null;
       const lon = gps?.longitude ?? null;
-      const exifDate =
-        tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
+      const exifDate = tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
       return { lat, lon, exifDate, altitude: gps?.altitude ?? null };
     } catch {
       return { lat: null, lon: null, exifDate: null, altitude: null };
@@ -126,19 +152,13 @@ export default function BottomBar({
   function getBrowserGeo(timeoutMs = 8000) {
     return new Promise((resolve) => {
       if (!navigator?.geolocation?.getCurrentPosition) return resolve(null);
-      const opts = {
-        enableHighAccuracy: true,
-        timeout: timeoutMs,
-        maximumAge: 0,
-      };
+      const opts = { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 };
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const { latitude, longitude, accuracy, altitude, speed } =
-            pos.coords || {};
+          const { latitude, longitude, accuracy, altitude, speed } = pos.coords || {};
           if (typeof latitude === "number" && typeof longitude === "number") {
             resolve({
-              lat: latitude,
-              lon: longitude,
+              lat: latitude, lon: longitude,
               acc: accuracy ?? null,
               alt: typeof altitude === "number" ? altitude : null,
               spd: typeof speed === "number" ? speed : null,
@@ -160,8 +180,7 @@ export default function BottomBar({
       if (!res.ok) return null;
       const data = await res.json();
       const a = data?.address || {};
-      const line1 =
-        [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
+      const line1 = [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
       const line2 = a.suburb || a.neighbourhood || a.locality || null;
       const line3 = a.city || a.town || a.village || a.county || null;
       const line4 = a.state || a.region || a.province || null;
@@ -174,23 +193,11 @@ export default function BottomBar({
   async function buildStampedImageBLOB(file) {
     const originalURL = URL.createObjectURL(file);
     let img;
-    try {
-      img = await loadImageFromBlobURL(originalURL);
-    } finally {
-      URL.revokeObjectURL(originalURL);
-    }
+    try { img = await loadImageFromBlobURL(originalURL); }
+    finally { URL.revokeObjectURL(originalURL); }
 
-    const {
-      lat: exifLat,
-      lon: exifLon,
-      exifDate,
-      altitude: exifAlt,
-    } = await getExifGeoAndTime(file);
-    let lat = exifLat,
-      lon = exifLon,
-      acc = null,
-      alt = exifAlt,
-      spdMs = null;
+    const { lat: exifLat, lon: exifLon, exifDate, altitude: exifAlt } = await getExifGeoAndTime(file);
+    let lat = exifLat, lon = exifLon, acc = null, alt = exifAlt, spdMs = null;
 
     if (lat == null || lon == null || alt == null) {
       const browserGeo = await getBrowserGeo(8000);
@@ -203,8 +210,7 @@ export default function BottomBar({
       }
     }
 
-    const indexNo =
-      (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
+    const indexNo = (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
     localStorage.setItem("sitewise_photo_index", String(indexNo));
 
     const networkDt = exifDate || new Date();
@@ -215,15 +221,10 @@ export default function BottomBar({
     let addrLines = null;
     if (lat != null && lon != null) addrLines = await reverseGeocode(lat, lon);
 
-    const coordStr =
-      lat != null && lon != null
-        ? `${lat.toFixed(6)}, ${lon.toFixed(6)}`
-        : null;
+    const coordStr = lat != null && lon != null ? `${lat.toFixed(6)}, ${lon.toFixed(6)}` : null;
     let altDisplay = "n/a";
-    if (typeof alt === "number" && isFinite(alt) && Math.abs(alt) >= 1)
-      altDisplay = `${alt.toFixed(1)}m`;
-    const spdDisplay =
-      typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
+    if (typeof alt === "number" && isFinite(alt) && Math.abs(alt) >= 1) altDisplay = `${alt.toFixed(1)}m`;
+    const spdDisplay = typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
 
     const lines = [`network: ${networkStr}`, `Local: ${localStr}`];
     if (addrLines && addrLines.length) lines.push(...addrLines);
@@ -233,19 +234,16 @@ export default function BottomBar({
     lines.push(`index number ${indexNo}`);
 
     // canvas
-    const maxW = img.width,
-      maxH = img.height;
+    const maxW = img.width, maxH = img.height;
     const canvas = document.createElement("canvas");
-    canvas.width = maxW;
-    canvas.height = maxH;
+    canvas.width = maxW; canvas.height = maxH;
     const ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = true;
 
     ctx.drawImage(img, 0, 0, maxW, maxH);
 
     // left panel
-    const padX = 10,
-      padY = 10;
+    const padX = 10, padY = 10;
     const boxW = Math.round(Math.min(0.35 * maxW, 400));
     const fontSize = Math.max(12, Math.round(maxW * 0.012));
     ctx.font = `${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
@@ -253,8 +251,7 @@ export default function BottomBar({
 
     const lineHeight = Math.round(fontSize * 1.25);
     const wrapped = [];
-    for (const raw of lines)
-      wrapped.push(...wrapTextLines(ctx, raw, boxW - padX * 2));
+    for (const raw of lines) wrapped.push(...wrapTextLines(ctx, raw, boxW - padX * 2));
     const textH = wrapped.length * lineHeight;
     const boxH = textH + padY * 2;
 
@@ -268,26 +265,19 @@ export default function BottomBar({
 
     ctx.fillStyle = "#fff";
     let ty = boxY + padY;
-    for (const l of wrapped) {
-      ctx.fillText(l, boxX + padX, ty);
-      ty += lineHeight;
-    }
+    for (const l of wrapped) { ctx.fillText(l, boxX + padX, ty); ty += lineHeight; }
 
     // bottom-right static map
     if (lat != null && lon != null) {
       try {
         const marker = `color:red%7C${lat},${lon}`;
-        const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(
-          /\/$/,
-          ""
-        );
+        const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(/\/$/, "");
         const url = `${API_BASE}/api/map/static?center=${lat},${lon}&zoom=10&size=220x220&maptype=roadmap&markers=${marker}`;
         const resp = await fetch(url);
         if (resp.ok) {
           const blob = await resp.blob();
           let bitmap = null;
-          if ("createImageBitmap" in window)
-            bitmap = await createImageBitmap(blob);
+          if ("createImageBitmap" in window) bitmap = await createImageBitmap(blob);
           else {
             const mapURL = URL.createObjectURL(blob);
             const mapImg = await loadImageFromBlobURL(mapURL);
@@ -296,8 +286,7 @@ export default function BottomBar({
           }
           const MAP_REL = 0.22;
           const mapSize = Math.round(Math.min(maxW, maxH) * MAP_REL);
-          const mapW = mapSize,
-            mapH = mapSize;
+          const mapW = mapSize, mapH = mapSize;
           const mx = maxW - mapW - 10;
           const my = Math.max(10, maxH - mapH - 10);
           ctx.save();
@@ -305,10 +294,8 @@ export default function BottomBar({
           ctx.fillStyle = "rgba(0,0,0,0.25)";
           ctx.fill();
           ctx.restore();
-          if (bitmap instanceof ImageBitmap) {
-            ctx.drawImage(bitmap, mx, my, mapW, mapH);
-            bitmap.close?.();
-          } else ctx.drawImage(bitmap, mx, my, mapW, mapH);
+          if (bitmap instanceof ImageBitmap) { ctx.drawImage(bitmap, mx, my, mapW, mapH); bitmap.close?.(); }
+          else ctx.drawImage(bitmap, mx, my, mapW, mapH);
         }
       } catch {}
     }
@@ -330,20 +317,15 @@ export default function BottomBar({
     setTranscribeError("");
   };
 
-  // Files (unchanged handlers omitted for brevity) …
   const handleFilesSelected = async (e) => {
     const files = Array.from(e.target.files || []);
     for (const f of files) {
       if (f.type.startsWith("image/")) {
         const stampedBlob = await buildStampedImageBLOB(f);
         const stampedURL = URL.createObjectURL(stampedBlob);
-        editor
-          ?.chain()
-          .focus()
-          .insertContent(
-            `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-          )
-          .run();
+        editor?.chain().focus().insertContent(
+          `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+        ).run();
         continue;
       }
       if (f.type === "application/pdf") {
@@ -352,13 +334,9 @@ export default function BottomBar({
         setTimeout(() => URL.revokeObjectURL(url), 15000);
       } else {
         const url = URL.createObjectURL(f);
-        editor
-          ?.chain()
-          .focus()
-          .insertContent(
-            `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-          )
-          .run();
+        editor?.chain().focus().insertContent(
+          `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
+        ).run();
         setTimeout(() => URL.revokeObjectURL(url), 15000);
       }
     }
@@ -370,26 +348,18 @@ export default function BottomBar({
     if (!f) return;
     if (!f.type.startsWith("image/")) {
       const url = URL.createObjectURL(f);
-      editor
-        ?.chain()
-        .focus()
-        .insertContent(
-          `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-        )
-        .run();
+      editor?.chain().focus().insertContent(
+        `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
+      ).run();
       setTimeout(() => URL.revokeObjectURL(url), 15000);
       e.target.value = "";
       return;
     }
     const stampedBlob = await buildStampedImageBLOB(f);
     const stampedURL = URL.createObjectURL(stampedBlob);
-    editor
-      ?.chain()
-      .focus()
-      .insertContent(
-        `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-      )
-      .run();
+    editor?.chain().focus().insertContent(
+      `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+    ).run();
     e.target.value = "";
   };
 
@@ -397,8 +367,7 @@ export default function BottomBar({
   const pickMimeType = () => {
     const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
     for (const type of candidates) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type))
-        return type;
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type)) return type;
     }
     return "";
   };
@@ -411,9 +380,7 @@ export default function BottomBar({
       const mimeType = pickMimeType();
       const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       chunksRef.current = [];
-      mr.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
-      };
+      mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
       mr.onstop = null;
       mr.start();
       mediaRecorderRef.current = mr;
@@ -425,8 +392,7 @@ export default function BottomBar({
   };
 
   const stopRecording = async () => {
-    if (transcribeStatus !== "recording" || !mediaRecorderRef.current)
-      return null;
+    if (transcribeStatus !== "recording" || !mediaRecorderRef.current) return null;
     setTranscribeStatus("stopping");
     return new Promise((resolve) => {
       mediaRecorderRef.current.onstop = () => {
@@ -441,8 +407,7 @@ export default function BottomBar({
 
   const handleVoiceClick = async () => {
     if (disabled || !editor || !hasMediaDevices) {
-      if (!hasMediaDevices)
-        setTranscribeError("Microphone not available in this browser.");
+      if (!hasMediaDevices) setTranscribeError("Microphone not available in this browser.");
       return;
     }
     if (transcribeStatus === "idle") {
@@ -457,21 +422,16 @@ export default function BottomBar({
         return;
       }
       const url = URL.createObjectURL(blob);
-      editor
-        .chain()
-        .focus()
-        .insertContent(
-          `<p><audio controls src="${url}" preload="metadata"></audio></p>`
-        )
-        .run();
+      editor.chain().focus().insertContent(
+        `<p><audio controls src="${url}" preload="metadata"></audio></p>`
+      ).run();
 
       setTranscribeStatus("transcribing");
       try {
         const text = await transcribeBlob(blob, transcribeLang);
         setTranscribeStatus("idle");
         if (text) {
-          if (refinedDraft != null)
-            setRefinedDraft((p) => (p ? `${p} ${text}` : text));
+          if (refinedDraft != null) setRefinedDraft((p) => (p ? `${p} ${text}` : text));
           else setInput((p) => (p ? `${p} ${text}` : text));
         } else {
           setTranscribeError("Empty transcription");
@@ -520,11 +480,7 @@ export default function BottomBar({
       >
         <textarea
           className="w-full resize-none bg-transparent outline-none text-sm text-black dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-          placeholder={
-            transcribeStatus === "transcribing"
-              ? "Transcribing…"
-              : "Type, dictate, or refine with AI…"
-          }
+          placeholder={transcribeStatus === "transcribing" ? "Transcribing…" : "Type, dictate, or refine with AI…"}
           rows={5}
           disabled={disabled}
           value={currentText}
@@ -548,10 +504,10 @@ export default function BottomBar({
 
         {/* Status row */}
         <div className="absolute left-3 bottom-2 flex items-center gap-3">
-          {/* Language selector */}
+          {/* Language selector (per-note memory) */}
           <VoiceLanguageSelect
             value={transcribeLang}
-            onChange={setTranscribeLang}
+            onChange={handleLanguageChange}  // NEW
             disabled={isDisabled}
           />
 
@@ -605,10 +561,7 @@ export default function BottomBar({
             <FaCamera />
           </button>
 
-          <div
-            className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200"
-            title="Record voice"
-          >
+          <div className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200" title="Record voice">
             <VoiceButton
               phase={transcribeStatus}
               disabled={disabled || !hasMediaDevices}

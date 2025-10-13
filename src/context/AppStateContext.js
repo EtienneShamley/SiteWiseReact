@@ -3,28 +3,21 @@ import React, { createContext, useContext, useState, useEffect } from "react";
 
 export const AppStateContext = createContext();
 
-/** ---------------- TEST RESET (dev only) ----------------
- * If REACT_APP_TEST_RESET=1, clear our client-side storage
- * on each page load so names/counters restart and notes disappear.
- * This runs before we read anything from localStorage.
- */
-const TEST_RESET = process.env.REACT_APP_TEST_RESET === "1";
-if (TEST_RESET) {
-  try {
-    localStorage.removeItem("sitewise-counters-v1");
-    localStorage.removeItem("sitewise-notes");
-    localStorage.removeItem("sitewise_photo_index");
-    // add any other app keys here if you introduce them later
-  } catch {}
-}
-/** ------------------------------------------------------ */
-
+/** Naming counters persisted locally */
 const COUNTERS_KEY = "sitewise-counters-v1";
+
+/** NEW: per-note voice language memory (noteId -> "en" | "auto" | ...) */
+const VOICE_LANG_KEY = "sitewise-note-voice-lang-v1";
+
+/** In test mode, clear local storage on load (you already wired this for counters). */
+const TEST_RESET = String(process.env.REACT_APP_TEST_RESET || "") === "1";
 
 function loadCounters() {
   try {
-    const raw = localStorage.getItem(COUNTERS_KEY);
-    if (raw) return JSON.parse(raw);
+    if (!TEST_RESET) {
+      const raw = localStorage.getItem(COUNTERS_KEY);
+      if (raw) return JSON.parse(raw);
+    }
   } catch {}
   return {
     // global
@@ -37,9 +30,22 @@ function loadCounters() {
     rootFolderNote: {},   // { [rootFolderId]: count } Note # inside each root folder
   };
 }
-
 function saveCounters(c) {
   try { localStorage.setItem(COUNTERS_KEY, JSON.stringify(c)); } catch {}
+}
+
+/** NEW: voice language map load/save */
+function loadVoiceLangMap() {
+  try {
+    if (!TEST_RESET) {
+      const raw = localStorage.getItem(VOICE_LANG_KEY);
+      if (raw) return JSON.parse(raw) || {};
+    }
+  } catch {}
+  return {};
+}
+function saveVoiceLangMap(map) {
+  try { localStorage.setItem(VOICE_LANG_KEY, JSON.stringify(map)); } catch {}
 }
 
 export function AppStateProvider({ children }) {
@@ -58,8 +64,36 @@ export function AppStateProvider({ children }) {
 
   // -------- Naming counters --------
   const [counters, setCounters] = useState(loadCounters);
-
   useEffect(() => { saveCounters(counters); }, [counters]);
+
+  // -------- NEW: Note-specific voice language memory --------
+  const [noteVoiceLangMap, setNoteVoiceLangMap] = useState(loadVoiceLangMap);
+  useEffect(() => { saveVoiceLangMap(noteVoiceLangMap); }, [noteVoiceLangMap]);
+
+  /** NEW: read the saved language for a note (defaults to "auto") */
+  function getNoteVoiceLanguage(nid) {
+    return (nid && noteVoiceLangMap[nid]) || "auto";
+  }
+  /** NEW: set/save language for a note */
+  function setNoteVoiceLanguage(nid, lang) {
+    if (!nid) return;
+    setNoteVoiceLangMap(prev => {
+      const next = { ...prev, [nid]: lang || "auto" };
+      saveVoiceLangMap(next);
+      return next;
+    });
+  }
+  /** NEW: cleanup when a note is deleted */
+  function removeNoteVoiceLanguage(nid) {
+    if (!nid) return;
+    setNoteVoiceLangMap(prev => {
+      if (!(nid in prev)) return prev;
+      const next = { ...prev };
+      delete next[nid];
+      saveVoiceLangMap(next);
+      return next;
+    });
+  }
 
   // helpers to increment & get scoped numbers
   const nextGlobal = (key) => {
@@ -70,15 +104,12 @@ export function AppStateProvider({ children }) {
       return out;
     });
   };
-
   const getGlobal = (key) => (counters[key] || 0) + 1;
-
   const getAndBumpGlobal = (key) => {
     const n = getGlobal(key);
     nextGlobal(key);
     return n;
   };
-
   const getAndBumpScoped = (mapKey, id) => {
     const curr = counters[mapKey]?.[id] || 0;
     const next = curr + 1;
@@ -145,6 +176,7 @@ export function AppStateProvider({ children }) {
     if (!window.confirm("Delete this note?")) return;
     setRootNotes((prev) => prev.filter((note) => note.id !== nid));
     if (currentNoteId === nid) setCurrentNoteId(null);
+    removeNoteVoiceLanguage(nid); // NEW: cleanup
   }
 
   function shareRootNote(nid) {
@@ -185,6 +217,12 @@ export function AppStateProvider({ children }) {
   function deleteProject(pid) {
     if (folderMap[pid]?.length) return alert("Delete folders first.");
     if (!window.confirm("Delete this project?")) return;
+    // Remove any note voice-language in this project's folders
+    try {
+      const folders = folderMap[pid] || [];
+      const allNotes = folders.flatMap(f => f.notes || []);
+      allNotes.forEach(n => removeNoteVoiceLanguage(n.id));
+    } catch {}
     setProjectData((prev) => prev.filter((p) => p.id !== pid));
     setFolderMap((prev) => {
       const copy = { ...prev };
@@ -247,6 +285,12 @@ export function AppStateProvider({ children }) {
 
   function deleteFolder(pid, fid) {
     if (!window.confirm("Delete this folder?")) return;
+    // cleanup note voice languages within folder
+    try {
+      const folders = folderMap[pid] || [];
+      const folder = folders.find(f => f.id === fid);
+      (folder?.notes || []).forEach(n => removeNoteVoiceLanguage(n.id));
+    } catch {}
     setFolderMap((prev) => ({
       ...prev,
       [pid]: prev[pid].filter((f) => f.id !== fid),
@@ -323,6 +367,11 @@ export function AppStateProvider({ children }) {
 
   function deleteRootFolder(fid) {
     if (!window.confirm("Delete this folder?")) return;
+    // cleanup note voice languages within root folder
+    try {
+      const list = rootFolderNotesMap[fid] || [];
+      list.forEach(n => removeNoteVoiceLanguage(n.id));
+    } catch {}
     setRootFolders((prev) => prev.filter((f) => f.id !== fid));
     setRootFolderNotesMap((prev) => {
       const m = { ...prev };
@@ -434,6 +483,7 @@ export function AppStateProvider({ children }) {
 
     // root notes handled by deleteRootNote
     if (currentNoteId === nid) setCurrentNoteId(null);
+    removeNoteVoiceLanguage(nid); // NEW: cleanup
   }
 
   function shareNote(nid) {
@@ -513,6 +563,10 @@ export function AppStateProvider({ children }) {
         renameNote,
         deleteNote,
         shareNote,
+
+        // NEW: per-note voice language memory
+        getNoteVoiceLanguage,
+        setNoteVoiceLanguage,
       }}
     >
       {children}
