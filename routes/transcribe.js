@@ -17,8 +17,8 @@ router.post("/transcribe", upload.single("audio"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No audio uploaded" });
 
-    // Language hint from form-data, default "auto"
-    const language = (req.body?.language || "auto").trim();
+    // Language hint from form-data. "auto" means do not send a language value.
+    const language = (req.body?.language || "auto").toString().trim().toLowerCase();
 
     const mime = req.file.mimetype || "application/octet-stream";
     const ext =
@@ -31,19 +31,23 @@ router.post("/transcribe", upload.single("audio"), async (req, res) => {
 
     let text = "";
     try {
+      // Primary: 4o-mini-transcribe (auto-detects language internally)
       const r1 = await openai.audio.transcriptions.create({
         model: "gpt-4o-mini-transcribe",
         file,
-        // many OpenAI transcription models ignore unknown params; harmless if not supported
-        ...(language && language !== "auto" ? { language } : {}),
+        // Most models ignore unknown params; we omit language so it truly auto-detects.
       });
       text = r1?.text || r1?.data?.text || "";
     } catch (e) {
-      const r2 = await openai.audio.transcriptions.create({
+      // Fallback: whisper-1 (supports optional language ISO-639-1)
+      const opts = {
         model: "whisper-1",
         file,
-        ...(language && language !== "auto" ? { language } : {}),
-      });
+      };
+      if (language && language !== "auto") {
+        opts.language = language; // e.g., "en", "es", "tl"
+      }
+      const r2 = await openai.audio.transcriptions.create(opts);
       text = r2?.text || r2?.data?.text || "";
     }
 

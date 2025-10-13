@@ -3,6 +3,22 @@ import React, { createContext, useContext, useState, useEffect } from "react";
 
 export const AppStateContext = createContext();
 
+/** ---------------- TEST RESET (dev only) ----------------
+ * If REACT_APP_TEST_RESET=1, clear our client-side storage
+ * on each page load so names/counters restart and notes disappear.
+ * This runs before we read anything from localStorage.
+ */
+const TEST_RESET = process.env.REACT_APP_TEST_RESET === "1";
+if (TEST_RESET) {
+  try {
+    localStorage.removeItem("sitewise-counters-v1");
+    localStorage.removeItem("sitewise-notes");
+    localStorage.removeItem("sitewise_photo_index");
+    // add any other app keys here if you introduce them later
+  } catch {}
+}
+/** ------------------------------------------------------ */
+
 const COUNTERS_KEY = "sitewise-counters-v1";
 
 function loadCounters() {

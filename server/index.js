@@ -1,3 +1,21 @@
+// --- TEST RESET (wipe on dev server restart) ---
+if (process.env.REACT_APP_TEST_RESET === "1") {
+  // only once per full page load (avoid hot-reload loops)
+  if (!sessionStorage.getItem("sitewise_test_reset_done")) {
+    try {
+      // wipe editor content + counters (add any other keys you use)
+      localStorage.removeItem("sitewise-notes"); // MainArea content
+      localStorage.removeItem("sitewise-counters-v1"); // naming counters
+      localStorage.removeItem("sitewise-share-last-format"); // ShareDialog preference (if used)
+
+      sessionStorage.setItem("sitewise_test_reset_done", "1");
+      // eslint-disable-next-line no-console
+      console.log("[TEST RESET] localStorage cleared");
+    } catch {}
+  }
+}
+// -----------------------------------------------
+
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
