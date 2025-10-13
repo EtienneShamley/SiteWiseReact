@@ -1,5 +1,5 @@
 // src/components/MainArea.js
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
 import { useTheme } from "../context/ThemeContext";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -21,6 +21,7 @@ import FontFamily from "@tiptap/extension-font-family";
 import { TextStyle } from "@tiptap/extension-text-style";
 import Color from "@tiptap/extension-color";
 import FullNoteAIBar from "./FullNoteAIBar";
+import PdfEditorTab from "./editor/PdfEditorTab";
 
 const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
@@ -40,36 +41,41 @@ export default function MainArea() {
     }
   });
 
-  // lightweight snapshots: { [noteId]: [{ts, html}] }
-  const [snapshots, setSnapshots] = useState({}); 
+  // simple in-memory map of PDFs per note: { [noteId]: File }
+  const [notePdfMap, setNotePdfMap] = useState({});
+
+  // Tabs
+  const [activeTab, setActiveTab] = useState("note"); // 'note' | 'pdf'
+
+  // lightweight snapshots
+  const [snapshots, setSnapshots] = useState({});
 
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(docState)); } catch {}
   }, [docState]);
 
-  let noteTitle = null;
-  let noteKey = null;
-
-  if (currentNoteId) {
-    // root notes
-    const root = rootNotes.find((n) => n.id === currentNoteId);
-    if (root) { noteTitle = root.title; noteKey = root.id; }
-
-    // project-folder notes
-    if (!noteTitle && activeProjectId && activeFolderId) {
-      const folder = state.folderMap[activeProjectId]?.find((f) => f.id === activeFolderId);
-      const note = folder?.notes.find((n) => n.id === currentNoteId);
-      if (note) { noteTitle = note.title; noteKey = note.id; }
+  // resolve current note title/id key
+  const { noteTitle, noteKey } = useMemo(() => {
+    let noteTitle = null;
+    let noteKey = null;
+    if (currentNoteId) {
+      const root = rootNotes.find((n) => n.id === currentNoteId);
+      if (root) { noteTitle = root.title; noteKey = root.id; }
+      if (!noteTitle && activeProjectId && activeFolderId) {
+        const folder = state.folderMap[activeProjectId]?.find((f) => f.id === activeFolderId);
+        const note = folder?.notes.find((n) => n.id === currentNoteId);
+        if (note) { noteTitle = note.title; noteKey = note.id; }
+      }
+      if (!noteTitle && activeFolderId && !activeProjectId) {
+        const list = state.rootFolderNotesMap?.[activeFolderId] || [];
+        const note = list.find((n) => n.id === currentNoteId);
+        if (note) { noteTitle = note.title; noteKey = note.id; }
+      }
     }
+    return { noteTitle, noteKey };
+  }, [currentNoteId, rootNotes, state, activeProjectId, activeFolderId]);
 
-    // root-folder notes
-    if (!noteTitle && activeFolderId && !activeProjectId) {
-      const list = state.rootFolderNotesMap?.[activeFolderId] || [];
-      const note = list.find((n) => n.id === currentNoteId);
-      if (note) { noteTitle = note.title; noteKey = note.id; }
-    }
-  }
-
+  // tiptap
   const editor = useEditor(
     {
       extensions: [
@@ -89,9 +95,7 @@ export default function MainArea() {
         },
       },
       onUpdate: ({ editor }) => {
-        if (noteKey) {
-          setDocState((prev) => ({ ...prev, [noteKey]: editor.getHTML() }));
-        }
+        if (noteKey) setDocState((prev) => ({ ...prev, [noteKey]: editor.getHTML() }));
       },
     },
     [noteKey]
@@ -118,99 +122,147 @@ export default function MainArea() {
       }
     }
   }
-  function handleInsertPDFAtCursor(pdfUrl) {
-    if (editor && pdfUrl) {
+  function handleInsertPDF(fileUrlOrObj) {
+    // If we get a File object, store it for the PDF tab and switch
+    if (fileUrlOrObj instanceof File) {
+      if (!noteKey) return;
+      setNotePdfMap((m) => ({ ...m, [noteKey]: fileUrlOrObj }));
+      setActiveTab("pdf");
+      return;
+    }
+    // If it's a blob URL (legacy path), just insert a link into the note
+    if (editor && typeof fileUrlOrObj === "string") {
       editor.chain().focus().insertContent(
-        `<a href="${pdfUrl}" target="_blank" rel="noopener noreferrer">[PDF]</a>`
+        `<a href="${fileUrlOrObj}" target="_blank" rel="noopener noreferrer">[PDF]</a>`
       ).run();
     }
   }
 
-  // --- Snapshots UI ---
+  // snapshots
   const saveSnapshot = () => {
     if (!editor || !noteKey) return;
     const html = editor.getHTML();
     setSnapshots((prev) => {
       const arr = prev[noteKey] ? [...prev[noteKey]] : [];
       arr.push({ ts: Date.now(), html });
-      // keep last 5
-      const trimmed = arr.slice(-5);
-      return { ...prev, [noteKey]: trimmed };
+      return { ...prev, [noteKey]: arr.slice(-5) };
     });
   };
-
   const revertToSnapshot = (ts) => {
     const arr = snapshots[noteKey] || [];
-    const snap = arr.find(s => String(s.ts) === String(ts));
+    const snap = arr.find((s) => String(s.ts) === String(ts));
     if (!snap || !editor) return;
     editor.commands.setContent(snap.html);
   };
-
   const noteSnaps = snapshots[noteKey] || [];
 
   return (
     <main className="flex-1 flex flex-col min-h-screen">
-      <EditorToolbar editor={editor} />
-
-      {/* Whole-note AI bar stays as-is */}
-      <FullNoteAIBar
-        editor={editor}
-        disabled={!noteTitle || !editor}
-        language="auto"
-      />
-
-      {/* Snapshots row (small, unobtrusive) */}
-      <div className="flex items-center gap-2 mb-2">
-        <button
-          className="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-[#333] text-black dark:text-white border border-gray-300 dark:border-[#444]"
-          onClick={saveSnapshot}
-          disabled={!noteTitle || !editor}
-          title="Save a quick snapshot to revert later"
-        >
-          Save snapshot
-        </button>
-        {noteSnaps.length > 0 && (
-          <select
-            className="text-xs rounded border px-2 py-1 bg-white dark:bg-[#1b1b1b] text-black dark:text-white border-gray-300 dark:border-[#444]"
-            onChange={(e) => e.target.value && revertToSnapshot(e.target.value)}
-            defaultValue=""
-            title="Revert to snapshot"
+      {/* Tabs strip */}
+      <div className="flex items-center justify-between mb-2">
+        <EditorToolbar editor={editor} />
+        <div className="flex items-center gap-2">
+          <button
+            className={`px-3 py-1.5 rounded border text-sm ${activeTab === "note" ? "bg-blue-600 text-white border-blue-600" : "bg-white dark:bg-[#222] border-gray-300 dark:border-gray-700"}`}
+            onClick={() => setActiveTab("note")}
           >
-            <option value="" disabled>Revert to…</option>
-            {noteSnaps.slice().reverse().map(s => (
-              <option key={s.ts} value={s.ts}>
-                {new Date(s.ts).toLocaleString()}
-              </option>
-            ))}
-          </select>
-        )}
+            Note
+          </button>
+          <button
+            className={`px-3 py-1.5 rounded border text-sm ${activeTab === "pdf" ? "bg-blue-600 text-white border-blue-600" : "bg-white dark:bg-[#222] border-gray-300 dark:border-gray-700"}`}
+            onClick={() => setActiveTab("pdf")}
+          >
+            PDF
+          </button>
+        </div>
       </div>
 
-      {/* 2-row grid: row 1 scrolls, row 2 is the composer */}
+      {/* Whole-note AI bar stays for Note tab only */}
+      {activeTab === "note" && (
+        <FullNoteAIBar
+          editor={editor}
+          disabled={!noteTitle || !editor}
+          language="auto"
+        />
+      )}
+
+      {/* Snapshots row */}
+      {activeTab === "note" && (
+        <div className="flex items-center gap-2 mb-2">
+          <button
+            className="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-[#333] text-black dark:text-white border border-gray-300 dark:border-[#444]"
+            onClick={saveSnapshot}
+            disabled={!noteTitle || !editor}
+            title="Save a quick snapshot to revert later"
+          >
+            Save snapshot
+          </button>
+          {noteSnaps.length > 0 && (
+            <select
+              className="text-xs rounded border px-2 py-1 bg-white dark:bg-[#1b1b1b] text-black dark:text-white border-gray-300 dark:border-[#444]"
+              onChange={(e) => e.target.value && revertToSnapshot(e.target.value)}
+              defaultValue=""
+              title="Revert to snapshot"
+            >
+              <option value="" disabled>Revert to…</option>
+              {noteSnaps.slice().reverse().map((s) => (
+                <option key={s.ts} value={s.ts}>
+                  {new Date(s.ts).toLocaleString()}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+
+      {/* Content area: Note or PDF */}
       <div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">
         <div
           id="chatWindow"
           className="overflow-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-[#2a2a2a] transition-colors m-0"
         >
-          {noteTitle ? (
-            <EditorContent editor={editor} />
+          {activeTab === "note" ? (
+            noteTitle ? <EditorContent editor={editor} /> : <div className="text-gray-400 px-4 py-10 text-center">No note selected.</div>
           ) : (
-            <div className="text-gray-400 px-4 py-10 text-center">
-              No note selected.
-            </div>
+            <PdfEditorTab
+              noteId={noteKey}
+              initialFile={noteKey ? notePdfMap[noteKey] : null}
+              onExportFlattened={(blob) => {
+                // after exporting, insert a link back in the note for traceability
+                const url = URL.createObjectURL(blob);
+                editor?.chain().focus().insertContent(
+                  `<p><a href="${url}" target="_blank" rel="noopener noreferrer">[Exported PDF]</a></p>`
+                ).run();
+                setActiveTab("note");
+                setTimeout(() => URL.revokeObjectURL(url), 60000);
+              }}
+            />
           )}
         </div>
 
-        {/* Bottom composer */}
-        <div className="bg-white dark:bg-[#2a2a2a] border-t border-gray-300 dark:border-gray-700">
-          <BottomBar
-            editor={editor}
-            onInsertText={handleInsertTextAtCursor}
-            onInsertImage={handleInsertImageAtCursor}
-            onInsertPDF={handleInsertPDFAtCursor}
-            disabled={!noteTitle || !editor}
-          />
-        </div>
+        {/* Bottom composer remains for Note tab; in PDF tab it's hidden */}
+        {activeTab === "note" ? (
+          <div className="bg-white dark:bg-[#2a2a2a] border-t border-gray-300 dark:border-gray-700">
+            <BottomBar
+              editor={editor}
+              onInsertText={handleInsertTextAtCursor}
+              onInsertImage={handleInsertImageAtCursor}
+              onInsertPDF={(fileUrlOrObj) => {
+                // if the user drops a real File (from BottomBar), switch to PDF editor
+                // BottomBar currently passes a Blob URL; upgrade to pass File if available in your flow.
+                if (fileUrlOrObj instanceof File) {
+                  handleInsertPDF(fileUrlOrObj);
+                } else {
+                  // fallback: keep old behavior
+                  handleInsertPDF(fileUrlOrObj);
+                }
+              }}
+              disabled={!noteTitle || !editor}
+            />
+          </div>
+        ) : (
+          <div className="h-0" />
+        )}
       </div>
     </main>
   );
