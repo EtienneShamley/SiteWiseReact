@@ -3,9 +3,10 @@ import React, { useRef, useState, useMemo, useEffect } from "react";
 import { FaPlus, FaCamera, FaArrowUp, FaStar, FaUndo } from "react-icons/fa";
 import VoiceButton from "./VoiceButton";
 import VoiceLanguageSelect from "./VoiceLanguageSelect";
+import StylePresetSelect from "./StylePresetSelect";
 import { useRefine } from "../hooks/useRefine";
 import { useTranscription } from "../hooks/useTranscription";
-import { useAppState } from "../context/AppStateContext"; // NEW
+import { useAppState } from "../context/AppStateContext";
 import exifr from "exifr";
 
 // ---------- canvas helpers for stamped image ----------
@@ -48,12 +49,31 @@ function loadImageFromBlobURL(url) {
 }
 // ------------------------------------------------------
 
+const VOICE_LANG_MEM_KEY = "sitewise-note-voice-lang-v1";
+const STYLE_MEM_KEY = "sitewise-note-style-v1";
+
+function loadMap(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+function saveMap(key, obj) {
+  try {
+    localStorage.setItem(key, JSON.stringify(obj));
+  } catch {}
+}
+
 export default function BottomBar({
   editor,
   onInsertText,
   onInsertPDF,
   disabled = false,
 }) {
+  const { currentNoteId } = useAppState();
+
   // Draft / refine state
   const [input, setInput] = useState("");
   const [refinedDraft, setRefinedDraft] = useState(null);
@@ -64,15 +84,11 @@ export default function BottomBar({
   const [transcribeStatus, setTranscribeStatus] = useState("idle"); // idle|recording|stopping|transcribing
   const [transcribeError, setTranscribeError] = useState("");
 
-  // Voice language (component state mirrors per-note memory)
+  // Voice language (per note memory)
   const [transcribeLang, setTranscribeLang] = useState("auto");
 
-  // NEW: get current note id + per-note language memory helpers
-  const {
-    currentNoteId,
-    getNoteVoiceLanguage,
-    setNoteVoiceLanguage,
-  } = useAppState();
+  // Style preset (per note memory)
+  const [stylePreset, setStylePreset] = useState("concise, professional");
 
   // Refs
   const fileInputRef = useRef(null);
@@ -97,28 +113,36 @@ export default function BottomBar({
     );
   }, []);
 
-  // ---------- NEW: sync per-note language into/out of component ----------
+  // Load per-note memory when note changes
   useEffect(() => {
-    // When the selected note changes, load its saved language (default "auto")
+    const langMap = loadMap(VOICE_LANG_MEM_KEY);
+    const styleMap = loadMap(STYLE_MEM_KEY);
+
     if (currentNoteId) {
-      const saved = getNoteVoiceLanguage(currentNoteId) || "auto";
-      setTranscribeLang(saved);
+      setTranscribeLang(langMap[currentNoteId] || "auto");
+      setStylePreset(styleMap[currentNoteId] || "concise, professional");
     } else {
-      // No note selected: keep the selector on "auto" visually
       setTranscribeLang("auto");
+      setStylePreset("concise, professional");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentNoteId]);
 
-  const handleLanguageChange = (val) => {
-    setTranscribeLang(val);
-    if (currentNoteId) {
-      setNoteVoiceLanguage(currentNoteId, val); // persist per-note
-    }
-  };
-  // ---------------------------------------------------------------------
+  // Persist language/style when changed
+  useEffect(() => {
+    if (!currentNoteId) return;
+    const langMap = loadMap(VOICE_LANG_MEM_KEY);
+    langMap[currentNoteId] = transcribeLang || "auto";
+    saveMap(VOICE_LANG_MEM_KEY, langMap);
+  }, [currentNoteId, transcribeLang]);
 
-  // ---------------- EXIF / GPS helpers (unchanged content omitted for brevity) ----------------
+  useEffect(() => {
+    if (!currentNoteId) return;
+    const styleMap = loadMap(STYLE_MEM_KEY);
+    styleMap[currentNoteId] = stylePreset || "concise, professional";
+    saveMap(STYLE_MEM_KEY, styleMap);
+  }, [currentNoteId, stylePreset]);
+
+  // ---------------- EXIF / GPS helpers ----------------
   async function getExifGeoAndTime(file) {
     try {
       const gps = await exifr.gps(file).catch(() => null);
@@ -233,7 +257,6 @@ export default function BottomBar({
     lines.push(`speed: ${spdDisplay}`);
     lines.push(`index number ${indexNo}`);
 
-    // canvas
     const maxW = img.width, maxH = img.height;
     const canvas = document.createElement("canvas");
     canvas.width = maxW; canvas.height = maxH;
@@ -242,7 +265,6 @@ export default function BottomBar({
 
     ctx.drawImage(img, 0, 0, maxW, maxH);
 
-    // left panel
     const padX = 10, padY = 10;
     const boxW = Math.round(Math.min(0.35 * maxW, 400));
     const fontSize = Math.max(12, Math.round(maxW * 0.012));
@@ -267,7 +289,6 @@ export default function BottomBar({
     let ty = boxY + padY;
     for (const l of wrapped) { ctx.fillText(l, boxX + padX, ty); ty += lineHeight; }
 
-    // bottom-right static map
     if (lat != null && lon != null) {
       try {
         const marker = `color:red%7C${lat},${lon}`;
@@ -445,7 +466,7 @@ export default function BottomBar({
   };
   // ----------------------------------------------------------
 
-  // AI refine (unchanged)
+  // AI refine
   const runRefine = async () => {
     const text = (refinedDraft ?? input).trim();
     if (!text) return;
@@ -453,7 +474,7 @@ export default function BottomBar({
       setBusy(true);
       setTranscribeError("");
       if (originalBeforeRefine == null) setOriginalBeforeRefine(input);
-      const refined = await refineText({ text });
+      const refined = await refineText({ text, style: stylePreset });
       setRefinedDraft(refined);
     } catch (e) {
       alert(e?.message || "Refine failed");
@@ -504,10 +525,14 @@ export default function BottomBar({
 
         {/* Status row */}
         <div className="absolute left-3 bottom-2 flex items-center gap-3">
-          {/* Language selector (per-note memory) */}
           <VoiceLanguageSelect
             value={transcribeLang}
-            onChange={handleLanguageChange}  // NEW
+            onChange={setTranscribeLang}
+            disabled={isDisabled}
+          />
+          <StylePresetSelect
+            value={stylePreset}
+            onChange={setStylePreset}
             disabled={isDisabled}
           />
 
