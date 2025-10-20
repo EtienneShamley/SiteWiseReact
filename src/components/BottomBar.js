@@ -47,6 +47,47 @@ function loadImageFromBlobURL(url) {
 }
 // ------------------------------------------------------
 
+// NEW: build a static map URL (Google if key present, else OpenStreetMap)
+function buildStaticMapURL(lat, lon, sizePx = 240, dpr = 2, zoom = 12) {
+  const width = sizePx;
+  const height = sizePx;
+  const key = process.env.REACT_APP_GOOGLE_MAPS_KEY;
+  if (key) {
+    const scale = dpr >= 2 ? 2 : 1;
+    const marker = `color:red|${lat},${lon}`;
+    return `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lon}&zoom=${zoom}&size=${width}x${height}&scale=${scale}&maptype=roadmap&markers=${encodeURIComponent(
+      marker
+    )}&key=${key}`;
+  }
+  return `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lon}&zoom=${zoom}&size=${width}x${height}&markers=${lat},${lon},lightred1`;
+}
+
+// Try to load an image from a remote URL safely; if it fails, return null (we’ll skip the map)
+async function loadImageWithFallback(src, timeoutMs = 6000) {
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+    const resp = await fetch(src, {
+      signal: controller.signal,
+      mode: "cors",
+      cache: "no-store",
+    });
+    clearTimeout(t);
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = await loadImageFromBlobURL(url);
+      return img;
+    } finally {
+      // release blob URL after we decode into an <img/> memory image
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  } catch {
+    return null;
+  }
+}
+
 const VOICE_LANG_MEM_KEY = "sitewise-note-voice-lang-v1";
 const STYLE_MEM_KEY = "sitewise-note-style-v1";
 
@@ -67,8 +108,8 @@ function saveMap(key, obj) {
 export default function BottomBar({
   editor,
   onInsertText,
-  onInsertPDF,      // legacy
-  onInsertPDFFile,  // NEW: preferred (passes bytes)
+  onInsertPDF, // legacy
+  onInsertPDFFile, // NEW: preferred (passes bytes)
   disabled = false,
 }) {
   const { currentNoteId } = useAppState();
@@ -141,14 +182,17 @@ export default function BottomBar({
     saveMap(STYLE_MEM_KEY, styleMap);
   }, [currentNoteId, stylePreset]);
 
-  // ---------------- EXIF / GPS helpers (unchanged) ----------------
+  // ---------------- EXIF / GPS helpers ----------------
   async function getExifGeoAndTime(file) {
     try {
       const gps = await exifr.gps(file).catch(() => null);
-      const tags = await exifr.parse(file, ["DateTimeOriginal"]).catch(() => null);
+      const tags = await exifr
+        .parse(file, ["DateTimeOriginal"])
+        .catch(() => null);
       const lat = gps?.latitude ?? null;
       const lon = gps?.longitude ?? null;
-      const exifDate = tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
+      const exifDate =
+        tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
       return { lat, lon, exifDate, altitude: gps?.altitude ?? null };
     } catch {
       return { lat: null, lon: null, exifDate: null, altitude: null };
@@ -173,13 +217,19 @@ export default function BottomBar({
   function getBrowserGeo(timeoutMs = 8000) {
     return new Promise((resolve) => {
       if (!navigator?.geolocation?.getCurrentPosition) return resolve(null);
-      const opts = { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 };
+      const opts = {
+        enableHighAccuracy: true,
+        timeout: timeoutMs,
+        maximumAge: 0,
+      };
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const { latitude, longitude, accuracy, altitude, speed } = pos.coords || {};
+          const { latitude, longitude, accuracy, altitude, speed } =
+            pos.coords || {};
           if (typeof latitude === "number" && typeof longitude === "number") {
             resolve({
-              lat: latitude, lon: longitude,
+              lat: latitude,
+              lon: longitude,
               acc: accuracy ?? null,
               alt: typeof altitude === "number" ? altitude : null,
               spd: typeof speed === "number" ? speed : null,
@@ -200,7 +250,8 @@ export default function BottomBar({
       if (!res.ok) return null;
       const data = await res.json();
       const a = data?.address || {};
-      const line1 = [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
+      const line1 =
+        [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
       const line2 = a.suburb || a.neighbourhood || a.locality || null;
       const line3 = a.city || a.town || a.village || a.county || null;
       const line4 = a.state || a.region || a.province || null;
@@ -209,13 +260,76 @@ export default function BottomBar({
       return null;
     }
   }
+
+  // NEW: draw a rounded static map thumbnail (bottom-right).
+  async function drawMapThumbnail(ctx, imgW, imgH, lat, lon) {
+    if (lat == null || lon == null) return;
+
+    // size relative to photo (cap between 140–260 px)
+    const base = Math.round(Math.min(Math.max(imgW * 0.18, 140), 260));
+    const mapSize = base; // square
+    const margin = Math.max(10, Math.round(imgW * 0.01));
+    const x = imgW - mapSize - margin; // top-right
+    const y = imgH - mapSize - margin;
+    const radius = Math.round(mapSize * 0.08);
+    const url = buildStaticMapURL(
+      lat,
+      lon,
+      mapSize,
+      window.devicePixelRatio || 1
+    );
+    const mapImg = await loadImageWithFallback(url);
+    if (!mapImg) return; // don’t fail the stamp
+
+    // Background shadow
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,0.35)";
+    ctx.shadowBlur = Math.max(6, Math.round(mapSize * 0.06));
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 2;
+    roundRectPath(ctx, x, y, mapSize, mapSize, radius);
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.fill();
+    ctx.restore();
+
+    // Clip and draw map
+    ctx.save();
+    roundRectPath(ctx, x, y, mapSize, mapSize, radius);
+    ctx.clip();
+    ctx.drawImage(mapImg, x, y, mapSize, mapSize);
+    ctx.restore();
+
+    // Thin white border
+    ctx.save();
+    roundRectPath(ctx, x, y, mapSize, mapSize, radius);
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.lineWidth = Math.max(2, Math.round(mapSize * 0.02));
+    ctx.stroke();
+    ctx.restore();
+  }
+
   async function buildStampedImageBLOB(file) {
     const originalURL = URL.createObjectURL(file);
     let img;
-    try { img = await loadImageFromBlobURL(originalURL); }
-    finally { URL.revokeObjectURL(originalURL); }
-    const { lat: exifLat, lon: exifLon, exifDate, altitude: exifAlt } = await getExifGeoAndTime(file);
-    let lat = exifLat, lon = exifLon, acc = null, alt = exifAlt, spdMs = null;
+    try {
+      img = await loadImageFromBlobURL(originalURL);
+    } finally {
+      URL.revokeObjectURL(originalURL);
+    }
+
+    const {
+      lat: exifLat,
+      lon: exifLon,
+      exifDate,
+      altitude: exifAlt,
+    } = await getExifGeoAndTime(file);
+
+    // fallback geo if EXIF is missing
+    let lat = exifLat,
+      lon = exifLon,
+      acc = null,
+      alt = exifAlt,
+      spdMs = null;
     if (lat == null || lon == null || alt == null) {
       const browserGeo = await getBrowserGeo(8000);
       if (browserGeo) {
@@ -226,50 +340,86 @@ export default function BottomBar({
         spdMs = browserGeo.spd;
       }
     }
-    const indexNo = (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
+
+    const indexNo =
+      (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
     localStorage.setItem("sitewise_photo_index", String(indexNo));
+
     const networkDt = exifDate || new Date();
     const localDt = new Date();
     const networkStr = formatLocalWithTz(networkDt);
     const localStr = formatLocalWithTz(localDt);
+
     let addrLines = null;
     if (lat != null && lon != null) addrLines = await reverseGeocode(lat, lon);
-    const coordStr = lat != null && lon != null ? `${lat.toFixed(6)}, ${lon.toFixed(6)}` : null;
+
+    const coordStr =
+      lat != null && lon != null
+        ? `${lat.toFixed(6)}, ${lon.toFixed(6)}`
+        : null;
     let altDisplay = "n/a";
-    if (typeof alt === "number" && isFinite(alt) && Math.abs(alt) >= 1) altDisplay = `${alt.toFixed(1)}m`;
-    const spdDisplay = typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
+    if (typeof alt === "number" && isFinite(alt) && Math.abs(alt) >= 1)
+      altDisplay = `${alt.toFixed(1)}m`;
+    const spdDisplay =
+      typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
+
     const lines = [`network: ${networkStr}`, `Local: ${localStr}`];
     if (addrLines && addrLines.length) lines.push(...addrLines);
     if (coordStr) lines.push(`Coordinates: ${coordStr}`);
     lines.push(`Altitude: ${altDisplay}`);
     lines.push(`speed: ${spdDisplay}`);
     lines.push(`index number ${indexNo}`);
+
+    // Canvas base
     const stampedCanvas = document.createElement("canvas");
-    const maxW = img.width, maxH = img.height;
-    stampedCanvas.width = maxW; stampedCanvas.height = maxH;
+    const maxW = img.width,
+      maxH = img.height;
+    stampedCanvas.width = maxW;
+    stampedCanvas.height = maxH;
     const ctx = stampedCanvas.getContext("2d");
     ctx.imageSmoothingEnabled = true;
+
+    // Draw photo
     ctx.drawImage(img, 0, 0, maxW, maxH);
-    const padX = 10, padY = 10;
+
+    // --- NEW: draw static map thumbnail (top-right) if we have coords ---
+    if (lat != null && lon != null) {
+      try {
+        await drawMapThumbnail(ctx, maxW, maxH, lat, lon);
+      } catch {
+        // swallow — map is optional
+      }
+    }
+
+    // Text box (bottom-left)
+    const padX = 10,
+      padY = 10;
     const boxW = Math.round(Math.min(0.35 * maxW, 400));
     const fontSize = Math.max(12, Math.round(maxW * 0.012));
     ctx.font = `${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
     ctx.textBaseline = "top";
     const lineHeight = Math.round(fontSize * 1.25);
     const wrapped = [];
-    for (const raw of lines) wrapped.push(...wrapTextLines(ctx, raw, boxW - padX * 2));
+    for (const raw of lines)
+      wrapped.push(...wrapTextLines(ctx, raw, boxW - padX * 2));
     const textH = wrapped.length * lineHeight;
     const boxH = textH + padY * 2;
     const boxX = 10;
     const boxY = Math.max(10, maxH - boxH - 10);
+
     ctx.save();
     roundRectPath(ctx, boxX, boxY, boxW, boxH, 8);
     ctx.fillStyle = "rgba(0,0,0,0.55)";
     ctx.fill();
     ctx.restore();
+
     ctx.fillStyle = "#fff";
     let ty = boxY + padY;
-    for (const l of wrapped) { ctx.fillText(l, boxX + padX, ty); ty += lineHeight; }
+    for (const l of wrapped) {
+      ctx.fillText(l, boxX + padX, ty);
+      ty += lineHeight;
+    }
+
     const stampedBlob = await new Promise((resolve) =>
       stampedCanvas.toBlob(resolve, "image/png", 0.92)
     );
@@ -293,9 +443,13 @@ export default function BottomBar({
       if (f.type.startsWith("image/")) {
         const stampedBlob = await buildStampedImageBLOB(f);
         const stampedURL = URL.createObjectURL(stampedBlob);
-        editor?.chain().focus().insertContent(
-          `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-        ).run();
+        editor
+          ?.chain()
+          .focus()
+          .insertContent(
+            `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+          )
+          .run();
         continue;
       }
       if (f.type === "application/pdf") {
@@ -304,16 +458,20 @@ export default function BottomBar({
         if (onInsertPDFFile) {
           await onInsertPDFFile({ fileName: f.name, bytes });
         } else if (onInsertPDF) {
-          // Legacy fallback: create a blob URL and insert, but do NOT revoke quickly.
-          const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+          const url = URL.createObjectURL(
+            new Blob([bytes], { type: "application/pdf" })
+          );
           onInsertPDF(url);
         }
-        // Note: do NOT revoke the blob here; the user may return to it in-session.
       } else {
         const url = URL.createObjectURL(f);
-        editor?.chain().focus().insertContent(
-          `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-        ).run();
+        editor
+          ?.chain()
+          .focus()
+          .insertContent(
+            `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
+          )
+          .run();
         setTimeout(() => URL.revokeObjectURL(url), 15000);
       }
     }
@@ -325,18 +483,26 @@ export default function BottomBar({
     if (!f) return;
     if (!f.type.startsWith("image/")) {
       const url = URL.createObjectURL(f);
-      editor?.chain().focus().insertContent(
-        `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-      ).run();
+      editor
+        ?.chain()
+        .focus()
+        .insertContent(
+          `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
+        )
+        .run();
       setTimeout(() => URL.revokeObjectURL(url), 15000);
       e.target.value = "";
       return;
     }
     const stampedBlob = await buildStampedImageBLOB(f);
     const stampedURL = URL.createObjectURL(stampedBlob);
-    editor?.chain().focus().insertContent(
-      `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-    ).run();
+    editor
+      ?.chain()
+      .focus()
+      .insertContent(
+        `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+      )
+      .run();
     e.target.value = "";
   };
 
@@ -344,7 +510,8 @@ export default function BottomBar({
   const pickMimeType = () => {
     const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
     for (const type of candidates) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type)) return type;
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type))
+        return type;
     }
     return "";
   };
@@ -356,7 +523,9 @@ export default function BottomBar({
       const mimeType = pickMimeType();
       const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       chunksRef.current = [];
-      mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      };
       mr.onstop = null;
       mr.start();
       mediaRecorderRef.current = mr;
@@ -367,7 +536,8 @@ export default function BottomBar({
     }
   };
   const stopRecording = async () => {
-    if (transcribeStatus !== "recording" || !mediaRecorderRef.current) return null;
+    if (transcribeStatus !== "recording" || !mediaRecorderRef.current)
+      return null;
     setTranscribeStatus("stopping");
     return new Promise((resolve) => {
       mediaRecorderRef.current.onstop = () => {
@@ -381,7 +551,8 @@ export default function BottomBar({
   };
   const handleVoiceClick = async () => {
     if (disabled || !editor || !hasMediaDevices) {
-      if (!hasMediaDevices) setTranscribeError("Microphone not available in this browser.");
+      if (!hasMediaDevices)
+        setTranscribeError("Microphone not available in this browser.");
       return;
     }
     if (transcribeStatus === "idle") {
@@ -396,15 +567,20 @@ export default function BottomBar({
         return;
       }
       const url = URL.createObjectURL(blob);
-      editor.chain().focus().insertContent(
-        `<p><audio controls src="${url}" preload="metadata"></audio></p>`
-      ).run();
+      editor
+        .chain()
+        .focus()
+        .insertContent(
+          `<p><audio controls src="${url}" preload="metadata"></audio></p>`
+        )
+        .run();
       setTranscribeStatus("transcribing");
       try {
         const text = await transcribeBlob(blob, transcribeLang);
         setTranscribeStatus("idle");
         if (text) {
-          if (refinedDraft != null) setRefinedDraft((p) => (p ? `${p} ${text}` : text));
+          if (refinedDraft != null)
+            setRefinedDraft((p) => (p ? `${p} ${text}` : text));
           else setInput((p) => (p ? `${p} ${text}` : text));
         } else {
           setTranscribeError("Empty transcription");
@@ -453,7 +629,11 @@ export default function BottomBar({
       >
         <textarea
           className="w-full resize-none bg-transparent outline-none text-sm text-black dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-          placeholder={transcribeStatus === "transcribing" ? "Transcribing…" : "Type, dictate, or refine with AI…"}
+          placeholder={
+            transcribeStatus === "transcribing"
+              ? "Transcribing…"
+              : "Type, dictate, or refine with AI…"
+          }
           rows={5}
           disabled={disabled}
           value={currentText}
@@ -538,7 +718,10 @@ export default function BottomBar({
             <FaCamera />
           </button>
 
-          <div className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200" title="Record voice">
+          <div
+            className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200"
+            title="Record voice"
+          >
             <VoiceButton
               phase={transcribeStatus}
               disabled={disabled || !hasMediaDevices}

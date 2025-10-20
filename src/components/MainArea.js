@@ -321,26 +321,29 @@ export default function MainArea() {
         </div>
       </div>
 
-      {/* Content area: Note or PDF */}
+      {/* Content area: keep BOTH views mounted; hide inactive with display:none */}
       <div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">
         <div
           id="chatWindow"
           className="overflow-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-[#2a2a2a] transition-colors m-0"
         >
-          {activeTab === "note" ? (
-            noteTitle ? (
+          {/* NOTE VIEW (always mounted) */}
+          <div style={{ display: activeTab === "note" ? "block" : "none" }}>
+            {noteTitle ? (
               <EditorContent editor={editor} />
             ) : (
               <div className="text-gray-400 px-4 py-10 text-center">
                 No note selected.
               </div>
-            )
-          ) : (
+            )}
+          </div>
+
+          {/* PDF VIEW (always mounted) */}
+          <div style={{ display: activeTab === "pdf" ? "block" : "none" }}>
             <PdfEditorTab
               noteId={noteKey}
               initialFile={noteKey ? notePdfMap[noteKey] : null}
               onExportFlattened={(blob) => {
-                // after exporting, insert a link back in the note for traceability
                 const url = URL.createObjectURL(blob);
                 editor
                   ?.chain()
@@ -353,31 +356,28 @@ export default function MainArea() {
                 setTimeout(() => URL.revokeObjectURL(url), 60000);
               }}
             />
-          )}
+          </div>
         </div>
 
-        {/* Bottom composer remains for Note tab; in PDF tab it's hidden */}
-        {activeTab === "note" ? (
-          <div className="bg-white dark:bg-[#2a2a2a] border-t border-gray-300 dark:border-gray-700">
-            <BottomBar
-              editor={editor}
-              onInsertText={handleInsertTextAtCursor}
-              onInsertImage={handleInsertImageAtCursor}
-              onInsertPDF={(fileUrlOrObj) => {
-                // if the user drops a real File (from BottomBar), switch to PDF editor
-                if (fileUrlOrObj instanceof File) {
-                  handleInsertPDF(fileUrlOrObj);
-                } else {
-                  // fallback: keep old behavior
-                  handleInsertPDF(fileUrlOrObj);
-                }
-              }}
-              disabled={!noteTitle || !editor}
-            />
-          </div>
-        ) : (
-          <div className="h-0" />
-        )}
+        {/* Bottom composer remains for Note tab; hide when PDF tab is active */}
+        <div
+          className="bg-white dark:bg-[#2a2a2a] border-t border-gray-300 dark:border-gray-700"
+          style={{ display: activeTab === "note" ? "block" : "none" }}
+        >
+          <BottomBar
+            editor={editor}
+            onInsertText={handleInsertTextAtCursor}
+            onInsertImage={handleInsertImageAtCursor}
+            onInsertPDF={(fileUrlOrObj) => {
+              if (fileUrlOrObj instanceof File) {
+                handleInsertPDF(fileUrlOrObj);
+              } else {
+                handleInsertPDF(fileUrlOrObj);
+              }
+            }}
+            disabled={!noteTitle || !editor}
+          />
+        </div>
       </div>
     </main>
   );
