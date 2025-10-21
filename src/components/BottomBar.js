@@ -1,6 +1,6 @@
 // src/components/BottomBar.js
 import React, { useRef, useState, useMemo, useEffect } from "react";
-import { FaPlus, FaCamera, FaArrowUp, FaStar, FaUndo } from "react-icons/fa";
+import { FaPlus, FaCamera, FaArrowUp, FaStar, FaUndo, FaTrash } from "react-icons/fa"; // NEW: FaTrash
 import VoiceButton from "./VoiceButton";
 import VoiceLanguageSelect from "./VoiceLanguageSelect";
 import StylePresetSelect from "./StylePresetSelect";
@@ -396,6 +396,14 @@ export default function BottomBar({
     setTranscribeError("");
   };
 
+  // NEW: clear the current textarea draft (post-transcription, pre-send)
+  const clearDraft = () => {
+    setRefinedDraft(null);
+    setInput("");
+    setOriginalBeforeRefine(null);
+    setTranscribeError("");
+  };
+
   const handleFilesSelected = async (e) => {
     const files = Array.from(e.target.files || []);
     for (const f of files) {
@@ -447,7 +455,7 @@ export default function BottomBar({
     e.target.value = "";
   };
 
-  // ---------------- Recording (unchanged) ----------------
+  // ---------------- Recording (plus cancel) ----------------
   const pickMimeType = () => {
     const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
     for (const type of candidates) {
@@ -486,6 +494,23 @@ export default function BottomBar({
       mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
     });
   };
+
+  // NEW: cancel recording (trash while recording)
+  const cancelRecording = () => {
+    try {
+      if (mediaRecorderRef.current) {
+        try { mediaRecorderRef.current.onstop = null; } catch {}
+        try { mediaRecorderRef.current.stop(); } catch {}
+        try { mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop()); } catch {}
+      }
+    } finally {
+      chunksRef.current = [];
+      mediaRecorderRef.current = null;
+      setTranscribeStatus("idle");
+      setTranscribeError("");
+    }
+  };
+
   const handleVoiceClick = async () => {
     if (disabled || !editor || !hasMediaDevices) {
       if (!hasMediaDevices) setTranscribeError("Microphone not available in this browser.");
@@ -658,6 +683,18 @@ export default function BottomBar({
             <FaCamera />
           </button>
 
+          {/* NEW: red trash to cancel current recording */}
+          {transcribeStatus === "recording" && (
+            <button
+              type="button"
+              onClick={cancelRecording}
+              title="Discard recording"
+              className="p-2 rounded-full bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 text-red-700 dark:text-red-200"
+            >
+              <FaTrash />
+            </button>
+          )}
+
           <div className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200" title="Record voice">
             <VoiceButton
               phase={transcribeStatus}
@@ -686,6 +723,17 @@ export default function BottomBar({
               <FaUndo />
             </button>
           )}
+
+          {/* NEW: trash to clear current draft (pre-send) */}
+          <button
+            type="button"
+            onClick={clearDraft}
+            disabled={!hasText || isDisabled}
+            title="Clear current message"
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-white dark:bg-[#1b1b1b] text-red-700 dark:text-red-200 border border-gray-300 dark:border-gray-600 disabled:opacity-60"
+          >
+            <FaTrash />
+          </button>
 
           <button
             type="button"
