@@ -9,6 +9,13 @@ import { useTranscription } from "../hooks/useTranscription";
 import { useAppState } from "../context/AppStateContext";
 import exifr from "exifr";
 
+// NEW: coordinate converter (offline-first, proj4-backed)
+import {
+  DEFAULT_COORD_SYSTEM,
+  COORD_SYSTEM_OPTIONS,
+  formatConvertedLineAsync,
+} from "../lib/coordConverter";
+
 // ---------- canvas helpers for stamped image ----------
 function roundRectPath(ctx, x, y, w, h, r) {
   const rr = Math.min(r, w / 2, h / 2);
@@ -47,49 +54,9 @@ function loadImageFromBlobURL(url) {
 }
 // ------------------------------------------------------
 
-// NEW: build a static map URL (Google if key present, else OpenStreetMap)
-function buildStaticMapURL(lat, lon, sizePx = 240, dpr = 2, zoom = 12) {
-  const width = sizePx;
-  const height = sizePx;
-  const key = process.env.REACT_APP_GOOGLE_MAPS_KEY;
-  if (key) {
-    const scale = dpr >= 2 ? 2 : 1;
-    const marker = `color:red|${lat},${lon}`;
-    return `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lon}&zoom=${zoom}&size=${width}x${height}&scale=${scale}&maptype=roadmap&markers=${encodeURIComponent(
-      marker
-    )}&key=${key}`;
-  }
-  return `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lon}&zoom=${zoom}&size=${width}x${height}&markers=${lat},${lon},lightred1`;
-}
-
-// Try to load an image from a remote URL safely; if it fails, return null (we’ll skip the map)
-async function loadImageWithFallback(src, timeoutMs = 6000) {
-  try {
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), timeoutMs);
-    const resp = await fetch(src, {
-      signal: controller.signal,
-      mode: "cors",
-      cache: "no-store",
-    });
-    clearTimeout(t);
-    if (!resp.ok) return null;
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    try {
-      const img = await loadImageFromBlobURL(url);
-      return img;
-    } finally {
-      // release blob URL after we decode into an <img/> memory image
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    }
-  } catch {
-    return null;
-  }
-}
-
 const VOICE_LANG_MEM_KEY = "sitewise-note-voice-lang-v1";
 const STYLE_MEM_KEY = "sitewise-note-style-v1";
+const COORD_SYS_KEY = "sitewise-coord-system-v1"; // per-note memory
 
 function loadMap(key) {
   try {
@@ -108,8 +75,8 @@ function saveMap(key, obj) {
 export default function BottomBar({
   editor,
   onInsertText,
-  onInsertPDF, // legacy
-  onInsertPDFFile, // NEW: preferred (passes bytes)
+  onInsertPDF,      // legacy
+  onInsertPDFFile,  // preferred (bytes)
   disabled = false,
 }) {
   const { currentNoteId } = useAppState();
@@ -129,6 +96,9 @@ export default function BottomBar({
 
   // Style preset (per note memory)
   const [stylePreset, setStylePreset] = useState("concise, professional");
+
+  // NEW: coordinate system state (default Mount Eden 2000)
+  const [coordSystem, setCoordSystem] = useState(DEFAULT_COORD_SYSTEM);
 
   // Refs
   const fileInputRef = useRef(null);
@@ -157,17 +127,20 @@ export default function BottomBar({
   useEffect(() => {
     const langMap = loadMap(VOICE_LANG_MEM_KEY);
     const styleMap = loadMap(STYLE_MEM_KEY);
+    const sysMap = loadMap(COORD_SYS_KEY);
 
     if (currentNoteId) {
       setTranscribeLang(langMap[currentNoteId] || "auto");
       setStylePreset(styleMap[currentNoteId] || "concise, professional");
+      setCoordSystem(sysMap[currentNoteId] || DEFAULT_COORD_SYSTEM);
     } else {
       setTranscribeLang("auto");
       setStylePreset("concise, professional");
+      setCoordSystem(DEFAULT_COORD_SYSTEM);
     }
   }, [currentNoteId]);
 
-  // Persist language/style when changed
+  // Persist language/style/system when changed
   useEffect(() => {
     if (!currentNoteId) return;
     const langMap = loadMap(VOICE_LANG_MEM_KEY);
@@ -182,17 +155,21 @@ export default function BottomBar({
     saveMap(STYLE_MEM_KEY, styleMap);
   }, [currentNoteId, stylePreset]);
 
+  useEffect(() => {
+    if (!currentNoteId) return;
+    const sysMap = loadMap(COORD_SYS_KEY);
+    sysMap[currentNoteId] = coordSystem || DEFAULT_COORD_SYSTEM;
+    saveMap(COORD_SYS_KEY, sysMap);
+  }, [currentNoteId, coordSystem]);
+
   // ---------------- EXIF / GPS helpers ----------------
   async function getExifGeoAndTime(file) {
     try {
       const gps = await exifr.gps(file).catch(() => null);
-      const tags = await exifr
-        .parse(file, ["DateTimeOriginal"])
-        .catch(() => null);
+      const tags = await exifr.parse(file, ["DateTimeOriginal"]).catch(() => null);
       const lat = gps?.latitude ?? null;
       const lon = gps?.longitude ?? null;
-      const exifDate =
-        tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
+      const exifDate = tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
       return { lat, lon, exifDate, altitude: gps?.altitude ?? null };
     } catch {
       return { lat: null, lon: null, exifDate: null, altitude: null };
@@ -217,19 +194,13 @@ export default function BottomBar({
   function getBrowserGeo(timeoutMs = 8000) {
     return new Promise((resolve) => {
       if (!navigator?.geolocation?.getCurrentPosition) return resolve(null);
-      const opts = {
-        enableHighAccuracy: true,
-        timeout: timeoutMs,
-        maximumAge: 0,
-      };
+      const opts = { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 };
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const { latitude, longitude, accuracy, altitude, speed } =
-            pos.coords || {};
+          const { latitude, longitude, accuracy, altitude, speed } = pos.coords || {};
           if (typeof latitude === "number" && typeof longitude === "number") {
             resolve({
-              lat: latitude,
-              lon: longitude,
+              lat: latitude, lon: longitude,
               acc: accuracy ?? null,
               alt: typeof altitude === "number" ? altitude : null,
               spd: typeof speed === "number" ? speed : null,
@@ -250,8 +221,7 @@ export default function BottomBar({
       if (!res.ok) return null;
       const data = await res.json();
       const a = data?.address || {};
-      const line1 =
-        [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
+      const line1 = [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
       const line2 = a.suburb || a.neighbourhood || a.locality || null;
       const line3 = a.city || a.town || a.village || a.county || null;
       const line4 = a.state || a.region || a.province || null;
@@ -261,27 +231,40 @@ export default function BottomBar({
     }
   }
 
-  // NEW: draw a rounded static map thumbnail (bottom-right).
+  // Map thumbnail (bottom-right, zoom 12)
   async function drawMapThumbnail(ctx, imgW, imgH, lat, lon) {
     if (lat == null || lon == null) return;
 
-    // size relative to photo (cap between 140–260 px)
     const base = Math.round(Math.min(Math.max(imgW * 0.18, 140), 260));
-    const mapSize = base; // square
+    const mapSize = base;
     const margin = Math.max(10, Math.round(imgW * 0.01));
-    const x = imgW - mapSize - margin; // top-right
-    const y = imgH - mapSize - margin;
+    const x = imgW - mapSize - margin;
+    const y = imgH - mapSize - margin;   // bottom-right corner
     const radius = Math.round(mapSize * 0.08);
-    const url = buildStaticMapURL(
-      lat,
-      lon,
-      mapSize,
-      window.devicePixelRatio || 1
-    );
-    const mapImg = await loadImageWithFallback(url);
-    if (!mapImg) return; // don’t fail the stamp
 
-    // Background shadow
+    const dpr = window.devicePixelRatio || 1;
+    const width = mapSize;
+    const height = mapSize;
+    const key = process.env.REACT_APP_GOOGLE_MAPS_KEY;
+
+    let url;
+    if (key) {
+      const scale = dpr >= 2 ? 2 : 1;
+      const marker = `color:red|${lat},${lon}`;
+      url = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lon}&zoom=12&size=${width}x${height}&scale=${scale}&maptype=roadmap&markers=${encodeURIComponent(marker)}&key=${key}`;
+    } else {
+      url = `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lon}&zoom=12&size=${width}x${height}&markers=${lat},${lon},lightred1`;
+    }
+
+    const mapImg = await (async () => {
+      try {
+        return await loadImageFromBlobURL(url);
+      } catch {
+        return null;
+      }
+    })();
+    if (!mapImg) return;
+
     ctx.save();
     ctx.shadowColor = "rgba(0,0,0,0.35)";
     ctx.shadowBlur = Math.max(6, Math.round(mapSize * 0.06));
@@ -292,14 +275,12 @@ export default function BottomBar({
     ctx.fill();
     ctx.restore();
 
-    // Clip and draw map
     ctx.save();
     roundRectPath(ctx, x, y, mapSize, mapSize, radius);
     ctx.clip();
     ctx.drawImage(mapImg, x, y, mapSize, mapSize);
     ctx.restore();
 
-    // Thin white border
     ctx.save();
     roundRectPath(ctx, x, y, mapSize, mapSize, radius);
     ctx.strokeStyle = "rgba(255,255,255,0.9)";
@@ -311,25 +292,12 @@ export default function BottomBar({
   async function buildStampedImageBLOB(file) {
     const originalURL = URL.createObjectURL(file);
     let img;
-    try {
-      img = await loadImageFromBlobURL(originalURL);
-    } finally {
-      URL.revokeObjectURL(originalURL);
-    }
+    try { img = await loadImageFromBlobURL(originalURL); }
+    finally { URL.revokeObjectURL(originalURL); }
 
-    const {
-      lat: exifLat,
-      lon: exifLon,
-      exifDate,
-      altitude: exifAlt,
-    } = await getExifGeoAndTime(file);
+    const { lat: exifLat, lon: exifLon, exifDate, altitude: exifAlt } = await getExifGeoAndTime(file);
+    let lat = exifLat, lon = exifLon, acc = null, alt = exifAlt, spdMs = null;
 
-    // fallback geo if EXIF is missing
-    let lat = exifLat,
-      lon = exifLon,
-      acc = null,
-      alt = exifAlt,
-      spdMs = null;
     if (lat == null || lon == null || alt == null) {
       const browserGeo = await getBrowserGeo(8000);
       if (browserGeo) {
@@ -341,8 +309,7 @@ export default function BottomBar({
       }
     }
 
-    const indexNo =
-      (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
+    const indexNo = (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
     localStorage.setItem("sitewise_photo_index", String(indexNo));
 
     const networkDt = exifDate || new Date();
@@ -350,58 +317,50 @@ export default function BottomBar({
     const networkStr = formatLocalWithTz(networkDt);
     const localStr = formatLocalWithTz(localDt);
 
+    // Reverse geocode (best-effort)
     let addrLines = null;
     if (lat != null && lon != null) addrLines = await reverseGeocode(lat, lon);
 
-    const coordStr =
-      lat != null && lon != null
-        ? `${lat.toFixed(6)}, ${lon.toFixed(6)}`
-        : null;
-    let altDisplay = "n/a";
-    if (typeof alt === "number" && isFinite(alt) && Math.abs(alt) >= 1)
-      altDisplay = `${alt.toFixed(1)}m`;
-    const spdDisplay =
-      typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
+    const coordStr = lat != null && lon != null ? `${lat.toFixed(6)}, ${lon.toFixed(6)}` : null;
 
-    const lines = [`network: ${networkStr}`, `Local: ${localStr}`];
+    // NEW: offline conversion under the Coordinates line
+    const convertedStr =
+      lat != null && lon != null
+        ? await formatConvertedLineAsync(coordSystem, lat, lon)
+        : null;
+
+    let altDisplay = "n/a";
+    if (typeof alt === "number" && isFinite(alt) && Math.abs(alt) >= 1) altDisplay = `${alt.toFixed(1)}m`;
+    const spdDisplay = typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
+
+    const lines = [
+      `network: ${networkStr}`,
+      `Local: ${localStr}`,
+    ];
     if (addrLines && addrLines.length) lines.push(...addrLines);
     if (coordStr) lines.push(`Coordinates: ${coordStr}`);
+    if (convertedStr) lines.push(convertedStr); // directly underneath
     lines.push(`Altitude: ${altDisplay}`);
     lines.push(`speed: ${spdDisplay}`);
     lines.push(`index number ${indexNo}`);
 
-    // Canvas base
+    // Prepare canvas and draw
     const stampedCanvas = document.createElement("canvas");
-    const maxW = img.width,
-      maxH = img.height;
-    stampedCanvas.width = maxW;
-    stampedCanvas.height = maxH;
+    const maxW = img.width, maxH = img.height;
+    stampedCanvas.width = maxW; stampedCanvas.height = maxH;
     const ctx = stampedCanvas.getContext("2d");
     ctx.imageSmoothingEnabled = true;
-
-    // Draw photo
     ctx.drawImage(img, 0, 0, maxW, maxH);
 
-    // --- NEW: draw static map thumbnail (top-right) if we have coords ---
-    if (lat != null && lon != null) {
-      try {
-        await drawMapThumbnail(ctx, maxW, maxH, lat, lon);
-      } catch {
-        // swallow — map is optional
-      }
-    }
-
-    // Text box (bottom-left)
-    const padX = 10,
-      padY = 10;
+    // Left info box
+    const padX = 10, padY = 10;
     const boxW = Math.round(Math.min(0.35 * maxW, 400));
     const fontSize = Math.max(12, Math.round(maxW * 0.012));
     ctx.font = `${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
     ctx.textBaseline = "top";
     const lineHeight = Math.round(fontSize * 1.25);
     const wrapped = [];
-    for (const raw of lines)
-      wrapped.push(...wrapTextLines(ctx, raw, boxW - padX * 2));
+    for (const raw of lines) wrapped.push(...wrapTextLines(ctx, raw, boxW - padX * 2));
     const textH = wrapped.length * lineHeight;
     const boxH = textH + padY * 2;
     const boxX = 10;
@@ -415,10 +374,10 @@ export default function BottomBar({
 
     ctx.fillStyle = "#fff";
     let ty = boxY + padY;
-    for (const l of wrapped) {
-      ctx.fillText(l, boxX + padX, ty);
-      ty += lineHeight;
-    }
+    for (const l of wrapped) { ctx.fillText(l, boxX + padX, ty); ty += lineHeight; }
+
+    // Map thumbnail (bottom-right, zoom 12)
+    await drawMapThumbnail(ctx, maxW, maxH, lat, lon);
 
     const stampedBlob = await new Promise((resolve) =>
       stampedCanvas.toBlob(resolve, "image/png", 0.92)
@@ -443,13 +402,9 @@ export default function BottomBar({
       if (f.type.startsWith("image/")) {
         const stampedBlob = await buildStampedImageBLOB(f);
         const stampedURL = URL.createObjectURL(stampedBlob);
-        editor
-          ?.chain()
-          .focus()
-          .insertContent(
-            `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-          )
-          .run();
+        editor?.chain().focus().insertContent(
+          `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+        ).run();
         continue;
       }
       if (f.type === "application/pdf") {
@@ -458,20 +413,14 @@ export default function BottomBar({
         if (onInsertPDFFile) {
           await onInsertPDFFile({ fileName: f.name, bytes });
         } else if (onInsertPDF) {
-          const url = URL.createObjectURL(
-            new Blob([bytes], { type: "application/pdf" })
-          );
+          const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
           onInsertPDF(url);
         }
       } else {
         const url = URL.createObjectURL(f);
-        editor
-          ?.chain()
-          .focus()
-          .insertContent(
-            `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-          )
-          .run();
+        editor?.chain().focus().insertContent(
+          `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
+        ).run();
         setTimeout(() => URL.revokeObjectURL(url), 15000);
       }
     }
@@ -483,26 +432,18 @@ export default function BottomBar({
     if (!f) return;
     if (!f.type.startsWith("image/")) {
       const url = URL.createObjectURL(f);
-      editor
-        ?.chain()
-        .focus()
-        .insertContent(
-          `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-        )
-        .run();
+      editor?.chain().focus().insertContent(
+        `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
+      ).run();
       setTimeout(() => URL.revokeObjectURL(url), 15000);
       e.target.value = "";
       return;
     }
     const stampedBlob = await buildStampedImageBLOB(f);
     const stampedURL = URL.createObjectURL(stampedBlob);
-    editor
-      ?.chain()
-      .focus()
-      .insertContent(
-        `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-      )
-      .run();
+    editor?.chain().focus().insertContent(
+      `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
+    ).run();
     e.target.value = "";
   };
 
@@ -510,8 +451,7 @@ export default function BottomBar({
   const pickMimeType = () => {
     const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
     for (const type of candidates) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type))
-        return type;
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type)) return type;
     }
     return "";
   };
@@ -523,9 +463,7 @@ export default function BottomBar({
       const mimeType = pickMimeType();
       const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       chunksRef.current = [];
-      mr.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
-      };
+      mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
       mr.onstop = null;
       mr.start();
       mediaRecorderRef.current = mr;
@@ -536,8 +474,7 @@ export default function BottomBar({
     }
   };
   const stopRecording = async () => {
-    if (transcribeStatus !== "recording" || !mediaRecorderRef.current)
-      return null;
+    if (transcribeStatus !== "recording" || !mediaRecorderRef.current) return null;
     setTranscribeStatus("stopping");
     return new Promise((resolve) => {
       mediaRecorderRef.current.onstop = () => {
@@ -551,8 +488,7 @@ export default function BottomBar({
   };
   const handleVoiceClick = async () => {
     if (disabled || !editor || !hasMediaDevices) {
-      if (!hasMediaDevices)
-        setTranscribeError("Microphone not available in this browser.");
+      if (!hasMediaDevices) setTranscribeError("Microphone not available in this browser.");
       return;
     }
     if (transcribeStatus === "idle") {
@@ -567,20 +503,15 @@ export default function BottomBar({
         return;
       }
       const url = URL.createObjectURL(blob);
-      editor
-        .chain()
-        .focus()
-        .insertContent(
-          `<p><audio controls src="${url}" preload="metadata"></audio></p>`
-        )
-        .run();
+      editor.chain().focus().insertContent(
+        `<p><audio controls src="${url}" preload="metadata"></audio></p>`
+      ).run();
       setTranscribeStatus("transcribing");
       try {
         const text = await transcribeBlob(blob, transcribeLang);
         setTranscribeStatus("idle");
         if (text) {
-          if (refinedDraft != null)
-            setRefinedDraft((p) => (p ? `${p} ${text}` : text));
+          if (refinedDraft != null) setRefinedDraft((p) => (p ? `${p} ${text}` : text));
           else setInput((p) => (p ? `${p} ${text}` : text));
         } else {
           setTranscribeError("Empty transcription");
@@ -629,11 +560,7 @@ export default function BottomBar({
       >
         <textarea
           className="w-full resize-none bg-transparent outline-none text-sm text-black dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-          placeholder={
-            transcribeStatus === "transcribing"
-              ? "Transcribing…"
-              : "Type, dictate, or refine with AI…"
-          }
+          placeholder={transcribeStatus === "transcribing" ? "Transcribing…" : "Type, dictate, or refine with AI…"}
           rows={5}
           disabled={disabled}
           value={currentText}
@@ -655,7 +582,7 @@ export default function BottomBar({
           style={{ height: 120, maxHeight: 320, overflow: "auto" }}
         />
 
-        {/* Status row */}
+        {/* Status row (left) */}
         <div className="absolute left-3 bottom-2 flex items-center gap-3">
           <VoiceLanguageSelect
             value={transcribeLang}
@@ -667,6 +594,19 @@ export default function BottomBar({
             onChange={setStylePreset}
             disabled={isDisabled}
           />
+
+          {/* NEW: converter dropdown (no label, no button) */}
+          <select
+            className="text-xs rounded border px-2 py-1 bg-white dark:bg-[#1b1b1b] text-black dark:text-white border-gray-300 dark:border-gray-600"
+            value={coordSystem}
+            onChange={(e) => setCoordSystem(e.target.value)}
+            disabled={isDisabled}
+            title="Choose coordinate system for the converted line"
+          >
+            {COORD_SYSTEM_OPTIONS.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
 
           {transcribeStatus === "transcribing" && (
             <span className="text-xs px-2 py-1 rounded bg-yellow-100 text-yellow-900 dark:bg-yellow-900/40 dark:text-yellow-200 border border-yellow-300 dark:border-yellow-700">
@@ -680,7 +620,7 @@ export default function BottomBar({
           )}
         </div>
 
-        {/* Controls */}
+        {/* Controls (right) */}
         <div className="absolute right-2 bottom-2 flex items-center gap-3">
           <input
             type="file"
@@ -718,10 +658,7 @@ export default function BottomBar({
             <FaCamera />
           </button>
 
-          <div
-            className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200"
-            title="Record voice"
-          >
+          <div className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200" title="Record voice">
             <VoiceButton
               phase={transcribeStatus}
               disabled={disabled || !hasMediaDevices}
