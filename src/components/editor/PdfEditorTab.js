@@ -1,11 +1,23 @@
 // src/components/editor/PdfEditorTab.js
-import React, { useEffect, useState } from "react";
-import { usePdfEditor } from "../../hooks/usePdfEditor";
+import React, { useEffect, useRef, useState, Suspense } from "react";
 import { loadPdf, renderPageToCanvas, flattenAnnotations } from "../../lib/pdfUtils";
 import { useAppState } from "../../context/AppStateContext";
 
-const TOOL_HIGHLIGHT = "highlight";
-const TOOL_TEXT = "text";
+const PdfAnnotator = React.lazy(() => import("../../pdf/PdfAnnotator"));
+
+const TOOL = {
+  SELECT: "select",
+  HIGHLIGHT: "highlight",
+  UNDERLINE: "underline",
+  STRIKE: "strike",
+  TYPEWRITER: "typewriter",
+  TEXTBOX: "textbox",
+  CALLOUT: "callout",
+  STICKY: "sticky",
+  ARROW: "arrow",
+  POLYLINE: "polyline",
+  PAN: "pan",
+};
 
 export default function PdfEditorTab({ noteId, initialFile, onExportFlattened }) {
   const { getNotePdfBytes, setNotePdfBytes } = useAppState();
@@ -13,18 +25,15 @@ export default function PdfEditorTab({ noteId, initialFile, onExportFlattened })
   const [renderBytes, setRenderBytes] = useState(null);
   const [exportBytes, setExportBytes] = useState(null);
   const [pdfDoc, setPdfDoc] = useState(null);
-  const [scale, setScale] = useState(1.25);
-  const [activeTool, setActiveTool] = useState(TOOL_HIGHLIGHT);
-
-  const [textDraft, setTextDraft] = useState("");
-  const [armed, setArmed] = useState(false);
-
+  const [scale, setScale] = useState(1.1);
+  const [activeTool, setActiveTool] = useState(TOOL.SELECT);
   const [busy, setBusy] = useState(false);
 
-  const {
-    state, addHighlight, addText, undo, redo, loadDocMeta, canUndo, canRedo,
-  } = usePdfEditor();
+  const [renderedPages, setRenderedPages] = useState([]);
+  const pageRefs = useRef({});
+  const annotatorRef = useRef(null);
 
+  // Load / cache PDF bytes
   useEffect(() => {
     let didSet = false;
     (async () => {
@@ -57,24 +66,22 @@ export default function PdfEditorTab({ noteId, initialFile, onExportFlattened })
     if (noteId) setNotePdfBytes(noteId, bytes);
   };
 
+  // Load PDF doc
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!renderBytes) {
         setPdfDoc(null);
+        setRenderedPages([]);
         return;
       }
       const doc = await loadPdf(renderBytes);
-      if (!cancelled) {
-        setPdfDoc(doc);
-        loadDocMeta("sitewise.pdf", doc.numPages);
-      }
+      if (!cancelled) setPdfDoc(doc);
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renderBytes]);
 
-  const [renderedPages, setRenderedPages] = useState([]);
+  // Render pages to canvases
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -98,112 +105,37 @@ export default function PdfEditorTab({ noteId, initialFile, onExportFlattened })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [noteId, exportBytes]);
 
-  const getLocalCoords = (e, canvas) => {
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    return { x: Math.max(0, x / scale), y: Math.max(0, y / scale) };
+  const setPageRef = (pageNo) => (el) => {
+    if (el) pageRefs.current[pageNo] = el;
   };
 
-  const placeTextAtCenter = () => {
-    if (!textDraft.trim() || renderedPages.length === 0) return false;
-    const p1 = renderedPages[0];
-    const x = (p1.w / 2) / scale - 30;
-    const y = (p1.h / 2) / scale;
-    addText(1, { x, y, text: textDraft.trim(), fontSize: 14 });
-    setTextDraft("");
-    setArmed(false);
-    return true;
-  };
-
-  const PageOverlay = ({ page }) => {
-    const [drag, setDrag] = useState(null);
-    const anns = state.annotations?.[page.pageNo] || [];
-
-    const onDown = (e) => {
-      if (activeTool !== TOOL_HIGHLIGHT) return;
-      setDrag({ x0: e.clientX, y0: e.clientY });
-    };
-    const onUp = (e) => {
-      if (!drag || activeTool !== TOOL_HIGHLIGHT) return;
-      const c = page.canvas;
-      const rect = c.getBoundingClientRect();
-      const x1 = Math.min(Math.max(Math.min(drag.x0, e.clientX), rect.left), rect.right);
-      const y1 = Math.min(Math.max(Math.min(drag.y0, e.clientY), rect.top), rect.bottom);
-      const x2 = Math.max(Math.min(Math.max(drag.x0, e.clientX), rect.right), rect.left);
-      const y2 = Math.max(Math.min(Math.max(drag.y0, e.clientY), rect.bottom), rect.top);
-      const w = x2 - x1;
-      const h = y2 - y1;
-      if (w > 4 && h > 4) {
-        const { x, y } = getLocalCoords({ clientX: x1, clientY: y1 }, c);
-        addHighlight(page.pageNo, { x, y, w: w / scale, h: h / scale });
-      }
-      setDrag(null);
-    };
-    const onClick = (e) => {
-      if (activeTool !== TOOL_TEXT) return;
-      if (!textDraft.trim()) return;
-      const { x, y } = getLocalCoords(e, page.canvas);
-      addText(page.pageNo, { x, y, text: textDraft.trim(), fontSize: 14 });
-      setTextDraft("");
-      setArmed(false);
-    };
-
-    const cursor =
-      (activeTool === TOOL_TEXT && textDraft.trim()) || activeTool === TOOL_HIGHLIGHT
-        ? "crosshair"
-        : "default";
-
-    return (
-      <div
-        style={{ position: "absolute", left: 0, top: 0, width: page.w, height: page.h, cursor }}
-        onMouseDown={onDown}
-        onMouseUp={onUp}
-        onClick={onClick}
-      >
-        {anns.map((a, idx) =>
-          a.type === "highlight" ? (
-            <div
-              key={idx}
-              style={{
-                position: "absolute",
-                left: a.x * scale,
-                top: a.y * scale,
-                width: a.w * scale,
-                height: a.h * scale,
-                background: "rgba(255,255,0,0.25)",
-                border: "1px solid rgba(255,255,0,0.35)",
-                borderRadius: 2,
-              }}
-            />
-          ) : (
-            <div
-              key={idx}
-              style={{
-                position: "absolute",
-                left: a.x * scale,
-                top: a.y * scale,
-                fontSize: (a.fontSize || 14) * scale,
-                color: "#111",
-                userSelect: "none",
-                background: "rgba(255,255,255,0.6)",
-                padding: "2px 4px",
-                borderRadius: 3,
-              }}
-            >
-              {a.text}
-            </div>
-          )
-        )}
-      </div>
-    );
-  };
-
+  // Export (flatten)
   const onExport = async () => {
-    if (!exportBytes) return;
+    if (!exportBytes || !annotatorRef.current) return;
     try {
       setBusy(true);
-      const blob = await flattenAnnotations(exportBytes, state.annotations);
+      const items = annotatorRef.current.serialize(); // full overlay items
+      const byPage = {};
+      for (const it of items) {
+        if (!byPage[it.page]) byPage[it.page] = [];
+        if (it.type === "highlight") {
+          byPage[it.page].push({
+            type: "highlight",
+            x: it.x, y: it.y, w: it.w, h: it.h,
+            color: it.fill, opacity: it.opacity,
+          });
+        } else if (it.type === "typewriter" || it.type === "textbox" || it.type === "callout") {
+          byPage[it.page].push({
+            type: "text",
+            x: it.x, y: it.y,
+            text: it.text || "",
+            fontSize: it.fontSize || 14,
+            color: it.textColor || "#111",
+          });
+        }
+        // TODO: add flattening for underline/strike/arrow/polyline/sticky if needed.
+      }
+      const blob = await flattenAnnotations(exportBytes, byPage);
       onExportFlattened?.(blob);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -218,85 +150,64 @@ export default function PdfEditorTab({ noteId, initialFile, onExportFlattened })
     }
   };
 
-  const btnBase = "px-2 py-1 rounded text-sm border";
-  const btnIdle = "bg-white dark:bg-[#1b1b1b] border-gray-300 dark:border-gray-600";
-  const btnBlue = "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700";
-  const btnDisabled = "disabled:opacity-50";
+  const btn = "px-2 py-1 rounded text-sm border";
+  const idle = "bg-white dark:bg-[#1b1b1b] border-gray-300 dark:border-gray-600";
+  const blue = "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700";
 
   return (
     <div className="flex flex-col h-full">
+      {/* Single slim top toolbar */}
       <div className="flex items-center gap-2 p-2 border-b border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-[#222]">
         <input type="file" accept="application/pdf" onChange={onPick} className="text-sm" />
 
         <div className="ml-2 flex items-center gap-1">
-          <button
-            className={`${btnBase} ${activeTool === TOOL_HIGHLIGHT ? btnBlue : btnIdle}`}
-            onClick={() => setActiveTool(TOOL_HIGHLIGHT)}
+          <label className="text-xs opacity-70">Tool</label>
+          <select
+            className="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#1b1b1b]"
+            value={activeTool}
+            onChange={(e) => setActiveTool(e.target.value)}
           >
-            Highlight
-          </button>
-          <button
-            className={`${btnBase} ${activeTool === TOOL_TEXT ? btnBlue : btnIdle}`}
-            onClick={() => setActiveTool(TOOL_TEXT)}
-          >
-            Text
-          </button>
-
-          {activeTool === TOOL_TEXT && (
-            <>
-              <input
-                className="ml-1 px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#1b1b1b]"
-                placeholder="Type text, then Enter / Place / click page"
-                value={textDraft}
-                onChange={(e) => {
-                  setTextDraft(e.target.value);
-                  if (!e.target.value.trim()) setArmed(false);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    if (!placeTextAtCenter()) setArmed(true);
-                  }
-                }}
-                style={{ width: 260 }}
-              />
-              <button
-                className={`${btnBase} ${textDraft.trim() ? btnBlue : btnIdle} ml-1`}
-                disabled={!textDraft.trim()}
-                onClick={() => { if (!placeTextAtCenter()) setArmed(true); }}
-                title="Place now (center of page 1) or arm for click"
-              >
-                Place
-              </button>
-              {armed && textDraft.trim() && (
-                <span className="text-xs ml-2 opacity-80">Click page to place</span>
-              )}
-            </>
-          )}
+            <option value={TOOL.SELECT}>Select/Move</option>
+            <option value={TOOL.HIGHLIGHT}>Highlight</option>
+            <option value={TOOL.UNDERLINE}>Underline</option>
+            <option value={TOOL.STRIKE}>Strikeout</option>
+            <option value={TOOL.TYPEWRITER}>Typewriter</option>
+            <option value={TOOL.TEXTBOX}>Textbox</option>
+            <option value={TOOL.CALLOUT}>Callout</option>
+            <option value={TOOL.STICKY}>Sticky note</option>
+            <option value={TOOL.ARROW}>Arrow</option>
+            <option value={TOOL.POLYLINE}>Polyline</option>
+            <option value={TOOL.PAN}>Hand</option>
+          </select>
         </div>
 
         <div className="flex-1" />
-
         <div className="flex items-center gap-2">
-          <button className={`${btnBase} ${btnIdle}`} onClick={() => setScale((s) => Math.max(0.6, s - 0.15))} title="Zoom out">-</button>
+          <button className={`${btn} ${idle}`} onClick={() => setScale((s) => Math.max(0.6, s - 0.15))} title="Zoom out">-</button>
           <span className="text-sm w-16 text-center">{Math.round(scale * 100)}%</span>
-          <button className={`${btnBase} ${btnIdle}`} onClick={() => setScale((s) => Math.min(3, s + 0.15))} title="Zoom in">+</button>
+          <button className={`${btn} ${idle}`} onClick={() => setScale((s) => Math.min(3, s + 0.15))} title="Zoom in">+</button>
 
-          <button disabled={!canUndo} onClick={undo} className={`${btnBase} ${canUndo ? btnBlue : btnIdle} ${btnDisabled}`} title="Undo">Undo</button>
-          <button disabled={!canRedo} onClick={redo} className={`${btnBase} ${canRedo ? btnBlue : btnIdle} ${btnDisabled}`} title="Redo">Redo</button>
-
-          <button onClick={onExport} disabled={!pdfDoc || busy} className={`px-3 py-1 rounded text-sm border ${(!pdfDoc || busy) ? btnIdle : btnBlue} ${btnDisabled}`} title="Export flattened PDF">
-            {busy ? "Exporting…" : "Export flattened PDF"}
+          <button
+            onClick={onExport}
+            disabled={!pdfDoc || busy}
+            className={`px-3 py-1 rounded text-sm border ${(!pdfDoc || busy) ? idle : blue}`}
+            title="Export flattened PDF"
+          >
+            {busy ? "Exporting…" : "Export PDF"}
           </button>
         </div>
       </div>
 
       <div className="flex-1 overflow-auto p-2">
-        {!pdfDoc && <div className="text-sm opacity-70 p-4">Load a PDF to start annotating. Use Highlight to draw rectangles; use Text to place labels.</div>}
+        {!pdfDoc && (
+          <div className="text-sm opacity-70 p-4">
+            Load a PDF. Pick a tool, then click/drag on the page. We auto-switch back to <em>Select/Move</em> after you place one item.
+          </div>
+        )}
 
         {renderedPages.map((p) => (
           <div key={p.pageNo} className="mb-4 flex justify-center">
-            <div style={{ position: "relative", width: p.w, height: p.h }}>
+            <div ref={setPageRef(p.pageNo)} style={{ position: "relative", width: p.w, height: p.h }}>
               <canvas
                 width={p.w}
                 height={p.h}
@@ -307,10 +218,22 @@ export default function PdfEditorTab({ noteId, initialFile, onExportFlattened })
                 }}
                 style={{ display: "block", width: p.w, height: p.h, background: "#fff", borderRadius: 6, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}
               />
-              <PageOverlay page={p} />
             </div>
           </div>
         ))}
+
+        {pdfDoc && renderedPages.length > 0 && (
+          <Suspense fallback={null}>
+            <PdfAnnotator
+              ref={annotatorRef}
+              renderedPages={renderedPages}
+              pageRefs={pageRefs.current}
+              scale={scale}
+              activeTool={activeTool}
+              setActiveTool={setActiveTool}   // allow annotator to auto-switch to SELECT
+            />
+          </Suspense>
+        )}
       </div>
     </div>
   );
