@@ -1,0 +1,25 @@
+/* Two-column template builder styles */
+
+/* Row + drag handle */
+.twocol-row {
+  position: relative;
+}
+
+.twocol-resize-handle {
+  position: absolute;
+  bottom: -6px;
+  left: 0;
+  right: 0;
+  height: 12px;
+  cursor: row-resize;
+  user-select: none;
+}
+
+/* Logo block */
+.logo-drop {
+  border: 1px dashed rgba(120, 120, 120, 0.6);
+}
+
+.dark .logo-drop {
+  border-color: rgba(200, 200, 200, 0.4);
+}
