@@ -21,9 +21,14 @@ export default function TemplateBuilderModal({ open, onClose }) {
           </button>
         </div>
 
-        {/* BODY (scrollable, includes Snapshot button) */}
+        {/* BODY */}
         <div className="flex-1 overflow-auto p-4">
-          <TemplateBuilderDoc />
+          <TemplateBuilderDoc
+            onTemplateSubmit={() => {
+              // template is saved in localStorage; just close
+              onClose && onClose();
+            }}
+          />
         </div>
       </div>
     </div>

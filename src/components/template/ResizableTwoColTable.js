@@ -10,6 +10,7 @@ import "./template.css";
  * - Global "Add image/file" button:
  *    - asks which row (by label search)
  *    - parent handles actual file selection + storage
+ * - logoSrc: string (data URL) or null
  */
 
 export default function ResizableTwoColTable({
@@ -18,7 +19,7 @@ export default function ResizableTwoColTable({
   onRowsChange,
   onAddRow,
   onLeftPctChange,
-  logoFile,
+  logoSrc,
   onLogoChange,
   rowImages = {},
   onRequestAddImage,
@@ -68,15 +69,20 @@ export default function ResizableTwoColTable({
   }, [drag, onMouseMove, onMouseUp]);
 
   const handleLogoInput = (e) => {
-    const file = e.target.files?.[0] || null;
-    onLogoChange?.(file);
+    const file = e.target.files?.[0];
+    if (!file || !onLogoChange) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      onLogoChange(ev.target.result); // data URL string
+    };
+    reader.readAsDataURL(file);
   };
 
   return (
     <div ref={containerRef} className="w-full">
       {/* LOGO BLOCK */}
       <div className="logo-drop rounded-xl p-6 mb-4 flex items-center justify-center bg-white dark:bg-neutral-900 border border-gray-300 dark:border-gray-700">
-        {!logoFile ? (
+        {!logoSrc ? (
           <label className="w-full text-center text-sm opacity-80 text-black dark:text-white">
             <div className="mb-2 font-medium">[ COMPANY LOGO ]</div>
             <input type="file" accept="image/*" onChange={handleLogoInput} />
@@ -84,7 +90,7 @@ export default function ResizableTwoColTable({
         ) : (
           <div className="flex flex-col items-center gap-2">
             <img
-              src={URL.createObjectURL(logoFile)}
+              src={logoSrc}
               alt="Logo"
               className="max-h-20 object-contain"
             />
@@ -196,17 +202,15 @@ export default function ResizableTwoColTable({
 
               {/* RIGHT COLUMN — writing space + condensed images */}
               <div className="bg-white dark:bg-neutral-950 px-3 py-2 relative overflow-hidden text-black dark:text-white">
-                {/* Writing area (empty in builder; content will come when used as actual doc) */}
                 <div className="w-full h-full" />
 
-                {/* Images condensed within row */}
                 {imgs.length > 0 && (
                   <div className="absolute inset-0 p-2 flex flex-wrap gap-2 items-center justify-start">
                     {imgs.map((f, i) => (
                       <img
                         key={`${row.id}_${i}`}
-                        src={URL.createObjectURL(f)}
-                        alt={f.name}
+                        src={typeof f === "string" ? f : URL.createObjectURL(f)}
+                        alt={f.name || `image-${i}`}
                         className="max-h-full object-contain"
                       />
                     ))}
@@ -214,7 +218,6 @@ export default function ResizableTwoColTable({
                 )}
               </div>
 
-              {/* HEIGHT DRAG HANDLE */}
               <div
                 className="twocol-resize-handle"
                 onMouseDown={(e) => startDrag(idx, e)}

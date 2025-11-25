@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import ResizableTwoColTable from "./ResizableTwoColTable";
 import {
   DEFAULT_LEFT_COL_PCT,
@@ -8,20 +8,49 @@ import {
 
 const TEMPLATE_STORAGE_KEY = "sitewise-template-v1";
 
-export default function TemplateBuilderDoc({ onTemplateSubmit }) {
+/**
+ * NoteTemplateDoc
+ * - Used inside main note window as the "Template" layout.
+ * - Per-note images, but shared template structure (from Template Builder).
+ * - Shows logo, draggable rows, editable labels, Add image/file, Add row.
+ */
+export default function NoteTemplateDoc({ noteId }) {
   const [rows, setRows] = useState(defaultRows);
   const [leftPct, setLeftPct] = useState(DEFAULT_LEFT_COL_PCT);
   const [logoSrc, setLogoSrc] = useState(null);
-
-  // Images are not part of template definition; they are per-note content.
   const [rowImages, setRowImages] = useState({});
   const [pendingRowId, setPendingRowId] = useState(null);
+
+  // Load template definition (layout + logo) from localStorage
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(TEMPLATE_STORAGE_KEY);
+      if (!raw) return;
+      const tpl = JSON.parse(raw);
+      if (tpl.leftPct) setLeftPct(tpl.leftPct);
+      if (Array.isArray(tpl.rows) && tpl.rows.length > 0) {
+        setRows(
+          tpl.rows.map((r, idx) => ({
+            id: r.id || `row-${idx}`,
+            label: r.label ?? "",
+            px: r.px ?? 64,
+            minPx: r.minPx ?? 48,
+          }))
+        );
+      }
+      if (tpl.logoSrc) setLogoSrc(tpl.logoSrc);
+    } catch {
+      // ignore parse failures
+    }
+  }, [noteId]);
 
   const addRow = () => setRows((prev) => [...prev, makeNewRow("New Field")]);
 
   function handleRequestAddImage(rowId) {
     setPendingRowId(rowId);
-    const input = document.getElementById("template-image-input");
+    const input = document.getElementById(
+      `note-template-image-input-${noteId || "global"}`
+    );
     if (input) input.click();
   }
 
@@ -41,34 +70,11 @@ export default function TemplateBuilderDoc({ onTemplateSubmit }) {
     setPendingRowId(null);
   }
 
-  function handleSubmitTemplate() {
-    const template = {
-      leftPct,
-      logoSrc: logoSrc || null,
-      rows: rows.map((r) => ({
-        id: r.id,
-        label: r.label,
-        px: r.px,
-        minPx: r.minPx ?? 48,
-      })),
-    };
-
-    try {
-      localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(template));
-      if (onTemplateSubmit) onTemplateSubmit(template);
-      alert("Template saved and applied for notes.");
-    } catch (e) {
-      alert("Failed to save template: " + (e?.message || "unknown error"));
-    }
-  }
-
   return (
-    <div className="p-4 text-black dark:text-white">
-      <h1 className="text-xl font-semibold mb-4">Template Builder</h1>
-
-      {/* Hidden global file input for images/files (demo only) */}
+    <div className="p-2 text-black dark:text-white">
+      {/* Hidden input per note for image/file selection */}
       <input
-        id="template-image-input"
+        id={`note-template-image-input-${noteId || "global"}`}
         type="file"
         accept="image/*,application/pdf"
         multiple
@@ -87,15 +93,6 @@ export default function TemplateBuilderDoc({ onTemplateSubmit }) {
         rowImages={rowImages}
         onRequestAddImage={handleRequestAddImage}
       />
-
-      <div className="mt-6 flex items-center gap-3">
-        <button
-          className="px-3 py-1 border rounded bg-white dark:bg-neutral-800 text-black dark:text-white"
-          onClick={handleSubmitTemplate}
-        >
-          Submit template
-        </button>
-      </div>
     </div>
   );
 }
