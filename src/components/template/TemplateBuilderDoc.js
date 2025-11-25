@@ -13,7 +13,7 @@ export default function TemplateBuilderDoc({ onTemplateSubmit }) {
   const [leftPct, setLeftPct] = useState(DEFAULT_LEFT_COL_PCT);
   const [logoSrc, setLogoSrc] = useState(null);
 
-  // Images are not part of template definition; they are per-note content.
+  // demo-only image state (not part of template definition)
   const [rowImages, setRowImages] = useState({});
   const [pendingRowId, setPendingRowId] = useState(null);
 
@@ -56,7 +56,7 @@ export default function TemplateBuilderDoc({ onTemplateSubmit }) {
     try {
       localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(template));
       if (onTemplateSubmit) onTemplateSubmit(template);
-      alert("Template saved and applied for notes.");
+      alert("Template saved. Switch notes to Template layout to use it.");
     } catch (e) {
       alert("Failed to save template: " + (e?.message || "unknown error"));
     }
@@ -66,7 +66,6 @@ export default function TemplateBuilderDoc({ onTemplateSubmit }) {
     <div className="p-4 text-black dark:text-white">
       <h1 className="text-xl font-semibold mb-4">Template Builder</h1>
 
-      {/* Hidden global file input for images/files (demo only) */}
       <input
         id="template-image-input"
         type="file"

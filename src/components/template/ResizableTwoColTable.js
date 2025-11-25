@@ -5,11 +5,12 @@ import "./template.css";
  * Two-column template table:
  * - Left column width adjustable (10–40%)
  * - Strong borders, print-ready in light + dark mode
- * - Editable left-column headings (wrapping with width)
- * - Row heights adjustable
- * - Global "Add image/file" button:
- *    - asks which row (by label search)
- *    - parent handles actual file selection + storage
+ * - Editable left-column headings (textarea, wraps properly)
+ * - Editable right-column fields per row (textarea)
+ * - Row heights adjustable via bottom drag handle
+ * - Single global "Add image/file" button:
+ *    - lets user choose which row by typing part of the name
+ *    - parent opens the file picker for that row
  * - logoSrc: string (data URL) or null
  */
 
@@ -22,7 +23,11 @@ export default function ResizableTwoColTable({
   logoSrc,
   onLogoChange,
   rowImages = {},
-  onRequestAddImage,
+  onRequestAddImage, // (rowId) => void
+  enableRightEditor = false,
+  rightValues = {},
+  onRightChange, // (rowId, newText) => void
+  onRightFocus, // (rowId) => void
 }) {
   const [drag, setDrag] = useState(null);
   const containerRef = useRef(null);
@@ -46,10 +51,11 @@ export default function ResizableTwoColTable({
       const dy = e.clientY - drag.startY;
       const next = rows.map((r, i) => {
         if (i !== drag.idx) return r;
-        const px = Math.max(r.minPx ?? 48, (drag.startH ?? r.px) + dy);
+        const base = drag.startH ?? r.px ?? 64;
+        const px = Math.max(r.minPx ?? 48, base + dy);
         return { ...r, px };
       });
-      onRowsChange?.(next);
+      onRowsChange && onRowsChange(next);
     },
     [drag, rows, onRowsChange]
   );
@@ -78,6 +84,25 @@ export default function ResizableTwoColTable({
     reader.readAsDataURL(file);
   };
 
+  const handleGlobalAddImage = () => {
+    if (!onRequestAddImage || !rows.length) return;
+    const query = prompt(
+      "Type part of the row name to add image/file into:"
+    );
+    if (!query) return;
+    const lower = query.toLowerCase();
+    const target = rows.find((r) =>
+      (r.label || "").toLowerCase().includes(lower)
+    );
+    if (!target) {
+      alert("No matching row found.");
+      return;
+    }
+    onRequestAddImage(target.id);
+  };
+
+  const showRightEditor = !!enableRightEditor;
+
   return (
     <div ref={containerRef} className="w-full">
       {/* LOGO BLOCK */}
@@ -96,7 +121,7 @@ export default function ResizableTwoColTable({
             />
             <button
               className="px-3 py-1 border rounded text-black dark:text-white bg-white dark:bg-neutral-800"
-              onClick={() => onLogoChange?.(null)}
+              onClick={() => onLogoChange && onLogoChange(null)}
             >
               Remove Logo
             </button>
@@ -116,7 +141,9 @@ export default function ResizableTwoColTable({
               step={1}
               className="ml-2 px-2 py-1 border rounded w-20 bg-white dark:bg-neutral-800 text-black dark:text-white"
               value={Number(leftPct)}
-              onChange={(e) => onLeftPctChange?.(Number(e.target.value))}
+              onChange={(e) =>
+                onLeftPctChange && onLeftPctChange(Number(e.target.value))
+              }
             />
           </label>
 
@@ -127,24 +154,9 @@ export default function ResizableTwoColTable({
             Add Row
           </button>
 
-          {/* Global Add image/file */}
           <button
             className="px-3 py-1 border rounded bg-white dark:bg-neutral-800 text-black dark:text-white"
-            onClick={() => {
-              const query = prompt(
-                "Type part of the row name to add image/file into:"
-              );
-              if (!query) return;
-              const lower = query.toLowerCase();
-              const target = rows.find((r) =>
-                (r.label || "").toLowerCase().includes(lower)
-              );
-              if (!target) {
-                alert("No matching row found.");
-                return;
-              }
-              onRequestAddImage?.(target.id);
-            }}
+            onClick={handleGlobalAddImage}
           >
             Add image/file
           </button>
@@ -161,6 +173,7 @@ export default function ResizableTwoColTable({
       <div className="border border-gray-300 dark:border-gray-700 rounded-xl overflow-hidden bg-white dark:bg-neutral-950">
         {rows.map((row, idx) => {
           const imgs = rowImages[row.id] || [];
+          const rightText = rightValues[row.id] || "";
 
           return (
             <div
@@ -171,53 +184,65 @@ export default function ResizableTwoColTable({
                 height: `${row.px}px`,
               }}
             >
-              {/* LEFT COLUMN — editable with vertical separator */}
-              <div className="bg-white dark:bg-neutral-900 px-3 py-2 flex items-start border-r border-gray-300 dark:border-gray-700">
-                <div
-                  contentEditable
-                  suppressContentEditableWarning={true}
+              {/* LEFT COLUMN — label textarea */}
+              <div className="bg-white dark:bg-neutral-900 px-3 py-2 flex items-stretch border-r border-gray-300 dark:border-gray-700">
+                <textarea
                   className="
                     w-full h-full bg-transparent text-sm font-medium outline-none
-                    break-words whitespace-normal
+                    resize-none overflow-hidden leading-tight
                     text-black dark:text-white
                   "
-                  onBlur={(e) => {
-                    const text = e.target.innerText;
+                  value={row.label}
+                  onChange={(e) => {
+                    const text = e.target.value;
                     const next = rows.map((r) =>
                       r.id === row.id ? { ...r, label: text } : r
                     );
-                    onRowsChange(next);
+                    onRowsChange && onRowsChange(next);
                   }}
-                  onInput={(e) => {
-                    const text = e.target.innerText;
-                    const next = rows.map((r) =>
-                      r.id === row.id ? { ...r, label: text } : r
-                    );
-                    onRowsChange(next);
-                  }}
-                >
-                  {row.label}
-                </div>
+                />
               </div>
 
-              {/* RIGHT COLUMN — writing space + condensed images */}
-              <div className="bg-white dark:bg-neutral-950 px-3 py-2 relative overflow-hidden text-black dark:text-white">
-                <div className="w-full h-full" />
+              {/* RIGHT COLUMN — text + images */}
+              <div className="bg-white dark:bg-neutral-950 px-3 py-2 relative overflow-hidden text-black dark:text-white flex flex-col">
+                {showRightEditor && (
+                  <textarea
+                    className="
+                      flex-1 w-full bg-transparent text-sm outline-none resize-none
+                      leading-tight mb-1
+                      text-black dark:text-white
+                    "
+                    placeholder="Enter details for this field..."
+                    value={rightText}
+                    onFocus={() => onRightFocus && onRightFocus(row.id)}
+                    onChange={(e) => {
+                      if (!onRightChange) return;
+                      onRightChange(row.id, e.target.value);
+                    }}
+                  />
+                )}
+
+                {!showRightEditor && <div className="w-full h-full" />}
 
                 {imgs.length > 0 && (
-                  <div className="absolute inset-0 p-2 flex flex-wrap gap-2 items-center justify-start">
-                    {imgs.map((f, i) => (
-                      <img
-                        key={`${row.id}_${i}`}
-                        src={typeof f === "string" ? f : URL.createObjectURL(f)}
-                        alt={f.name || `image-${i}`}
-                        className="max-h-full object-contain"
-                      />
-                    ))}
+                  <div className="mt-1 flex flex-wrap gap-2 items-center justify-start">
+                    {imgs.map((f, i) => {
+                      const src =
+                        typeof f === "string" ? f : URL.createObjectURL(f);
+                      return (
+                        <img
+                          key={`${row.id}_${i}`}
+                          src={src}
+                          alt={f.name || `image-${i}`}
+                          className="max-h-16 object-contain"
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </div>
 
+              {/* ROW DRAG HANDLE */}
               <div
                 className="twocol-resize-handle"
                 onMouseDown={(e) => startDrag(idx, e)}

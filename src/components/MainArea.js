@@ -1,5 +1,5 @@
 // src/components/MainArea.js
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
 import { useTheme } from "../context/ThemeContext";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -25,7 +25,7 @@ import BottomBar from "./BottomBar";
 import FontFamily from "@tiptap/extension-font-family";
 import { TextStyle } from "@tiptap/extension-text-style";
 import Color from "@tiptap/extension-color";
-// import FullNoteAIBar from "./FullNoteAIBar"; // still hidden
+// import FullNoteAIBar from "./FullNoteAIBar";
 import PdfEditorTab from "./editor/PdfEditorTab";
 import { useRefine } from "../hooks/useRefine";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
@@ -49,21 +49,16 @@ export default function MainArea() {
     }
   });
 
-  // PDFs per note: { [noteId]: File }
   const [notePdfMap, setNotePdfMap] = useState({});
-
-  // Tabs: Note / PDF
   const [activeTab, setActiveTab] = useState("note");
-
-  // Layout: 'template' | 'natural' – DEFAULT BACK TO NATURAL
-  const [noteLayout, setNoteLayout] = useState("natural");
-
-  // Snapshots
+  const [noteLayout, setNoteLayout] = useState("natural"); // default natural
   const [snapshots, setSnapshots] = useState({});
-
-  // Refine state
   const [refineBusy, setRefineBusy] = useState(false);
   const [refineBackupHtml, setRefineBackupHtml] = useState(null);
+
+  // Template integration
+  const templateInsertRef = useRef(null); // (rowId, text) => void
+  const [activeTemplateRowId, setActiveTemplateRowId] = useState(null);
 
   useEffect(() => {
     try {
@@ -71,7 +66,6 @@ export default function MainArea() {
     } catch {}
   }, [docState]);
 
-  // Resolve current note title/id key
   const { noteTitle, noteKey } = useMemo(() => {
     let noteTitle = null;
     let noteKey = null;
@@ -103,12 +97,12 @@ export default function MainArea() {
     return { noteTitle, noteKey };
   }, [currentNoteId, rootNotes, state, activeProjectId, activeFolderId]);
 
-  // When switching notes, reset layout back to NATURAL so old behaviour is default
+  // when switching notes, reset to natural + clear selected template row
   useEffect(() => {
     setNoteLayout("natural");
+    setActiveTemplateRowId(null);
   }, [noteKey]);
 
-  // Tiptap editor for Natural layout
   const editor = useEditor(
     {
       extensions: [
@@ -161,18 +155,6 @@ export default function MainArea() {
     if (editor && text) editor.chain().focus().insertContent(text).run();
   }
 
-  function handleInsertImageAtCursor(imgSrc) {
-    if (editor && imgSrc) {
-      if (imgSrc instanceof File) {
-        const url = URL.createObjectURL(imgSrc);
-        editor.chain().focus().setImage({ src: url }).run();
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-      } else {
-        editor.chain().focus().setImage({ src: imgSrc }).run();
-      }
-    }
-  }
-
   function handleInsertPDF(fileUrlOrObj) {
     if (fileUrlOrObj instanceof File) {
       if (!noteKey) return;
@@ -191,7 +173,37 @@ export default function MainArea() {
     }
   }
 
-  // Snapshots
+  function handleInsertImageAtCursor(imgSrc) {
+    if (editor && imgSrc) {
+      if (imgSrc instanceof File) {
+        const url = URL.createObjectURL(imgSrc);
+        editor.chain().focus().setImage({ src: url }).run();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      } else {
+        editor.chain().focus().setImage({ src: imgSrc }).run();
+      }
+    }
+  }
+
+  // BottomBar text routing:
+  // - natural layout -> tiptap
+  // - template layout -> selected template row
+  function handleBottomBarInsert(text) {
+    if (!text || !noteTitle) return;
+
+    if (noteLayout === "template") {
+      if (!activeTemplateRowId || !templateInsertRef.current) {
+        alert("Select a template field first (right-hand column).");
+        return;
+      }
+      templateInsertRef.current(activeTemplateRowId, text);
+      return;
+    }
+
+    // natural
+    handleInsertTextAtCursor(text);
+  }
+
   const saveSnapshot = () => {
     if (!editor || !noteKey) return;
     const html = editor.getHTML();
@@ -211,7 +223,6 @@ export default function MainArea() {
 
   const noteSnaps = snapshots[noteKey] || [];
 
-  // Refine NOTE content – only makes sense for NATURAL layout
   const refineNote = async () => {
     if (!editor || refineBusy || noteLayout !== "natural") return;
     const plain = editor.getText().trim();
@@ -249,7 +260,7 @@ export default function MainArea() {
         <EditorToolbar editor={editor} />
       </div>
 
-      {/* Control bar: snapshots, refine, layout toggle, tabs */}
+      {/* Control bar */}
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <button
@@ -284,7 +295,6 @@ export default function MainArea() {
             </select>
           )}
 
-          {/* Refine (natural only) */}
           <button
             className="text-xs px-2 py-1 rounded border bg-white dark:bg-[#1b1b1b] text-black dark:text-white border-gray-300 dark:border-[#444] disabled:opacity-60"
             onClick={refineNote}
@@ -304,7 +314,6 @@ export default function MainArea() {
             Revert
           </button>
 
-          {/* Layout toggle: Template vs Natural */}
           <div className="ml-4 flex items-center gap-1 text-xs text-gray-700 dark:text-gray-300">
             <span>Layout:</span>
             <button
@@ -334,7 +343,6 @@ export default function MainArea() {
           </div>
         </div>
 
-        {/* Note/PDF tabs */}
         <div className="flex items-center gap-2">
           <button
             className={[
@@ -361,7 +369,6 @@ export default function MainArea() {
         </div>
       </div>
 
-      {/* Content area: keep everything mounted; hide via display */}
       <div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">
         <div
           id="chatWindow"
@@ -371,7 +378,6 @@ export default function MainArea() {
           <div style={{ display: activeTab === "note" ? "block" : "none" }}>
             {noteTitle ? (
               <>
-                {/* Natural note (Tiptap editor) */}
                 <div
                   style={{
                     display: noteLayout === "natural" ? "block" : "none",
@@ -379,14 +385,19 @@ export default function MainArea() {
                 >
                   <EditorContent editor={editor} />
                 </div>
-
-                {/* Template note (two-column doc with logo) */}
                 <div
                   style={{
                     display: noteLayout === "template" ? "block" : "none",
                   }}
                 >
-                  <NoteTemplateDoc noteId={noteKey} key={noteKey} />
+                  <NoteTemplateDoc
+                    noteId={noteKey}
+                    key={noteKey}
+                    onRegisterTemplateInsert={(fn) => {
+                      templateInsertRef.current = fn;
+                    }}
+                    onSelectRow={(rowId) => setActiveTemplateRowId(rowId)}
+                  />
                 </div>
               </>
             ) : (
@@ -417,14 +428,14 @@ export default function MainArea() {
           </div>
         </div>
 
-        {/* BottomBar (voice/text area): ALWAYS for Note tab, regardless of layout */}
+        {/* BottomBar always available for Note tab */}
         <div
           className="bg-white dark:bg-[#2a2a2a] border-t border-gray-300 dark:border-gray-700"
           style={{ display: activeTab === "note" ? "block" : "none" }}
         >
           <BottomBar
             editor={editor}
-            onInsertText={handleInsertTextAtCursor}
+            onInsertText={handleBottomBarInsert}
             onInsertImage={handleInsertImageAtCursor}
             onInsertPDF={handleInsertPDF}
             disabled={!noteTitle || !editor}
