@@ -144,8 +144,10 @@ export default function ResizableTwoColTable({
           </button>
         </div>
 
-        <div className="text-xs opacity-70 text-black dark:text-white">
-          Drag row borders to adjust height
+        {/* Helper lines */}
+        <div className="flex flex-col text-xs text-black dark:text-white opacity-70 text-right">
+          <span>Drag row borders to adjust height</span>
+          <span>Click left column names to edit</span>
         </div>
       </div>
 
