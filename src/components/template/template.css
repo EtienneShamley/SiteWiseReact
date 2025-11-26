@@ -1,6 +1,4 @@
-/* Two-column template builder styles */
-
-/* Row + drag handle */
+/* Row drag */
 .twocol-row {
   position: relative;
 }
@@ -15,11 +13,49 @@
   user-select: none;
 }
 
-/* Logo block */
+/* Logo block uses only the dashed boundary */
 .logo-drop {
   border: 1px dashed rgba(120, 120, 120, 0.6);
+  background: #ffffff;
+  padding: 8px 12px;
 }
 
 .dark .logo-drop {
   border-color: rgba(200, 200, 200, 0.4);
+  background: #111827;
+}
+
+/* Wrapper for logo + controls */
+.logo-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+/* Fixed header band the logo lives in */
+.logo-img-wrapper {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  height: 110px; /* header band height – tweak if you want */
+  margin: 0 auto;
+  overflow: hidden;
+}
+
+/* Logo image – auto-fit inside the band */
+.logo-img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  margin: 0 auto;
+  object-fit: contain;
+}
+
+/* Field images in right column */
+.twocol-img {
+  object-fit: contain;
+  max-width: 100%;
 }

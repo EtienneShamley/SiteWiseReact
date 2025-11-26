@@ -1,26 +1,40 @@
+// src/context/ThemeContext.js
 import React, { createContext, useContext, useEffect, useState } from "react";
 
-const ThemeContext = createContext();
+const ThemeContext = createContext(null);
 
 export function ThemeProvider({ children }) {
-  // Detect theme from localStorage or system
-  const [theme, setTheme] = useState(() =>
-    localStorage.getItem("theme") ||
-    (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
-  );
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === "undefined") return "light";
+    try {
+      const stored = window.localStorage.getItem("sitewise-theme");
+      if (stored === "dark" || stored === "light") return stored;
+    } catch {
+      // ignore
+    }
+    return "light"; // DEFAULT = LIGHT
+  });
 
   useEffect(() => {
-    localStorage.setItem("theme", theme);
+    if (typeof document === "undefined") return;
+    const root = document.documentElement;
+
+    // Tailwind dark mode uses the "dark" class
+    root.classList.remove("dark");
     if (theme === "dark") {
-      document.documentElement.classList.add("dark");
-    } else {
-      document.documentElement.classList.remove("dark");
+      root.classList.add("dark");
+    }
+
+    try {
+      window.localStorage.setItem("sitewise-theme", theme);
+    } catch {
+      // ignore
     }
   }, [theme]);
 
-  function toggleTheme() {
-    setTheme((t) => (t === "dark" ? "light" : "dark"));
-  }
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
 
   return (
     <ThemeContext.Provider value={{ theme, toggleTheme }}>
@@ -30,5 +44,9 @@ export function ThemeProvider({ children }) {
 }
 
 export function useTheme() {
-  return useContext(ThemeContext);
+  const ctx = useContext(ThemeContext);
+  if (!ctx) {
+    throw new Error("useTheme must be used within a ThemeProvider");
+  }
+  return ctx;
 }

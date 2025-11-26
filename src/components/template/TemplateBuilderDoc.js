@@ -83,6 +83,7 @@ export default function TemplateBuilderDoc({ onTemplateSubmit }) {
         onLeftPctChange={setLeftPct}
         logoSrc={logoSrc}
         onLogoChange={setLogoSrc}
+        logoLocked={false}
         rowImages={rowImages}
         onRequestAddImage={handleRequestAddImage}
       />

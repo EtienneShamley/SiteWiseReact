@@ -41,8 +41,8 @@ export default function NoteTemplateDoc({
           tpl.rows.map((r, idx) => ({
             id: r.id || `row-${idx}`,
             label: r.label ?? "",
-            px: r.px ?? 64,
-            minPx: r.minPx ?? 48,
+            px: r.px ?? 120,
+            minPx: r.minPx ?? 100,
           }))
         );
       }
@@ -84,6 +84,19 @@ export default function NoteTemplateDoc({
       ...prev,
       [rowId]: value,
     }));
+  }
+
+  function handleRemoveImage(rowId, index) {
+    setRowImages((prev) => {
+      const list = prev[rowId] || [];
+      if (!list.length) return prev;
+      const nextList = [...list];
+      nextList.splice(index, 1);
+      return {
+        ...prev,
+        [rowId]: nextList,
+      };
+    });
   }
 
   // Function for MainArea to push BottomBar text into a selected row
@@ -131,7 +144,7 @@ export default function NoteTemplateDoc({
         onAddRow={addRow}
         onLeftPctChange={setLeftPct}
         logoSrc={logoSrc}
-        onLogoChange={setLogoSrc}
+        // NOTE: do NOT pass onLogoChange here -> logo is fixed in notes
         rowImages={rowImages}
         onRequestAddImage={handleRequestAddImage}
         enableRightEditor={true}
@@ -140,6 +153,8 @@ export default function NoteTemplateDoc({
         onRightFocus={(rowId) => {
           if (onSelectRow) onSelectRow(rowId);
         }}
+        onRemoveImage={handleRemoveImage}
+        logoLocked={true} // <- NOTE MODE: no upload, no resize handle, no "choose file"
       />
     </div>
   );
