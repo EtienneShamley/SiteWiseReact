@@ -29,6 +29,7 @@ import Color from "@tiptap/extension-color";
 import PdfEditorTab from "./editor/PdfEditorTab";
 import { useRefine } from "../hooks/useRefine";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
+import ListenInPanel from "./ListenInPanel";
 
 const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
@@ -428,18 +429,21 @@ export default function MainArea() {
           </div>
         </div>
 
-        {/* BottomBar always available for Note tab */}
+        {/* Listen-In + BottomBar (Note tab only) */}
         <div
           className="bg-white dark:bg-[#2a2a2a] border-t border-gray-300 dark:border-gray-700"
           style={{ display: activeTab === "note" ? "block" : "none" }}
         >
-          <BottomBar
-            editor={editor}
-            onInsertText={handleBottomBarInsert}
-            onInsertImage={handleInsertImageAtCursor}
-            onInsertPDF={handleInsertPDF}
-            disabled={!noteTitle || !editor}
-          />
+          <div className="px-2 py-2 flex flex-col gap-2">
+            {noteTitle && <ListenInPanel onInsert={handleBottomBarInsert} />}
+            <BottomBar
+              editor={editor}
+              onInsertText={handleBottomBarInsert}
+              onInsertImage={handleInsertImageAtCursor}
+              onInsertPDF={handleInsertPDF}
+              disabled={!noteTitle || !editor}
+            />
+          </div>
         </div>
       </div>
     </main>
