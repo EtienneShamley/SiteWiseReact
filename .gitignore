@@ -26,3 +26,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .env*
+
+# Design reference (not part of NoteWise)
+Constrapp_v5.jsx
