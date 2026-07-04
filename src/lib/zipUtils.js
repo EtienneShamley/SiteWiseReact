@@ -1,4 +1,4 @@
-export async function downloadZip(files, zipName = "sitewise-export.zip") {
+export async function downloadZip(files, zipName = "notewise-export.zip") {
   // files: Array<{ path: string, blob: Blob }>
   const JSZip = (await import("jszip")).default;
   const zip = new JSZip();

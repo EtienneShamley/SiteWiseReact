@@ -129,7 +129,7 @@ export default function ShareDialog({
         const path = (folderPath ? `${folderPath}/` : "") + f.name;
         files.push({ path, blob: f.blob });
       }
-      await downloadZip(files, `sitewise-export_${new Date().toISOString().replace(/[:.]/g,'-')}.zip`);
+      await downloadZip(files, `notewise-export_${new Date().toISOString().replace(/[:.]/g,'-')}.zip`);
       onClose?.();
     } finally {
       setBusy(false);

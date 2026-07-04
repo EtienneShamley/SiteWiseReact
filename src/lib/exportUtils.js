@@ -26,25 +26,25 @@ const baseDocHTML = (editor) => `
 `;
 
 export const suggestedTitle = (editor) => {
-  if (!editor) return "sitewise-note";
+  if (!editor) return "notewise-note";
   const html = editor.getHTML();
   const h = html.match(/<h[12][^>]*>(.*?)<\/h[12]>/i);
   if (h) {
     const tmp = document.createElement("div");
     tmp.innerHTML = h[1];
-    return (tmp.textContent || "sitewise-note").trim();
+    return (tmp.textContent || "notewise-note").trim();
   }
   const t = editor.getText().trim().replace(/\s+/g, " ");
-  return t ? t.slice(0, 40) : "sitewise-note";
+  return t ? t.slice(0, 40) : "notewise-note";
 };
 
 export const safeFilename = (base, ext) => {
-  const clean = (base || "sitewise-note")
+  const clean = (base || "notewise-note")
     .replace(/[\\/:*?"<>|]+/g, " ")
     .trim()
     .slice(0, 80);
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  return `${clean || "sitewise-note"}_${ts}.${ext}`;
+  return `${clean || "notewise-note"}_${ts}.${ext}`;
 };
 
 export async function exportPDF(editor) {

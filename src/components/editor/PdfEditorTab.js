@@ -140,7 +140,7 @@ export default function PdfEditorTab({ noteId, initialFile, onExportFlattened })
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `sitewise_annotated_${new Date().toISOString().replace(/[:.]/g, "-")}.pdf`;
+      a.download = `notewise_annotated_${new Date().toISOString().replace(/[:.]/g, "-")}.pdf`;
       document.body.appendChild(a);
       a.click();
       a.remove();
