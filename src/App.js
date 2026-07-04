@@ -11,7 +11,7 @@ function App() {
 
   return (
     <ThemeProvider>
-      <div className="flex min-h-screen bg-white dark:bg-[#1a1a1a] text-black dark:text-white relative">
+      <div className="flex min-h-screen bg-white dark:bg-gray-950 text-black dark:text-white relative">
         <Sidebar />
         <MiddlePane />
         <MainArea />
@@ -21,7 +21,7 @@ function App() {
           onClick={() => setSettingsOpen(true)}
           className="fixed bottom-4 left-4 rounded-full p-3 shadow-lg z-50
                      bg-white text-black border border-gray-300 hover:bg-gray-100
-                     dark:bg-[#222] dark:text-white dark:border-gray-700 dark:hover:bg-[#2b2b2b]"
+                     dark:bg-gray-900 dark:text-white dark:border-gray-700 dark:hover:bg-gray-800"
           title="Settings"
         >
           <Cog6ToothIcon className="w-7 h-7" />

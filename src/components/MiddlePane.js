@@ -60,7 +60,7 @@ export default function MiddlePane() {
   return (
     <aside
       id="middlePane"
-      className="w-80 bg-white dark:bg-[#1a1a1a] text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-800 space-y-2"
+      className="w-80 bg-white dark:bg-gray-900 text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-800 space-y-2"
     >
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-lg font-semibold">Notes</h2>
@@ -88,7 +88,7 @@ export default function MiddlePane() {
               className={`p-2 rounded flex justify-between items-center border transition-colors cursor-pointer
                 ${isActive
                   ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                  : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+                  : "bg-gray-50 dark:bg-gray-900 border-transparent hover:bg-gray-100 dark:hover:bg-gray-800"
                 }`}
               onClick={() => setCurrentNoteId(note.id)}
             >

@@ -53,7 +53,7 @@ export default function Sidebar() {
   const dotBase = "ml-2 p-1 rounded transition";
   const dotColor =
     theme === "dark"
-      ? "text-white hover:bg-[#353535] active:bg-[#232323]"
+      ? "text-white hover:bg-gray-800 active:bg-gray-900"
       : "text-black hover:bg-gray-200 active:bg-gray-300";
 
   // ---------- Share / Export helpers ----------
@@ -157,7 +157,7 @@ export default function Sidebar() {
   return (
     <>
       <aside
-        className="w-64 bg-white dark:bg-[#111] text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-700 flex flex-col space-y-2"
+        className="w-64 bg-white dark:bg-gray-950 text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-700 flex flex-col space-y-2"
         id="leftPane"
       >
         <div className="pb-3 mb-3 border-b border-gray-200 dark:border-gray-800">
@@ -237,7 +237,7 @@ export default function Sidebar() {
                   ${
                     isRootFolderActive
                       ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                      : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+                      : "bg-gray-50 dark:bg-gray-900 border-transparent hover:bg-gray-100 dark:hover:bg-gray-800"
                   }`}
               >
                 <span
@@ -367,7 +367,7 @@ function RootNotesList({
               ${
                 isActive
                   ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                  : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+                  : "bg-gray-50 dark:bg-gray-900 border-transparent hover:bg-gray-100 dark:hover:bg-gray-800"
               }`}
             onClick={() => {
               setCurrentNoteId(note.id);
@@ -470,7 +470,7 @@ function ProjectTree({
               ${
                 isProjectActive
                   ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                  : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+                  : "bg-gray-50 dark:bg-gray-900 border-transparent hover:bg-gray-100 dark:hover:bg-gray-800"
               }`}
           >
             <div className="flex justify-between items-center rounded">
@@ -554,7 +554,7 @@ function ProjectTree({
                         ${
                           isFolderActive
                             ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                            : "bg-gray-50 dark:bg-[#202020] border-transparent hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+                            : "bg-gray-50 dark:bg-gray-900 border-transparent hover:bg-gray-100 dark:hover:bg-gray-800"
                         }`}
                     >
                       <div className="flex justify-between items-center rounded">

@@ -130,7 +130,7 @@ export default function MainArea() {
       editorProps: {
         attributes: {
           class:
-            "prose prose-invert dark:prose-invert bg-white dark:bg-[#1a1a1a] min-h-[400px] rounded-lg border border-gray-400 dark:border-gray-700 px-6 py-4 focus:outline-none transition-colors",
+            "prose prose-invert dark:prose-invert bg-white dark:bg-gray-900 min-h-[400px] rounded-lg border border-gray-400 dark:border-gray-700 px-6 py-4 focus:outline-none transition-colors",
           spellCheck: "true",
         },
       },
@@ -268,7 +268,7 @@ export default function MainArea() {
         {activeTab === "note" ? (
         <div className="flex items-center gap-2">
           <button
-            className="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-[#333] text-black dark:text-white border border-gray-300 dark:border-[#444]"
+            className="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-gray-800 text-black dark:text-white border border-gray-300 dark:border-gray-700"
             onClick={saveSnapshot}
             disabled={!noteTitle || !editor}
             title="Save a quick snapshot to revert later"
@@ -278,7 +278,7 @@ export default function MainArea() {
 
           {noteSnaps.length > 0 && (
             <select
-              className="text-xs rounded border px-2 py-1 bg-white dark:bg-[#1b1b1b] text-black dark:text-white border-gray-300 dark:border-[#444]"
+              className="text-xs rounded border px-2 py-1 bg-white dark:bg-gray-900 text-black dark:text-white border-gray-300 dark:border-gray-700"
               onChange={(e) =>
                 e.target.value && revertToSnapshot(e.target.value)
               }
@@ -300,7 +300,7 @@ export default function MainArea() {
           )}
 
           <button
-            className="text-xs px-2 py-1 rounded border bg-white dark:bg-[#1b1b1b] text-black dark:text-white border-gray-300 dark:border-[#444] disabled:opacity-60"
+            className="text-xs px-2 py-1 rounded border bg-white dark:bg-gray-900 text-black dark:text-white border-gray-300 dark:border-gray-700 disabled:opacity-60"
             onClick={refineNote}
             disabled={
               !noteTitle || !editor || refineBusy || noteLayout !== "natural"
@@ -310,7 +310,7 @@ export default function MainArea() {
             {refineBusy ? "Refining…" : "Refine"}
           </button>
           <button
-            className="text-xs px-2 py-1 rounded border bg-white dark:bg-[#1b1b1b] text-black dark:text-white border-gray-300 dark:border-[#444] disabled:opacity-60"
+            className="text-xs px-2 py-1 rounded border bg-white dark:bg-gray-900 text-black dark:text-white border-gray-300 dark:border-gray-700 disabled:opacity-60"
             onClick={revertRefine}
             disabled={!noteTitle || !editor || !refineBackupHtml}
             title="Revert last refine"
@@ -325,7 +325,7 @@ export default function MainArea() {
                 "px-2 py-1 rounded border",
                 noteLayout === "template"
                   ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                  : "bg-white dark:bg-[#222] border-gray-300 dark:border-gray-700",
+                  : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700",
               ].join(" ")}
               onClick={() => setNoteLayout("template")}
               disabled={!noteTitle}
@@ -337,7 +337,7 @@ export default function MainArea() {
                 "px-2 py-1 rounded border",
                 noteLayout === "natural"
                   ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                  : "bg-white dark:bg-[#222] border-gray-300 dark:border-gray-700",
+                  : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700",
               ].join(" ")}
               onClick={() => setNoteLayout("natural")}
               disabled={!noteTitle}
@@ -356,7 +356,7 @@ export default function MainArea() {
               "px-3 py-1.5 rounded border text-sm",
               activeTab === "note"
                 ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                : "bg-white dark:bg-[#222] border-gray-300 dark:border-gray-700",
+                : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700",
             ].join(" ")}
             onClick={() => setActiveTab("note")}
           >
@@ -367,7 +367,7 @@ export default function MainArea() {
               "px-3 py-1.5 rounded border text-sm",
               activeTab === "pdf"
                 ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                : "bg-white dark:bg-[#222] border-gray-300 dark:border-gray-700",
+                : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700",
             ].join(" ")}
             onClick={() => setActiveTab("pdf")}
           >
@@ -379,7 +379,7 @@ export default function MainArea() {
       <div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">
         <div
           id="chatWindow"
-          className="overflow-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-[#2a2a2a] transition-colors m-0"
+          className="overflow-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 transition-colors m-0"
         >
           {/* NOTE VIEW */}
           <div style={{ display: activeTab === "note" ? "block" : "none" }}>
