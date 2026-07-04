@@ -23,7 +23,7 @@ import { createLowlight } from "lowlight";
 import EditorToolbar from "./EditorToolbar";
 import BottomBar from "./BottomBar";
 import FontFamily from "@tiptap/extension-font-family";
-import { TextStyle } from "@tiptap/extension-text-style";
+import { TextStyle, FontSize } from "@tiptap/extension-text-style";
 import Color from "@tiptap/extension-color";
 // import FullNoteAIBar from "./FullNoteAIBar";
 import PdfEditorTab from "./editor/PdfEditorTab";
@@ -123,6 +123,7 @@ export default function MainArea() {
         CodeBlockLowlight.configure({ lowlight }),
         FontFamily,
         TextStyle,
+        FontSize,
         Color,
       ],
       content: noteKey && docState[noteKey] ? docState[noteKey] : EMPTY_DOC,
