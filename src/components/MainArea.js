@@ -130,7 +130,7 @@ export default function MainArea() {
       editorProps: {
         attributes: {
           class:
-            "prose prose-invert dark:prose-invert bg-white dark:bg-gray-900 min-h-[400px] rounded-lg border border-gray-400 dark:border-gray-700 px-6 py-4 focus:outline-none transition-colors",
+            "prose prose-invert dark:prose-invert min-h-[400px] focus:outline-none",
           spellCheck: "true",
         },
       },
@@ -254,121 +254,119 @@ export default function MainArea() {
     setRefineBackupHtml(null);
   };
 
+  // Shared control-bar visual language: neutral gray chips/segments,
+  // consistent hover/disabled/focus-visible treatment across every control.
+  const chipBtnCls =
+    "px-3 py-1.5 rounded-md text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-900/70 hover:text-gray-900 dark:hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50";
+
+  const chipSelectCls =
+    "text-xs rounded-md px-2 py-1.5 bg-transparent text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-900/70 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50";
+
+  const segmentBtnCls = (active) =>
+    [
+      "px-3 py-1.5 rounded-md text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50",
+      active
+        ? "bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm"
+        : "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100",
+    ].join(" ");
+
   return (
-    <main className="flex-1 flex flex-col min-h-screen">
+    <main className="flex-1 flex flex-col min-h-screen p-4 gap-3">
       {/* Top toolbar (Note tab only — the PDF tab has its own toolbar) */}
-      {activeTab === "note" && (
-        <div className="flex items-center justify-between mb-2">
-          <EditorToolbar editor={editor} />
-        </div>
-      )}
+      {activeTab === "note" && <EditorToolbar editor={editor} />}
 
       {/* Control bar */}
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         {activeTab === "note" ? (
-        <div className="flex items-center gap-2">
-          <button
-            className="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-gray-800 text-black dark:text-white border border-gray-300 dark:border-gray-700"
-            onClick={saveSnapshot}
-            disabled={!noteTitle || !editor}
-            title="Save a quick snapshot to revert later"
-          >
-            Save snapshot
-          </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
+            <button
+              className={chipBtnCls}
+              onClick={saveSnapshot}
+              disabled={!noteTitle || !editor}
+              title="Save a quick snapshot to revert later"
+            >
+              Save snapshot
+            </button>
 
-          {noteSnaps.length > 0 && (
-            <select
-              className="text-xs rounded border px-2 py-1 bg-white dark:bg-gray-900 text-black dark:text-white border-gray-300 dark:border-gray-700"
-              onChange={(e) =>
-                e.target.value && revertToSnapshot(e.target.value)
+            {noteSnaps.length > 0 && (
+              <select
+                className={chipSelectCls}
+                onChange={(e) =>
+                  e.target.value && revertToSnapshot(e.target.value)
+                }
+                defaultValue=""
+                title="Revert to snapshot"
+              >
+                <option value="" disabled>
+                  Revert to…
+                </option>
+                {noteSnaps
+                  .slice()
+                  .reverse()
+                  .map((s) => (
+                    <option key={s.ts} value={s.ts}>
+                      {new Date(s.ts).toLocaleString()}
+                    </option>
+                  ))}
+              </select>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
+            <button
+              className={chipBtnCls}
+              onClick={refineNote}
+              disabled={
+                !noteTitle || !editor || refineBusy || noteLayout !== "natural"
               }
-              defaultValue=""
-              title="Revert to snapshot"
+              title="Refine note with AI (natural view only)"
             >
-              <option value="" disabled>
-                Revert to…
-              </option>
-              {noteSnaps
-                .slice()
-                .reverse()
-                .map((s) => (
-                  <option key={s.ts} value={s.ts}>
-                    {new Date(s.ts).toLocaleString()}
-                  </option>
-                ))}
-            </select>
-          )}
-
-          <button
-            className="text-xs px-2 py-1 rounded border bg-white dark:bg-gray-900 text-black dark:text-white border-gray-300 dark:border-gray-700 disabled:opacity-60"
-            onClick={refineNote}
-            disabled={
-              !noteTitle || !editor || refineBusy || noteLayout !== "natural"
-            }
-            title="Refine note with AI (natural view only)"
-          >
-            {refineBusy ? "Refining…" : "Refine"}
-          </button>
-          <button
-            className="text-xs px-2 py-1 rounded border bg-white dark:bg-gray-900 text-black dark:text-white border-gray-300 dark:border-gray-700 disabled:opacity-60"
-            onClick={revertRefine}
-            disabled={!noteTitle || !editor || !refineBackupHtml}
-            title="Revert last refine"
-          >
-            Revert
-          </button>
-
-          <div className="ml-4 flex items-center gap-1 text-xs text-gray-700 dark:text-gray-300">
-            <span>Layout:</span>
-            <button
-              className={[
-                "px-2 py-1 rounded border",
-                noteLayout === "template"
-                  ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                  : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700",
-              ].join(" ")}
-              onClick={() => setNoteLayout("template")}
-              disabled={!noteTitle}
-            >
-              Template
+              {refineBusy ? "Refining…" : "Refine"}
             </button>
             <button
-              className={[
-                "px-2 py-1 rounded border",
-                noteLayout === "natural"
-                  ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                  : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700",
-              ].join(" ")}
-              onClick={() => setNoteLayout("natural")}
-              disabled={!noteTitle}
+              className={chipBtnCls}
+              onClick={revertRefine}
+              disabled={!noteTitle || !editor || !refineBackupHtml}
+              title="Revert last refine"
             >
-              Natural
+              Revert
             </button>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <span className="font-medium">Layout</span>
+            <div className="flex items-center rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
+              <button
+                className={segmentBtnCls(noteLayout === "template")}
+                onClick={() => setNoteLayout("template")}
+                disabled={!noteTitle}
+              >
+                Template
+              </button>
+              <button
+                className={segmentBtnCls(noteLayout === "natural")}
+                onClick={() => setNoteLayout("natural")}
+                disabled={!noteTitle}
+              >
+                Natural
+              </button>
+            </div>
           </div>
         </div>
         ) : (
           <div />
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
           <button
-            className={[
-              "px-3 py-1.5 rounded border text-sm",
-              activeTab === "note"
-                ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700",
-            ].join(" ")}
+            className={segmentBtnCls(activeTab === "note")}
             onClick={() => setActiveTab("note")}
           >
             Note
           </button>
           <button
-            className={[
-              "px-3 py-1.5 rounded border text-sm",
-              activeTab === "pdf"
-                ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                : "bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700",
-            ].join(" ")}
+            className={segmentBtnCls(activeTab === "pdf")}
             onClick={() => setActiveTab("pdf")}
           >
             PDF
@@ -379,7 +377,7 @@ export default function MainArea() {
       <div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">
         <div
           id="chatWindow"
-          className="overflow-auto px-2 py-2 space-y-3 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 transition-colors m-0"
+          className="overflow-auto px-4 py-4 sm:px-6 sm:py-6 space-y-3 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-200 dark:focus-within:ring-blue-900/40 focus-within:border-blue-300 dark:focus-within:border-blue-700"
         >
           {/* NOTE VIEW */}
           <div style={{ display: activeTab === "note" ? "block" : "none" }}>
@@ -437,10 +435,10 @@ export default function MainArea() {
 
         {/* Listen-In + BottomBar (Note tab only) */}
         <div
-          className="bg-white dark:bg-[#2a2a2a] border-t border-gray-300 dark:border-gray-700"
+          className="bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800"
           style={{ display: activeTab === "note" ? "block" : "none" }}
         >
-          <div className="px-2 py-2 flex flex-col gap-2">
+          <div className="px-4 py-3 flex flex-col gap-2">
             {noteTitle && <ListenInPanel onInsert={handleBottomBarInsert} />}
             <BottomBar
               editor={editor}

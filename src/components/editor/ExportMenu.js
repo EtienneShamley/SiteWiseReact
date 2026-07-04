@@ -21,7 +21,7 @@ export default function ExportMenu({ editor }) {
     <div className="relative" ref={ref}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 px-3 py-1.5 rounded bg-white dark:bg-[#2a2a2a] text-black dark:text-white border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-[#3a3a3a]"
+        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100 border border-gray-300 dark:border-gray-700 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50"
         title="Export"
         aria-haspopup="menu"
         aria-expanded={open}
@@ -32,17 +32,17 @@ export default function ExportMenu({ editor }) {
       </button>
 
       {open && (
-        <div role="menu" className="absolute right-0 mt-2 min-w-[220px] rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#232323] overflow-hidden z-50">
-          <button role="menuitem" className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-[#333] text-gray-900 dark:text-gray-100" onClick={safeRun(exportPDF)}>
+        <div role="menu" className="absolute right-0 mt-2 min-w-[220px] rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 overflow-hidden z-50">
+          <button role="menuitem" className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-gray-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/60" onClick={safeRun(exportPDF)}>
             Export as PDF (.pdf)
           </button>
-          <button role="menuitem" className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-[#333] text-gray-900 dark:text-gray-100" onClick={safeRun(exportDOCX)}>
+          <button role="menuitem" className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-gray-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/60" onClick={safeRun(exportDOCX)}>
             Export as Word (.docx)
           </button>
-          <button role="menuitem" className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-[#333] text-gray-900 dark:text-gray-100" onClick={safeRun(exportHTML)}>
+          <button role="menuitem" className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-gray-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/60" onClick={safeRun(exportHTML)}>
             Export as HTML (.html)
           </button>
-          <button role="menuitem" className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-[#333] text-gray-900 dark:text-gray-100" onClick={safeRun(exportMD)}>
+          <button role="menuitem" className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-gray-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/60" onClick={safeRun(exportMD)}>
             Export as Markdown (.md)
           </button>
         </div>
