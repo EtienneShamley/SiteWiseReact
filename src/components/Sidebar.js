@@ -160,7 +160,13 @@ export default function Sidebar() {
         className="w-64 bg-white dark:bg-[#111] text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-700 flex flex-col space-y-2"
         id="leftPane"
       >
-        <div className="flex items-center justify-between mb-2">
+        <div className="pb-3 mb-3 border-b border-gray-200 dark:border-gray-800">
+          <span className="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">
+            NoteWise
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold">Projects</h2>
           <button
             className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-2 py-1 rounded text-black dark:text-white text-xs"
