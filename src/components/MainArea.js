@@ -256,13 +256,16 @@ export default function MainArea() {
 
   return (
     <main className="flex-1 flex flex-col min-h-screen">
-      {/* Top toolbar */}
-      <div className="flex items-center justify-between mb-2">
-        <EditorToolbar editor={editor} />
-      </div>
+      {/* Top toolbar (Note tab only — the PDF tab has its own toolbar) */}
+      {activeTab === "note" && (
+        <div className="flex items-center justify-between mb-2">
+          <EditorToolbar editor={editor} />
+        </div>
+      )}
 
       {/* Control bar */}
       <div className="flex items-center justify-between mb-2">
+        {activeTab === "note" ? (
         <div className="flex items-center gap-2">
           <button
             className="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-[#333] text-black dark:text-white border border-gray-300 dark:border-[#444]"
@@ -343,6 +346,9 @@ export default function MainArea() {
             </button>
           </div>
         </div>
+        ) : (
+          <div />
+        )}
 
         <div className="flex items-center gap-2">
           <button

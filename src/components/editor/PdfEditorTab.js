@@ -1,5 +1,26 @@
 // src/components/editor/PdfEditorTab.js
 import React, { useEffect, useRef, useState, Suspense } from "react";
+import {
+  FaFolderOpen,
+  FaMousePointer,
+  FaHandPaper,
+  FaHighlighter,
+  FaUnderline,
+  FaStrikethrough,
+  FaFont,
+  FaICursor,
+  FaComment,
+  FaStickyNote,
+  FaArrowRight,
+  FaRegSquare,
+  FaPencilAlt,
+  FaUndo,
+  FaRedo,
+  FaTrashAlt,
+  FaSearchPlus,
+  FaSearchMinus,
+  FaFileExport,
+} from "react-icons/fa";
 import { loadPdf, renderPageToCanvas, flattenAnnotations } from "../../lib/pdfUtils";
 import { useAppState } from "../../context/AppStateContext";
 
@@ -16,8 +37,36 @@ const TOOL = {
   STICKY: "sticky",
   ARROW: "arrow",
   POLYLINE: "polyline",
+  RECT: "rect",
+  PEN: "pen",
   PAN: "pan",
 };
+
+function ToolButton({ icon, label, active, onClick, disabled }) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={!!active}
+      disabled={disabled}
+      onClick={onClick}
+      className={`w-8 h-8 flex items-center justify-center rounded border text-sm transition shrink-0
+        ${disabled ? "opacity-40 cursor-not-allowed" : ""}
+        ${
+          active
+            ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300"
+            : "bg-white dark:bg-[#1b1b1b] border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
+        }`}
+    >
+      {icon}
+    </button>
+  );
+}
+
+function ToolbarDivider() {
+  return <div className="w-px self-stretch bg-gray-300 dark:bg-gray-700 mx-1" />;
+}
 
 export default function PdfEditorTab({ noteId, initialFile, onExportFlattened }) {
   const { getNotePdfBytes, setNotePdfBytes } = useAppState();
@@ -32,6 +81,7 @@ export default function PdfEditorTab({ noteId, initialFile, onExportFlattened })
   const [renderedPages, setRenderedPages] = useState([]);
   const pageRefs = useRef({});
   const annotatorRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   // Load / cache PDF bytes
   useEffect(() => {
@@ -114,28 +164,18 @@ export default function PdfEditorTab({ noteId, initialFile, onExportFlattened })
     if (!exportBytes || !annotatorRef.current) return;
     try {
       setBusy(true);
-      const items = annotatorRef.current.serialize(); // full overlay items
+      // serialize() returns a JSON string of the overlay items — it must be
+      // parsed before use (previously this was iterated as a raw string,
+      // silently dropping every annotation from every export).
+      const raw = annotatorRef.current.serialize();
+      const items = JSON.parse(raw || "[]");
       const byPage = {};
       for (const it of items) {
+        if (!it || !it.page) continue;
         if (!byPage[it.page]) byPage[it.page] = [];
-        if (it.type === "highlight") {
-          byPage[it.page].push({
-            type: "highlight",
-            x: it.x, y: it.y, w: it.w, h: it.h,
-            color: it.fill, opacity: it.opacity,
-          });
-        } else if (it.type === "typewriter" || it.type === "textbox" || it.type === "callout") {
-          byPage[it.page].push({
-            type: "text",
-            x: it.x, y: it.y,
-            text: it.text || "",
-            fontSize: it.fontSize || 14,
-            color: it.textColor || "#111",
-          });
-        }
-        // TODO: add flattening for underline/strike/arrow/polyline/sticky if needed.
+        byPage[it.page].push(it);
       }
-      const blob = await flattenAnnotations(exportBytes, byPage);
+      const blob = await flattenAnnotations(exportBytes, byPage, scale);
       onExportFlattened?.(blob);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -150,52 +190,70 @@ export default function PdfEditorTab({ noteId, initialFile, onExportFlattened })
     }
   };
 
-  const btn = "px-2 py-1 rounded text-sm border";
   const idle = "bg-white dark:bg-[#1b1b1b] border-gray-300 dark:border-gray-600";
   const blue = "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700";
 
   return (
     <div className="flex flex-col h-full">
-      {/* Single slim top toolbar */}
-      <div className="flex items-center gap-2 p-2 border-b border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-[#222]">
-        <input type="file" accept="application/pdf" onChange={onPick} className="text-sm" />
+      <div className="text-[11px] uppercase tracking-wide opacity-70 px-2 pt-1">
+        PDF Editor
+      </div>
+      {/* Modern compact icon toolbar */}
+      <div className="flex items-center gap-1 p-2 border-b border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-[#222] flex-wrap">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/pdf"
+          onChange={onPick}
+          className="hidden"
+        />
+        <ToolButton icon={<FaFolderOpen />} label="Open PDF" onClick={() => fileInputRef.current?.click()} />
 
-        <div className="ml-2 flex items-center gap-1">
-          <label className="text-xs opacity-70">Tool</label>
-          <select
-            className="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#1b1b1b]"
-            value={activeTool}
-            onChange={(e) => setActiveTool(e.target.value)}
-          >
-            <option value={TOOL.SELECT}>Select/Move</option>
-            <option value={TOOL.HIGHLIGHT}>Highlight</option>
-            <option value={TOOL.UNDERLINE}>Underline</option>
-            <option value={TOOL.STRIKE}>Strikeout</option>
-            <option value={TOOL.TYPEWRITER}>Typewriter</option>
-            <option value={TOOL.TEXTBOX}>Textbox</option>
-            <option value={TOOL.CALLOUT}>Callout</option>
-            <option value={TOOL.STICKY}>Sticky note</option>
-            <option value={TOOL.ARROW}>Arrow</option>
-            <option value={TOOL.POLYLINE}>Polyline</option>
-            <option value={TOOL.PAN}>Hand</option>
-          </select>
-        </div>
+        <ToolbarDivider />
+
+        <ToolButton icon={<FaMousePointer />} label="Select" active={activeTool === TOOL.SELECT} onClick={() => setActiveTool(TOOL.SELECT)} />
+        <ToolButton icon={<FaHandPaper />} label="Hand (Pan)" active={activeTool === TOOL.PAN} onClick={() => setActiveTool(TOOL.PAN)} />
+
+        <ToolbarDivider />
+
+        <ToolButton icon={<FaHighlighter />} label="Highlight" active={activeTool === TOOL.HIGHLIGHT} onClick={() => setActiveTool(TOOL.HIGHLIGHT)} />
+        <ToolButton icon={<FaUnderline />} label="Underline" active={activeTool === TOOL.UNDERLINE} onClick={() => setActiveTool(TOOL.UNDERLINE)} />
+        <ToolButton icon={<FaStrikethrough />} label="Strikethrough" active={activeTool === TOOL.STRIKE} onClick={() => setActiveTool(TOOL.STRIKE)} />
+
+        <ToolbarDivider />
+
+        <ToolButton icon={<FaFont />} label="Text" active={activeTool === TOOL.TYPEWRITER} onClick={() => setActiveTool(TOOL.TYPEWRITER)} />
+        <ToolButton icon={<FaICursor />} label="Text Box" active={activeTool === TOOL.TEXTBOX} onClick={() => setActiveTool(TOOL.TEXTBOX)} />
+        <ToolButton icon={<FaComment />} label="Callout" active={activeTool === TOOL.CALLOUT} onClick={() => setActiveTool(TOOL.CALLOUT)} />
+        <ToolButton icon={<FaStickyNote />} label="Sticky Note" active={activeTool === TOOL.STICKY} onClick={() => setActiveTool(TOOL.STICKY)} />
+
+        <ToolbarDivider />
+
+        <ToolButton icon={<FaArrowRight />} label="Arrow" active={activeTool === TOOL.ARROW} onClick={() => setActiveTool(TOOL.ARROW)} />
+        <ToolButton icon={<FaRegSquare />} label="Rectangle" active={activeTool === TOOL.RECT} onClick={() => setActiveTool(TOOL.RECT)} />
+        <ToolButton icon={<FaPencilAlt />} label="Freehand Pen" active={activeTool === TOOL.PEN} onClick={() => setActiveTool(TOOL.PEN)} />
+
+        <ToolbarDivider />
+
+        <ToolButton icon={<FaUndo />} label="Undo" disabled={!pdfDoc} onClick={() => annotatorRef.current?.undo()} />
+        <ToolButton icon={<FaRedo />} label="Redo" disabled={!pdfDoc} onClick={() => annotatorRef.current?.redo()} />
+        <ToolButton icon={<FaTrashAlt />} label="Delete selected" disabled={!pdfDoc} onClick={() => annotatorRef.current?.deleteSelected()} />
 
         <div className="flex-1" />
-        <div className="flex items-center gap-2">
-          <button className={`${btn} ${idle}`} onClick={() => setScale((s) => Math.max(0.6, s - 0.15))} title="Zoom out">-</button>
-          <span className="text-sm w-16 text-center">{Math.round(scale * 100)}%</span>
-          <button className={`${btn} ${idle}`} onClick={() => setScale((s) => Math.min(3, s + 0.15))} title="Zoom in">+</button>
 
-          <button
-            onClick={onExport}
-            disabled={!pdfDoc || busy}
-            className={`px-3 py-1 rounded text-sm border ${(!pdfDoc || busy) ? idle : blue}`}
-            title="Export flattened PDF"
-          >
-            {busy ? "Exporting…" : "Export PDF"}
-          </button>
-        </div>
+        <ToolButton icon={<FaSearchMinus />} label="Zoom out" onClick={() => setScale((s) => Math.max(0.6, s - 0.15))} />
+        <span className="text-sm w-14 text-center select-none">{Math.round(scale * 100)}%</span>
+        <ToolButton icon={<FaSearchPlus />} label="Zoom in" onClick={() => setScale((s) => Math.min(3, s + 0.15))} />
+
+        <button
+          onClick={onExport}
+          disabled={!pdfDoc || busy}
+          title="Export flattened PDF"
+          className={`ml-2 flex items-center gap-2 px-3 py-1.5 rounded text-sm border shrink-0 ${(!pdfDoc || busy) ? idle : blue}`}
+        >
+          <FaFileExport />
+          {busy ? "Exporting…" : "Export"}
+        </button>
       </div>
 
       <div className="flex-1 overflow-auto p-2">

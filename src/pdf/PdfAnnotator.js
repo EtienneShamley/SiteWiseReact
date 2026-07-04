@@ -25,6 +25,8 @@ const TOOL = {
   STICKY: "sticky",
   ARROW: "arrow",
   POLYLINE: "polyline",
+  RECT: "rect",
+  PEN: "pen",
 };
 
 const STYLE_MEMORY = {
@@ -48,6 +50,8 @@ const STYLE_MEMORY = {
   },
   [TOOL.ARROW]: { stroke: "#333333", strokeWidth: 2, head: "single" },
   [TOOL.POLYLINE]: { stroke: "#333333", strokeWidth: 2 },
+  [TOOL.RECT]: { stroke: "#333333", strokeWidth: 2, fill: "transparent" },
+  [TOOL.PEN]: { stroke: "#1976D2", strokeWidth: 3 },
 };
 
 const makeId = () => "a_" + Math.random().toString(36).slice(2, 10);
@@ -125,6 +129,16 @@ export default forwardRef(function PdfAnnotator(
     setActiveId(null);
   }, []);
 
+  const deleteSelected = useCallback(() => {
+    if (!activeId) return;
+    const h = history.current;
+    h.past.push(clone(itemsRef.current));
+    h.future = [];
+    write(itemsRef.current.filter((it) => it.id !== activeId));
+    setActiveId(null);
+    setOpenStickyId(null);
+  }, [activeId]);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -139,11 +153,41 @@ export default forwardRef(function PdfAnnotator(
       },
       undo,
       redo,
+      deleteSelected,
     }),
-    [undo, redo]
+    [undo, redo, deleteSelected]
   );
 
-  // When tool changes: reset UI, open options, arm after close
+  // Keyboard support: Delete/Backspace removes the selected annotation,
+  // Escape deselects. Ignored while the user is typing inside a text
+  // field/contentEditable so normal text editing isn't hijacked.
+  useEffect(() => {
+    function isTypingTarget(el) {
+      if (!el) return false;
+      if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") return true;
+      if (el.isContentEditable) return true;
+      return false;
+    }
+    function onKeyDown(e) {
+      if (isTypingTarget(e.target)) return;
+      if (e.key === "Escape") {
+        setActiveId(null);
+        return;
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && activeId) {
+        e.preventDefault();
+        deleteSelected();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeId, deleteSelected]);
+
+  // When tool changes: reset UI and make the tool usable right away. The
+  // options panel is shown for discoverability but is optional — it no
+  // longer gates drawing, so picking a tool and immediately clicking/typing
+  // on the page works like a normal PDF editor instead of requiring an
+  // extra "close panel" step every time.
   useEffect(() => {
     setActiveId(null);
     setOpenStickyId(null);
@@ -153,7 +197,7 @@ export default forwardRef(function PdfAnnotator(
 
     if (activeTool && activeTool !== TOOL.SELECT && activeTool !== TOOL.PAN) {
       setToolPanelOpen(true);
-      setArmed(false);
+      setArmed(true);
     } else {
       setToolPanelOpen(false);
       setArmed(false);
@@ -186,31 +230,6 @@ export default forwardRef(function PdfAnnotator(
         );
       })}
 
-      {renderedPages[0] &&
-        pageRefs?.[renderedPages[0].pageNo] &&
-        ReactDOM.createPortal(
-          <div
-            className="absolute z-20"
-            style={{ right: 8, top: 8, display: "flex", gap: 6 }}
-          >
-            <button
-              className="text-xs px-2 py-1 border rounded bg-white dark:bg-[#1b1b1b]"
-              onClick={undo}
-              title="Undo (Cmd/Ctrl+Z)"
-            >
-              Undo
-            </button>
-            <button
-              className="text-xs px-2 py-1 border rounded bg-white dark:bg-[#1b1b1b]"
-              onClick={redo}
-              title="Redo (Cmd/Ctrl+Y)"
-            >
-              Redo
-            </button>
-          </div>,
-          pageRefs[renderedPages[0].pageNo]
-        )}
-
       {toolPanelOpen &&
         toolPanelPage &&
         pageRefs?.[toolPanelPage] &&
@@ -222,11 +241,9 @@ export default forwardRef(function PdfAnnotator(
             onClose={() => {
               STYLE_MEMORY[activeTool] = { ...toolStyle };
               setToolPanelOpen(false);
-              setArmed(true); // user can now draw/insert
             }}
             onCancel={() => {
               setToolPanelOpen(false);
-              setArmed(false);
             }}
           />,
           pageRefs[toolPanelPage]
@@ -423,6 +440,42 @@ function PageOverlay({
     setOpenStickyId(id);
   }
 
+  function newRectAnn(p0) {
+    const id = makeId();
+    const a = {
+      id,
+      page: page.pageNo,
+      type: TOOL.RECT,
+      x: p0.x,
+      y: p0.y,
+      w: 2,
+      h: 2,
+      stroke: toolStyle.stroke || "#333333",
+      strokeWidth: toolStyle.strokeWidth || 2,
+      fill: toolStyle.fill ?? "transparent",
+    };
+    startBatch();
+    write([...itemsRef.current, a]);
+    setActiveId(id);
+    drag.current = { mode: "textbox-new", id, x0: p0.x, y0: p0.y };
+  }
+
+  function newPen(p0) {
+    const id = makeId();
+    const a = {
+      id,
+      page: page.pageNo,
+      type: TOOL.PEN,
+      pts: [{ x: p0.x, y: p0.y }],
+      stroke: toolStyle.stroke || "#1976D2",
+      strokeWidth: toolStyle.strokeWidth || 3,
+    };
+    startBatch();
+    write([...itemsRef.current, a]);
+    setActiveId(id);
+    drag.current = { mode: "pen", id };
+  }
+
   /* --------------------------------- Events -------------------------------- */
 
   function onSvgDown(e) {
@@ -456,6 +509,16 @@ function PageOverlay({
     }
     if (tool === TOOL.STICKY) {
       newSticky(p);
+      return;
+    }
+    if (tool === TOOL.RECT) {
+      newRectAnn(p);
+      attachGlobalDrag();
+      return;
+    }
+    if (tool === TOOL.PEN) {
+      newPen(p);
+      attachGlobalDrag();
       return;
     }
   }
@@ -501,6 +564,8 @@ function PageOverlay({
     } else if (d.mode === "move-leader") {
       a.leader.x = p.x;
       a.leader.y = p.y;
+    } else if (d.mode === "pen") {
+      a.pts = [...(a.pts || []), p];
     } else if (d.mode === "arrow-end" && a.type === TOOL.ARROW) {
       if (d.which === "end1") {
         a.x1 = p.x;
@@ -621,6 +686,10 @@ function PageOverlay({
         return renderArrow(a);
       case TOOL.POLYLINE:
         return renderPolyline(a);
+      case TOOL.RECT:
+        return renderRect(a);
+      case TOOL.PEN:
+        return renderPen(a);
       case TOOL.HIGHLIGHT:
       case TOOL.UNDERLINE:
       case TOOL.STRIKE:
@@ -670,6 +739,16 @@ function PageOverlay({
         >
           <div
             dir="ltr"
+            ref={(el) => {
+              // Uncontrolled while focused: React must not overwrite the
+              // live DOM text node the user is typing into, or the browser
+              // recreates it and the caret collapses to the start — every
+              // keystroke then inserts at position 0, reversing the input.
+              if (el && document.activeElement !== el) {
+                const val = a.text || "";
+                if (el.textContent !== val) el.textContent = val;
+              }
+            }}
             style={{
               width: "100%",
               height: "100%",
@@ -715,9 +794,7 @@ function PageOverlay({
               cancelIfEmpty(a.id);
             }}
             onMouseDown={(e) => e.stopPropagation()}
-          >
-            {a.text || ""}
-          </div>
+          />
         </foreignObject>
 
         {!a.editing && (
@@ -784,6 +861,14 @@ function PageOverlay({
         >
           <div
             dir="ltr"
+            ref={(el) => {
+              // See renderTextbox: keep this uncontrolled while focused so
+              // the browser owns the caret during typing.
+              if (el && document.activeElement !== el) {
+                const val = a.text || "";
+                if (el.textContent !== val) el.textContent = val;
+              }
+            }}
             style={{
               minHeight: 20,
               outline: a.editing ? "1px dashed #bbb" : "none",
@@ -829,9 +914,7 @@ function PageOverlay({
               cancelIfEmpty(a.id);
             }}
             onMouseDown={(e) => e.stopPropagation()}
-          >
-            {a.text || ""}
-          </div>
+          />
         </foreignObject>
 
         {!a.editing && (
@@ -904,6 +987,56 @@ function PageOverlay({
     );
   }
 
+  function renderRect(a) {
+    return (
+      <g key={a.id}>
+        <rect
+          x={a.x}
+          y={a.y}
+          width={a.w}
+          height={a.h}
+          fill={a.fill ?? "transparent"}
+          stroke={a.stroke || "#333333"}
+          strokeWidth={a.strokeWidth || 2}
+          style={{ cursor: "move" }}
+          onMouseDown={startMove(a, "box")}
+          onClick={() => setActiveId(a.id)}
+        />
+        {activeId === a.id && (
+          <rect
+            x={a.x + a.w - 6}
+            y={a.y + a.h - 6}
+            width={12}
+            height={12}
+            fill="#fff"
+            stroke="#333"
+            onMouseDown={startResizeSE(a)}
+          />
+        )}
+      </g>
+    );
+  }
+
+  function renderPen(a) {
+    const d = (a.pts || []).map((pt) => `${pt.x},${pt.y}`).join(" ");
+    return (
+      <polyline
+        key={a.id}
+        points={d}
+        fill="none"
+        stroke={a.stroke || "#1976D2"}
+        strokeWidth={a.strokeWidth || 3}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={{ cursor: "pointer" }}
+        onMouseDown={(e) => {
+          e.stopPropagation();
+          setActiveId(a.id);
+        }}
+      />
+    );
+  }
+
   // NEW: center-anchored rotated rect for marks (uses endpoints)
   function renderMark(a) {
     const p0 = { x: a.x0, y: a.y0 };
@@ -918,10 +1051,12 @@ function PageOverlay({
     const ang = a.angleSnap != null ? a.angleSnap : angleDeg(p0, p1);
 
     const x = cx - w / 2;
+    // Strike-through crosses exactly where the user dragged (through the
+    // middle of the text). Underline instead hangs just below the dragged
+    // line, so the two read as distinct marks rather than identical bars
+    // that only differ by color.
     const y =
-      a.type === TOOL.HIGHLIGHT
-        ? cy - h / 2
-        : cy - h / 2; // underline/strike rendered as thin rotated rect too
+      a.type === TOOL.UNDERLINE ? cy - h / 2 + h : cy - h / 2;
 
     const commonProps = {
       transform: `rotate(${ang} ${cx} ${cy})`,
@@ -1067,7 +1202,9 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
     tool === TOOL.CALLOUT ||
     tool === TOOL.TEXTBOX ||
     tool === TOOL.UNDERLINE ||
-    tool === TOOL.STRIKE;
+    tool === TOOL.STRIKE ||
+    tool === TOOL.RECT ||
+    tool === TOOL.PEN;
 
   const colorChoices = [
     "#111111",
@@ -1108,7 +1245,7 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
             className="px-2 py-0.5 border rounded bg-blue-50 dark:bg-blue-900/30"
             onClick={onClose}
           >
-            Close & Arm
+            Done
           </button>
         </div>
       </div>
@@ -1221,6 +1358,18 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
             />
           </label>
         </div>
+      )}
+
+      {tool === TOOL.RECT && (
+        <label className="block mt-2">
+          <div className="mb-1">Fill</div>
+          <input
+            className="w-full px-2 py-1 border rounded bg-white dark:bg-[#111]"
+            value={styleState.fill ?? "transparent"}
+            onChange={(e) => setStyleState({ ...styleState, fill: e.target.value })}
+            placeholder="transparent"
+          />
+        </label>
       )}
 
       {tool === TOOL.ARROW && (
