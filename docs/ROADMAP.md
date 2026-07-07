@@ -35,6 +35,7 @@ Candidates surfaced during the architecture and product review, pending prioriti
 - Resolve the PDF annotation architecture question (consolidate on one implementation) and act on the decision.
 - Branding pass: replace placeholder product identity (title, manifest, icons) with NoteWise branding, once a design direction is decided in `docs/DESIGN_SYSTEM.md`.
 - Investigate and resolve the backend code-location issue noted in `docs/ARCHITECTURE.md`.
+- Begin phased implementation of the approved Template Architecture (see `docs/PROJECT_DECISIONS.md`). First increment: a seed migration that wraps the existing single template as "Template 1, Version 1" so current users' template and note data are preserved before the Template Library and versioning model are introduced — this also closes the current data-orphaning risk described in `docs/ARCHITECTURE.md` → Current Limitations.
 
 ## Future Phases
 
@@ -44,6 +45,8 @@ Candidates surfaced during the architecture and product review, pending prioriti
 - Introduce automated test coverage incrementally, following the phased strategy in `docs/TESTING.md` → Future Automated Testing Strategy, starting with the highest-risk flows (export, PDF flatten, persistence).
 - Evaluate broader industry template support per `docs/PRODUCT.md`.
 - Evaluate mobile distribution — see Release Milestones below and `docs/DEPLOYMENT.md`.
+- Implement the remaining phases of the approved Template Architecture beyond the initial seed migration: Template Library CRUD (create/duplicate/rename/delete/categories/search/favorites/default), the field-type system, per-row photo/file/signature controls, IndexedDB-backed template assets, template versioning UI (publish/history), and export version-provenance — see `docs/PROJECT_DECISIONS.md`.
+- Workspace/company template scope and template permissions — blocked on the backend and authentication decisions above; not to be implemented ahead of them.
 
 ## Backlog
 
@@ -65,6 +68,7 @@ Candidates surfaced during the architecture and product review, pending prioriti
 | No automated tests | Repository-wide | Every change relies on manual verification — see `docs/TESTING.md` |
 | Mixed icon libraries | Various UI components | Visual inconsistency |
 | Placeholder product branding | Public/static assets | Product still presents under generic scaffold branding |
+| Template Builder uses one global, mutable template with no version isolation | Template subsystem (`src/components/template/`) | Editing the master template can silently orphan existing notes' saved answers today; approved redesign recorded in `docs/PROJECT_DECISIONS.md`, phased implementation not yet started |
 
 Each item should have a corresponding entry in `docs/PROJECT_DECISIONS.md` once its disposition is decided.
 

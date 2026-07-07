@@ -7,12 +7,45 @@ import {
 } from "../../templates/defaultTwoColDoc";
 
 const TEMPLATE_STORAGE_KEY = "sitewise-template-v1";
+const TEMPLATE_CONTENT_STORAGE_KEY = "sitewise-template-content-v1";
+
+// Per-note template field content (text + images), keyed by noteId.
+// Additive, separate key from TEMPLATE_STORAGE_KEY (the shared layout
+// definition) and from the note-content storage in MainArea — reading or
+// writing this key never touches either of those.
+function loadNoteTemplateContent(noteId) {
+  if (!noteId) return { rowText: {}, rowImages: {} };
+  try {
+    const raw = localStorage.getItem(TEMPLATE_CONTENT_STORAGE_KEY);
+    const all = raw ? JSON.parse(raw) : {};
+    const entry = all[noteId];
+    return {
+      rowText: entry?.rowText || {},
+      rowImages: entry?.rowImages || {},
+    };
+  } catch {
+    return { rowText: {}, rowImages: {} };
+  }
+}
+
+function saveNoteTemplateContent(noteId, rowText, rowImages) {
+  if (!noteId) return;
+  try {
+    const raw = localStorage.getItem(TEMPLATE_CONTENT_STORAGE_KEY);
+    const all = raw ? JSON.parse(raw) : {};
+    all[noteId] = { rowText, rowImages };
+    localStorage.setItem(TEMPLATE_CONTENT_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    // ignore quota/serialization errors, mirrors existing storage handling in this file
+  }
+}
 
 /**
  * NoteTemplateDoc
  * - Renders the template layout inside the main note window.
  * - Uses a shared template (logo + labels + widths) from localStorage.
- * - Maintains per-note text and images for the right-hand fields.
+ * - Maintains per-note text and images for the right-hand fields, persisted
+ *   per noteId so they survive note switches and page reloads.
  * - Exposes an insert handler so MainArea can push BottomBar text into a row.
  */
 export default function NoteTemplateDoc({
@@ -24,9 +57,13 @@ export default function NoteTemplateDoc({
   const [leftPct, setLeftPct] = useState(DEFAULT_LEFT_COL_PCT);
   const [logoSrc, setLogoSrc] = useState(null);
 
-  // Per-note content
-  const [rowImages, setRowImages] = useState({});
-  const [rowText, setRowText] = useState({});
+  // Per-note content — initialized from storage for this noteId, then persisted below
+  const [rowImages, setRowImages] = useState(
+    () => loadNoteTemplateContent(noteId).rowImages
+  );
+  const [rowText, setRowText] = useState(
+    () => loadNoteTemplateContent(noteId).rowText
+  );
   const [pendingRowId, setPendingRowId] = useState(null);
 
   // Load template definition when a note is opened or changed
@@ -52,6 +89,11 @@ export default function NoteTemplateDoc({
     }
   }, [noteId]);
 
+  // Persist per-note template field content whenever it changes
+  useEffect(() => {
+    saveNoteTemplateContent(noteId, rowText, rowImages);
+  }, [noteId, rowText, rowImages]);
+
   const addRow = () =>
     setRows((prev) => [...prev, makeNewRow("New Field")]);
 
@@ -67,13 +109,34 @@ export default function NoteTemplateDoc({
     const files = Array.from(e.target.files || []);
     if (!files.length || !pendingRowId) return;
 
-    setRowImages((prev) => {
-      const existing = prev[pendingRowId] || [];
-      return {
-        ...prev,
-        [pendingRowId]: [...existing, ...files],
-      };
-    });
+    const rowId = pendingRowId;
+
+    // Read as base64 data URLs (same representation already used for the
+    // logo) so selected images can be persisted to localStorage, not just
+    // held as in-memory File objects.
+    Promise.all(
+      files.map(
+        (file) =>
+          new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          })
+      )
+    )
+      .then((dataUrls) => {
+        setRowImages((prev) => {
+          const existing = prev[rowId] || [];
+          return {
+            ...prev,
+            [rowId]: [...existing, ...dataUrls],
+          };
+        });
+      })
+      .catch(() => {
+        // ignore unreadable file, mirrors existing silent-failure handling in this file
+      });
 
     e.target.value = "";
     setPendingRowId(null);

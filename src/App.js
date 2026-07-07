@@ -1,13 +1,18 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import MiddlePane from "./components/MiddlePane";
 import MainArea from "./components/MainArea";
 import { ThemeProvider } from "./context/ThemeContext";
 import { Cog6ToothIcon } from "@heroicons/react/24/outline";
 import SettingsModal from "./components/SettingsModal";
+import { runTemplateMigration } from "./lib/templateMigration";
 
 function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    runTemplateMigration();
+  }, []);
 
   return (
     <ThemeProvider>

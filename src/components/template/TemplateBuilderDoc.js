@@ -8,10 +8,37 @@ import {
 
 const TEMPLATE_STORAGE_KEY = "sitewise-template-v1";
 
+// Load the previously saved template definition, if any, so opening the
+// builder edits the real saved template instead of always resetting to the
+// default scaffold. Mirrors the parsing already used in NoteTemplateDoc.js
+// when it loads this same key.
+function loadSavedTemplate() {
+  try {
+    const raw = localStorage.getItem(TEMPLATE_STORAGE_KEY);
+    if (!raw) return null;
+    const tpl = JSON.parse(raw);
+    if (!Array.isArray(tpl.rows) || tpl.rows.length === 0) return null;
+    return {
+      leftPct: tpl.leftPct || DEFAULT_LEFT_COL_PCT,
+      logoSrc: tpl.logoSrc || null,
+      rows: tpl.rows.map((r, idx) => ({
+        id: r.id || `row-${idx}`,
+        label: r.label ?? "",
+        px: r.px ?? 120,
+        minPx: r.minPx ?? 100,
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export default function TemplateBuilderDoc({ onTemplateSubmit }) {
-  const [rows, setRows] = useState(defaultRows);
-  const [leftPct, setLeftPct] = useState(DEFAULT_LEFT_COL_PCT);
-  const [logoSrc, setLogoSrc] = useState(null);
+  const [rows, setRows] = useState(() => loadSavedTemplate()?.rows ?? defaultRows);
+  const [leftPct, setLeftPct] = useState(
+    () => loadSavedTemplate()?.leftPct ?? DEFAULT_LEFT_COL_PCT
+  );
+  const [logoSrc, setLogoSrc] = useState(() => loadSavedTemplate()?.logoSrc ?? null);
 
   // demo-only image state (not part of template definition)
   const [rowImages, setRowImages] = useState({});

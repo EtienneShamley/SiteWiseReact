@@ -158,15 +158,18 @@ Privacy and risk framing for this same integration list lives in [`docs/SECURITY
 - No authentication or multi-device sync exists — the application is currently single-browser, single-device only.
 - Icon usage is currently split across two different icon sets with no documented convention for which to use.
 - Product branding (page title, app manifest, icons) has not yet been updated to reflect NoteWise.
+- The Template Builder currently uses a single, global, mutable template definition with no library, no versioning, and no per-note isolation — note content is bound directly to the live template's row ids, so editing the master template (renaming or deleting a row) can silently orphan existing notes' saved answers. A target architecture (Template Library, immutable Template Versions, note-scoped Template Instances) has been approved — see `docs/PROJECT_DECISIONS.md` — but is not yet implemented; the single-template behavior described above remains current fact until the phased migration in `docs/ROADMAP.md` lands.
 
 These are described here as **current facts**, not permanent constraints — each has a corresponding open question in `docs/PROJECT_DECISIONS.md` and, where prioritized, an entry in `docs/ROADMAP.md`.
 
 ## Future Architectural Direction
 
-No architectural changes are currently approved. Open questions under consideration (see `docs/PROJECT_DECISIONS.md` → Pending Decisions):
+**Approved, pending implementation**: a template architecture redesign — Template Library, immutable Template Versions, Note Template Instances, a defined field-type system, per-row attachment controls, stable UUID-style field ids, and a move from localStorage to IndexedDB for template assets — has been approved. See `docs/PROJECT_DECISIONS.md` → "Template architecture: library, immutable versions, and note instances" for the full decision. None of this is implemented yet; the current single-template implementation described elsewhere in this document (see Storage and Current Limitations) remains accurate until the phased plan in `docs/ROADMAP.md` lands its increments in code.
+
+No further architectural changes beyond the above are currently approved. Open questions still under consideration (see `docs/PROJECT_DECISIONS.md` → Pending Decisions):
 - Whether to introduce a backend and database for multi-device sync and backup, or remain local-only by design.
 - Whether to introduce user accounts and authentication.
 - Whether to consolidate the PDF annotation implementation onto a single approach.
 - Whether any visual direction explored in `Constrapp_v5.jsx` (explicitly reference-only today — see `docs/DESIGN_SYSTEM.md` → Future Visual Direction) is formally adopted.
 
-Any of the above requires an approved, recorded decision before implementation begins.
+Any of the above requires an approved, recorded decision before implementation begins. Company/workspace-scoped templates and template permissions specifically depend on the backend and authentication questions above being resolved first.
