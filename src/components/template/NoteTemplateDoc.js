@@ -5,47 +5,24 @@ import {
   defaultRows,
   makeNewRow,
 } from "../../templates/defaultTwoColDoc";
-
-const TEMPLATE_STORAGE_KEY = "sitewise-template-v1";
-const TEMPLATE_CONTENT_STORAGE_KEY = "sitewise-template-content-v1";
-
-// Per-note template field content (text + images), keyed by noteId.
-// Additive, separate key from TEMPLATE_STORAGE_KEY (the shared layout
-// definition) and from the note-content storage in MainArea — reading or
-// writing this key never touches either of those.
-function loadNoteTemplateContent(noteId) {
-  if (!noteId) return { rowText: {}, rowImages: {} };
-  try {
-    const raw = localStorage.getItem(TEMPLATE_CONTENT_STORAGE_KEY);
-    const all = raw ? JSON.parse(raw) : {};
-    const entry = all[noteId];
-    return {
-      rowText: entry?.rowText || {},
-      rowImages: entry?.rowImages || {},
-    };
-  } catch {
-    return { rowText: {}, rowImages: {} };
-  }
-}
-
-function saveNoteTemplateContent(noteId, rowText, rowImages) {
-  if (!noteId) return;
-  try {
-    const raw = localStorage.getItem(TEMPLATE_CONTENT_STORAGE_KEY);
-    const all = raw ? JSON.parse(raw) : {};
-    all[noteId] = { rowText, rowImages };
-    localStorage.setItem(TEMPLATE_CONTENT_STORAGE_KEY, JSON.stringify(all));
-  } catch {
-    // ignore quota/serialization errors, mirrors existing storage handling in this file
-  }
-}
+import {
+  getOrCreateInstanceForNote,
+  saveNoteTemplateInstance,
+  setInstanceTemplate,
+  listTemplates,
+  getVersion,
+  getCurrentVersion,
+} from "../../lib/templateModel";
 
 /**
  * NoteTemplateDoc
  * - Renders the template layout inside the main note window.
- * - Uses a shared template (logo + labels + widths) from localStorage.
+ * - Renders from the note's pinned template version (never the live,
+ *   editable template) via its NoteTemplateInstance — editing a master
+ *   template does not change existing notes.
  * - Maintains per-note text and images for the right-hand fields, persisted
- *   per noteId so they survive note switches and page reloads.
+ *   on the instance so they survive note switches and page reloads.
+ * - Lets the user re-pin the note to a different template via a selector.
  * - Exposes an insert handler so MainArea can push BottomBar text into a row.
  */
 export default function NoteTemplateDoc({
@@ -53,46 +30,64 @@ export default function NoteTemplateDoc({
   onRegisterTemplateInsert, // (fn | null) => void
   onSelectRow, // (rowId) => void
 }) {
+  // The instance pins this note to a specific template version; created
+  // against the default template on first use. This component is remounted
+  // per note (keyed in MainArea), so initializers run for each note.
+  const [instance, setInstance] = useState(() => getOrCreateInstanceForNote(noteId));
+  const [templates, setTemplates] = useState(() => listTemplates());
+
   const [rows, setRows] = useState(defaultRows);
   const [leftPct, setLeftPct] = useState(DEFAULT_LEFT_COL_PCT);
   const [logoSrc, setLogoSrc] = useState(null);
 
-  // Per-note content — initialized from storage for this noteId, then persisted below
-  const [rowImages, setRowImages] = useState(
-    () => loadNoteTemplateContent(noteId).rowImages
-  );
-  const [rowText, setRowText] = useState(
-    () => loadNoteTemplateContent(noteId).rowText
-  );
+  // Per-note content — initialized from the instance, persisted back below
+  const [rowImages, setRowImages] = useState(() => instance?.attachments || {});
+  const [rowText, setRowText] = useState(() => instance?.answers || {});
   const [pendingRowId, setPendingRowId] = useState(null);
 
-  // Load template definition when a note is opened or changed
+  // Load the pinned version's layout. Falls back to the pinned template's
+  // current version if that exact version record is missing, then to the
+  // built-in scaffold.
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(TEMPLATE_STORAGE_KEY);
-      if (!raw) return;
-      const tpl = JSON.parse(raw);
-      if (tpl.leftPct) setLeftPct(tpl.leftPct);
-      if (Array.isArray(tpl.rows) && tpl.rows.length > 0) {
-        setRows(
-          tpl.rows.map((r, idx) => ({
-            id: r.id || `row-${idx}`,
-            label: r.label ?? "",
-            px: r.px ?? 120,
-            minPx: r.minPx ?? 100,
-          }))
-        );
-      }
-      if (tpl.logoSrc) setLogoSrc(tpl.logoSrc);
-    } catch {
-      // ignore bad template
+    const version =
+      getVersion(instance?.templateVersionId) ||
+      getCurrentVersion(instance?.templateId);
+    if (!version) return; // keep scaffold defaults
+    setLeftPct(version.leftPct || DEFAULT_LEFT_COL_PCT);
+    if (Array.isArray(version.rows) && version.rows.length > 0) {
+      setRows(
+        version.rows.map((r, idx) => ({
+          id: r.id || `row-${idx}`,
+          label: r.label ?? "",
+          px: r.px ?? 120,
+          minPx: r.minPx ?? 100,
+        }))
+      );
     }
-  }, [noteId]);
+    setLogoSrc(version.logoSrc || null);
+  }, [instance?.templateVersionId, instance?.templateId]);
 
   // Persist per-note template field content whenever it changes
   useEffect(() => {
-    saveNoteTemplateContent(noteId, rowText, rowImages);
-  }, [noteId, rowText, rowImages]);
+    if (!noteId || !instance) return;
+    saveNoteTemplateInstance({
+      ...instance,
+      answers: rowText,
+      attachments: rowImages,
+    });
+  }, [noteId, instance, rowText, rowImages]);
+
+  const refreshTemplates = () => setTemplates(listTemplates());
+
+  // Re-pin this note to another template's current version. Answers are
+  // kept — entries keyed by row ids the new template doesn't have simply
+  // stop rendering, nothing is destroyed.
+  function handleTemplateChange(e) {
+    const templateId = e.target.value;
+    if (!templateId || templateId === instance?.templateId) return;
+    const next = setInstanceTemplate(noteId, templateId);
+    if (next) setInstance(next);
+  }
 
   const addRow = () =>
     setRows((prev) => [...prev, makeNewRow("New Field")]);
@@ -190,6 +185,34 @@ export default function NoteTemplateDoc({
 
   return (
     <div className="p-2 text-black dark:text-white">
+      {/* Per-note template selection */}
+      <div className="mb-2 flex items-center gap-2">
+        <label
+          htmlFor={`note-template-select-${noteId || "global"}`}
+          className="text-sm text-gray-600 dark:text-gray-300"
+        >
+          Template
+        </label>
+        <select
+          id={`note-template-select-${noteId || "global"}`}
+          value={instance?.templateId || ""}
+          onChange={handleTemplateChange}
+          onFocus={refreshTemplates}
+          className="px-2 py-1 text-sm border rounded border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-800 text-black dark:text-white"
+        >
+          {!instance?.templateId && <option value="">—</option>}
+          {instance?.templateId &&
+            !templates.some((t) => t.id === instance.templateId) && (
+              <option value={instance.templateId}>(deleted template)</option>
+            )}
+          {templates.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name || "Untitled"}
+            </option>
+          ))}
+        </select>
+      </div>
+
       {/* Hidden input per note for image/file selection */}
       <input
         id={`note-template-image-input-${noteId || "global"}`}

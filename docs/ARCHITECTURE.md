@@ -84,7 +84,9 @@ All persistence is currently client-side browser storage. There is no server-sid
 | Per-note voice language preference | Last-used transcription language, per note | |
 | Per-note AI style preference | Last-used AI refine style, per note | |
 | Per-note coordinate system preference | Last-used location coordinate system, per note | |
-| Saved report template | Template Builder layout, including logo and field labels | |
+| Template library | Named template records and their immutable version snapshots (layout, labels, widths, logo), plus a default-template pointer | Editing a template publishes a new version; existing versions are never rewritten |
+| Note template instances | Per-note template answers and attachments, pinned to the specific template version the note was created against | Notes render from their pinned version, not the live template |
+| Legacy single-template keys | The pre-library template definition and per-note content | Frozen: read once by a one-time startup migration, never written again; retained so a code rollback loses nothing |
 | Theme preference | Light/dark mode | |
 | Last export format | Most recently used export format | |
 | Coordinate-system metadata cache | Cached lookup data for location conversion, time-limited | |
@@ -158,13 +160,13 @@ Privacy and risk framing for this same integration list lives in [`docs/SECURITY
 - No authentication or multi-device sync exists — the application is currently single-browser, single-device only.
 - Icon usage is currently split across two different icon sets with no documented convention for which to use.
 - Product branding (page title, app manifest, icons) has not yet been updated to reflect NoteWise.
-- The Template Builder currently uses a single, global, mutable template definition with no library, no versioning, and no per-note isolation — note content is bound directly to the live template's row ids, so editing the master template (renaming or deleting a row) can silently orphan existing notes' saved answers. A target architecture (Template Library, immutable Template Versions, note-scoped Template Instances) has been approved — see `docs/PROJECT_DECISIONS.md` — but is not yet implemented; the single-template behavior described above remains current fact until the phased migration in `docs/ROADMAP.md` lands.
+- The template system implements the approved Template Library model (multiple named templates, immutable versions, per-note pinned instances with a per-note template selector), so editing a master template no longer affects existing notes. Not yet implemented from the approved decision: version history UI, the field-type system, per-row photo/file/signature controls, stable UUID ids for builder-added rows, and IndexedDB-backed template assets — template logos and note attachments are still stored as base64 in localStorage, and superseded versions accumulate without pruning, so storage-quota pressure grows with template count and edit frequency.
 
 These are described here as **current facts**, not permanent constraints — each has a corresponding open question in `docs/PROJECT_DECISIONS.md` and, where prioritized, an entry in `docs/ROADMAP.md`.
 
 ## Future Architectural Direction
 
-**Approved, pending implementation**: a template architecture redesign — Template Library, immutable Template Versions, Note Template Instances, a defined field-type system, per-row attachment controls, stable UUID-style field ids, and a move from localStorage to IndexedDB for template assets — has been approved. See `docs/PROJECT_DECISIONS.md` → "Template architecture: library, immutable versions, and note instances" for the full decision. None of this is implemented yet; the current single-template implementation described elsewhere in this document (see Storage and Current Limitations) remains accurate until the phased plan in `docs/ROADMAP.md` lands its increments in code.
+**Approved, partially implemented**: a template architecture redesign — Template Library, immutable Template Versions, Note Template Instances, a defined field-type system, per-row attachment controls, stable UUID-style field ids, and a move from localStorage to IndexedDB for template assets — has been approved. See `docs/PROJECT_DECISIONS.md` → "Template architecture: library, immutable versions, and note instances" for the full decision. The Template Library, immutable versions, and per-note pinned instances (including per-note template selection) are now implemented on localStorage; a one-time startup migration rebuilt the new model from the legacy single-template keys, which remain frozen in place. Still pending from that decision: the field-type system, per-row attachment controls, stable UUID field ids for builder-added rows, template versioning UI, export version-provenance, and the IndexedDB move for template assets.
 
 No further architectural changes beyond the above are currently approved. Open questions still under consideration (see `docs/PROJECT_DECISIONS.md` → Pending Decisions):
 - Whether to introduce a backend and database for multi-device sync and backup, or remain local-only by design.

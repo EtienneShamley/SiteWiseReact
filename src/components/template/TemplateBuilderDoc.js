@@ -5,40 +5,42 @@ import {
   defaultRows,
   makeNewRow,
 } from "../../templates/defaultTwoColDoc";
+import {
+  getCurrentVersion,
+  publishTemplateVersion,
+} from "../../lib/templateModel";
 
-const TEMPLATE_STORAGE_KEY = "sitewise-template-v1";
-
-// Load the previously saved template definition, if any, so opening the
-// builder edits the real saved template instead of always resetting to the
-// default scaffold. Mirrors the parsing already used in NoteTemplateDoc.js
-// when it loads this same key.
-function loadSavedTemplate() {
-  try {
-    const raw = localStorage.getItem(TEMPLATE_STORAGE_KEY);
-    if (!raw) return null;
-    const tpl = JSON.parse(raw);
-    if (!Array.isArray(tpl.rows) || tpl.rows.length === 0) return null;
-    return {
-      leftPct: tpl.leftPct || DEFAULT_LEFT_COL_PCT,
-      logoSrc: tpl.logoSrc || null,
-      rows: tpl.rows.map((r, idx) => ({
-        id: r.id || `row-${idx}`,
-        label: r.label ?? "",
-        px: r.px ?? 120,
-        minPx: r.minPx ?? 100,
-      })),
-    };
-  } catch {
+// Load the template's current version for editing, so opening the builder
+// edits the real saved template instead of always resetting to the default
+// scaffold. Saving publishes a new immutable version (see templateModel.js);
+// the loaded version itself is never rewritten in place.
+function loadCurrentDefinition(templateId) {
+  const version = getCurrentVersion(templateId);
+  if (!version || !Array.isArray(version.rows) || version.rows.length === 0) {
     return null;
   }
+  return {
+    leftPct: version.leftPct || DEFAULT_LEFT_COL_PCT,
+    logoSrc: version.logoSrc || null,
+    rows: version.rows.map((r, idx) => ({
+      id: r.id || `row-${idx}`,
+      label: r.label ?? "",
+      px: r.px ?? 120,
+      minPx: r.minPx ?? 100,
+    })),
+  };
 }
 
-export default function TemplateBuilderDoc({ onTemplateSubmit }) {
-  const [rows, setRows] = useState(() => loadSavedTemplate()?.rows ?? defaultRows);
-  const [leftPct, setLeftPct] = useState(
-    () => loadSavedTemplate()?.leftPct ?? DEFAULT_LEFT_COL_PCT
+export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
+  const [rows, setRows] = useState(
+    () => loadCurrentDefinition(templateId)?.rows ?? defaultRows
   );
-  const [logoSrc, setLogoSrc] = useState(() => loadSavedTemplate()?.logoSrc ?? null);
+  const [leftPct, setLeftPct] = useState(
+    () => loadCurrentDefinition(templateId)?.leftPct ?? DEFAULT_LEFT_COL_PCT
+  );
+  const [logoSrc, setLogoSrc] = useState(
+    () => loadCurrentDefinition(templateId)?.logoSrc ?? null
+  );
 
   // demo-only image state (not part of template definition)
   const [rowImages, setRowImages] = useState({});
@@ -69,7 +71,7 @@ export default function TemplateBuilderDoc({ onTemplateSubmit }) {
   }
 
   function handleSubmitTemplate() {
-    const template = {
+    const definition = {
       leftPct,
       logoSrc: logoSrc || null,
       rows: rows.map((r) => ({
@@ -80,12 +82,12 @@ export default function TemplateBuilderDoc({ onTemplateSubmit }) {
       })),
     };
 
-    try {
-      localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(template));
-      if (onTemplateSubmit) onTemplateSubmit(template);
-      alert("Template saved. Switch notes to Template layout to use it.");
-    } catch (e) {
-      alert("Failed to save template: " + (e?.message || "unknown error"));
+    const version = publishTemplateVersion(templateId, definition);
+    if (version) {
+      if (onTemplateSubmit) onTemplateSubmit(version);
+      alert("Template saved.");
+    } else {
+      alert("Failed to save template: template not found.");
     }
   }
 

@@ -23,7 +23,8 @@ Use this list to judge blast radius for any change that isn't obviously isolated
 - [ ] Create, rename, and delete a note (project folder, root folder, and root-level)
 - [ ] Edit note content and confirm it persists after a page reload
 - [ ] Switch between notes and confirm the correct content loads for each
-- [ ] Apply and edit a report template on a note
+- [ ] Apply and edit a report template on a note (fill fields, switch the note's template via the selector, confirm answers persist)
+- [ ] Open the Template Library: create, rename, duplicate, delete, and set-default a template; confirm an edit to a master template does not change an existing note's layout or answers
 - [ ] Import a PDF, add at least one annotation, and export the flattened result
 - [ ] Record and transcribe a voice note
 - [ ] Run AI refine on typed and on dictated text, and confirm revert works
