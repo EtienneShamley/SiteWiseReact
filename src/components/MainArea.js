@@ -27,6 +27,13 @@ import { TextStyle, FontSize } from "@tiptap/extension-text-style";
 import Color from "@tiptap/extension-color";
 // import FullNoteAIBar from "./FullNoteAIBar";
 import PdfEditorTab from "./editor/PdfEditorTab";
+import {
+  ListIndentKeymap,
+  TextAlign,
+  Subscript,
+  Superscript,
+} from "./editor/extensions";
+import "./editor/editor.css";
 import { useRefine } from "../hooks/useRefine";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import ListenInPanel from "./ListenInPanel";
@@ -107,10 +114,21 @@ export default function MainArea() {
   const editor = useEditor(
     {
       extensions: [
-        StarterKit,
+        // StarterKit v3 already bundles these five; they must be disabled
+        // here so the standalone registrations below are the only ones —
+        // duplicate registrations produce conflicting schema/keymap entries.
+        StarterKit.configure({
+          underline: false,
+          link: false,
+          blockquote: false,
+          horizontalRule: false,
+          codeBlock: false,
+        }),
         Underline,
-        Link,
-        Highlight,
+        // openOnClick would navigate away when clicking a link to edit it
+        Link.configure({ openOnClick: false }),
+        // multicolor is required for the toolbar's highlight colour picker
+        Highlight.configure({ multicolor: true }),
         Blockquote,
         HorizontalRule,
         Table.configure({ resizable: true }),
@@ -119,7 +137,14 @@ export default function MainArea() {
         TableCell,
         Image,
         TaskList,
-        TaskItem,
+        // nested is required for the toolbar's indent inside task lists
+        TaskItem.configure({ nested: true }),
+        // Locally defined (see ./editor/extensions.js): corrected list
+        // indent/outdent keymap, alignment, subscript, superscript.
+        ListIndentKeymap,
+        TextAlign,
+        Subscript,
+        Superscript,
         CodeBlockLowlight.configure({ lowlight }),
         FontFamily,
         TextStyle,
@@ -130,8 +155,7 @@ export default function MainArea() {
       editable: !!noteTitle,
       editorProps: {
         attributes: {
-          class:
-            "prose prose-invert dark:prose-invert min-h-[400px] focus:outline-none",
+          class: "note-editor min-h-[400px] focus:outline-none",
           spellCheck: "true",
         },
       },
