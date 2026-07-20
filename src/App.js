@@ -6,6 +6,22 @@ import { ThemeProvider } from "./context/ThemeContext";
 import { Cog6ToothIcon } from "@heroicons/react/24/outline";
 import SettingsModal from "./components/SettingsModal";
 import { runTemplateMigration } from "./lib/templateMigration";
+import { useAppState } from "./context/AppStateContext";
+
+// Surfaces localStorage persistence failures (tree, PDF registry, note links)
+// rather than letting them fail silently.
+function PersistenceErrorBanner() {
+  const { persistenceError, clearPersistenceError } = useAppState();
+  if (!persistenceError) return null;
+  return (
+    <div className="fixed top-0 inset-x-0 z-[60] flex items-center justify-between gap-3 px-4 py-2 text-sm bg-red-600 text-white shadow">
+      <span className="truncate">{persistenceError}</span>
+      <button className="shrink-0 underline text-xs" onClick={clearPersistenceError}>
+        Dismiss
+      </button>
+    </div>
+  );
+}
 
 function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -17,6 +33,7 @@ function App() {
   return (
     <ThemeProvider>
       <div className="flex min-h-screen bg-white dark:bg-gray-950 text-black dark:text-white relative">
+        <PersistenceErrorBanner />
         <Sidebar />
         <MiddlePane />
         <MainArea />

@@ -52,8 +52,8 @@ There is currently no database and no authentication layer. The backend holds no
 - **Build tooling**: a standard single-page-application build and bundling pipeline, extended with a configuration layer that adds browser-compatible versions of several Node-standard APIs so certain libraries (PDF handling, coordinate conversion) work correctly in the browser. The exact current toolchain is defined in `package.json` and its build configuration file rather than named in prose here, so this document does not require rewriting if the toolchain changes.
 - **Styling**: a utility-first CSS approach with class-based light/dark theming, plus a small amount of component-scoped styling.
 - **Editor**: a rich-text editing engine, extended with tables, images, task lists, code blocks, highlighting, links, font/color controls, text alignment, and subscript/superscript. A small set of locally defined editor extensions (list indent keymap, text alignment, subscript, superscript) lives alongside the editor UI (`src/components/editor/extensions.js`) to avoid adding dependencies for capabilities the installed packages don't cover.
-- **Navigation**: no URL-based routing — the app is a single view driven by selection state (active project, active folder, current note) held in application state.
-- **Layout shell**: a persistent three-pane structure — a project/folder navigator, a note list (shown contextually), and the active note editor — plus a small number of global floating controls.
+- **Navigation**: no URL-based routing — the app is driven by a top-level `workspace` mode (`"projects" | "pdfs"`) plus selection state (active project, active folder, current note, current PDF) held in application state. The sidebar's Projects | PDFs switch chooses the workspace; note and PDF selections are independent.
+- **Layout shell**: in Projects mode, a three-pane structure — a project/folder navigator, a contextual note list, and the active note editor. In PDFs mode, the note list (middle pane) is hidden and the main area shows the global PDF library or the open PDF editor full-width. A small number of global floating controls persist across both.
 
 ## Backend
 
@@ -71,7 +71,9 @@ Two application-wide state providers currently carry all cross-cutting state:
 - One holding the project/folder/note hierarchy, the active selection, and several persisted lookup maps (naming counters, per-note preferences, in-session file caches).
 - One holding the light/dark theme preference.
 
-**Important distinction**: the project/folder/note *hierarchy* itself is currently held only in in-memory application state and is not persisted — reloading the page resets it to empty. This is separate from note *content*, which is persisted (see Storage below). Whether this is an intentional simplification or an outstanding gap has not been settled — see `docs/PROJECT_DECISIONS.md` (Pending).
+**Hierarchy persistence**: the project/folder/note *hierarchy* is now persisted as a single versioned localStorage record (`src/lib/treeStorage.js`, key `notewise-tree-v1`), preserving existing project/folder/note ids so it — and note *content* keyed by those ids — survives reload. Only durable structure is persisted; transient selection state (active project/folder, current note, current PDF) is not. Hydration is synchronous from storage so initial empty state can never overwrite stored data, malformed data falls back to empty safely, and write failures surface in a visible banner. See `docs/PROJECT_DECISIONS.md` → "PDFs are independent folder-level documents; hierarchy is now persisted".
+
+The same application-wide provider (`AppStateContext`) also owns the PDF document registry, note→PDF references, the current-PDF selection, and PDF create/rename/delete with cascade cleanup (see PDF Pipeline and Storage).
 
 ## Storage
 
@@ -87,14 +89,17 @@ All persistence is currently client-side browser storage. There is no server-sid
 | Template library | Named template records and their immutable version snapshots (layout, labels, widths, logo), plus a default-template pointer | Editing a template publishes a new version; existing versions are never rewritten |
 | Note template instances | Per-note template answers and attachments, pinned to the specific template version the note was created against | Notes render from their pinned version, not the live template |
 | Legacy single-template keys | The pre-library template definition and per-note content | Frozen: read once by a one-time startup migration, never written again; retained so a code rollback loses nothing |
-| Per-note PDF source bytes | The original imported PDF file, keyed by note identifier | IndexedDB (`notewise-pdf-editor` → `pdfBytes`); binary data is never placed in localStorage |
-| Per-note PDF annotations | Page-space annotation JSON, keyed by note identifier | IndexedDB (`notewise-pdf-editor` → `annotations`); see `docs/features/PDF_EDITOR.md` |
+| Project/folder/note hierarchy | The full tree (projects, project folders + notes, root folders + notes, root notes) with stable ids | localStorage (`notewise-tree-v1`); transient selection is not persisted |
+| PDF document registry | One metadata record per PDF: `{ id, projectId, folderId, name, createdAt, updatedAt }` | localStorage (`notewise-pdf-docs-v1`); PDFs are **global standalone documents** — `projectId`/`folderId` are optional metadata (null for globally-created PDFs), not an access requirement |
+| Note → PDF references | Map of `{ [noteId]: pdfDocId }` | localStorage (`notewise-note-pdf-refs-v1`); a note stores only a reference — the PDF exists independently |
+| PDF document source bytes | The original imported PDF file, keyed by **documentId** | IndexedDB (`notewise-pdf-editor` v2 → `pdfDocBytes`); binary data is never placed in localStorage |
+| PDF document annotations | Page-space annotation JSON, keyed by **documentId** | IndexedDB (`notewise-pdf-editor` v2 → `pdfDocAnnotations`); see `docs/features/PDF_EDITOR.md` |
 | Theme preference | Light/dark mode | |
 | Last export format | Most recently used export format | |
 | Coordinate-system metadata cache | Cached lookup data for location conversion, time-limited | |
 | Photo numbering counter | Sequential counter used when labeling captured photos | |
 
-**Not currently persisted**: the project/folder/note hierarchy itself. (PDF bytes and annotations, formerly session-only, are now persisted per note in IndexedDB — the in-memory per-note PDF cache remains only as a session fast path.)
+**Persisted as of 2026-07-20**: the project/folder/note hierarchy (versioned `notewise-tree-v1`), the PDF document registry, and note→PDF references. PDF bytes and annotations are persisted in IndexedDB keyed by **documentId** (upgraded from the earlier note-keyed v1 stores by a one-time migration — see PDF Pipeline). The in-memory PDF byte cache (now keyed by documentId) remains only as a session fast path. Transient selection state is intentionally not persisted.
 
 Stored-data keys currently use identifiers derived from the previous product name — this is expected pending a planned migration (see `docs/PROJECT_DECISIONS.md`). Renaming these without a migration path would silently discard existing users' data — see `AGENTS.md`.
 
@@ -110,7 +115,7 @@ Stored-data keys currently use identifiers derived from the previous product nam
 
 **Photo capture**: an image is selected or captured → location and timestamp metadata are extracted from the image or, failing that, from the device's location capability → the coordinates are reverse-geocoded to a readable address → a small map-reference image is fetched → all of the above is composited onto the photo before it is inserted into the note.
 
-**PDF annotation**: a PDF is imported → its bytes are persisted to IndexedDB keyed by the note → each page is rendered for on-screen display (canvas + text layer) → the user creates annotations (stored in page-space coordinates, auto-persisted per note) → an export step flattens all supported annotation types into a new, downloadable PDF. The exported file is downloaded only; no link is inserted into the note (see `docs/features/PDF_EDITOR.md`).
+**PDF annotation**: a PDF is imported → its bytes are persisted to IndexedDB keyed by a stable `documentId` → each page is rendered for on-screen display (canvas + text layer) → the user creates annotations (stored in page-space coordinates, auto-persisted by `documentId`) → an export step flattens all supported annotation types into a new, downloadable PDF. The exported file is downloaded only; no link is inserted into the note (see `docs/features/PDF_EDITOR.md`).
 
 ## Voice Pipeline
 
@@ -134,7 +139,7 @@ The "conversation/meeting capture" feature is not a separate AI capability — i
 Two independent systems currently exist under the "PDF" umbrella and do not share code:
 
 1. **Note-to-PDF export** — converts rich-text note content into a downloadable PDF. This is a one-way rendering step with no annotation concept.
-2. **PDF editor** — an imported PDF is rendered page-by-page (canvas + pdf.js text layer + annotation overlay); annotations are stored in scale-independent page-space coordinates and persisted per note, alongside the source PDF bytes, in IndexedDB; find/search, zoom/fit, select/hand tool modes, and text-selection-anchored markup are supported; an export/"flatten" step burns all supported annotation types into a new, downloadable PDF. **The canonical detailed description — architecture, coordinate model, layer stack, persistence model, supported tools, limitations, and explicitly unsupported capabilities — is [`docs/features/PDF_EDITOR.md`](features/PDF_EDITOR.md)**; this section deliberately does not duplicate it.
+2. **PDF editor** — the single canonical annotator. PDFs are **global standalone documents**, reached via a top-level **Projects | PDFs** workspace switch in the sidebar — no project, folder or note is required to upload, open, annotate, rename or delete a PDF. The PDFs workspace shows a global library (all PDF documents) and opens the canonical editor. Each PDF has one metadata record (registry), one byte record and one annotation record, all keyed by a stable `documentId`. A note may reference a PDF via `pdfDocId` (optional), but the PDF exists independently and is never deleted by deleting the note, folder or project. An imported PDF is rendered page-by-page (canvas + pdf.js text layer + annotation overlay); annotations are stored in scale-independent page-space coordinates and persisted **by documentId** alongside the source PDF bytes in IndexedDB (`notewise-pdf-editor` v2). The v1 note-keyed stores were upgraded to documentId-keyed stores by a one-time, guarded migration (`src/lib/pdfMigration.js`) that preserves existing data into a "Recovered PDFs" root folder rather than orphaning it; find/search, zoom/fit, select/hand tool modes, and text-selection-anchored markup are supported; an export/"flatten" step burns all supported annotation types into a new, downloadable PDF. **The canonical detailed description — architecture, coordinate model, layer stack, persistence model, supported tools, limitations, and explicitly unsupported capabilities — is [`docs/features/PDF_EDITOR.md`](features/PDF_EDITOR.md)**; this section deliberately does not duplicate it.
 
 **Dead code, removal decided**: a second, never-adopted annotation subsystem exists in parallel (hooks, schema module, supporting UI components, none referenced by the running application). The decision to keep the active implementation and remove these files in a dedicated cleanup change is recorded in `docs/PROJECT_DECISIONS.md` → "PDF editor architecture"; the file list is in `docs/features/PDF_EDITOR.md`.
 
@@ -151,7 +156,6 @@ Privacy and risk framing for this same integration list lives in [`docs/SECURITY
 
 ## Current Limitations
 
-- The project/folder/note hierarchy is not currently persisted across page reloads (see State Management).
 - A second, currently-unreferenced PDF annotation implementation still exists alongside the active one; its removal is decided but not yet executed (see `docs/PROJECT_DECISIONS.md` → "PDF editor architecture").
 - A full-note AI refinement UI component exists but is not currently used, duplicating logic implemented elsewhere.
 - The backend entry file contains a code block that cannot execute correctly in its current location.

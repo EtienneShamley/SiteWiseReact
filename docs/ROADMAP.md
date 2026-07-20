@@ -14,7 +14,10 @@ Functionality that currently exists and works, based on the current implementati
 - Rich-text note editor (tables, images, task lists, code blocks, formatting)
 - Report Template Builder with per-note structured layout and logo support
 - Template Library: multiple named templates (create/rename/duplicate/delete/default), immutable template versions, and per-note template selection with version-pinned note instances
-- PDF editor: import with per-note IndexedDB persistence (source bytes + annotations), text layer with native selection/copy, selection-anchored highlight/underline/strikeout (drag-band fallback for scanned pages), find/search across pages, zoom with fit width/page, select/hand tool modes, and flattened export of all supported annotation types in scale-independent coordinates — see `docs/features/PDF_EDITOR.md`
+- Persisted Project/Folder/Note hierarchy (versioned `notewise-tree-v1`), preserving ids so note content survives reload
+- PDFs as global standalone documents: a top-level Projects | PDFs workspace switch; a global PDF library (upload/open/annotate/rename/delete) reachable without any project/folder/note; notes may optionally reference a canonical PDF via `pdfDocId` (deleting a note/folder/project never deletes the PDF)
+- PDF editor: canonical documentId-keyed IndexedDB persistence (source bytes + annotations), text layer with native selection/copy, selection-anchored highlight/underline/strikeout (drag-band fallback for scanned pages), find/search across pages, zoom with fit width/page, select/hand tool modes, and flattened export of all supported annotation types in scale-independent coordinates — see `docs/features/PDF_EDITOR.md`
+- NoteWise cyan-blue navigation system: semantic design tokens + Constrapp-inspired selected state (cyan rail, translucent cyan fill, muted→cyan label) applied across the sidebar, the top-level Projects | PDFs switch, and note navigation; green reserved for success, purple for AI
 - Voice dictation with per-note language memory and a transcription fallback path
 - AI-assisted text refinement with selectable style presets
 - Structured conversation/meeting capture with summary and action items
@@ -32,7 +35,7 @@ Functionality that currently exists and works, based on the current implementati
 
 Candidates surfaced during the architecture and product review, pending prioritization:
 
-- Resolve the project/folder/note persistence question (bug to fix vs. accepted current limitation) and act on the decision.
+- ~~Resolve the project/folder/note persistence question~~ — **done 2026-07-20**: the hierarchy is now persisted (versioned `notewise-tree-v1`); see `docs/PROJECT_DECISIONS.md`.
 - ~~Resolve the PDF annotation architecture question~~ — **done 2026-07-17**: consolidated on the active annotator with page-space coordinates and IndexedDB persistence (Phase 1 of the PDF editor plan; see `docs/PROJECT_DECISIONS.md` and `docs/features/PDF_EDITOR.md`). Remaining: delete the dead parallel PDF subsystem in a dedicated cleanup change.
 - Branding pass: replace placeholder product identity (title, manifest, icons) with NoteWise branding, once a design direction is decided in `docs/DESIGN_SYSTEM.md`.
 - Investigate and resolve the backend code-location issue noted in `docs/ARCHITECTURE.md`.
@@ -63,7 +66,7 @@ Candidates surfaced during the architecture and product review, pending prioriti
 
 | Item | Where | Impact |
 |---|---|---|
-| Project/folder/note hierarchy not persisted | Application state layer | Structure is lost on page reload |
+| ~~Project/folder/note hierarchy not persisted~~ | Application state layer | Resolved 2026-07-20 — persisted as versioned `notewise-tree-v1` |
 | Dead parallel PDF annotation implementation awaiting deletion | PDF subsystem (file list in `docs/features/PDF_EDITOR.md`) | Disposition decided 2026-07-17 (remove); files remain until a dedicated cleanup change lands |
 | Unused full-note AI refinement component | AI refine UI | Duplicated logic, dead surface area |
 | Misplaced code in backend entry file | Backend entry point | Would fail if a specific env flag were ever set server-side |

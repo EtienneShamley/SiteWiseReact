@@ -39,23 +39,36 @@ This direction is not yet reflected in any token values, component styling, or b
 | Active / selected state | light blue tint | dark blue tint |
 | Table borders | light gray | dark gray |
 
-**Proposed (Not Implemented)** — a formal token layer so future rebranding is a single-file change rather than a scattered find-and-replace, with values drawn from the blue/cyan direction stated above once designed:
+**Current (Implemented, 2026-07-20)** — a **navigation** token layer now exists (`src/styles/nav.css`, imported in `src/index.js`), defined for both light (`:root`) and dark (`.dark`) themes. This is the single source for navigation colours; components use shared classes (`.nw-nav-item`, `.nw-nav-item--active`, `.nw-seg`, `.nw-seg--active`) instead of hardcoded utility colours. The NoteWise interaction accent is a bright **cyan-blue** (`#39DDE9`). Governed by `docs/PROJECT_DECISIONS.md` → "NoteWise blue navigation system" and its cyan-blue refinement.
 
 ```
---nw-bg
---nw-surface
---nw-surface-hover
---nw-border
---nw-text-primary
---nw-text-secondary
---nw-accent          /* candidate direction: blue/cyan family, see Future Visual Direction */
---nw-accent-hover
---nw-danger
---nw-warning
---nw-success
+--nw-accent              /* #39DDE9 bright cyan-blue — brand mark (W), dark rail/text */
+--nw-accent-strong       /* #1F7F88 darker cyan-blue — brand mark (N), light-mode text/rail */
+--nw-accent-foreground   /* text on a solid accent fill */
+--nw-nav-muted-text      /* unselected nav label (muted grey) */
+--nw-nav-active-text     /* selected nav label + icon (cyan-blue; darker on light for contrast) */
+--nw-nav-selected-bg     /* translucent cyan selected background */
+--nw-nav-hover-bg        /* weaker-than-selected hover background */
+--nw-nav-rail            /* thin cyan-blue left selection rail */
+--nw-border              /* blue-grey border */
+--nw-success             /* green — saved / success / completed */
+--nw-ai-accent           /* purple — AI features */
 ```
 
-Exact values are undecided — the blue/cyan family is a stated direction, not a finalized palette.
+Contrast is theme-tuned rather than reused: dark mode uses bright `#39DDE9` for selected text/rail (~10:1 on the dark shell); light mode uses the darker `#1F7F88` (~4.7:1 on white) so labels stay accessible, with its own restrained cyan overlay tints (not the dark rgba values).
+
+**Brand mark**: a compact two-tone "NW" precedes the wordmark in the sidebar — `N` in the dimmer `--nw-accent-strong` (#1F7F88), `W` in bright `--nw-accent` (#39DDE9) — reading clearly as "NW", vertically aligned with the wordmark, within the existing sidebar spacing. The "NoteWise" wordmark itself stays neutral (white in dark / dark foreground in light), never cyan. This is inspired by Constrapp's compact mark idea only — not its chevron shape or colours.
+
+**Top-level navigation**: the sidebar's primary switch is **Projects | PDFs** (the two application workspaces), styled with the shared `.nw-nav-item` selected-navigation pattern below. Projects opens the Project → Folder → Note experience; PDFs opens the global PDF library/editor.
+
+**Selected-navigation pattern** (inspired by the sidebar in the root-level `Constrapp_v5.jsx`, visual language only): unselected rows use muted grey text on a transparent background; hover applies a weak cyan background; the selected row gets a translucent cyan background, a cyan-blue label/icon, and a thin cyan-blue left rail. The 3px rail is a permanently-reserved **transparent** left border so a row never shifts width or text position between states. Colour role reservations: **cyan-blue** = branding/navigation/interaction, **green/emerald** = saved/success, **purple** = AI, **amber/red** = warning/destructive, **muted grey** = inactive/secondary. Main workspace titles (note titles, PDF names) stay white in dark mode / dark in light mode — never cyan.
+
+**Proposed (Not Implemented)** — extend the token layer to the remaining surface roles (backgrounds, surfaces, text, danger/warning) and, if desired, wire them into the Tailwind config, so a full rebrand is a single-file change:
+
+```
+--nw-bg   --nw-surface   --nw-surface-hover   --nw-text-primary   --nw-text-secondary
+--nw-accent-hover   --nw-danger   --nw-warning
+```
 
 ## Typography
 

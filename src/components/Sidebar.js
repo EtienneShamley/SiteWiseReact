@@ -1,6 +1,6 @@
 import React, { useRef, useState, useMemo } from "react";
 import { useAppState } from "../context/AppStateContext";
-import { FaEllipsisV, FaPen, FaTrash, FaShare } from "react-icons/fa";
+import { FaEllipsisV, FaPen, FaTrash, FaShare, FaFolder, FaFilePdf } from "react-icons/fa";
 import ThreeDotMenu from "./ThreeDotMenu";
 import ShareDialog from "./ShareDialog";
 import { useTheme } from "../context/ThemeContext";
@@ -36,6 +36,10 @@ export default function Sidebar() {
     createRootFolder,
     renameRootFolder,
     deleteRootFolder,
+
+    // top-level workspace
+    workspace,
+    setWorkspace,
   } = useAppState();
 
   const { theme } = useTheme();
@@ -92,6 +96,7 @@ export default function Sidebar() {
     return { title, html };
   };
 
+  // eslint-disable-next-line no-unused-vars
   const buildItemsForRootNote = (note) => [
     { id: note.id, type: "note", title: note.title },
   ];
@@ -160,12 +165,45 @@ export default function Sidebar() {
         className="w-64 bg-white dark:bg-gray-950 text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-700 flex flex-col space-y-2"
         id="leftPane"
       >
-        <div className="pb-3 mb-3 border-b border-gray-200 dark:border-gray-800">
+        <div className="pb-3 mb-3 border-b border-gray-200 dark:border-gray-800 flex items-center gap-2">
+          {/* Compact two-tone "NW" brand mark: dimmer N + bright turquoise W.
+              Turquoise reserved for branding/interaction; wordmark stays neutral. */}
+          <span
+            className="inline-flex items-baseline text-lg font-extrabold tracking-tight leading-none select-none"
+            aria-hidden="true"
+          >
+            <span style={{ color: "var(--nw-accent-strong)" }}>N</span>
+            <span style={{ color: "var(--nw-accent)" }}>W</span>
+          </span>
           <span className="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">
             NoteWise
           </span>
         </div>
 
+        {/* Top-level workspace navigation: Projects | PDFs (cyan-blue active) */}
+        <nav className="space-y-1 mb-3">
+          <button
+            className={`nw-nav-item w-full flex items-center gap-2 rounded px-3 py-2 text-sm text-left ${
+              workspace === "projects" ? "nw-nav-item--active" : ""
+            }`}
+            onClick={() => setWorkspace("projects")}
+          >
+            <FaFolder className="nw-nav-icon shrink-0" />
+            <span className="flex-1">Projects</span>
+          </button>
+          <button
+            className={`nw-nav-item w-full flex items-center gap-2 rounded px-3 py-2 text-sm text-left ${
+              workspace === "pdfs" ? "nw-nav-item--active" : ""
+            }`}
+            onClick={() => setWorkspace("pdfs")}
+          >
+            <FaFilePdf className="nw-nav-icon shrink-0" />
+            <span className="flex-1">PDFs</span>
+          </button>
+        </nav>
+
+        {workspace === "projects" && (
+        <>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold">Projects</h2>
           <button
@@ -233,12 +271,9 @@ export default function Sidebar() {
             return (
               <li
                 key={folder.id}
-                className={`p-2 rounded flex justify-between items-center border transition-colors
-                  ${
-                    isRootFolderActive
-                      ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                      : "bg-gray-50 dark:bg-gray-900 border-transparent hover:bg-gray-100 dark:hover:bg-gray-800"
-                  }`}
+                className={`nw-nav-item p-2 rounded flex justify-between items-center ${
+                  isRootFolderActive ? "nw-nav-item--active" : ""
+                }`}
               >
                 <span
                   className="flex-1 cursor-pointer font-semibold"
@@ -323,6 +358,8 @@ export default function Sidebar() {
           buildItemsForProjectFolder={buildItemsForProjectFolder}
           theme={theme}
         />
+        </>
+        )}
       </aside>
 
       {shareCfg && (
@@ -363,12 +400,9 @@ function RootNotesList({
         return (
           <li
             key={note.id}
-            className={`p-2 rounded flex justify-between items-center border transition-colors
-              ${
-                isActive
-                  ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                  : "bg-gray-50 dark:bg-gray-900 border-transparent hover:bg-gray-100 dark:hover:bg-gray-800"
-              }`}
+            className={`nw-nav-item p-2 rounded flex justify-between items-center ${
+              isActive ? "nw-nav-item--active" : ""
+            }`}
             onClick={() => {
               setCurrentNoteId(note.id);
               clearActiveSelection();
@@ -466,12 +500,9 @@ function ProjectTree({
         return (
           <li
             key={pid}
-            className={`p-2 rounded border transition-colors
-              ${
-                isProjectActive
-                  ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                  : "bg-gray-50 dark:bg-gray-900 border-transparent hover:bg-gray-100 dark:hover:bg-gray-800"
-              }`}
+            className={`nw-nav-item p-2 rounded ${
+              isProjectActive ? "nw-nav-item--active" : ""
+            }`}
           >
             <div className="flex justify-between items-center rounded">
               <span
@@ -550,12 +581,9 @@ function ProjectTree({
                   return (
                     <li
                       key={folder.id}
-                      className={`p-2 rounded border transition-colors
-                        ${
-                          isFolderActive
-                            ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700"
-                            : "bg-gray-50 dark:bg-gray-900 border-transparent hover:bg-gray-100 dark:hover:bg-gray-800"
-                        }`}
+                      className={`nw-nav-item p-2 rounded ${
+                        isFolderActive ? "nw-nav-item--active" : ""
+                      }`}
                     >
                       <div className="flex justify-between items-center rounded">
                         <span

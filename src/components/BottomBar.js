@@ -303,6 +303,7 @@ export default function BottomBar({
       if (browserGeo) {
         lat = lat ?? browserGeo.lat;
         lon = lon ?? browserGeo.lon;
+        // eslint-disable-next-line no-unused-vars
         acc = browserGeo.acc ?? null;
         alt = alt ?? browserGeo.alt;
         spdMs = browserGeo.spd;

@@ -180,12 +180,12 @@ function PdfPage({ pdfDoc, meta, scale, textSelectable, hostRef, highlights }) {
 /* ------------------------------- Editor tab ------------------------------ */
 
 export default function PdfEditorTab({
-  noteId,
+  docId,
   initialFile,
   onInitialFileConsumed,
   onExportFlattened,
 }) {
-  const { getNotePdfBytes, setNotePdfBytes } = useAppState();
+  const { getPdfBytesCache, setPdfBytesCache } = useAppState();
 
   const [sourceBytes, setSourceBytes] = useState(null); // canonical export bytes
   const [renderBytes, setRenderBytes] = useState(null); // pdf.js working copy
@@ -232,18 +232,18 @@ export default function PdfEditorTab({
       latestItemsRef.current = [];
       annotatorRef.current?.load([]);
       setStorageError(null);
-      if (noteId) {
-        setNotePdfBytes(noteId, bytes);
-        savePdfBytes(noteId, bytes, name).catch((err) =>
+      if (docId) {
+        setPdfBytesCache(docId, bytes);
+        savePdfBytes(docId, bytes, name).catch((err) =>
           reportStorageError("Could not save the PDF to browser storage", err)
         );
-        saveAnnotations(noteId, []).catch((err) =>
+        saveAnnotations(docId, []).catch((err) =>
           reportStorageError("Could not reset stored annotations", err)
         );
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [noteId, reportStorageError]
+    [docId, reportStorageError]
   );
 
   useEffect(() => {
@@ -261,7 +261,7 @@ export default function PdfEditorTab({
         }
         return;
       }
-      if (!noteId) {
+      if (!docId) {
         setInitialAnnotations([]);
         return;
       }
@@ -274,7 +274,7 @@ export default function PdfEditorTab({
       let rec = null;
       let anns = [];
       try {
-        [rec, anns] = await Promise.all([loadPdfBytes(noteId), loadAnnotations(noteId)]);
+        [rec, anns] = await Promise.all([loadPdfBytes(docId), loadAnnotations(docId)]);
       } catch (err) {
         if (!cancelled) reportStorageError("Could not read this note's PDF from browser storage", err);
       }
@@ -282,10 +282,10 @@ export default function PdfEditorTab({
       if (rec) {
         setSourceBytes(rec.bytes);
         setRenderBytes(rec.bytes.slice(0));
-        setNotePdfBytes(noteId, rec.bytes);
+        setPdfBytesCache(docId, rec.bytes);
       } else {
         // Fall back to the in-memory session cache (e.g. storage unavailable).
-        const cached = getNotePdfBytes(noteId);
+        const cached = getPdfBytesCache(docId);
         if (cached) {
           setSourceBytes(cached);
           setRenderBytes(cached.slice(0));
@@ -298,7 +298,7 @@ export default function PdfEditorTab({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [noteId, initialFile]);
+  }, [docId, initialFile]);
 
   const onPick = async (e) => {
     const f = e.target.files?.[0];
@@ -356,28 +356,28 @@ export default function PdfEditorTab({
   const handleItemsChange = useCallback(
     (items) => {
       latestItemsRef.current = items;
-      if (!noteId) return;
+      if (!docId) return;
       window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
-        saveAnnotations(noteId, items).catch((err) =>
+        saveAnnotations(docId, items).catch((err) =>
           reportStorageError("Could not save annotations to browser storage", err)
         );
       }, 600);
     },
-    [noteId, reportStorageError]
+    [docId, reportStorageError]
   );
 
   // Flush pending annotation writes when leaving the note/tab.
   useEffect(() => {
     return () => {
       window.clearTimeout(saveTimer.current);
-      if (noteId && latestItemsRef.current) {
-        saveAnnotations(noteId, latestItemsRef.current).catch((err) =>
+      if (docId && latestItemsRef.current) {
+        saveAnnotations(docId, latestItemsRef.current).catch((err) =>
           console.error("Final annotation save failed", err)
         );
       }
     };
-  }, [noteId]);
+  }, [docId]);
 
   /* --------------------------------- Zoom ---------------------------------- */
 

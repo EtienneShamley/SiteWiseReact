@@ -35,6 +35,17 @@ Use this list to judge blast radius for any change that isn't obviously isolated
 - [ ] Switch between notes and confirm the correct content loads for each
 - [ ] Apply and edit a report template on a note (fill fields, switch the note's template via the selector, confirm answers persist)
 - [ ] Open the Template Library: create, rename, duplicate, delete, and set-default a template; confirm an edit to a master template does not change an existing note's layout or answers
+- [ ] Persistence: create a project, folder and note, then reload — confirm the whole tree returns, note ids are unchanged, and note content is still accessible; confirm no duplicate default projects/folders appear
+- [ ] Global PDFs (top-level Projects | PDFs workspace switch):
+  - [ ] With **no** projects/folders/notes at all, click PDFs in the sidebar → Upload PDF; confirm no project/folder/note is created; open and annotate it; reload and confirm bytes + annotations return
+  - [ ] Rename a PDF; export/flatten a PDF
+  - [ ] Return to Projects, create/select a project + folder + note, return to PDFs — confirm the PDF is still listed
+  - [ ] Link the PDF to a note (Note → PDF tab import); open it via the note and confirm identical annotations; unlink and confirm the PDF remains in the global library
+  - [ ] Delete the note, its folder, and its project — confirm the global PDF still exists
+  - [ ] Delete a PDF from the global library (with confirmation) — confirm its metadata, bytes, annotations and any note references are cleaned up
+  - [ ] Open two PDFs and confirm no annotation crossover
+  - [ ] Confirm there is NO Notes/PDFs switch in the middle pane, and no project/folder/note is required for PDF access
+- [ ] Navigation styling: selected vs. hover states are visually distinct in the sidebar (including the top-level Projects | PDFs switch); the cyan rail does not shift row width; verify in both dark and light themes
 - [ ] Import a PDF, add at least one annotation, and export the flattened result
 - [ ] PDF editor deep pass (any change touching the PDF subsystem — see `docs/features/PDF_EDITOR.md` for the architecture being exercised):
   - [ ] Text-based PDF: select and copy text; create a multi-line highlight, underline, and strikeout from a text selection

@@ -1,6 +1,18 @@
 // src/context/AppStateContext.js
 import React, { createContext, useContext, useState, useEffect } from "react";
-import { removeNotePdfData } from "../lib/pdfStorage";
+import {
+  savePdfBytes,
+  saveAnnotations,
+  removePdfDocumentData,
+} from "../lib/pdfStorage";
+import {
+  makePdfDoc,
+  getPdfDocs,
+  savePdfDocs,
+} from "../lib/pdfDocuments";
+import { getNotePdfRefs, saveNotePdfRefs } from "../lib/notePdfRefs";
+import { loadTree, saveTree } from "../lib/treeStorage";
+import { migrateLegacyNotePdfs } from "../lib/pdfMigration";
 
 export const AppStateContext = createContext();
 
@@ -50,18 +62,42 @@ function saveVoiceLangMap(map) {
 }
 
 export function AppStateProvider({ children }) {
-  // -------- Structure state --------
-  const [projectData, setProjectData] = useState([]);
-  const [folderMap, setFolderMap] = useState({});           // { [projectId]: [{ id, name, notes: [] }] }
+  // -------- Structure state (persisted as one versioned tree record) --------
+  // Hydrated synchronously from localStorage so the initial state IS the stored
+  // data — there is no empty-state window that could overwrite the stored tree.
+  const initialTree = TEST_RESET
+    ? { projectData: [], folderMap: {}, rootFolders: [], rootFolderNotesMap: {}, rootNotes: [] }
+    : loadTree();
+
+  const [projectData, setProjectData] = useState(initialTree.projectData);
+  const [folderMap, setFolderMap] = useState(initialTree.folderMap);
+  const [rootFolders, setRootFolders] = useState(initialTree.rootFolders);
+  const [rootFolderNotesMap, setRootFolderNotesMap] = useState(initialTree.rootFolderNotesMap);
+  const [rootNotes, setRootNotes] = useState(initialTree.rootNotes);
+
+  // Transient selection (never persisted)
   const [activeProjectId, setActiveProjectId] = useState(null);
   const [activeFolderId, setActiveFolderId] = useState(null);
   const [expandedProjectId, setExpandedProjectId] = useState(null);
-  const [currentNoteId, setCurrentNoteId] = useState(null);
+  const [currentNoteId, setCurrentNoteIdRaw] = useState(null);
+  const [currentPdfId, setCurrentPdfIdRaw] = useState(null);
 
-  // root-level stuff
-  const [rootNotes, setRootNotes] = useState([]);           // [{ id, title }]
-  const [rootFolders, setRootFolders] = useState([]);       // [{ id, name }]
-  const [rootFolderNotesMap, setRootFolderNotesMap] = useState({}); // { [rootFolderId]: [{ id, title }] }
+  // Top-level workspace mode: "projects" (Project → Folder → Note) or "pdfs"
+  // (the global standalone PDF library/editor). PDFs are reachable without any
+  // project/folder/note; workspace mode — not note/PDF precedence — decides
+  // what the main workspace shows. Transient; defaults to projects.
+  const [workspace, setWorkspaceRaw] = useState("projects");
+
+  // -------- PDF document registry + note references --------
+  const [pdfDocs, setPdfDocs] = useState(() => (TEST_RESET ? {} : getPdfDocs()));
+  const [notePdfRefs, setNotePdfRefs] = useState(() => (TEST_RESET ? {} : getNotePdfRefs()));
+
+  // Session-only PDF byte cache, keyed by documentId (fast path; IndexedDB is
+  // the source of truth across reloads).
+  const [pdfBytesCache, setPdfBytesCache] = useState(() => ({}));
+
+  // Visible surface for localStorage persistence failures (quota, etc.).
+  const [persistenceError, setPersistenceError] = useState(null);
 
   // -------- Naming counters --------
   const [counters, setCounters] = useState(loadCounters);
@@ -71,32 +107,202 @@ export function AppStateProvider({ children }) {
   const [noteVoiceLangMap, setNoteVoiceLangMap] = useState(loadVoiceLangMap);
   useEffect(() => { saveVoiceLangMap(noteVoiceLangMap); }, [noteVoiceLangMap]);
 
-  /** NEW: in-memory per-note PDF bytes (Uint8Array). Session-only. */
-  const [notePdfBytesMap, setNotePdfBytesMap] = useState(() => ({})); // { [noteId]: Uint8Array }
+  // -------- Persist the hierarchy (versioned tree record) --------
+  useEffect(() => {
+    try {
+      saveTree({ projectData, folderMap, rootFolders, rootFolderNotesMap, rootNotes });
+    } catch (err) {
+      setPersistenceError("Could not save your projects/folders: " + (err?.message || err));
+    }
+  }, [projectData, folderMap, rootFolders, rootFolderNotesMap, rootNotes]);
 
-  function getNotePdfBytes(nid) {
-    if (!nid) return null;
-    return notePdfBytesMap[nid] || null;
+  // -------- Persist the PDF registry + note references --------
+  useEffect(() => {
+    try { savePdfDocs(pdfDocs); }
+    catch (err) { setPersistenceError("Could not save the PDF list: " + (err?.message || err)); }
+  }, [pdfDocs]);
+
+  useEffect(() => {
+    try { saveNotePdfRefs(notePdfRefs); }
+    catch (err) { setPersistenceError("Could not save note↔PDF links: " + (err?.message || err)); }
+  }, [notePdfRefs]);
+
+  // -------- One-time legacy PDF migration (note-scoped -> documentId) --------
+  useEffect(() => {
+    if (TEST_RESET) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await migrateLegacyNotePdfs();
+        if (cancelled || !res.migrated) return;
+        // Reload the registry + refs so recovered global PDFs appear immediately
+        // in the PDF library. The migration does not touch the project tree.
+        setPdfDocs(getPdfDocs());
+        setNotePdfRefs(getNotePdfRefs());
+      } catch (err) {
+        if (!cancelled) {
+          setPersistenceError("Could not migrate existing PDF data: " + (err?.message || err));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  /* ------------------------------- Selection ------------------------------- */
+  // Note and PDF selections are INDEPENDENT — the top-level `workspace` decides
+  // which one the main workspace shows, not note/PDF precedence. Opening a note
+  // puts us in the projects workspace; opening a global PDF does not touch the
+  // note/project selection, so returning to Projects preserves it.
+  function setWorkspace(mode) {
+    setWorkspaceRaw(mode === "pdfs" ? "pdfs" : "projects");
   }
-  function setNotePdfBytes(nid, bytes) {
-    if (!nid || !bytes) return;
-    // Store a defensive copy to avoid accidental detachment by consumers
+  function setCurrentNoteId(nid) {
+    setCurrentNoteIdRaw(nid);
+    if (nid) setWorkspaceRaw("projects");
+  }
+  function setCurrentPdfId(pid) {
+    setCurrentPdfIdRaw(pid);
+  }
+
+  /* ------------------------- PDF byte session cache ------------------------ */
+  function getPdfBytesCache(id) {
+    if (!id) return null;
+    return pdfBytesCache[id] || null;
+  }
+  function setPdfBytesCacheFor(id, bytes) {
+    if (!id || !bytes) return;
     const clone = bytes instanceof Uint8Array ? bytes.slice(0) : new Uint8Array(bytes);
-    setNotePdfBytesMap(prev => ({ ...prev, [nid]: clone }));
+    setPdfBytesCache((prev) => ({ ...prev, [id]: clone }));
   }
-  function removeNotePdfBytes(nid) {
-    if (!nid) return;
-    setNotePdfBytesMap(prev => {
-      if (!(nid in prev)) return prev;
+  function removePdfBytesCache(id) {
+    if (!id) return;
+    setPdfBytesCache((prev) => {
+      if (!(id in prev)) return prev;
       const next = { ...prev };
-      delete next[nid];
+      delete next[id];
       return next;
     });
-    // Also drop the note's persisted PDF + annotations from IndexedDB; every
-    // caller of this function is a note-deletion cleanup path.
-    removeNotePdfData(nid).catch((err) =>
-      console.error("Failed to remove stored PDF data for note", nid, err)
+  }
+
+  /* -------------------------- PDF registry (global) ------------------------ */
+  // PDFs are standalone documents with no required project/folder ownership.
+  // projectId/folderId are optional metadata (null for globally-created PDFs).
+
+  // All standalone PDF documents, newest-updated first — the global library.
+  function listAllPdfs() {
+    return Object.values(pdfDocs).sort(
+      (a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0)
     );
+  }
+  function getPdfDocById(id) {
+    return (id && pdfDocs[id]) || null;
+  }
+
+  // Creates a canonical, global PDF document (projectId/folderId null), persists
+  // its bytes, and returns the new doc. `file` may be a File or { name/fileName,
+  // bytes }. There is only ONE PDF storage model — note imports use this too.
+  async function createGlobalPdf(file) {
+    let name, bytes;
+    if (file instanceof File) {
+      name = file.name;
+      bytes = new Uint8Array(await file.arrayBuffer());
+    } else {
+      name = file?.name || file?.fileName || "Untitled PDF";
+      bytes = file?.bytes;
+    }
+    if (!bytes || !bytes.byteLength) {
+      setPersistenceError("That PDF appears to be empty and was not added.");
+      return null;
+    }
+    const doc = makePdfDoc({ projectId: null, folderId: null, name });
+    try {
+      await savePdfBytes(doc.id, bytes, name);
+      await saveAnnotations(doc.id, []);
+    } catch (err) {
+      setPersistenceError("Could not save the PDF to browser storage: " + (err?.message || err));
+      throw err;
+    }
+    setPdfBytesCacheFor(doc.id, bytes);
+    setPdfDocs((prev) => ({ ...prev, [doc.id]: doc }));
+    return doc;
+  }
+
+  function renamePdf(pdfId) {
+    const doc = pdfDocs[pdfId];
+    if (!doc) return;
+    let name = prompt("New PDF name:", doc.name);
+    if (name === null) return;
+    name = name.trim();
+    if (!name) return;
+    setPdfDocs((prev) =>
+      prev[pdfId] ? { ...prev, [pdfId]: { ...prev[pdfId], name, updatedAt: Date.now() } } : prev
+    );
+  }
+
+  // User-facing delete: confirms, then removes metadata, note references,
+  // session cache, selection, and (async) the IndexedDB bytes + annotations.
+  async function deletePdf(pdfId) {
+    const doc = pdfDocs[pdfId];
+    if (!doc) return;
+    if (!window.confirm(`Delete "${doc.name}"? This permanently removes the PDF and its annotations.`)) {
+      return;
+    }
+    setPdfDocs((prev) => {
+      if (!(pdfId in prev)) return prev;
+      const next = { ...prev };
+      delete next[pdfId];
+      return next;
+    });
+    clearNoteRefsTo(pdfId);
+    removePdfBytesCache(pdfId);
+    if (currentPdfId === pdfId) setCurrentPdfIdRaw(null);
+    try {
+      await removePdfDocumentData(pdfId);
+    } catch (err) {
+      setPersistenceError("Could not fully delete PDF data: " + (err?.message || err));
+    }
+  }
+
+  /* --------------------------- Note ⟷ PDF references ----------------------- */
+
+  function getNotePdf(noteId) {
+    return (noteId && notePdfRefs[noteId]) || null;
+  }
+  function linkNotePdf(noteId, pdfId) {
+    if (!noteId || !pdfId) return;
+    setNotePdfRefs((prev) => ({ ...prev, [noteId]: pdfId }));
+  }
+  // Removes only the note's reference — never deletes the underlying PDF.
+  function unlinkNotePdf(noteId) {
+    if (!noteId) return;
+    setNotePdfRefs((prev) => {
+      if (!(noteId in prev)) return prev;
+      const next = { ...prev };
+      delete next[noteId];
+      return next;
+    });
+  }
+  function clearNoteRefsTo(pdfId) {
+    setNotePdfRefs((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const k of Object.keys(next)) {
+        if (next[k] === pdfId) {
+          delete next[k];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }
+
+  // Imports a PDF from within a note: creates a canonical GLOBAL PDF document
+  // and links the note to it via pdfDocId. The note does not own the PDF —
+  // deleting the note (or its folder/project) never deletes the PDF.
+  async function importPdfForNote(noteId, file) {
+    const doc = await createGlobalPdf(file);
+    if (doc && noteId) linkNotePdf(noteId, doc.id);
+    return doc;
   }
 
   /** NEW: read the saved language for a note (defaults to "auto") */
@@ -157,7 +363,8 @@ export function AppStateProvider({ children }) {
     setActiveProjectId(pid ?? null);
     setActiveFolderId(fid ?? null);
     if (pid) setExpandedProjectId(pid);
-    setCurrentNoteId(null);
+    setCurrentNoteIdRaw(null);
+    setWorkspaceRaw("projects");
   }
   function clearActiveSelection() {
     setActiveProjectId(null);
@@ -204,9 +411,9 @@ export function AppStateProvider({ children }) {
   function deleteRootNote(nid) {
     if (!window.confirm("Delete this note?")) return;
     setRootNotes((prev) => prev.filter((note) => note.id !== nid));
-    if (currentNoteId === nid) setCurrentNoteId(null);
+    if (currentNoteId === nid) setCurrentNoteIdRaw(null);
     removeNoteVoiceLanguage(nid); // NEW: cleanup
-    removeNotePdfBytes(nid);      // NEW: cleanup cached pdf
+    unlinkNotePdf(nid);           // remove the note's PDF reference (keep the PDF)
   }
 
   function shareRootNote(nid) {
@@ -229,7 +436,8 @@ export function AppStateProvider({ children }) {
     setActiveProjectId(id);
     setActiveFolderId(null);
     setExpandedProjectId(id);
-    setCurrentNoteId(null);
+    setCurrentNoteIdRaw(null);
+    setCurrentPdfIdRaw(null);
   }
 
   function renameProject(pid) {
@@ -247,13 +455,14 @@ export function AppStateProvider({ children }) {
   function deleteProject(pid) {
     if (folderMap[pid]?.length) return alert("Delete folders first.");
     if (!window.confirm("Delete this project?")) return;
-    // Remove any note voice-language in this project's folders
+    // Remove note voice-language + PDF references for this project's notes.
+    // Global PDFs are NOT deleted — a note reference never owns the PDF.
     try {
       const folders = folderMap[pid] || [];
       const allNotes = folders.flatMap(f => f.notes || []);
       allNotes.forEach(n => {
         removeNoteVoiceLanguage(n.id);
-        removeNotePdfBytes(n.id);
+        unlinkNotePdf(n.id);
       });
     } catch {}
     setProjectData((prev) => prev.filter((p) => p.id !== pid));
@@ -266,7 +475,8 @@ export function AppStateProvider({ children }) {
       setActiveProjectId(null);
       setActiveFolderId(null);
       setExpandedProjectId(null);
-      setCurrentNoteId(null);
+      setCurrentNoteIdRaw(null);
+      setCurrentPdfIdRaw(null);
     }
   }
 
@@ -294,7 +504,8 @@ export function AppStateProvider({ children }) {
     setExpandedProjectId(pid);
     setActiveProjectId(pid);
     setActiveFolderId(fid);
-    setCurrentNoteId(null);
+    setCurrentNoteIdRaw(null);
+    setCurrentPdfIdRaw(null);
     return fid;
   }
 
@@ -318,13 +529,14 @@ export function AppStateProvider({ children }) {
 
   function deleteFolder(pid, fid) {
     if (!window.confirm("Delete this folder?")) return;
-    // cleanup note voice languages within folder
+    // cleanup note voice languages + PDF references within folder.
+    // Global PDFs are NOT deleted when a folder is deleted.
     try {
       const folders = folderMap[pid] || [];
       const folder = folders.find(f => f.id === fid);
       (folder?.notes || []).forEach(n => {
         removeNoteVoiceLanguage(n.id);
-        removeNotePdfBytes(n.id);
+        unlinkNotePdf(n.id);
       });
     } catch {}
     setFolderMap((prev) => ({
@@ -333,7 +545,7 @@ export function AppStateProvider({ children }) {
     }));
     if (activeFolderId === fid && activeProjectId === pid) {
       setActiveFolderId(null);
-      setCurrentNoteId(null);
+      setCurrentNoteIdRaw(null);
     }
   }
 
@@ -358,9 +570,9 @@ export function AppStateProvider({ children }) {
           : f
       ),
     }));
-    setCurrentNoteId(nid);
     setActiveProjectId(pid);
     setActiveFolderId(fid);
+    setCurrentNoteId(nid);
   }
 
   // =========================================================
@@ -378,7 +590,7 @@ export function AppStateProvider({ children }) {
     setRootFolderNotesMap((prev) => ({ ...prev, [fid]: [] }));
     // Select the new root folder; do NOT auto-create note
     setActiveSelection(null, fid);
-    setCurrentNoteId(null);
+    setCurrentNoteIdRaw(null);
     return fid;
   }
 
@@ -403,12 +615,13 @@ export function AppStateProvider({ children }) {
 
   function deleteRootFolder(fid) {
     if (!window.confirm("Delete this folder?")) return;
-    // cleanup note voice languages within root folder
+    // cleanup note voice languages + PDF references within root folder.
+    // Global PDFs are NOT deleted when a folder is deleted.
     try {
       const list = rootFolderNotesMap[fid] || [];
       list.forEach(n => {
         removeNoteVoiceLanguage(n.id);
-        removeNotePdfBytes(n.id);
+        unlinkNotePdf(n.id);
       });
     } catch {}
     setRootFolders((prev) => prev.filter((f) => f.id !== fid));
@@ -419,7 +632,7 @@ export function AppStateProvider({ children }) {
     });
     if (!activeProjectId && activeFolderId === fid) {
       setActiveFolderId(null);
-      setCurrentNoteId(null);
+      setCurrentNoteIdRaw(null);
     }
   }
 
@@ -521,9 +734,9 @@ export function AppStateProvider({ children }) {
     });
 
     // root notes handled by deleteRootNote
-    if (currentNoteId === nid) setCurrentNoteId(null);
+    if (currentNoteId === nid) setCurrentNoteIdRaw(null);
     removeNoteVoiceLanguage(nid); // NEW: cleanup
-    removeNotePdfBytes(nid);      // NEW: cleanup
+    unlinkNotePdf(nid);           // remove the note's PDF reference (keep the PDF)
   }
 
   function shareNote(nid) {
@@ -565,12 +778,18 @@ export function AppStateProvider({ children }) {
         activeFolderId,
         expandedProjectId,
         currentNoteId,
+        currentPdfId,
+
+        // top-level workspace mode ("projects" | "pdfs")
+        workspace,
+        setWorkspace,
 
         // selection helpers
         setActiveSelection,
         clearActiveSelection,
         setExpandedProjectId,
         setCurrentNoteId,
+        setCurrentPdfId,
 
         // root notes
         createRootNote,
@@ -603,15 +822,32 @@ export function AppStateProvider({ children }) {
         renameNote,
         deleteNote,
         shareNote,
+        createNoteUniversal,
 
         // NEW: per-note voice language memory
         getNoteVoiceLanguage,
         setNoteVoiceLanguage,
 
-        // NEW: per-note PDF session cache
-        getNotePdfBytes,
-        setNotePdfBytes,
-        removeNotePdfBytes,
+        // PDF registry (global standalone documents)
+        listAllPdfs,
+        getPdfDocById,
+        createGlobalPdf,
+        renamePdf,
+        deletePdf,
+
+        // Note ⟷ PDF references
+        getNotePdf,
+        linkNotePdf,
+        unlinkNotePdf,
+        importPdfForNote,
+
+        // PDF byte session cache (keyed by documentId)
+        getPdfBytesCache,
+        setPdfBytesCache: setPdfBytesCacheFor,
+
+        // persistence error surface
+        persistenceError,
+        clearPersistenceError: () => setPersistenceError(null),
       }}
     >
       {children}

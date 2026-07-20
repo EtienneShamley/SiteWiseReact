@@ -1,7 +1,6 @@
 // src/components/MainArea.js
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
-import { useTheme } from "../context/ThemeContext";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
@@ -27,6 +26,7 @@ import { TextStyle, FontSize } from "@tiptap/extension-text-style";
 import Color from "@tiptap/extension-color";
 // import FullNoteAIBar from "./FullNoteAIBar";
 import PdfEditorTab from "./editor/PdfEditorTab";
+import PdfLibrary from "./PdfLibrary";
 import {
   ListIndentKeymap,
   TextAlign,
@@ -42,10 +42,33 @@ const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
 const STORAGE_KEY = "sitewise-notes";
 
+// Secondary metadata line for a PDF workspace header (muted grey).
+function pdfMetaLine(doc) {
+  if (!doc) return "PDF";
+  const when = doc.updatedAt || doc.createdAt;
+  if (!when) return "PDF";
+  try {
+    return `PDF · updated ${new Date(when).toLocaleString()}`;
+  } catch {
+    return "PDF";
+  }
+}
+
 export default function MainArea() {
-  const { currentNoteId, rootNotes, state, activeProjectId, activeFolderId } =
-    useAppState();
-  const { theme } = useTheme();
+  const {
+    workspace,
+    currentNoteId,
+    currentPdfId,
+    rootNotes,
+    state,
+    activeProjectId,
+    activeFolderId,
+    getPdfDocById,
+    getNotePdf,
+    importPdfForNote,
+    unlinkNotePdf,
+    setCurrentPdfId,
+  } = useAppState();
   const { refineText } = useRefine();
 
   const [docState, setDocState] = useState(() => {
@@ -57,12 +80,13 @@ export default function MainArea() {
     }
   });
 
-  const [notePdfMap, setNotePdfMap] = useState({});
   const [activeTab, setActiveTab] = useState("note");
   const [noteLayout, setNoteLayout] = useState("natural"); // default natural
   const [snapshots, setSnapshots] = useState({});
   const [refineBusy, setRefineBusy] = useState(false);
   const [refineBackupHtml, setRefineBackupHtml] = useState(null);
+
+  const notePdfInputRef = useRef(null);
 
   // Template integration
   const templateInsertRef = useRef(null); // (rowId, text) => void
@@ -105,10 +129,18 @@ export default function MainArea() {
     return { noteTitle, noteKey };
   }, [currentNoteId, rootNotes, state, activeProjectId, activeFolderId]);
 
-  // when switching notes, reset to natural + clear selected template row
+  // The standalone PDF currently open in the workspace (from the PDFs list).
+  const standalonePdf = currentPdfId ? getPdfDocById(currentPdfId) : null;
+
+  // The PDF referenced by the current note (Note → PDF tab), if any.
+  const linkedPdfId = noteKey ? getNotePdf(noteKey) : null;
+  const linkedPdfDoc = linkedPdfId ? getPdfDocById(linkedPdfId) : null;
+
+  // when switching notes, reset to natural + clear selected template row + tab
   useEffect(() => {
     setNoteLayout("natural");
     setActiveTemplateRowId(null);
+    setActiveTab("note");
   }, [noteKey]);
 
   const editor = useEditor(
@@ -181,22 +213,23 @@ export default function MainArea() {
     if (editor && text) editor.chain().focus().insertContent(text).run();
   }
 
-  function handleInsertPDF(fileUrlOrObj) {
-    if (fileUrlOrObj instanceof File) {
-      if (!noteKey) return;
-      setNotePdfMap((m) => ({ ...m, [noteKey]: fileUrlOrObj }));
-      setActiveTab("pdf");
-      return;
+  // Importing a PDF from within a note creates a canonical folder-level PDF in
+  // the note's current folder, persists its bytes, links the note via pdfDocId,
+  // and opens the shared PDF editor. No note-specific PDF bytes are stored.
+  async function handleNotePdfImport(fileObj) {
+    if (!noteKey) return;
+    try {
+      const doc = await importPdfForNote(noteKey, fileObj);
+      if (doc) setActiveTab("pdf");
+    } catch {
+      // storage error is surfaced by the context's persistence error banner
     }
-    if (editor && typeof fileUrlOrObj === "string") {
-      editor
-        .chain()
-        .focus()
-        .insertContent(
-          `<a href="${fileUrlOrObj}" target="_blank" rel="noopener noreferrer">[PDF]</a>`
-        )
-        .run();
-    }
+  }
+
+  function onPickNotePdf(e) {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (f) handleNotePdfImport(f);
   }
 
   function handleInsertImageAtCursor(imgSrc) {
@@ -287,16 +320,63 @@ export default function MainArea() {
   const chipSelectCls =
     "text-xs rounded-md px-2 py-1.5 bg-transparent text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-900/70 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50";
 
+  // Note/PDF tab segments use the shared nav accent tokens (see styles/nav.css)
+  // so the active tab matches the blue navigation system everywhere.
   const segmentBtnCls = (active) =>
     [
-      "px-3 py-1.5 rounded-md text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50",
-      active
-        ? "bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm"
-        : "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100",
+      "nw-seg px-3 py-1.5 rounded-md text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50",
+      active ? "nw-seg--active" : "",
     ].join(" ");
 
+  /* ============================ PDFs workspace ============================= */
+  // The global PDF workspace is independent of any project/folder/note. It shows
+  // either the open PDF (canonical editor) or the global PDF library.
+  if (workspace === "pdfs") {
+    if (standalonePdf) {
+      return (
+        <main className="flex-1 flex flex-col min-h-screen p-4 gap-3">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div className="min-w-0">
+              <h1 className="text-xl font-semibold tracking-tight text-gray-900 dark:text-white truncate">
+                {standalonePdf.name}
+              </h1>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                {pdfMetaLine(standalonePdf)}
+              </p>
+            </div>
+            <button
+              className={chipBtnCls}
+              onClick={() => setCurrentPdfId(null)}
+              title="Back to the PDF library"
+            >
+              ← Back to PDFs
+            </button>
+          </div>
+
+          <div className="flex-1 min-h-0 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm overflow-hidden">
+            <PdfEditorTab key={standalonePdf.id} docId={standalonePdf.id} />
+          </div>
+        </main>
+      );
+    }
+    return <PdfLibrary />;
+  }
+
+  /* =========================== Projects workspace ========================= */
+  // The full MainArea shell ALWAYS renders in projects mode — the note-editor
+  // chrome (top area, editor workspace surface, sizing/borders) exists even with
+  // no note open. A note selection only controls whether note actions are
+  // enabled and what the surface displays; it does NOT gate the shell. (The
+  // earlier `if (!noteTitle) return <centered welcome>` gate is removed.)
   return (
     <main className="flex-1 flex flex-col min-h-screen p-4 gap-3">
+      {/* Open note title (white in dark mode) */}
+      {noteTitle && (
+        <h1 className="text-xl font-semibold tracking-tight text-gray-900 dark:text-white truncate">
+          {noteTitle}
+        </h1>
+      )}
+
       {/* Top toolbar (Note tab only — the PDF tab has its own toolbar) */}
       {activeTab === "note" && <EditorToolbar editor={editor} />}
 
@@ -432,32 +512,66 @@ export default function MainArea() {
               </>
             ) : (
               <div className="text-gray-400 px-4 py-10 text-center">
-                No note selected.
+                <div className="text-base font-medium text-gray-500 dark:text-gray-300">
+                  Welcome to NoteWise
+                </div>
+                <div className="text-sm mt-1">Select or create a note to begin.</div>
               </div>
             )}
           </div>
 
-          {/* PDF VIEW */}
-          {/* Keyed by note so switching notes fully remounts the editor —
-              note A's PDF/annotations can never bleed into note B. The
-              exported PDF is downloaded by the editor itself; no link is
-              inserted into the note (a blob: URL dies with the session, so a
-              persisted link would go dead — see docs/features/PDF_EDITOR.md). */}
+          {/* PDF VIEW (note-linked) */}
+          {/* A note references a canonical folder-level PDF via pdfDocId. The
+              shared PDF editor is keyed by that document id, so opening the same
+              PDF here or from the folder PDF list shows identical annotations. */}
           <div style={{ display: activeTab === "pdf" ? "block" : "none" }}>
-            <PdfEditorTab
-              key={noteKey || "no-note"}
-              noteId={noteKey}
-              initialFile={noteKey ? notePdfMap[noteKey] : null}
-              onInitialFileConsumed={() => {
-                if (!noteKey) return;
-                setNotePdfMap((m) => {
-                  if (!(noteKey in m)) return m;
-                  const next = { ...m };
-                  delete next[noteKey];
-                  return next;
-                });
-              }}
-            />
+            {noteTitle ? (
+              linkedPdfId ? (
+                <>
+                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">
+                        {linkedPdfDoc?.name || "Linked PDF"}
+                      </div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        Linked to this note · {pdfMetaLine(linkedPdfDoc)}
+                      </div>
+                    </div>
+                    <button
+                      className={chipBtnCls}
+                      onClick={() => unlinkNotePdf(noteKey)}
+                      title="Remove the PDF link from this note (the PDF itself is kept)"
+                    >
+                      Unlink PDF
+                    </button>
+                  </div>
+                  <PdfEditorTab key={linkedPdfId} docId={linkedPdfId} />
+                </>
+              ) : (
+                <div className="text-center px-4 py-10">
+                  <p className="text-gray-500 dark:text-gray-400 mb-3">
+                    No PDF linked to this note yet.
+                  </p>
+                  <input
+                    ref={notePdfInputRef}
+                    type="file"
+                    accept="application/pdf"
+                    onChange={onPickNotePdf}
+                    className="hidden"
+                  />
+                  <button
+                    className="nw-seg nw-seg--active px-3 py-1.5 rounded-md text-sm"
+                    onClick={() => notePdfInputRef.current?.click()}
+                  >
+                    + Add PDF to this note
+                  </button>
+                </div>
+              )
+            ) : (
+              <div className="text-gray-400 px-4 py-10 text-center">
+                No note selected.
+              </div>
+            )}
           </div>
         </div>
 
@@ -472,7 +586,7 @@ export default function MainArea() {
               editor={editor}
               onInsertText={handleBottomBarInsert}
               onInsertImage={handleInsertImageAtCursor}
-              onInsertPDF={handleInsertPDF}
+              onInsertPDFFile={handleNotePdfImport}
               disabled={!noteTitle || !editor}
             />
           </div>

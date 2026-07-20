@@ -1,0 +1,117 @@
+/*
+ * NoteWise navigation design tokens + shared nav classes.
+ *
+ * Semantic tokens so navigation colours live in ONE place rather than being
+ * hardcoded across every component. The NoteWise interaction accent is a bright
+ * cyan-blue; adopting it is recorded in docs/PROJECT_DECISIONS.md. The
+ * selected-row behaviour (translucent cyan fill + thin cyan left rail +
+ * muted→cyan label) is inspired by the sidebar pattern in the root-level
+ * Constrapp_v5.jsx (visual language only — not its colours or mark).
+ *
+ * Colour roles reserved by convention:
+ *   cyan-blue -> NoteWise branding, navigation selection + primary interaction
+ *   green     -> saved / success / completed states (--nw-success)
+ *   purple    -> AI-related features (--nw-ai-accent)
+ *   amber/red -> warning / destructive states
+ *   muted grey-> inactive navigation + secondary text
+ *
+ * Bright cyan-blue reads well on dark surfaces; on light surfaces the selected
+ * label/rail use the darker cyan (--nw-accent-strong, ~4.7:1 on white) so text
+ * stays accessible. Light-mode overlays use their own restrained tints — NOT
+ * the dark rgba values.
+ */
+
+:root {
+  /* Brand accents */
+  --nw-accent: #39DDE9;              /* bright cyan-blue — brand mark (W), dark rail/text */
+  --nw-accent-strong: #1F7F88;       /* darker cyan-blue — mark (N), light-mode text/rail */
+  --nw-accent-foreground: #ffffff;   /* text on a solid accent fill */
+
+  /* Navigation row states (light theme) */
+  --nw-nav-muted-text: #64748b;      /* slate-500 — unselected label */
+  --nw-nav-active-text: #1F7F88;     /* darker cyan-blue — accessible on white (~4.7:1) */
+  --nw-nav-selected-bg: rgba(57, 221, 233, 0.16);  /* restrained cyan tint */
+  --nw-nav-hover-bg: rgba(57, 221, 233, 0.08);      /* weaker than selected */
+  --nw-nav-rail: #1F7F88;            /* thin left selection rail (contrast on light) */
+
+  /* Structural */
+  --nw-border: #cbd5e1;              /* slate-300 */
+
+  /* Reserved semantic roles (kept distinct from the cyan accent) */
+  --nw-success: #16a34a;             /* green-600 — saved / success */
+  --nw-ai-accent: #7c3aed;           /* violet-600 — AI features */
+}
+
+.dark {
+  --nw-accent: #39DDE9;              /* bright cyan-blue */
+  --nw-accent-strong: #1F7F88;
+  --nw-accent-foreground: #ffffff;
+
+  --nw-nav-muted-text: #94a3b8;      /* slate-400 */
+  --nw-nav-active-text: #39DDE9;     /* bright cyan-blue — high contrast on dark (~10:1) */
+  --nw-nav-selected-bg: rgba(57, 221, 233, 0.12);
+  --nw-nav-hover-bg: rgba(57, 221, 233, 0.06);       /* weaker than selected */
+  --nw-nav-rail: #39DDE9;
+
+  --nw-border: #1e293b;              /* slate-800 */
+
+  --nw-success: #22c55e;             /* green-500 */
+  --nw-ai-accent: #a78bfa;           /* violet-400 */
+}
+
+/* -------------------------------------------------------------------------- */
+/* Navigation row                                                             */
+/*                                                                            */
+/* The 3px left rail is ALWAYS present (transparent when inactive) so the row */
+/* width and text position never shift between normal and selected states.    */
+/* -------------------------------------------------------------------------- */
+
+.nw-nav-item {
+  border-left: 3px solid transparent;
+  color: var(--nw-nav-muted-text);
+  background-color: transparent;
+  transition: background-color 0.12s ease, color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.nw-nav-item:hover {
+  background-color: var(--nw-nav-hover-bg);
+}
+
+/* Icon inherits the muted label colour unless overridden while active. */
+.nw-nav-item .nw-nav-icon {
+  color: var(--nw-nav-muted-text);
+}
+
+.nw-nav-item--active,
+.nw-nav-item--active:hover {
+  border-left-color: var(--nw-nav-rail);
+  background-color: var(--nw-nav-selected-bg);
+  color: var(--nw-nav-active-text);
+  font-weight: 600;
+}
+
+.nw-nav-item--active .nw-nav-icon {
+  color: var(--nw-nav-active-text);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Segmented control (e.g. the Note / PDF editor tabs)                        */
+/* -------------------------------------------------------------------------- */
+
+.nw-seg {
+  color: var(--nw-nav-muted-text);
+  background-color: transparent;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.nw-seg:hover:not(.nw-seg--active) {
+  background-color: var(--nw-nav-hover-bg);
+  color: var(--nw-nav-active-text);
+}
+
+.nw-seg--active {
+  color: var(--nw-nav-active-text);
+  background-color: var(--nw-nav-selected-bg);
+  font-weight: 600;
+}

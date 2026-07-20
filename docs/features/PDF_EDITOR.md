@@ -1,21 +1,39 @@
 # PDF Editor
 
-This is the canonical detailed description of NoteWise's PDF editor. `docs/ARCHITECTURE.md` links here rather than duplicating this content. The governing decision is recorded in `docs/PROJECT_DECISIONS.md` → "PDF editor architecture: single annotator, page-space coordinates, IndexedDB persistence".
+This is the canonical detailed description of NoteWise's PDF editor. `docs/ARCHITECTURE.md` links here rather than duplicating this content. The governing decisions are recorded in `docs/PROJECT_DECISIONS.md` → "PDF editor architecture: single annotator, page-space coordinates, IndexedDB persistence" and "PDFs are independent folder-level documents; hierarchy is now persisted".
+
+## PDFs are global standalone documents
+
+A PDF is a first-class, **global** document — reachable without creating or selecting any project, folder or note. The primary navigation is a top-level **Projects | PDFs** workspace switch in the sidebar. The PDFs workspace shows a global library (`src/components/PdfLibrary.js`) listing all PDF documents with upload, open, rename and delete (with confirmation) plus an empty state; opening one shows the canonical editor in the main workspace (PDF name in white, metadata muted) with a "← Back to PDFs" control. The middle-pane note list is hidden in the PDFs workspace.
+
+Each PDF has exactly one of each, all keyed by the same stable `documentId` (`crypto.randomUUID()` with a safe fallback, `src/lib/id.js`):
+
+| Layer | Where | Key |
+|---|---|---|
+| Metadata record | localStorage `notewise-pdf-docs-v1` (`src/lib/pdfDocuments.js`) — `{ id, name, projectId, folderId, createdAt, updatedAt }` | `id` (= documentId) |
+| Source bytes | IndexedDB `notewise-pdf-editor` v2 → `pdfDocBytes` (`src/lib/pdfStorage.js`) | `documentId` |
+| Annotations | IndexedDB `notewise-pdf-editor` v2 → `pdfDocAnnotations` | `documentId` |
+
+`projectId`/`folderId` are **optional** provenance metadata (null for globally-created PDFs), never an access requirement.
+
+**Note → PDF relationship**: a note stores only a `pdfDocId` reference (`src/lib/notePdfRefs.js`, `notewise-note-pdf-refs-v1`). Importing a PDF from within a note creates a canonical **global** PDF document and links the note. A note reference never owns the PDF: removing the link, deleting the note, or deleting its folder/project never deletes the PDF. A PDF is deleted only through the global PDF library, which removes its metadata + bytes + annotations and clears the reference from every note. Opening the same PDF via the library or via a note reference shows identical annotations (same `documentId`).
 
 ## Active Architecture
 
-The editor lives in the note editor's PDF tab and is composed of:
+The canonical editor is a single component reused for both standalone (folder-level) PDFs and note-referenced PDFs, composed of:
 
 | Piece | File | Role |
 |---|---|---|
-| Editor tab | `src/components/editor/PdfEditorTab.js` | Toolbar, tool state, page stack, find bar, zoom/fit, hand pan, per-note persistence wiring, export |
+| Editor tab | `src/components/editor/PdfEditorTab.js` | Toolbar, tool state, page stack, find bar, zoom/fit, hand pan, per-**document** persistence wiring, export |
 | Annotation overlay | `src/pdf/PdfAnnotator.js` | All annotation creation/selection/editing/history, rendered as one SVG overlay per page |
 | PDF utilities | `src/lib/pdfUtils.js` | pdf.js document loading, page/canvas/text-layer rendering, per-page layout metadata, pdf-lib flatten/export |
 | Coordinate layer | `src/lib/pdfCoords.js` | The single shared conversion layer between screen, page, and PDF user space |
 | Search | `src/lib/pdfSearch.js` | Text extraction indexing and match/rectangle calculation for the find bar |
-| Storage | `src/lib/pdfStorage.js` | Native-IndexedDB persistence of source PDF bytes and annotation JSON, keyed by note id |
+| Storage | `src/lib/pdfStorage.js` | Native-IndexedDB persistence of source PDF bytes and annotation JSON, keyed by **documentId** |
+| Document registry | `src/lib/pdfDocuments.js` | Folder-level PDF metadata records |
+| One-time migration | `src/lib/pdfMigration.js` | Moves legacy note-keyed v1 data into documentId-keyed v2 stores |
 
-The tab component is remounted per note (keyed by note id in `MainArea.js`), so one note's document and annotations can never bleed into another's.
+The editor component is remounted per document (keyed by `docId` in `MainArea.js`), so one PDF's document and annotations can never bleed into another's.
 
 ### Inactive / dead PDF code (scheduled for removal)
 
@@ -52,18 +70,20 @@ Zoom therefore never touches stored data: drawing at 100% and exporting at 150% 
 
 ## Persistence Model
 
-Native IndexedDB (no wrapper library), database `notewise-pdf-editor`, in `src/lib/pdfStorage.js`:
+Native IndexedDB (no wrapper library), database `notewise-pdf-editor` (**v2**), in `src/lib/pdfStorage.js`:
 
 | Store | Key | Value |
 |---|---|---|
-| `pdfBytes` | note id | `{ noteId, bytes: ArrayBuffer, name, updatedAt }` — the ORIGINAL source PDF |
-| `annotations` | note id | `{ noteId, items: [...], updatedAt }` — the annotation JSON |
+| `pdfDocBytes` | documentId | `{ documentId, bytes: ArrayBuffer, name, updatedAt }` — the ORIGINAL source PDF |
+| `pdfDocAnnotations` | documentId | `{ documentId, items: [...], updatedAt }` — the annotation JSON |
 
 - PDF bytes are **never** stored in localStorage.
 - Annotation edits save on a 600 ms debounce and flush on unmount; opening/replacing a PDF saves the new bytes and resets the stored annotations.
-- Deleting a note (or its folder/project) removes both records (`AppStateContext.removeNotePdfBytes`).
-- Read/write failures surface in a visible, dismissible error banner in the tab — they are not silently swallowed.
-- The pre-existing in-memory session cache (`AppStateContext.notePdfBytesMap`) remains as a fast path; IndexedDB is the source of truth across reloads.
+- Deleting a PDF document (only via the global library, `AppStateContext.deletePdf`) removes both records — it `await`s the IndexedDB deletes and surfaces any failure. Deleting a note/folder/project never deletes a PDF (it only clears note references).
+- Read/write failures surface in a visible, dismissible error banner — they are not silently swallowed.
+- The in-memory session byte cache (now keyed by documentId) remains as a fast path; IndexedDB is the source of truth across reloads.
+
+**v1 → v2 migration**: the earlier v1 schema kept `pdfBytes`/`annotations` keyed by `noteId`. On upgrade, a one-time guarded migration (`src/lib/pdfMigration.js`, guard `notewise-pdf-docid-migration-v1-complete`) creates a canonical **global** document record for each legacy PDF (projectId/folderId null), moves its bytes + annotations under a new `documentId`, and sets the originating note's `pdfDocId`, so nothing is orphaned — recovered PDFs appear in the global library. It runs at most once and leaves the guard unset if a step fails, so it can retry. (An earlier build of this migration collected recovered PDFs into a "Recovered PDFs" root folder; any such already-migrated records carry a non-null `folderId` that is now treated as optional provenance and still appear in the global library.)
 
 ## Supported Tools
 
@@ -90,7 +110,7 @@ Native IndexedDB (no wrapper library), database `notewise-pdf-editor`, in `src/l
 - Fit width/page compute from the current container size and do not re-fit on window resize.
 - The find bar matches literal substrings (case-insensitive); no whole-word or regex options.
 - Sticky-note bubbles and selection handles scale with zoom (they are drawn in page space).
-- The project/folder/note hierarchy itself is still not persisted (pre-existing, tracked separately); a stored PDF is only reachable again through a note with the same id.
+- All PDFs live in the single global library (the top-level PDFs workspace); there is no per-folder PDF list. A PDF's optional `projectId`/`folderId` metadata is provenance only and does not affect where it appears.
 
 ## Explicitly Unsupported Capabilities
 
