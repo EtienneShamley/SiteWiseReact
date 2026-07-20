@@ -1,5 +1,6 @@
 // src/context/AppStateContext.js
 import React, { createContext, useContext, useState, useEffect } from "react";
+import { removeNotePdfData } from "../lib/pdfStorage";
 
 export const AppStateContext = createContext();
 
@@ -91,6 +92,11 @@ export function AppStateProvider({ children }) {
       delete next[nid];
       return next;
     });
+    // Also drop the note's persisted PDF + annotations from IndexedDB; every
+    // caller of this function is a note-deletion cleanup path.
+    removeNotePdfData(nid).catch((err) =>
+      console.error("Failed to remove stored PDF data for note", nid, err)
+    );
   }
 
   /** NEW: read the saved language for a note (defaults to "auto") */

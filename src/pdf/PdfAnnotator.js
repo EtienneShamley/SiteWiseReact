@@ -1,4 +1,11 @@
 // src/pdf/PdfAnnotator.js
+//
+// Annotation overlay for the PDF editor. All annotation geometry is stored in
+// PAGE SPACE — pdf.js scale-1 viewport units (see src/lib/pdfCoords.js) — and
+// rendered through an SVG whose viewBox is the page's base size while its CSS
+// size is the zoomed size, so a single scale factor drives every conversion.
+// Drawing at one zoom level therefore stays correctly positioned at any other
+// zoom level and in the flattened export.
 import React, {
   forwardRef,
   useEffect,
@@ -8,6 +15,7 @@ import React, {
   useCallback,
 } from "react";
 import ReactDOM from "react-dom";
+import { clientRectToPageRect, normalizeQuads } from "../lib/pdfCoords";
 
 /* -------------------------------------------------------------------------- */
 /* Tools & helpers                                                            */
@@ -28,6 +36,8 @@ const TOOL = {
   RECT: "rect",
   PEN: "pen",
 };
+
+const MARKUP_TOOLS = [TOOL.HIGHLIGHT, TOOL.UNDERLINE, TOOL.STRIKE];
 
 const STYLE_MEMORY = {
   [TOOL.HIGHLIGHT]: { color: "#FFF59D", opacity: 0.35, thickness: 22 },
@@ -64,10 +74,22 @@ const angleDeg = (a, b) => (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
 /* -------------------------------------------------------------------------- */
 
 export default forwardRef(function PdfAnnotator(
-  { renderedPages, pageRefs, scale, activeTool },
+  {
+    pages, // [{ pageNo, baseW, baseH, hasText }]
+    pageEls, // { [pageNo]: annotation-host element }
+    scale,
+    activeTool,
+    initialItems,
+    onItemsChange,
+    onHistoryChange,
+    onSelectionChange,
+    onToolConsumed, // parent switches back to Select after place-and-edit tools
+  },
   ref
 ) {
-  const [items, setItems] = useState([]);
+  const [items, setItems] = useState(() =>
+    Array.isArray(initialItems) ? clone(initialItems) : []
+  );
   const itemsRef = useRef(items);
   useEffect(() => {
     itemsRef.current = items;
@@ -78,7 +100,6 @@ export default forwardRef(function PdfAnnotator(
   // Tool arming and style panel state
   const [armed, setArmed] = useState(false);
   const [toolPanelOpen, setToolPanelOpen] = useState(false);
-  const [toolPanelPage, setToolPanelPage] = useState(null);
   const [toolStyle, setToolStyle] = useState(getInitialStyle(activeTool));
 
   // Sticky note bubble control
@@ -92,9 +113,21 @@ export default forwardRef(function PdfAnnotator(
     baseline: null,
   });
 
+  const notifyHistory = useCallback(() => {
+    onHistoryChange?.({
+      canUndo: history.current.past.length > 0,
+      canRedo: history.current.future.length > 0,
+    });
+  }, [onHistoryChange]);
+
+  useEffect(() => {
+    onSelectionChange?.(activeId != null);
+  }, [activeId, onSelectionChange]);
+
   const write = (next) => {
     setItems(next);
     itemsRef.current = next;
+    onItemsChange?.(next);
   };
 
   function startBatch() {
@@ -109,6 +142,7 @@ export default forwardRef(function PdfAnnotator(
     history.current.future = [];
     history.current.batchActive = false;
     history.current.baseline = null;
+    notifyHistory();
   }
 
   const undo = useCallback(() => {
@@ -118,7 +152,9 @@ export default forwardRef(function PdfAnnotator(
     h.future.unshift(itemsRef.current);
     write(prev);
     setActiveId(null);
-  }, []);
+    notifyHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notifyHistory]);
 
   const redo = useCallback(() => {
     const h = history.current;
@@ -127,7 +163,9 @@ export default forwardRef(function PdfAnnotator(
     h.past.push(itemsRef.current);
     write(next);
     setActiveId(null);
-  }, []);
+    notifyHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notifyHistory]);
 
   const deleteSelected = useCallback(() => {
     if (!activeId) return;
@@ -137,25 +175,32 @@ export default forwardRef(function PdfAnnotator(
     write(itemsRef.current.filter((it) => it.id !== activeId));
     setActiveId(null);
     setOpenStickyId(null);
-  }, [activeId]);
+    notifyHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, notifyHistory]);
 
   useImperativeHandle(
     ref,
     () => ({
       serialize: () => JSON.stringify(itemsRef.current),
-      load: (json) => {
+      getItems: () => itemsRef.current,
+      load: (jsonOrArray) => {
         try {
-          const arr = JSON.parse(json || "[]");
-          write(Array.isArray(arr) ? arr : []);
+          const arr = Array.isArray(jsonOrArray)
+            ? jsonOrArray
+            : JSON.parse(jsonOrArray || "[]");
+          write(Array.isArray(arr) ? clone(arr) : []);
           history.current = { past: [], future: [], batchActive: false, baseline: null };
           setActiveId(null);
+          notifyHistory();
         } catch {}
       },
       undo,
       redo,
       deleteSelected,
     }),
-    [undo, redo, deleteSelected]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [undo, redo, deleteSelected, notifyHistory]
   );
 
   // Keyboard support: Delete/Backspace removes the selected annotation,
@@ -183,37 +228,108 @@ export default forwardRef(function PdfAnnotator(
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeId, deleteSelected]);
 
-  // When tool changes: reset UI and make the tool usable right away. The
-  // options panel is shown for discoverability but is optional — it no
-  // longer gates drawing, so picking a tool and immediately clicking/typing
-  // on the page works like a normal PDF editor instead of requiring an
-  // extra "close panel" step every time.
+  // When the tool changes: arm creation tools and show their options panel.
+  // Switching TO Select (including the auto-switch after placing a text item)
+  // keeps the current selection so the just-placed item stays editable.
   useEffect(() => {
-    setActiveId(null);
-    setOpenStickyId(null);
     setToolStyle(getInitialStyle(activeTool));
-    const first = renderedPages[0]?.pageNo ?? null;
-    setToolPanelPage(first);
-
     if (activeTool && activeTool !== TOOL.SELECT && activeTool !== TOOL.PAN) {
+      setActiveId(null);
+      setOpenStickyId(null);
       setToolPanelOpen(true);
       setArmed(true);
     } else {
       setToolPanelOpen(false);
       setArmed(false);
     }
-  }, [activeTool, renderedPages]);
+  }, [activeTool]);
+
+  /* ------------------- Text-selection → quad markup ---------------------- */
+  // For highlight/underline/strike on pages that have a text layer, a native
+  // text selection is converted into page-space quads on mouseup: one logical
+  // annotation per page, carrying one quad per selected line.
+  useEffect(() => {
+    if (!MARKUP_TOOLS.includes(activeTool)) return;
+
+    function onMouseUp() {
+      // Let the browser finalize the selection first.
+      window.setTimeout(captureSelection, 0);
+    }
+
+    function captureSelection() {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      const range = sel.getRangeAt(0);
+      const rects = Array.from(range.getClientRects());
+      if (!rects.length) return;
+
+      const created = [];
+      for (const p of pages) {
+        if (!p.hasText) continue;
+        const host = pageEls?.[p.pageNo];
+        const pageContainer = host?.parentElement;
+        if (!pageContainer) continue;
+        const textLayer = pageContainer.querySelector(".textLayer");
+        if (!textLayer) continue;
+        try {
+          if (!range.intersectsNode(textLayer)) continue;
+        } catch {
+          continue;
+        }
+        const contRect = pageContainer.getBoundingClientRect();
+        const pageRects = rects.filter((r) => {
+          const cx = r.left + r.width / 2;
+          const cy = r.top + r.height / 2;
+          return cx >= contRect.left && cx <= contRect.right && cy >= contRect.top && cy <= contRect.bottom;
+        });
+        const quads = normalizeQuads(
+          pageRects.map((r) => clientRectToPageRect(r, contRect, scale))
+        ).filter((q) => q.h < p.baseH / 2); // discard whole-layer artifacts
+        if (!quads.length) continue;
+
+        const a = {
+          id: makeId(),
+          page: p.pageNo,
+          type: activeTool,
+          quads,
+        };
+        if (activeTool === TOOL.HIGHLIGHT) {
+          a.fill = toolStyle.color || "#FFF59D";
+          a.opacity = toolStyle.opacity ?? 0.35;
+        } else {
+          a.stroke = toolStyle.stroke || (activeTool === TOOL.STRIKE ? "#E53935" : "#1976D2");
+        }
+        created.push(a);
+      }
+
+      if (created.length) {
+        startBatch();
+        write([...itemsRef.current, ...created]);
+        endBatch();
+        sel.removeAllRanges();
+      }
+    }
+
+    document.addEventListener("mouseup", onMouseUp);
+    return () => document.removeEventListener("mouseup", onMouseUp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTool, pages, pageEls, scale, toolStyle]);
+
+  const firstHost = pages?.length ? pageEls?.[pages[0].pageNo] : null;
 
   return (
     <>
-      {renderedPages.map((p) => {
-        const container = pageRefs?.[p.pageNo];
-        if (!container) return null;
+      {(pages || []).map((p) => {
+        const host = pageEls?.[p.pageNo];
+        if (!host) return null;
         return ReactDOM.createPortal(
           <PageOverlay
             key={p.pageNo}
             page={p}
+            scale={scale}
+            hostEl={host}
             itemsRef={itemsRef}
+            items={items}
             write={write}
             startBatch={startBatch}
             endBatch={endBatch}
@@ -221,18 +337,17 @@ export default forwardRef(function PdfAnnotator(
             setActiveId={setActiveId}
             tool={activeTool}
             armed={armed}
-            setArmed={setArmed}
             toolStyle={toolStyle}
             openStickyId={openStickyId}
             setOpenStickyId={setOpenStickyId}
+            onToolConsumed={onToolConsumed}
           />,
-          container
+          host
         );
       })}
 
       {toolPanelOpen &&
-        toolPanelPage &&
-        pageRefs?.[toolPanelPage] &&
+        firstHost &&
         ReactDOM.createPortal(
           <ToolOptionsPanel
             tool={activeTool}
@@ -246,7 +361,7 @@ export default forwardRef(function PdfAnnotator(
               setToolPanelOpen(false);
             }}
           />,
-          pageRefs[toolPanelPage]
+          firstHost
         )}
     </>
   );
@@ -258,7 +373,10 @@ export default forwardRef(function PdfAnnotator(
 
 function PageOverlay({
   page,
+  scale,
+  hostEl,
   itemsRef,
+  items,
   write,
   startBatch,
   endBatch,
@@ -266,14 +384,45 @@ function PageOverlay({
   setActiveId,
   tool,
   armed,
-  setArmed,
   toolStyle,
   openStickyId,
   setOpenStickyId,
+  onToolConsumed,
 }) {
   const svgRef = useRef(null);
   const drag = useRef(null);
   const holdTimer = useRef(null);
+
+  // In Select mode annotations are interactive (click to select, drag to
+  // move). Under any other tool existing annotations are inert so they can't
+  // be grabbed accidentally — except an item currently being edited.
+  const interactive = tool === TOOL.SELECT;
+
+  // Whether this page creates markup via drag-band (scanned/no-text pages)
+  // rather than via text selection.
+  const isMarkupTool = MARKUP_TOOLS.includes(tool);
+  const dragCreates =
+    armed && ((isMarkupTool && !page.hasText) || (!isMarkupTool && tool !== TOOL.SELECT && tool !== TOOL.PAN));
+
+  // Pointer routing:
+  // - drag-creation tools own the whole overlay (crosshair);
+  // - Select/Pan/markup-on-text pass through (text layer handles selection),
+  //   with individual annotations opting back in when interactive.
+  const svgPointerEvents = dragCreates ? "auto" : "none";
+
+  // Deselect when clicking empty page area (canvas / text layer) in Select
+  // mode — those clicks never reach the overlay, so listen on the container.
+  useEffect(() => {
+    const pageContainer = hostEl?.parentElement;
+    if (!pageContainer) return;
+    function onDown(e) {
+      if (tool !== TOOL.SELECT) return;
+      if (svgRef.current && svgRef.current.contains(e.target)) return;
+      setActiveId(null);
+    }
+    pageContainer.addEventListener("mousedown", onDown);
+    return () => pageContainer.removeEventListener("mousedown", onDown);
+  }, [hostEl, tool, setActiveId]);
 
   // Arrow marker once
   useEffect(() => {
@@ -297,9 +446,11 @@ function PageOverlay({
     svgRef.current.appendChild(defs);
   }, []);
 
+  // Screen px (relative to the overlay) → page space.
   const getLocal = (evt) => {
     const rect = svgRef.current.getBoundingClientRect();
-    return { x: evt.clientX - rect.left, y: evt.clientY - rect.top };
+    const s = scale || 1;
+    return { x: (evt.clientX - rect.left) / s, y: (evt.clientY - rect.top) / s };
   };
 
   function attachGlobalDrag() {
@@ -313,7 +464,8 @@ function PageOverlay({
 
   /* --------------------------------- Create -------------------------------- */
 
-  // NEW: marks defined by endpoints (x0,y0) -> (x1,y1) so rotation is centered and stable
+  // Drag-band marks (x0,y0)->(x1,y1): kept as the markup fallback for
+  // scanned/image-only pages, where there is no text to anchor quads to.
   function newMark(p0, kind) {
     const id = makeId();
     const thickness =
@@ -330,12 +482,11 @@ function PageOverlay({
       x1: p0.x,
       y1: p0.y,
       thickness,
-      // optional visual props
       fill: kind === TOOL.HIGHLIGHT ? (toolStyle.color || "#FFF59D") : undefined,
       opacity: kind === TOOL.HIGHLIGHT ? (toolStyle.opacity ?? 0.35) : undefined,
       stroke: kind !== TOOL.HIGHLIGHT ? (toolStyle.stroke || "#333333") : undefined,
       strokeWidth: kind !== TOOL.HIGHLIGHT ? (toolStyle.strokeWidth || 3) : undefined,
-      angleSnap: null, // when user holds, we store snapped angle here
+      angleSnap: null,
     };
     startBatch();
     write([...itemsRef.current, a]);
@@ -378,7 +529,7 @@ function PageOverlay({
     startBatch();
     write([...itemsRef.current, a]);
     setActiveId(id);
-    drag.current = { mode: "textbox-new", id, x0: p0.x, y0: p0.y };
+    drag.current = { mode: "textbox-new", id, x0: p0.x, y0: p0.y, isNew: true, kind };
   }
 
   function newTypewriter(p0) {
@@ -400,6 +551,8 @@ function PageOverlay({
     startBatch();
     write([...itemsRef.current, a]);
     setActiveId(id);
+    // Hand control back to Select so the fresh item is immediately editable.
+    onToolConsumed?.();
   }
 
   function newArrow(p0) {
@@ -438,6 +591,7 @@ function PageOverlay({
     write([...itemsRef.current, a]);
     setActiveId(id);
     setOpenStickyId(id);
+    onToolConsumed?.();
   }
 
   function newRectAnn(p0) {
@@ -480,13 +634,12 @@ function PageOverlay({
 
   function onSvgDown(e) {
     if (e.button !== 0) return;
-    e.preventDefault();
-    const p = getLocal(e);
-
-    if (!armed || tool === TOOL.SELECT || tool === TOOL.PAN) {
-      if (e.target === svgRef.current) setActiveId(null);
+    if (!dragCreates) {
+      if (tool === TOOL.SELECT && e.target === svgRef.current) setActiveId(null);
       return;
     }
+    e.preventDefault();
+    const p = getLocal(e);
 
     if (tool === TOOL.HIGHLIGHT || tool === TOOL.UNDERLINE || tool === TOOL.STRIKE) {
       newMark(p, tool);
@@ -585,14 +738,24 @@ function PageOverlay({
       window.clearTimeout(holdTimer.current);
       holdTimer.current = null;
     }
+    const d = drag.current;
     drag.current = null;
     detachGlobalDrag();
+
+    // A freshly drawn textbox/callout goes straight into editing, and the
+    // tool returns to Select so typing/adjusting doesn't create another box.
+    if (d?.isNew && (d.kind === TOOL.TEXTBOX || d.kind === TOOL.CALLOUT)) {
+      const cur = itemsRef.current;
+      write(cur.map((it) => (it.id === d.id ? { ...it, editing: true } : it)));
+      onToolConsumed?.();
+    }
     endBatch();
   }
 
   /* -------------------------- Move/resize handlers ------------------------- */
 
   const startMove = (a, kind) => (e) => {
+    if (!interactive) return;
     e.stopPropagation();
     e.preventDefault();
     setActiveId(a.id);
@@ -615,6 +778,7 @@ function PageOverlay({
   };
 
   const startResizeSE = (a) => (e) => {
+    if (!interactive) return;
     e.stopPropagation();
     e.preventDefault();
     setActiveId(a.id);
@@ -624,6 +788,7 @@ function PageOverlay({
   };
 
   const startRotate = (a) => (e) => {
+    if (!interactive) return;
     e.stopPropagation();
     e.preventDefault();
     setActiveId(a.id);
@@ -633,6 +798,7 @@ function PageOverlay({
   };
 
   const startArrowEnd = (a, which) => (e) => {
+    if (!interactive) return;
     e.stopPropagation();
     e.preventDefault();
     setActiveId(a.id);
@@ -642,6 +808,7 @@ function PageOverlay({
   };
 
   const startLeader = (a) => (e) => {
+    if (!interactive) return;
     e.stopPropagation();
     e.preventDefault();
     setActiveId(a.id);
@@ -652,25 +819,37 @@ function PageOverlay({
 
   /* --------------------------------- Render -------------------------------- */
 
-  const cursor =
-    tool === TOOL.PAN ? "grab" : tool === TOOL.SELECT ? "default" : armed ? "crosshair" : "default";
+  const cursor = dragCreates ? "crosshair" : "default";
+  const w = page.baseW * (scale || 1);
+  const h = page.baseH * (scale || 1);
+
+  // An item accepts pointer events when annotations are interactive (Select
+  // mode) or while it is being edited (fresh textbox/typewriter/sticky).
+  const itemPE = (a) =>
+    interactive || a.editing || openStickyId === a.id ? "auto" : "none";
 
   return (
-    <div style={{ position: "absolute", left: 0, top: 0, width: page.w, height: page.h }}>
-      <svg
-        ref={svgRef}
-        width={page.w}
-        height={page.h}
-        viewBox={`0 0 ${page.w} ${page.h}`}
-        style={{ position: "absolute", left: 0, top: 0, cursor }}
-        onMouseDown={onSvgDown}
-      >
-        <defs id="arrow-defs" />
-        {itemsRef.current
-          .filter((a) => a.page === page.pageNo)
-          .map((a) => renderItem(a))}
-      </svg>
-    </div>
+    <svg
+      ref={svgRef}
+      width={w}
+      height={h}
+      viewBox={`0 0 ${page.baseW} ${page.baseH}`}
+      style={{
+        position: "absolute",
+        left: 0,
+        top: 0,
+        width: w,
+        height: h,
+        cursor,
+        pointerEvents: svgPointerEvents,
+      }}
+      onMouseDown={onSvgDown}
+    >
+      <defs id="arrow-defs" />
+      {items
+        .filter((a) => a.page === page.pageNo)
+        .map((a) => renderItem(a))}
+    </svg>
   );
 
   function renderItem(a) {
@@ -693,10 +872,60 @@ function PageOverlay({
       case TOOL.HIGHLIGHT:
       case TOOL.UNDERLINE:
       case TOOL.STRIKE:
-        return renderMark(a);
+        return Array.isArray(a.quads) && a.quads.length
+          ? renderQuadMarkup(a)
+          : renderMark(a);
       default:
         return null;
     }
+  }
+
+  // Quad-based text markup: one rect per selected line; anchored to text, so
+  // selectable/deletable but not draggable.
+  function renderQuadMarkup(a) {
+    const isActive = activeId === a.id;
+    const color = a.type === TOOL.HIGHLIGHT ? a.fill || "#FFF59D" : a.stroke || "#333333";
+    return (
+      <g
+        key={a.id}
+        pointerEvents={itemPE(a)}
+        style={{ cursor: interactive ? "pointer" : undefined }}
+        onMouseDown={(e) => {
+          if (!interactive) return;
+          e.stopPropagation();
+          setActiveId(a.id);
+        }}
+      >
+        {a.quads.map((q, i) => {
+          if (a.type === TOOL.HIGHLIGHT) {
+            return (
+              <rect key={i} x={q.x} y={q.y} width={q.w} height={q.h} fill={color} fillOpacity={a.opacity ?? 0.35} />
+            );
+          }
+          const t = Math.max(1, q.h * (a.type === TOOL.STRIKE ? 0.08 : 0.06));
+          const y = a.type === TOOL.STRIKE ? q.y + q.h / 2 - t / 2 : q.y + q.h - t;
+          return <rect key={i} x={q.x} y={y} width={q.w} height={t} fill={color} />;
+        })}
+        {/* invisible hit areas so thin underline/strike bands stay clickable */}
+        {a.type !== TOOL.HIGHLIGHT &&
+          a.quads.map((q, i) => (
+            <rect key={`hit-${i}`} x={q.x} y={q.y} width={q.w} height={q.h} fill="transparent" />
+          ))}
+        {isActive && (
+          <rect
+            x={Math.min(...a.quads.map((q) => q.x)) - 2}
+            y={Math.min(...a.quads.map((q) => q.y)) - 2}
+            width={Math.max(...a.quads.map((q) => q.x + q.w)) - Math.min(...a.quads.map((q) => q.x)) + 4}
+            height={Math.max(...a.quads.map((q) => q.y + q.h)) - Math.min(...a.quads.map((q) => q.y)) + 4}
+            fill="none"
+            stroke="#3b82f6"
+            strokeDasharray="4 3"
+            strokeWidth={1}
+            pointerEvents="none"
+          />
+        )}
+      </g>
+    );
   }
 
   function renderTextbox(a) {
@@ -705,7 +934,7 @@ function PageOverlay({
       : undefined;
 
     return (
-      <g key={a.id} transform={transform}>
+      <g key={a.id} transform={transform} pointerEvents={itemPE(a)}>
         {a.type === TOOL.CALLOUT && (
           <line
             x1={a.leader?.x ?? a.x - 20}
@@ -727,9 +956,9 @@ function PageOverlay({
           fill={a.fill ?? "transparent"}
           stroke={a.stroke || "#333333"}
           strokeWidth={a.strokeWidth || 2}
-          style={{ cursor: "move" }}
+          style={{ cursor: interactive ? "move" : undefined }}
           onMouseDown={startMove(a, "box")}
-          onClick={() => setActiveId(a.id)}
+          onClick={() => interactive && setActiveId(a.id)}
         />
         <foreignObject
           x={a.x + 6}
@@ -797,7 +1026,7 @@ function PageOverlay({
           />
         </foreignObject>
 
-        {!a.editing && (
+        {!a.editing && interactive && (
           <>
             <rect
               x={a.x + a.w - 6}
@@ -852,7 +1081,7 @@ function PageOverlay({
 
   function renderTypewriter(a) {
     return (
-      <g key={a.id}>
+      <g key={a.id} pointerEvents={itemPE(a)}>
         <foreignObject
           x={a.x}
           y={a.y - (a.fontSize || 14)}
@@ -925,7 +1154,7 @@ function PageOverlay({
             height={Math.max(28, 40)}
             fill="transparent"
             onMouseDown={startMove(a, "text")}
-            onClick={() => setActiveId(a.id)}
+            onClick={() => interactive && setActiveId(a.id)}
           />
         )}
       </g>
@@ -934,7 +1163,7 @@ function PageOverlay({
 
   function renderArrow(a) {
     return (
-      <g key={a.id} onMouseDown={(e) => e.stopPropagation()}>
+      <g key={a.id} pointerEvents={itemPE(a)} onMouseDown={(e) => interactive && e.stopPropagation()}>
         <line
           x1={a.x1}
           y1={a.y1}
@@ -946,9 +1175,9 @@ function PageOverlay({
             a.head === "single" || a.head === "double" ? "url(#arrow-head)" : undefined
           }
           markerStart={a.head === "double" ? "url(#arrow-head)" : undefined}
-          onClick={() => setActiveId(a.id)}
+          onClick={() => interactive && setActiveId(a.id)}
         />
-        {activeId === a.id && (
+        {activeId === a.id && interactive && (
           <>
             <circle
               cx={a.x1}
@@ -975,13 +1204,13 @@ function PageOverlay({
   function renderPolyline(a) {
     const d = (a.pts || []).map((pt) => `${pt.x},${pt.y}`).join(" ");
     return (
-      <g key={a.id} onMouseDown={(e) => e.stopPropagation()}>
+      <g key={a.id} pointerEvents={itemPE(a)} onMouseDown={(e) => interactive && e.stopPropagation()}>
         <polyline
           points={d}
           fill="none"
           stroke={a.stroke || "#333333"}
           strokeWidth={a.strokeWidth || 2}
-          onClick={() => setActiveId(a.id)}
+          onClick={() => interactive && setActiveId(a.id)}
         />
       </g>
     );
@@ -989,7 +1218,7 @@ function PageOverlay({
 
   function renderRect(a) {
     return (
-      <g key={a.id}>
+      <g key={a.id} pointerEvents={itemPE(a)}>
         <rect
           x={a.x}
           y={a.y}
@@ -998,11 +1227,11 @@ function PageOverlay({
           fill={a.fill ?? "transparent"}
           stroke={a.stroke || "#333333"}
           strokeWidth={a.strokeWidth || 2}
-          style={{ cursor: "move" }}
+          style={{ cursor: interactive ? "move" : undefined }}
           onMouseDown={startMove(a, "box")}
-          onClick={() => setActiveId(a.id)}
+          onClick={() => interactive && setActiveId(a.id)}
         />
-        {activeId === a.id && (
+        {activeId === a.id && interactive && (
           <rect
             x={a.x + a.w - 6}
             y={a.y + a.h - 6}
@@ -1028,8 +1257,10 @@ function PageOverlay({
         strokeWidth={a.strokeWidth || 3}
         strokeLinecap="round"
         strokeLinejoin="round"
-        style={{ cursor: "pointer" }}
+        pointerEvents={itemPE(a)}
+        style={{ cursor: interactive ? "pointer" : undefined }}
         onMouseDown={(e) => {
+          if (!interactive) return;
           e.stopPropagation();
           setActiveId(a.id);
         }}
@@ -1037,7 +1268,8 @@ function PageOverlay({
     );
   }
 
-  // NEW: center-anchored rotated rect for marks (uses endpoints)
+  // Drag-band mark (fallback markup): center-anchored rotated rect defined by
+  // endpoints — see newMark.
   function renderMark(a) {
     const p0 = { x: a.x0, y: a.y0 };
     const p1 = { x: a.x1, y: a.y1 };
@@ -1060,8 +1292,9 @@ function PageOverlay({
 
     const commonProps = {
       transform: `rotate(${ang} ${cx} ${cy})`,
+      pointerEvents: itemPE(a),
       onMouseDown: startMove(a, "mark"),
-      onClick: () => setActiveId(a.id),
+      onClick: () => interactive && setActiveId(a.id),
     };
 
     if (a.type === TOOL.HIGHLIGHT) {
@@ -1095,7 +1328,7 @@ function PageOverlay({
   function renderSticky(a) {
     const isOpen = openStickyId === a.id || a.open;
     return (
-      <g key={a.id} onMouseDown={(e) => e.stopPropagation()}>
+      <g key={a.id} pointerEvents={itemPE(a)} onMouseDown={(e) => interactive && e.stopPropagation()}>
         <rect
           x={a.x}
           y={a.y}
@@ -1105,6 +1338,7 @@ function PageOverlay({
           stroke="#333"
           onMouseDown={startMove(a, "mark")}
           onClick={() => {
+            if (!interactive) return;
             setActiveId(a.id);
             setOpenStickyId(a.id);
           }}
@@ -1120,6 +1354,7 @@ function PageOverlay({
                 height: 160,
                 fontSize: 12,
                 color: "#111",
+                pointerEvents: "auto",
               }}
               onMouseDown={(e) => e.stopPropagation()}
             >
@@ -1156,6 +1391,8 @@ function PageOverlay({
                   onClick={(e) => {
                     e.stopPropagation();
                     setOpenStickyId(null);
+                    const cur = itemsRef.current;
+                    write(cur.map((it) => (it.id === a.id ? { ...it, open: false } : it)));
                   }}
                 >
                   Close
@@ -1232,7 +1469,7 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
   return (
     <div
       className="absolute z-30 px-3 py-2 bg-white dark:bg-[#1b1b1b] border rounded shadow text-xs"
-      style={{ left: 8, top: 8, minWidth: 300 }}
+      style={{ left: 8, top: 8, minWidth: 300, pointerEvents: "auto" }}
       onMouseDown={(e) => e.stopPropagation()}
     >
       <div className="flex items-center justify-between mb-2">

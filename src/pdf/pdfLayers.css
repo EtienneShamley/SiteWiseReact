@@ -1,0 +1,90 @@
+/* src/pdf/pdfLayers.css
+   Layer styling for the PDF editor page stack:
+   canvas (z 1) -> text layer (z 2) -> search highlights (z 3) -> annotation overlay (z 4).
+
+   The .textLayer rules are the minimal subset of pdf.js's own viewer CSS
+   (pdfjs-dist/web/pdf_viewer.css) needed by the TextLayer class, kept local
+   so the app doesn't import the full PDFViewer stylesheet. pdf.js sizes the
+   layer with --total-scale-factor and positions spans in percentages, so the
+   page container must define --scale-factor (set inline per page). */
+
+.nw-pdf-page {
+  position: relative;
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  --user-unit: 1;
+  --total-scale-factor: calc(var(--scale-factor) * var(--user-unit));
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+}
+
+.nw-pdf-page canvas.nw-pdf-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+}
+
+.nw-pdf-page .textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 2;
+}
+
+.nw-pdf-page .textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+.nw-pdf-page .textLayer span::selection {
+  background: rgba(59, 130, 246, 0.35);
+  color: transparent;
+}
+
+/* Tool modes: when text selection is not part of the active tool's job,
+   the text layer must neither select nor swallow pointer events. */
+.nw-pdf-page[data-textselect="off"] .textLayer {
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Search match highlighting overlay */
+.nw-pdf-search-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.nw-pdf-search-hit {
+  position: absolute;
+  background: rgba(250, 204, 21, 0.4);
+  border-radius: 2px;
+}
+
+.nw-pdf-search-hit--current {
+  background: rgba(249, 115, 22, 0.55);
+  outline: 1px solid rgba(194, 65, 12, 0.9);
+}
+
+/* Annotation overlay host (PdfAnnotator portals). The host itself must be
+   transparent to the pointer — the annotator's SVG opts in per tool mode. */
+.nw-pdf-annot-host {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}

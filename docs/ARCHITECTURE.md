@@ -87,12 +87,14 @@ All persistence is currently client-side browser storage. There is no server-sid
 | Template library | Named template records and their immutable version snapshots (layout, labels, widths, logo), plus a default-template pointer | Editing a template publishes a new version; existing versions are never rewritten |
 | Note template instances | Per-note template answers and attachments, pinned to the specific template version the note was created against | Notes render from their pinned version, not the live template |
 | Legacy single-template keys | The pre-library template definition and per-note content | Frozen: read once by a one-time startup migration, never written again; retained so a code rollback loses nothing |
+| Per-note PDF source bytes | The original imported PDF file, keyed by note identifier | IndexedDB (`notewise-pdf-editor` → `pdfBytes`); binary data is never placed in localStorage |
+| Per-note PDF annotations | Page-space annotation JSON, keyed by note identifier | IndexedDB (`notewise-pdf-editor` → `annotations`); see `docs/features/PDF_EDITOR.md` |
 | Theme preference | Light/dark mode | |
 | Last export format | Most recently used export format | |
 | Coordinate-system metadata cache | Cached lookup data for location conversion, time-limited | |
 | Photo numbering counter | Sequential counter used when labeling captured photos | |
 
-**Not currently persisted**: the project/folder/note hierarchy itself, and in-session PDF file caches (intentionally session-scoped by design, per current implementation).
+**Not currently persisted**: the project/folder/note hierarchy itself. (PDF bytes and annotations, formerly session-only, are now persisted per note in IndexedDB — the in-memory per-note PDF cache remains only as a session fast path.)
 
 Stored-data keys currently use identifiers derived from the previous product name — this is expected pending a planned migration (see `docs/PROJECT_DECISIONS.md`). Renaming these without a migration path would silently discard existing users' data — see `AGENTS.md`.
 
@@ -108,7 +110,7 @@ Stored-data keys currently use identifiers derived from the previous product nam
 
 **Photo capture**: an image is selected or captured → location and timestamp metadata are extracted from the image or, failing that, from the device's location capability → the coordinates are reverse-geocoded to a readable address → a small map-reference image is fetched → all of the above is composited onto the photo before it is inserted into the note.
 
-**PDF annotation**: a PDF is imported → each page is rendered for on-screen display → the user draws annotations on an overlay → an export step serializes supported annotation types and writes them into a new, downloadable PDF, which is also linked from the note.
+**PDF annotation**: a PDF is imported → its bytes are persisted to IndexedDB keyed by the note → each page is rendered for on-screen display (canvas + text layer) → the user creates annotations (stored in page-space coordinates, auto-persisted per note) → an export step flattens all supported annotation types into a new, downloadable PDF. The exported file is downloaded only; no link is inserted into the note (see `docs/features/PDF_EDITOR.md`).
 
 ## Voice Pipeline
 
@@ -132,11 +134,9 @@ The "conversation/meeting capture" feature is not a separate AI capability — i
 Two independent systems currently exist under the "PDF" umbrella and do not share code:
 
 1. **Note-to-PDF export** — converts rich-text note content into a downloadable PDF. This is a one-way rendering step with no annotation concept.
-2. **PDF import and annotation** — an imported PDF is rendered page-by-page for on-screen display; a custom overlay supports several annotation types (highlights, underline, strike, text boxes, sticky notes, arrows); an export/"flatten" step burns a subset of these back into a real, downloadable PDF.
+2. **PDF editor** — an imported PDF is rendered page-by-page (canvas + pdf.js text layer + annotation overlay); annotations are stored in scale-independent page-space coordinates and persisted per note, alongside the source PDF bytes, in IndexedDB; find/search, zoom/fit, select/hand tool modes, and text-selection-anchored markup are supported; an export/"flatten" step burns all supported annotation types into a new, downloadable PDF. **The canonical detailed description — architecture, coordinate model, layer stack, persistence model, supported tools, limitations, and explicitly unsupported capabilities — is [`docs/features/PDF_EDITOR.md`](features/PDF_EDITOR.md)**; this section deliberately does not duplicate it.
 
-**Current limitation**: only highlight and text annotation types are currently written into the exported PDF. Other annotation types render on-screen but are not currently included in the exported file — an explicit gap noted in the code.
-
-**Currently unused / under review**: a second, more structured annotation subsystem exists in parallel to the one actually in use — a set of hooks, a schema module, and several supporting UI components — none of which are currently referenced by the running application. This appears to be an earlier or alternate implementation path that was not completed or adopted. Its disposition has not been decided — see `docs/PROJECT_DECISIONS.md` (Pending).
+**Dead code, removal decided**: a second, never-adopted annotation subsystem exists in parallel (hooks, schema module, supporting UI components, none referenced by the running application). The decision to keep the active implementation and remove these files in a dedicated cleanup change is recorded in `docs/PROJECT_DECISIONS.md` → "PDF editor architecture"; the file list is in `docs/features/PDF_EDITOR.md`.
 
 ## External Integrations
 
@@ -152,11 +152,10 @@ Privacy and risk framing for this same integration list lives in [`docs/SECURITY
 ## Current Limitations
 
 - The project/folder/note hierarchy is not currently persisted across page reloads (see State Management).
-- PDF annotation export currently supports only a subset of on-screen annotation types.
-- A second, currently-unreferenced PDF annotation implementation exists alongside the one in active use.
+- A second, currently-unreferenced PDF annotation implementation still exists alongside the active one; its removal is decided but not yet executed (see `docs/PROJECT_DECISIONS.md` → "PDF editor architecture").
 - A full-note AI refinement UI component exists but is not currently used, duplicating logic implemented elsewhere.
 - The backend entry file contains a code block that cannot execute correctly in its current location.
-- No automated test coverage currently exists — see [`docs/TESTING.md`](TESTING.md) for the current manual verification approach and the planned path toward automated coverage.
+- Automated test coverage is minimal: a small unit-test suite covers the PDF editor's pure logic (coordinate transforms, quad normalization, storage record keying, search calculation); everything else relies on manual verification — see [`docs/TESTING.md`](TESTING.md).
 - No authentication or multi-device sync exists — the application is currently single-browser, single-device only.
 - Icon usage is currently split across two different icon sets with no documented convention for which to use.
 - Product branding (page title, app manifest, icons) has not yet been updated to reflect NoteWise.
@@ -168,10 +167,11 @@ These are described here as **current facts**, not permanent constraints — eac
 
 **Approved, partially implemented**: a template architecture redesign — Template Library, immutable Template Versions, Note Template Instances, a defined field-type system, per-row attachment controls, stable UUID-style field ids, and a move from localStorage to IndexedDB for template assets — has been approved. See `docs/PROJECT_DECISIONS.md` → "Template architecture: library, immutable versions, and note instances" for the full decision. The Template Library, immutable versions, and per-note pinned instances (including per-note template selection) are now implemented on localStorage; a one-time startup migration rebuilt the new model from the legacy single-template keys, which remain frozen in place. Still pending from that decision: the field-type system, per-row attachment controls, stable UUID field ids for builder-added rows, template versioning UI, export version-provenance, and the IndexedDB move for template assets.
 
+**Approved and implemented (2026-07-17)**: the PDF editor consolidation — single active annotator, page-space coordinate model, IndexedDB persistence of per-note PDF bytes and annotations — per `docs/PROJECT_DECISIONS.md` → "PDF editor architecture". Remaining from that decision: deleting the dead parallel annotation subsystem in a dedicated cleanup change.
+
 No further architectural changes beyond the above are currently approved. Open questions still under consideration (see `docs/PROJECT_DECISIONS.md` → Pending Decisions):
 - Whether to introduce a backend and database for multi-device sync and backup, or remain local-only by design.
 - Whether to introduce user accounts and authentication.
-- Whether to consolidate the PDF annotation implementation onto a single approach.
 - Whether any visual direction explored in `Constrapp_v5.jsx` (explicitly reference-only today — see `docs/DESIGN_SYSTEM.md` → Future Visual Direction) is formally adopted.
 
 Any of the above requires an approved, recorded decision before implementation begins. Company/workspace-scoped templates and template permissions specifically depend on the backend and authentication questions above being resolved first.

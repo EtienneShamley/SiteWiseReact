@@ -438,21 +438,24 @@ export default function MainArea() {
           </div>
 
           {/* PDF VIEW */}
+          {/* Keyed by note so switching notes fully remounts the editor —
+              note A's PDF/annotations can never bleed into note B. The
+              exported PDF is downloaded by the editor itself; no link is
+              inserted into the note (a blob: URL dies with the session, so a
+              persisted link would go dead — see docs/features/PDF_EDITOR.md). */}
           <div style={{ display: activeTab === "pdf" ? "block" : "none" }}>
             <PdfEditorTab
+              key={noteKey || "no-note"}
               noteId={noteKey}
               initialFile={noteKey ? notePdfMap[noteKey] : null}
-              onExportFlattened={(blob) => {
-                const url = URL.createObjectURL(blob);
-                editor
-                  ?.chain()
-                  .focus()
-                  .insertContent(
-                    `<p><a href="${url}" target="_blank" rel="noopener noreferrer">[Exported PDF]</a></p>`
-                  )
-                  .run();
-                setActiveTab("note");
-                setTimeout(() => URL.revokeObjectURL(url), 60000);
+              onInitialFileConsumed={() => {
+                if (!noteKey) return;
+                setNotePdfMap((m) => {
+                  if (!(noteKey in m)) return m;
+                  const next = { ...m };
+                  delete next[noteKey];
+                  return next;
+                });
               }}
             />
           </div>

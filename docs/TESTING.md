@@ -2,9 +2,19 @@
 
 This is the canonical source for how NoteWise is verified today, and how automated testing is planned to be introduced. [`AGENTS.md`](../AGENTS.md) → Testing Expectations defers to this document rather than restating it.
 
+## Automated Tests (current state)
+
+A small unit-test suite now exists for the PDF editor's pure logic — coordinate transforms and quad normalization (`src/lib/pdfCoords.test.js`), search match/rectangle calculation (`src/lib/pdfSearch.test.js`), and storage record shape/per-note keying (`src/lib/pdfStorage.test.js`). Run it with:
+
+```bash
+CI=true npm test -- --watchAll=false
+```
+
+This is the beginning of Phase 1–2 of the strategy below, not meaningful product coverage: IndexedDB I/O, rendering, and every user-facing flow still require manual verification.
+
 ## Manual Testing Workflow
 
-No automated test suite currently provides meaningful coverage (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) → Current Limitations), so every change is verified manually before being reported as complete.
+Beyond the small suite above, no automated coverage exists (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) → Current Limitations), so every change is verified manually before being reported as complete.
 
 1. Run both the frontend and backend locally (see `CLAUDE.md` → Development Commands).
 2. Identify every user-facing flow the change could plausibly affect — not just the one it was intended to touch. Use the Regression Checklist below as a reference, not only the specific feature worked on.
@@ -26,6 +36,19 @@ Use this list to judge blast radius for any change that isn't obviously isolated
 - [ ] Apply and edit a report template on a note (fill fields, switch the note's template via the selector, confirm answers persist)
 - [ ] Open the Template Library: create, rename, duplicate, delete, and set-default a template; confirm an edit to a master template does not change an existing note's layout or answers
 - [ ] Import a PDF, add at least one annotation, and export the flattened result
+- [ ] PDF editor deep pass (any change touching the PDF subsystem — see `docs/features/PDF_EDITOR.md` for the architecture being exercised):
+  - [ ] Text-based PDF: select and copy text; create a multi-line highlight, underline, and strikeout from a text selection
+  - [ ] Scanned/image-only PDF: drag-band highlight/underline/strike fallback still works
+  - [ ] Search across a multi-page PDF: zero, one, and many matches; next/previous wrap; highlights visible
+  - [ ] Draw at 100%, zoom to 150%: annotations stay positioned; export at the changed zoom and inspect the file externally
+  - [ ] Portrait, landscape, and rotated-page PDFs render and export with correct annotation placement
+  - [ ] Fit width, fit page, and the zoom selector keep canvas/text/annotation layers aligned
+  - [ ] Hand tool pans without selecting text or moving annotations; Select tool never creates annotations
+  - [ ] Switch between two notes with different PDFs — no bleed-through of document or annotations
+  - [ ] Reload the app — the note's PDF and annotations restore from IndexedDB
+  - [ ] Replace the PDF via Open — confirm prompt appears when annotations exist, stored record updates cleanly
+  - [ ] Undo/redo/delete (including Delete/Backspace with typing-target guard) across create, move, resize
+  - [ ] All annotation types (pencil, arrow, rectangle, text box, callout, typewriter, sticky note) draw, persist, and flatten
 - [ ] Record and transcribe a voice note
 - [ ] Run AI refine on typed and on dictated text, and confirm revert works
 - [ ] Run conversation/meeting capture and confirm summary + action items formatting
@@ -55,8 +78,8 @@ No automated tests currently exist (see `docs/ARCHITECTURE.md` → Current Limit
 
 Recommended phased approach, prioritized by risk rather than ease:
 
-1. **Phase 1 — Foundation**: confirm a test runner is available and correctly configured (the current toolchain already includes one — see `package.json` — so this should not require a new dependency decision). Add one trivial smoke test to prove the pipeline works end-to-end, including in CI once CI exists (see `docs/DEPLOYMENT.md`).
-2. **Phase 2 — Pure logic first**: unit-test the framework-agnostic utility functions first, since they carry real risk and are cheapest to test in isolation — coordinate conversion, PDF flatten logic, export format generation.
+1. **Phase 1 — Foundation**: confirm a test runner is available and correctly configured (the current toolchain already includes one — see `package.json` — so this should not require a new dependency decision). Add one trivial smoke test to prove the pipeline works end-to-end, including in CI once CI exists (see `docs/DEPLOYMENT.md`). *Started 2026-07-17: the runner is confirmed working via the PDF logic suite (see Automated Tests above).*
+2. **Phase 2 — Pure logic first**: unit-test the framework-agnostic utility functions first, since they carry real risk and are cheapest to test in isolation — coordinate conversion, PDF flatten logic, export format generation. *Partially started: PDF coordinate/search/storage-record logic is covered; coordinate-system conversion and export generation are not.*
 3. **Phase 3 — Critical flows**: integration-level tests for the highest-risk flows identified in `docs/ARCHITECTURE.md` → Current Limitations — persistence behavior, PDF annotation export coverage, multi-format export correctness.
 4. **Phase 4 — End-to-end**: a small number of end-to-end tests covering golden paths (create a note → dictate → refine → export), rather than broad coverage, to catch integration regressions across the full stack.
 

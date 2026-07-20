@@ -34,6 +34,19 @@ This is an **append-only** decision log. It exists so non-obvious choices are re
 
 ## Active Decisions
 
+### PDF editor architecture: single annotator, page-space coordinates, IndexedDB persistence
+- **Date**: 2026-07-17
+- **Status**: Active
+- **Decision**: The PDF annotation subsystem standardizes on the currently-active `PdfAnnotator` architecture (`src/pdf/PdfAnnotator.js` + `src/components/editor/PdfEditorTab.js`). The parallel, never-adopted implementation (`src/pdf/useAnnotations.js`, `src/pdf/annotationSchema.js`, `src/pdf/CommentsPanel.js`, `src/pdf/StickyNoteBubble.js`, `src/pdf/popovers/`, `src/hooks/usePdfEditor.js`) is declared dead and will be removed in a dedicated future cleanup change — it was deliberately not deleted inside the Phase 1 feature work. Annotation geometry is stored in scale-independent page space (pdf.js scale-1 viewport units) with one shared conversion layer (`src/lib/pdfCoords.js`) used for rendering, dragging/resizing, text-selection quads, search highlighting, and flatten/export. Both the source PDF bytes and the annotation JSON are persisted per note in native browser IndexedDB (`src/lib/pdfStorage.js`, database `notewise-pdf-editor`) — PDF bytes never go into localStorage, and no IndexedDB wrapper dependency is added. Exported PDFs remain flattened deliverables (annotations burned into page content), downloaded directly without inserting a link into the note, because a `blob:` object URL dies with the session and a persisted link to one is guaranteed to go dead. The following capabilities are explicitly recorded as NOT existing and must never be claimed: true editing of existing PDF text/objects, cryptographic signatures, true secure redaction, and password-protected PDF creation. Canonical detail: `docs/features/PDF_EDITOR.md`.
+- **Context**: Resolves the Pending "PDF architecture review" question (2026-07-04). Two non-interoperating annotation systems coexisted; the active one stored annotations in screen pixels at the render scale, so zooming corrupted exported positions, nothing was persisted, there was no text layer (no selection/copy/search), and the exported-PDF note link died when its object URL was revoked. Phase 1 of the approved PDF editor plan fixed the foundation rather than stacking features on it.
+- **Alternatives**:
+  - Finishing and adopting the unused structured subsystem — rejected: it was substantially less complete than the active one (two annotation types, no rendering pipeline integration), so adopting it meant rebuilding everything the active system already does.
+  - Storing annotations in PDF user space (y-up, unrotated) instead of page space — rejected: page space keeps on-screen math trivial (screen = page × zoom) while a single per-page affine inversion handles export, including rotated pages.
+  - Persisting PDF bytes as base64 in localStorage — rejected outright: quota pressure and blocking-main-thread serialization; binary data belongs in IndexedDB.
+  - Writing editable native PDF annotation objects on export — rejected for this phase: flattening is what the report-deliverable workflow needs and is far simpler to guarantee visually.
+- **Consequences**: All future PDF feature work builds on `PdfAnnotator` + page-space coordinates; the dead subsystem must not be extended and should be deleted in its own approved change. Annotation records persisted from this point on are page-space and per-note; changing that shape later requires a migration path per `AGENTS.md`. Squiggly markup, OCR, page management, forms, signatures, measurements, bookmarks, links, stamps, extra shapes, snapshot, print, view rotation, password protection, and redaction remain explicitly out of scope until scheduled.
+- **Follow-up**: Remove the dead PDF files in a dedicated cleanup change; later-phase candidates are listed in `docs/features/PDF_EDITOR.md` and `docs/ROADMAP.md`.
+
 ### Template architecture: library, immutable versions, and note instances
 - **Date**: 2026-07-04
 - **Status**: Active
@@ -124,6 +137,7 @@ This is an **append-only** decision log. It exists so non-obvious choices are re
 - **Question**: Should the currently-unused PDF annotation implementation (a parallel set of hooks, schema, and supporting components not referenced by the running app) be finished and adopted, or removed in favor of the implementation actually in use?
 - **Context**: Two parallel, non-interoperating annotation systems exist today; only one is active. See `docs/ARCHITECTURE.md` → PDF Pipeline.
 - **Blocking**: Further PDF annotation feature work should wait on this decision.
+- **Resolution**: Decided 2026-07-17 — see "PDF editor architecture: single annotator, page-space coordinates, IndexedDB persistence" under Active Decisions.
 
 ### Project/folder/note tree persistence
 - **Date opened**: 2026-07-04

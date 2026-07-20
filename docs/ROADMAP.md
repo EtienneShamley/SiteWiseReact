@@ -14,7 +14,7 @@ Functionality that currently exists and works, based on the current implementati
 - Rich-text note editor (tables, images, task lists, code blocks, formatting)
 - Report Template Builder with per-note structured layout and logo support
 - Template Library: multiple named templates (create/rename/duplicate/delete/default), immutable template versions, and per-note template selection with version-pinned note instances
-- PDF import, on-screen annotation, and flattened export (highlight + text)
+- PDF editor: import with per-note IndexedDB persistence (source bytes + annotations), text layer with native selection/copy, selection-anchored highlight/underline/strikeout (drag-band fallback for scanned pages), find/search across pages, zoom with fit width/page, select/hand tool modes, and flattened export of all supported annotation types in scale-independent coordinates — see `docs/features/PDF_EDITOR.md`
 - Voice dictation with per-note language memory and a transcription fallback path
 - AI-assisted text refinement with selectable style presets
 - Structured conversation/meeting capture with summary and action items
@@ -33,7 +33,7 @@ Functionality that currently exists and works, based on the current implementati
 Candidates surfaced during the architecture and product review, pending prioritization:
 
 - Resolve the project/folder/note persistence question (bug to fix vs. accepted current limitation) and act on the decision.
-- Resolve the PDF annotation architecture question (consolidate on one implementation) and act on the decision.
+- ~~Resolve the PDF annotation architecture question~~ — **done 2026-07-17**: consolidated on the active annotator with page-space coordinates and IndexedDB persistence (Phase 1 of the PDF editor plan; see `docs/PROJECT_DECISIONS.md` and `docs/features/PDF_EDITOR.md`). Remaining: delete the dead parallel PDF subsystem in a dedicated cleanup change.
 - Branding pass: replace placeholder product identity (title, manifest, icons) with NoteWise branding, once a design direction is decided in `docs/DESIGN_SYSTEM.md`.
 - Investigate and resolve the backend code-location issue noted in `docs/ARCHITECTURE.md`.
 - Continue phased implementation of the approved Template Architecture (see `docs/PROJECT_DECISIONS.md`). Landed so far: the seed migration (Sprint 1) and the Template Library cutover (Sprint 2 — library CRUD, default template, immutable versions, per-note pinned instances with a template selector; this closed the former data-orphaning risk). Next increments: the field-type system, per-row photo/file/signature controls, template versioning UI, IndexedDB-backed assets, and export version-provenance.
@@ -52,9 +52,11 @@ Candidates surfaced during the architecture and product review, pending prioriti
 ## Backlog
 
 - Consolidate icon usage onto a single set.
-- Complete or explicitly scope out PDF flatten support for annotation types beyond highlight and text.
+- ~~Complete or explicitly scope out PDF flatten support for annotation types beyond highlight and text~~ — done 2026-07-17: all supported annotation types now flatten (see `docs/features/PDF_EDITOR.md`).
+- Delete the dead parallel PDF annotation subsystem (file list in `docs/features/PDF_EDITOR.md`) — removal decided, needs its own cleanup change.
+- PDF editor later phases (candidates, unscheduled): squiggly markup, page management, view rotation, stamps/extra shapes, links, bookmarks, measurements, forms, print, snapshot, OCR — see `docs/features/PDF_EDITOR.md`.
 - Resolve the unused full-note AI refinement component (consolidate or remove).
-- Confirm and document the intended behavior of in-session PDF file caching.
+- ~~Confirm and document the intended behavior of in-session PDF file caching~~ — resolved 2026-07-17: PDF bytes and annotations are now persisted per note in IndexedDB; the in-memory cache remains as a session fast path only.
 - Define and instrument the success metrics proposed in `docs/PRODUCT.md`.
 
 ## Technical Debt
@@ -62,11 +64,10 @@ Candidates surfaced during the architecture and product review, pending prioriti
 | Item | Where | Impact |
 |---|---|---|
 | Project/folder/note hierarchy not persisted | Application state layer | Structure is lost on page reload |
-| Two PDF annotation implementations, only one in use | PDF subsystem | Confusing for future contributors; unclear disposition |
-| Incomplete PDF export coverage | PDF export path | Some annotation types don't appear in exported files |
+| Dead parallel PDF annotation implementation awaiting deletion | PDF subsystem (file list in `docs/features/PDF_EDITOR.md`) | Disposition decided 2026-07-17 (remove); files remain until a dedicated cleanup change lands |
 | Unused full-note AI refinement component | AI refine UI | Duplicated logic, dead surface area |
 | Misplaced code in backend entry file | Backend entry point | Would fail if a specific env flag were ever set server-side |
-| No automated tests | Repository-wide | Every change relies on manual verification — see `docs/TESTING.md` |
+| Near-zero automated tests | Repository-wide | Only the PDF editor's pure logic has unit tests (2026-07-17); everything else relies on manual verification — see `docs/TESTING.md` |
 | Mixed icon libraries | Various UI components | Visual inconsistency |
 | Placeholder product branding | Public/static assets | Product still presents under generic scaffold branding |
 | Template versions accumulate without pruning; template assets (logos, note attachments) are base64 in localStorage | Template subsystem (`src/components/template/`, `src/lib/templateModel.js`) | Storage-quota pressure grows with template count and edit frequency; the approved IndexedDB move is not yet implemented, and a version-pruning policy has not been decided |
@@ -81,7 +82,7 @@ MVP → Private Alpha → Beta → Public Web Launch → PWA → Android → iOS
 
 | Milestone | Definition | Exit criteria (indicative) | Current status |
 |---|---|---|---|
-| **MVP** | Core capture-to-report loop works end-to-end for a single user | Notes, photo evidence, voice, AI refine, PDF markup, and export all function reliably in local development | **Functionally close** — most core capabilities exist; not yet verified against a defined MVP scope, and known gaps (persistence, PDF export coverage) remain unresolved |
+| **MVP** | Core capture-to-report loop works end-to-end for a single user | Notes, photo evidence, voice, AI refine, PDF markup, and export all function reliably in local development | **Functionally close** — most core capabilities exist; not yet verified against a defined MVP scope, and the project/folder/note hierarchy persistence gap remains unresolved (PDF export coverage and PDF persistence were closed 2026-07-17) |
 | **Private Alpha** | A small, known group of real users tries it on real work | Deployed to a real environment; feedback channel exists; core flows manually verified | **Not started** — no deployment exists yet |
 | **Beta** | Wider, still-controlled user group; product surface stabilizing | Key technical debt resolved or explicitly accepted; basic monitoring in place | Not started |
 | **Public Web Launch** | Anyone can sign up/use the web app | Branding complete; security checklist passed; support process exists | Not started |
