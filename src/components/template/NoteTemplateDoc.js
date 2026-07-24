@@ -15,6 +15,7 @@ import {
   collectKnownOptionIds,
 } from "../../lib/templateModel";
 import { isTextInsertable, normalizeRows } from "../../lib/templateFields";
+import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 
 /**
  * NoteTemplateDoc
@@ -40,7 +41,10 @@ export default function NoteTemplateDoc({
 
   const [rows, setRows] = useState(() => normalizeRows(defaultRows));
   const [leftPct, setLeftPct] = useState(DEFAULT_LEFT_COL_PCT);
-  const [logoSrc, setLogoSrc] = useState(null);
+  // The logo is referenced by asset id (resolved to an object URL below).
+  // `legacyLogoSrc` is the fallback for an un-migrated pinned version.
+  const [logoAssetId, setLogoAssetId] = useState(null);
+  const [legacyLogoSrc, setLegacyLogoSrc] = useState(null);
 
   // All known dropdown option ids (across every template version). Used to
   // recognize a stored answer that is actually an option id — e.g. a field
@@ -74,8 +78,19 @@ export default function NoteTemplateDoc({
       // unified Text field (a full-cell textarea).
       setRows(normalizeRows(version.rows));
     }
-    setLogoSrc(version.logoSrc || null);
+    setLogoAssetId(version.logoAssetId ?? null);
+    setLegacyLogoSrc(version.logoSrc || null);
   }, [instance?.templateVersionId, instance?.templateId]);
+
+  // Resolve the pinned version's logo asset to an object URL (lifecycle-managed
+  // by the hook); fall back to a legacy data URL for un-migrated versions.
+  const assetUrl = useAssetObjectUrl(logoAssetId);
+  const logoUrl = logoAssetId ? assetUrl.url : legacyLogoSrc;
+  const logoStatus = logoAssetId
+    ? assetUrl.status
+    : legacyLogoSrc
+    ? "ready"
+    : "idle";
 
   // Persist per-note template field content whenever it changes
   useEffect(() => {
@@ -252,8 +267,9 @@ export default function NoteTemplateDoc({
         onRowsChange={setRows}
         onAddRow={addRow}
         onLeftPctChange={setLeftPct}
-        logoSrc={logoSrc}
-        // NOTE: do NOT pass onLogoChange here -> logo is fixed in notes
+        logoUrl={logoUrl}
+        logoStatus={logoStatus}
+        // NOTE: no onLogoFile/onLogoChange here -> logo is fixed in notes
         rowImages={rowImages}
         onRequestAddImage={handleRequestAddImage}
         enableRightEditor={true}

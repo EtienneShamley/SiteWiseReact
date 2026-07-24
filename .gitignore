@@ -29,3 +29,9 @@ yarn-error.log*
 
 # Design reference (not part of NoteWise)
 Constrapp_v5.jsx
+
+# Claude reference
+.claude/
+CLAUDE.md
+AGENTS.md
+docs/

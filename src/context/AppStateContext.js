@@ -13,6 +13,8 @@ import {
 import { getNotePdfRefs, saveNotePdfRefs } from "../lib/notePdfRefs";
 import { loadTree, saveTree } from "../lib/treeStorage";
 import { migrateLegacyNotePdfs } from "../lib/pdfMigration";
+import { runTemplateMigration } from "../lib/templateMigration";
+import { migrateTemplateLogos } from "../lib/templateLogoMigration";
 
 export const AppStateContext = createContext();
 
@@ -142,6 +144,28 @@ export function AppStateProvider({ children }) {
       } catch (err) {
         if (!cancelled) {
           setPersistenceError("Could not migrate existing PDF data: " + (err?.message || err));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // -------- One-time template logo storage migration (base64 -> IndexedDB) --
+  // Correctness does NOT depend on React effect ordering: this explicitly runs
+  // the synchronous, guarded, idempotent template migration FIRST (so the
+  // TemplateVersions exist), then migrates their logos. A failure leaves the
+  // logo-migration guard unset (safe retry next load) and surfaces in the same
+  // persistence-error banner used elsewhere.
+  useEffect(() => {
+    if (TEST_RESET) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        runTemplateMigration();
+        await migrateTemplateLogos();
+      } catch (err) {
+        if (!cancelled) {
+          setPersistenceError("Could not migrate template logos: " + (err?.message || err));
         }
       }
     })();

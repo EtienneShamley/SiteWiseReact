@@ -9,11 +9,14 @@ import {
   getVersion,
   getCurrentVersion,
   publishTemplateVersion,
+  duplicateTemplate,
   getOrCreateInstanceForNote,
   getNoteTemplateInstance,
   saveNoteTemplateInstance,
   setInstanceTemplate,
   collectKnownOptionIds,
+  isLogoAssetReferenced,
+  TEMPLATE_VERSIONS_KEY,
 } from "./templateModel";
 import { makeOption, displayTextValue } from "./templateFields";
 
@@ -163,6 +166,61 @@ describe("dropdown option-id answers never leak as raw text (the UUID bug)", () 
     expect(
       displayTextValue(stored, "weather_site_conditions", collectKnownOptionIds())
     ).toBe("");
+  });
+});
+
+describe("template logo asset references (IndexedDB-backed logos)", () => {
+  test("new versions store logoAssetId, not base64", () => {
+    const tpl = createTemplate("T", { leftPct: 18, logoAssetId: "asset-1", rows: rows() });
+    const v = getCurrentVersion(tpl.id);
+    expect(v.logoAssetId).toBe("asset-1");
+    expect(v.logoSrc ?? null).toBeNull();
+  });
+
+  test("no base64 blob lands in the persisted versions record for asset-based logos", () => {
+    createTemplate("T", { leftPct: 18, logoAssetId: "asset-1", rows: rows() });
+    const raw = localStorage.getItem(TEMPLATE_VERSIONS_KEY);
+    expect(raw).not.toContain("data:image");
+    expect(raw).toContain("asset-1");
+  });
+
+  test("publishing a replacement logo does not alter the older version's logo", () => {
+    const tpl = createTemplate("T", { leftPct: 18, logoAssetId: "asset-1", rows: rows() });
+    const v1Id = tpl.currentVersionId;
+    publishTemplateVersion(tpl.id, { leftPct: 18, logoAssetId: "asset-2", rows: rows() });
+    expect(getVersion(v1Id).logoAssetId).toBe("asset-1"); // older version untouched
+    expect(getCurrentVersion(tpl.id).logoAssetId).toBe("asset-2");
+  });
+
+  test("removing the logo in a new version keeps the older version's logo", () => {
+    const tpl = createTemplate("T", { leftPct: 18, logoAssetId: "asset-1", rows: rows() });
+    const v1Id = tpl.currentVersionId;
+    publishTemplateVersion(tpl.id, { leftPct: 18, logoAssetId: null, rows: rows() });
+    expect(getVersion(v1Id).logoAssetId).toBe("asset-1");
+    expect(getCurrentVersion(tpl.id).logoAssetId ?? null).toBeNull();
+  });
+
+  test("isLogoAssetReferenced is true while any retained version references the asset", () => {
+    const tpl = createTemplate("T", { leftPct: 18, logoAssetId: "asset-1", rows: rows() });
+    // Publish a newer version that drops the logo; the old version still uses it.
+    publishTemplateVersion(tpl.id, { leftPct: 18, logoAssetId: null, rows: rows() });
+    expect(isLogoAssetReferenced("asset-1")).toBe(true);
+    expect(isLogoAssetReferenced("asset-unused")).toBe(false);
+    expect(isLogoAssetReferenced(null)).toBe(false);
+  });
+
+  test("duplicating a template shares the source version's logo asset reference", () => {
+    const tpl = createTemplate("T", { leftPct: 18, logoAssetId: "asset-1", rows: rows() });
+    const copy = duplicateTemplate(tpl.id);
+    expect(getCurrentVersion(copy.id).logoAssetId).toBe("asset-1");
+  });
+
+  test("a legacy logoSrc definition is preserved as a fallback (no asset yet)", () => {
+    const dataUrl = "data:image/png;base64,AAAA";
+    const tpl = createTemplate("Legacy", { leftPct: 18, logoSrc: dataUrl, rows: rows() });
+    const v = getCurrentVersion(tpl.id);
+    expect(v.logoSrc).toBe(dataUrl);
+    expect(v.logoAssetId ?? null).toBeNull();
   });
 });
 

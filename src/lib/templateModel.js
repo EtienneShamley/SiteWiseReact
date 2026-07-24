@@ -38,9 +38,14 @@ function saveMap(key, map) {
 export const getTemplates = () => loadMap(TEMPLATES_KEY);
 export const saveTemplates = (map) => saveMap(TEMPLATES_KEY, map);
 
-// TemplateVersions: { [versionId]: { id, templateId, createdAt, leftPct, logoSrc, rows } }
+// TemplateVersions: { [versionId]: { id, templateId, createdAt, leftPct, logoAssetId, rows } }
+// The logo is referenced by `logoAssetId` (a Blob asset in IndexedDB, see
+// src/lib/assetStorage.js). A legacy `logoSrc` base64 data URL may still appear
+// on un-migrated versions and is preserved as a rendering fallback until the
+// one-time logo migration (src/lib/templateLogoMigration.js) converts it.
 // Versions are immutable — editing a template publishes a new version; an
-// existing version record is never rewritten in place.
+// existing version record is never rewritten in place (the logo migration only
+// swaps a version's storage representation, not its content — see that file).
 export const getTemplateVersions = () => loadMap(TEMPLATE_VERSIONS_KEY);
 export const saveTemplateVersions = (map) => saveMap(TEMPLATE_VERSIONS_KEY, map);
 
@@ -98,6 +103,9 @@ export function createTemplate(name, definition) {
     templateId,
     createdAt: now,
     leftPct: definition?.leftPct ?? DEFAULT_LEFT_COL_PCT,
+    // Prefer an IndexedDB asset reference; a legacy base64 logoSrc is only kept
+    // when there is no asset (e.g. the seed migration passing a legacy logo).
+    logoAssetId: definition?.logoAssetId ?? null,
     logoSrc: definition?.logoSrc ?? null,
     rows: definition?.rows ?? [],
   };
@@ -129,8 +137,11 @@ export function duplicateTemplate(templateId) {
   const source = getTemplate(templateId);
   if (!source) return null;
   const version = getVersion(source.currentVersionId);
+  // Share the source version's logo reference — assets are immutable and
+  // reference-safe, and cleanup never deletes an asset a version still uses.
   return createTemplate(`${source.name} (copy)`, {
     leftPct: version?.leftPct,
+    logoAssetId: version?.logoAssetId ?? null,
     logoSrc: version?.logoSrc ?? null,
     rows: (version?.rows || []).map((r) => ({ ...r })),
   });
@@ -163,6 +174,7 @@ export function publishTemplateVersion(templateId, definition) {
 
   const next = {
     leftPct: definition?.leftPct ?? DEFAULT_LEFT_COL_PCT,
+    logoAssetId: definition?.logoAssetId ?? null,
     logoSrc: definition?.logoSrc ?? null,
     rows: definition?.rows ?? [],
   };
@@ -173,6 +185,7 @@ export function publishTemplateVersion(templateId, definition) {
     current &&
     JSON.stringify({
       leftPct: current.leftPct,
+      logoAssetId: current.logoAssetId ?? null,
       logoSrc: current.logoSrc ?? null,
       rows: current.rows,
     }) === JSON.stringify(next)
@@ -228,6 +241,20 @@ export function collectKnownOptionIds() {
     }
   }
   return ids;
+}
+
+// True if ANY retained template version references this logo asset. Versions
+// are retained for pinned notes even after a template is deleted, so an asset
+// referenced by any version must never be deleted (a pinned note may still
+// render it). Used by the builder's draft-asset cleanup so it never deletes an
+// asset that is — or has become — historically referenced.
+export function isLogoAssetReferenced(assetId) {
+  if (!assetId) return false;
+  const versions = getTemplateVersions();
+  for (const id of Object.keys(versions)) {
+    if (versions[id]?.logoAssetId === assetId) return true;
+  }
+  return false;
 }
 
 export function getNoteTemplateInstance(noteId) {

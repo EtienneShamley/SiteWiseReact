@@ -17,12 +17,15 @@ import {
  * - Row height adjustable via bottom drag
  * - One global "Add image/file" button (targets a row by name or number)
  *
- * LOGO (v1, simple & stable):
- * - In builder mode (logoLocked = false):
- *    - Upload logo
- *    - Logo auto-fits the fixed header band
- * - In note mode (logoLocked = true):
- *    - Logo is fixed, no upload
+ * LOGO:
+ * - The logo is a Blob asset in IndexedDB (src/lib/assetStorage.js); the parent
+ *   resolves it to a display URL and passes it as `logoUrl` (+ `logoStatus`).
+ *   A legacy base64 data URL is passed the same way until it is migrated.
+ * - In builder mode (logoLocked = false): upload calls `onLogoFile(file)` (the
+ *   parent validates + stores the asset); remove calls `onLogoChange(null)`.
+ * - In note mode (logoLocked = true): the logo is fixed — no upload/remove.
+ * - The logo displays inside a bounded, centered frame (object-fit: contain) so
+ *   wide/square/tall logos are never stretched or cropped.
  */
 
 export default function ResizableTwoColTable({
@@ -31,7 +34,9 @@ export default function ResizableTwoColTable({
   onRowsChange,
   onAddRow,
   onLeftPctChange,
-  logoSrc,
+  logoUrl = null,
+  logoStatus = "idle",
+  onLogoFile,
   onLogoChange,
   rowImages = {},
   onRequestAddImage,
@@ -91,15 +96,14 @@ export default function ResizableTwoColTable({
   }, [rowDrag, onMouseMoveRow, stopRowDrag]);
 
   // ---------- LOGO UPLOAD (BUILDER ONLY) ----------
+  // The file is handed straight to the parent, which validates it and stores
+  // the original Blob as an IndexedDB asset (no base64, no re-encoding here).
   const handleLogoInput = (e) => {
     if (logoLocked) return;
     const file = e.target.files?.[0];
-    if (!file || !onLogoChange) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      onLogoChange(ev.target.result); // base64 data URL
-    };
-    reader.readAsDataURL(file);
+    e.target.value = ""; // allow re-selecting the same file after a rejection
+    if (!file || !onLogoFile) return;
+    onLogoFile(file);
   };
 
   // ---------- GLOBAL ADD IMAGE/FILE ----------
@@ -355,23 +359,10 @@ export default function ResizableTwoColTable({
     <div ref={containerRef} className="w-full">
       {/* COMPANY LOGO BLOCK */}
       <div className="logo-drop rounded-xl mb-4 bg-white dark:bg-neutral-900">
-        {!logoSrc ? (
-          logoLocked ? (
-            <div className="w-full text-center text-sm opacity-80 text-black dark:text-white py-4">
-              [ COMPANY LOGO ]
-            </div>
-          ) : (
-            <div className="logo-box">
-              <div className="w-full text-center text-sm opacity-80 text-black dark:text-white mb-2">
-                [ COMPANY LOGO ]
-              </div>
-              <input type="file" accept="image/*" onChange={handleLogoInput} />
-            </div>
-          )
-        ) : (
+        {logoUrl ? (
           <div className="logo-box">
             <div className="logo-img-wrapper">
-              <img src={logoSrc} alt="Logo" className="logo-img" />
+              <img src={logoUrl} alt="Logo" className="logo-img" />
             </div>
             {!logoLocked && (
               <button
@@ -381,6 +372,25 @@ export default function ResizableTwoColTable({
               >
                 Remove Logo
               </button>
+            )}
+          </div>
+        ) : (
+          <div className="logo-box">
+            <div className="logo-img-wrapper">
+              <div className="w-full text-center text-sm opacity-80 text-black dark:text-white">
+                {logoStatus === "loading"
+                  ? "Loading logo…"
+                  : logoStatus === "missing" || logoStatus === "error"
+                  ? "[ LOGO UNAVAILABLE ]"
+                  : "[ COMPANY LOGO ]"}
+              </div>
+            </div>
+            {!logoLocked && (
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={handleLogoInput}
+              />
             )}
           </div>
         )}
