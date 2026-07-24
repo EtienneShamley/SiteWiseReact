@@ -1,8 +1,32 @@
-/* Row drag */
+/* Template two-column rows now render as document blocks inside the A4 pages
+ * (see PagedDocument.js / pagedDocument.css). The paper is always white with
+ * dark text in both light and dark app themes, so these document surfaces use
+ * light styling only — dark-mode variants are intentionally absent. */
+
+/* Row block */
 .twocol-row {
   position: relative;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  margin-top: -1px; /* collapse the 1px border shared with the row above */
 }
 
+.twocol-cell-left {
+  background: #ffffff;
+  border-right: 1px solid #d1d5db;
+}
+
+.twocol-cell-right {
+  background: #ffffff;
+}
+
+/* Unified Text field: grows with content, never shows an inner scrollbar. */
+.twocol-text {
+  overflow: hidden;
+  min-height: 1.6em;
+}
+
+/* Row drag handle */
 .twocol-resize-handle {
   position: absolute;
   bottom: -6px;
@@ -11,18 +35,14 @@
   height: 12px;
   cursor: row-resize;
   user-select: none;
+  z-index: 1;
 }
 
-/* Logo block uses only the dashed boundary */
+/* Logo block — dashed header frame on the white paper */
 .logo-drop {
   border: 1px dashed rgba(120, 120, 120, 0.6);
   background: #ffffff;
   padding: 8px 12px;
-}
-
-.dark .logo-drop {
-  border-color: rgba(200, 200, 200, 0.4);
-  background: #111827;
 }
 
 /* Wrapper for logo + controls */
@@ -33,9 +53,9 @@
   width: 100%;
 }
 
-/* Bounded, centered logo frame. Theme-agnostic: it constrains size only, so a
-   wide, square or tall logo is preserved (never stretched, squashed or cropped)
-   and centered on both axes via flex. Same frame in the builder and the note. */
+/* Bounded, centered logo frame. Constrains size only, so a wide, square or tall
+   logo is preserved (never stretched, squashed or cropped) and centered on both
+   axes. Same frame in the builder and the note. */
 .logo-img-wrapper {
   position: relative;
   display: flex;

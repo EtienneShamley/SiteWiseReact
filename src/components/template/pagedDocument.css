@@ -1,0 +1,103 @@
+/* src/components/template/pagedDocument.css
+ *
+ * Styling for the page-aware template document (PagedDocument.js). The document
+ * is a stack of white A4 paper backdrops on the app background, with all block
+ * content in a single continuous flow overlaid inside the page margins.
+ *
+ * Geometry here (210mm page width, 20mm left/right margins => 170mm usable
+ * width) is the CSS mirror of src/lib/pageGeometry.js: the browser converts CSS
+ * mm at the same 96dpi reference density the JS pagination uses, so on-screen
+ * layout and the derived page distribution agree. Vertical geometry (page tops,
+ * heights, spacers) is supplied inline in px by PagedDocument.
+ *
+ * The paper stays WHITE with dark text in both light and dark app themes — a
+ * report document reads as paper, not a dark UI surface. Only interaction/focus
+ * accents (defined by the inputs themselves) use the NoteWise cyan. */
+
+/* ---- App-background surround + horizontal scroll on narrow viewports ---- */
+.paged-doc {
+  box-sizing: border-box;
+  width: 100%;
+  overflow-x: auto;
+  padding: 24px;
+  background: #eceef1; /* light "desk" behind the paper */
+  border-radius: 12px;
+}
+
+.dark .paged-doc {
+  background: #0b0f14; /* app shell stays dark around the white paper */
+}
+
+/* Positioning context for the page backdrops + the content flow. Centered when
+ * the viewport is wider than a page; on narrower viewports the .paged-doc
+ * scrolls horizontally rather than squashing the page. */
+.paged-stack {
+  position: relative;
+  width: 210mm;
+  margin: 0 auto;
+}
+
+/* ---- A4 paper backdrop ---- */
+.paged-page {
+  box-sizing: border-box;
+  position: absolute;
+  left: 0;
+  width: 210mm;
+  /* top + height are supplied inline (px); a normal page is a full A4 height,
+     an oversized page grows to contain its single block. */
+  background: #ffffff; /* paper stays white even in dark mode */
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 2px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18); /* restrained shadow */
+}
+
+/* ---- Continuous content flow (in front of the backdrops) ---- */
+.paged-flow {
+  position: absolute;
+  top: 20mm; /* top margin */
+  left: 20mm; /* left margin */
+  width: 170mm; /* usable width = 210 - 20 - 20 */
+  color: #111111; /* printed-document text stays dark */
+}
+
+/* Block wrapper — a stable, measured container per document block. It must not
+ * add margins of its own, so a block's measured height equals its real content
+ * height (what pagination distributes). */
+.paged-block {
+  box-sizing: border-box;
+}
+
+/* Page-break spacer inside the content flow (height supplied inline). */
+.paged-flow-spacer {
+  width: 100%;
+  pointer-events: none;
+}
+
+/* ---- Restrained page number ---- */
+.paged-page-footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 7mm; /* sits inside the bottom margin band */
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Keep document text dark inside the paper regardless of app theme. Inner
+ * utility classes like `dark:text-white` would otherwise turn report text white
+ * on white paper in dark mode. */
+.paged-flow,
+.paged-flow .text-black,
+.paged-flow .dark\:text-white {
+  color: #111111;
+}
+
+/* ---- Print / export foundation (not full WYSIWYG export yet) ---- */
+@page {
+  size: A4;
+  margin: 20mm;
+}
