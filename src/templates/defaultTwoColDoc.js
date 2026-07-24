@@ -1,5 +1,7 @@
 // Default scaffold for the 2-col template doc (no fill-ins)
 // Left column target within 15–20%
+import { newId } from "../lib/id";
+
 export const DEFAULT_LEFT_COL_PCT = 18;
 
 export const defaultRows = [
@@ -12,7 +14,9 @@ export const defaultRows = [
   { id: 'weather_site_conditions',label: 'Weather / Site Conditions', minPx: 72, px: 128 },
 ];
 
+// Newly added builder rows get a stable UUID-style id (crypto.randomUUID with
+// a safe fallback, src/lib/id.js) and default to the unified "text" type (a
+// full-cell multiline textarea). See templateFields.js.
 export function makeNewRow(label = 'New Field') {
-  const id = `row_${Math.random().toString(36).slice(2, 10)}`;
-  return { id, label, minPx: 48, px: 64 };
+  return { id: newId(), label, minPx: 48, px: 64, type: 'text' };
 }

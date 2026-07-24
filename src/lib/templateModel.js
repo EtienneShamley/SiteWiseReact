@@ -7,6 +7,7 @@ import {
   DEFAULT_LEFT_COL_PCT,
   defaultRows,
 } from "../templates/defaultTwoColDoc";
+import { newId } from "./id";
 
 export const TEMPLATES_KEY = "sitewise-templates-v1";
 export const TEMPLATE_VERSIONS_KEY = "sitewise-template-versions-v1";
@@ -88,8 +89,8 @@ export function setDefaultTemplateId(templateId) {
 // definition: { leftPct, logoSrc, rows }
 export function createTemplate(name, definition) {
   const now = Date.now();
-  const templateId = crypto.randomUUID();
-  const versionId = crypto.randomUUID();
+  const templateId = newId();
+  const versionId = newId();
 
   const versions = getTemplateVersions();
   versions[versionId] = {
@@ -180,7 +181,7 @@ export function publishTemplateVersion(templateId, definition) {
   }
 
   const now = Date.now();
-  const versionId = crypto.randomUUID();
+  const versionId = newId();
   versions[versionId] = { id: versionId, templateId, createdAt: now, ...next };
   saveTemplateVersions(versions);
 
@@ -206,6 +207,27 @@ export function ensureDefaultTemplate() {
     logoSrc: null,
     rows: defaultRows.map((r) => ({ ...r })),
   });
+}
+
+// Every dropdown option id across ALL template versions (versions are never
+// rewritten and are retained even when a template is deleted, so an id from any
+// version a note was ever pinned to stays resolvable). Used at render time to
+// recognize a stored answer that is actually an internal option id — so it is
+// displayed as blank instead of leaking a raw UUID into a text field.
+export function collectKnownOptionIds() {
+  const ids = new Set();
+  const versions = getTemplateVersions();
+  for (const versionId of Object.keys(versions)) {
+    const rows = versions[versionId]?.rows;
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (!Array.isArray(row?.options)) continue;
+      for (const opt of row.options) {
+        if (opt && typeof opt.id === "string") ids.add(opt.id);
+      }
+    }
+  }
+  return ids;
 }
 
 export function getNoteTemplateInstance(noteId) {

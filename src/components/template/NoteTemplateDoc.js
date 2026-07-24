@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ResizableTwoColTable from "./ResizableTwoColTable";
 import {
   DEFAULT_LEFT_COL_PCT,
@@ -12,7 +12,9 @@ import {
   listTemplates,
   getVersion,
   getCurrentVersion,
+  collectKnownOptionIds,
 } from "../../lib/templateModel";
+import { isTextInsertable, normalizeRows } from "../../lib/templateFields";
 
 /**
  * NoteTemplateDoc
@@ -36,9 +38,20 @@ export default function NoteTemplateDoc({
   const [instance, setInstance] = useState(() => getOrCreateInstanceForNote(noteId));
   const [templates, setTemplates] = useState(() => listTemplates());
 
-  const [rows, setRows] = useState(defaultRows);
+  const [rows, setRows] = useState(() => normalizeRows(defaultRows));
   const [leftPct, setLeftPct] = useState(DEFAULT_LEFT_COL_PCT);
   const [logoSrc, setLogoSrc] = useState(null);
+
+  // All known dropdown option ids (across every template version). Used to
+  // recognize a stored answer that is actually an option id — e.g. a field
+  // that used to be a dropdown and is now rendered as Text — so its raw id is
+  // shown as blank rather than leaking into the field. Recomputed when the
+  // template set or pinned version changes; the set is tiny.
+  const knownOptionIds = useMemo(
+    () => collectKnownOptionIds(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [templates, instance?.templateVersionId]
+  );
 
   // Per-note content — initialized from the instance, persisted back below
   const [rowImages, setRowImages] = useState(() => instance?.attachments || {});
@@ -55,14 +68,11 @@ export default function NoteTemplateDoc({
     if (!version) return; // keep scaffold defaults
     setLeftPct(version.leftPct || DEFAULT_LEFT_COL_PCT);
     if (Array.isArray(version.rows) && version.rows.length > 0) {
-      setRows(
-        version.rows.map((r, idx) => ({
-          id: r.id || `row-${idx}`,
-          label: r.label ?? "",
-          px: r.px ?? 120,
-          minPx: r.minPx ?? 100,
-        }))
-      );
+      // Read-time normalization for rendering only — supplies field-type and
+      // deterministic id defaults without rewriting the pinned immutable
+      // version. Legacy rows (no type, or the old "multiline") render as the
+      // unified Text field (a full-cell textarea).
+      setRows(normalizeRows(version.rows));
     }
     setLogoSrc(version.logoSrc || null);
   }, [instance?.templateVersionId, instance?.templateId]);
@@ -157,23 +167,36 @@ export default function NoteTemplateDoc({
     });
   }
 
-  // Function for MainArea to push BottomBar text into a selected row
-  const insertIntoRow = useCallback((rowId, text) => {
-    if (!rowId || !text) return;
-    setRowText((prev) => {
-      const existing = prev[rowId] || "";
-      const next =
-        existing.trim().length === 0
-          ? text
-          : existing.endsWith("\n")
-          ? existing + text
-          : existing + "\n" + text;
-      return {
-        ...prev,
-        [rowId]: next,
-      };
-    });
-  }, []);
+  // Function for MainArea to push BottomBar text into a selected row.
+  // Only free-text destinations (Text / Multiline) accept inserted text;
+  // structured fields (number, date, time, checkbox, yes/no, dropdown) reject
+  // it rather than being corrupted by arbitrary text.
+  const insertIntoRow = useCallback(
+    (rowId, text) => {
+      if (!rowId || !text) return;
+      const row = rows.find((r) => r.id === rowId);
+      if (row && !isTextInsertable(row.type)) {
+        alert(
+          "This field type doesn't accept inserted text. Select a Text or Multiline field."
+        );
+        return;
+      }
+      setRowText((prev) => {
+        const existing = typeof prev[rowId] === "string" ? prev[rowId] : "";
+        const next =
+          existing.trim().length === 0
+            ? text
+            : existing.endsWith("\n")
+            ? existing + text
+            : existing + "\n" + text;
+        return {
+          ...prev,
+          [rowId]: next,
+        };
+      });
+    },
+    [rows]
+  );
 
   // Register/unregister the insert handler with MainArea
   useEffect(() => {
@@ -241,6 +264,7 @@ export default function NoteTemplateDoc({
         }}
         onRemoveImage={handleRemoveImage}
         logoLocked={true} // <- NOTE MODE: no upload, no resize handle, no "choose file"
+        knownOptionIds={knownOptionIds}
       />
     </div>
   );

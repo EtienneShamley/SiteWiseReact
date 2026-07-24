@@ -4,7 +4,7 @@ This is the canonical source for how NoteWise is verified today, and how automat
 
 ## Automated Tests (current state)
 
-A small unit-test suite now exists for the PDF editor's pure logic — coordinate transforms and quad normalization (`src/lib/pdfCoords.test.js`), search match/rectangle calculation (`src/lib/pdfSearch.test.js`), and storage record shape/per-note keying (`src/lib/pdfStorage.test.js`). Run it with:
+A small unit-test suite now exists. For the PDF editor's pure logic: coordinate transforms and quad normalization (`src/lib/pdfCoords.test.js`), search match/rectangle calculation (`src/lib/pdfSearch.test.js`), and storage record shape/per-note keying (`src/lib/pdfStorage.test.js`). For the template field-type system: field-type normalization (incl. legacy `multiline` → unified `text`), id stability, dropdown-option handling, BottomBar insert compatibility, and answer-display resolution that blanks a value which is provably an internal id — the field's own id or a known dropdown option id — so no id leaks into a visible field (`src/lib/templateFields.test.js`); plus localStorage round-trip coverage of immutable versions, notes staying pinned, answer values surviving reload with their empty/zero/false/unanswered distinctions, and a dropdown option-id answer under a now-Text field being preserved yet displayed blank (`src/lib/templateModel.test.js`). Run them with:
 
 ```bash
 CI=true npm test -- --watchAll=false
@@ -35,6 +35,13 @@ Use this list to judge blast radius for any change that isn't obviously isolated
 - [ ] Switch between notes and confirm the correct content loads for each
 - [ ] Apply and edit a report template on a note (fill fields, switch the note's template via the selector, confirm answers persist)
 - [ ] Open the Template Library: create, rename, duplicate, delete, and set-default a template; confirm an edit to a master template does not change an existing note's layout or answers
+- [ ] Template field types: in the builder, set each of the seven types (text, number, date, time, checkbox, yes/no, dropdown) on rows; add/rename/delete dropdown options; save and reopen the builder and confirm every type and its options persist
+- [ ] Unified Text field: add a new row (defaults to Text); confirm its textarea fills the whole right-hand cell with no inner box, enter several lines, drag the row taller (typing area grows), reload — lines remain
+- [ ] In a note, fill each field type; confirm Number keeps `0` distinct from empty, an unchecked Checkbox stays `false`, Yes/No can stay unanswered, and a dropdown selection persists; switch notes and reload and confirm all values restore
+- [ ] Dropdowns display the option **label**, never a raw option id/UUID; open the original/default template and confirm no field (e.g. Weather / Site Conditions) shows a raw UUID
+- [ ] Rename a field (publish a new version) and confirm existing notes keep their old layout, options and answers (answers stay associated by field id); confirm a new note picks up the new version
+- [ ] BottomBar: confirm insertion works into the Text field and is rejected (with a message, no corruption) for the other field types
+- [ ] Confirm an existing (pre-field-type) template loads with every old field as an editable unified Text field and its answers, including line breaks, unchanged
 - [ ] Persistence: create a project, folder and note, then reload — confirm the whole tree returns, note ids are unchanged, and note content is still accessible; confirm no duplicate default projects/folders appear
 - [ ] Global PDFs (top-level Projects | PDFs workspace switch):
   - [ ] With **no** projects/folders/notes at all, click PDFs in the sidebar → Upload PDF; confirm no project/folder/note is created; open and annotate it; reload and confirm bytes + annotations return

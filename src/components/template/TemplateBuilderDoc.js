@@ -9,6 +9,7 @@ import {
   getCurrentVersion,
   publishTemplateVersion,
 } from "../../lib/templateModel";
+import { FIELD_TYPE, normalizeRows, normalizeType } from "../../lib/templateFields";
 
 // Load the template's current version for editing, so opening the builder
 // edits the real saved template instead of always resetting to the default
@@ -22,18 +23,17 @@ function loadCurrentDefinition(templateId) {
   return {
     leftPct: version.leftPct || DEFAULT_LEFT_COL_PCT,
     logoSrc: version.logoSrc || null,
-    rows: version.rows.map((r, idx) => ({
-      id: r.id || `row-${idx}`,
-      label: r.label ?? "",
-      px: r.px ?? 120,
-      minPx: r.minPx ?? 100,
-    })),
+    // Read-time normalization supplies rendering defaults (legacy rows and the
+    // old "multiline" type -> unified "text", deterministic id fallback)
+    // without mutating the stored immutable version. Publishing below writes a
+    // new normalized version.
+    rows: normalizeRows(version.rows),
   };
 }
 
 export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
   const [rows, setRows] = useState(
-    () => loadCurrentDefinition(templateId)?.rows ?? defaultRows
+    () => loadCurrentDefinition(templateId)?.rows ?? normalizeRows(defaultRows)
   );
   const [leftPct, setLeftPct] = useState(
     () => loadCurrentDefinition(templateId)?.leftPct ?? DEFAULT_LEFT_COL_PCT
@@ -74,12 +74,25 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     const definition = {
       leftPct,
       logoSrc: logoSrc || null,
-      rows: rows.map((r) => ({
-        id: r.id,
-        label: r.label,
-        px: r.px,
-        minPx: r.minPx ?? 48,
-      })),
+      rows: rows.map((r) => {
+        const type = normalizeType(r.type);
+        const base = {
+          id: r.id,
+          label: r.label,
+          px: r.px,
+          minPx: r.minPx ?? 48,
+          type,
+        };
+        // Persist options only for dropdowns, dropping completely empty option
+        // values while preserving order and stable ids. Dormant options on a
+        // non-dropdown row are not written to the published version.
+        if (type === FIELD_TYPE.SELECT) {
+          base.options = (r.options || [])
+            .filter((o) => String(o.value ?? "").trim() !== "")
+            .map((o) => ({ id: o.id, value: o.value }));
+        }
+        return base;
+      }),
     };
 
     const version = publishTemplateVersion(templateId, definition);
@@ -115,6 +128,7 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
         logoLocked={false}
         rowImages={rowImages}
         onRequestAddImage={handleRequestAddImage}
+        enableFieldTypeEditor={true}
       />
 
       <div className="mt-6 flex items-center gap-3">

@@ -1,6 +1,13 @@
 // src/components/template/ResizableTwoColTable.js
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import "./template.css";
+import {
+  FIELD_TYPE,
+  FIELD_TYPES,
+  makeOption,
+  normalizeType,
+  displayTextValue,
+} from "../../lib/templateFields";
 
 /**
  * Two-column template table:
@@ -34,6 +41,8 @@ export default function ResizableTwoColTable({
   onRightFocus,
   onRemoveImage,
   logoLocked = false,
+  enableFieldTypeEditor = false,
+  knownOptionIds = null,
 }) {
   const [rowDrag, setRowDrag] = useState(null);
   const containerRef = useRef(null);
@@ -126,6 +135,222 @@ export default function ResizableTwoColTable({
 
   const showRightEditor = !!enableRightEditor;
 
+  // ---------- ROW MUTATION HELPERS (builder field-type editor) ----------
+  const patchRow = useCallback(
+    (rowId, patch) => {
+      if (!onRowsChange) return;
+      onRowsChange(rows.map((r) => (r.id === rowId ? { ...r, ...patch } : r)));
+    },
+    [rows, onRowsChange]
+  );
+
+  // Changing type never deletes existing options — a row switched away from
+  // Dropdown keeps its options dormant (only rendered while type === select),
+  // the smallest safe behavior so switching back within the session is lossless.
+  const handleTypeChange = useCallback(
+    (rowId, nextType) => patchRow(rowId, { type: normalizeType(nextType) }),
+    [patchRow]
+  );
+
+  const handleOptionAdd = useCallback(
+    (row) => patchRow(row.id, { options: [...(row.options || []), makeOption("")] }),
+    [patchRow]
+  );
+
+  const handleOptionRename = useCallback(
+    (row, optId, value) =>
+      patchRow(row.id, {
+        options: (row.options || []).map((o) =>
+          o.id === optId ? { ...o, value } : o
+        ),
+      }),
+    [patchRow]
+  );
+
+  const handleOptionDelete = useCallback(
+    (row, optId) =>
+      patchRow(row.id, {
+        options: (row.options || []).filter((o) => o.id !== optId),
+      }),
+    [patchRow]
+  );
+
+  // ---------- NOTE-MODE ANSWER CONTROL (per field type) ----------
+  // Reads the raw stored answer without truthy coercion so empty vs zero,
+  // false vs missing, and unanswered vs a real choice all survive. Text-like
+  // controls also pass the value through displayTextValue, which blanks a value
+  // that is provably an internal id (the field's own id or a known dropdown
+  // option id) so an id can never leak into a visible field.
+  function renderAnswerControl(row) {
+    const type = normalizeType(row.type);
+    const raw = rightValues[row.id];
+    const focus = () => onRightFocus && onRightFocus(row.id);
+    const change = (v) => onRightChange && onRightChange(row.id, v);
+    const safeStr = displayTextValue(raw, row.id, knownOptionIds);
+    const inputCls =
+      "w-full bg-transparent text-sm outline-none border border-gray-300 " +
+      "dark:border-gray-700 rounded px-2 py-1 text-black dark:text-white";
+
+    if (type === FIELD_TYPE.NUMBER) {
+      // Stored as a string so "" (empty) and "0" (zero) stay distinct and
+      // invalid text is never silently coerced to 0.
+      return (
+        <input
+          type="number"
+          className={inputCls}
+          value={safeStr}
+          onFocus={focus}
+          onChange={(e) => change(e.target.value)}
+        />
+      );
+    }
+    if (type === FIELD_TYPE.DATE) {
+      return (
+        <input
+          type="date"
+          className={inputCls}
+          value={safeStr}
+          onFocus={focus}
+          onChange={(e) => change(e.target.value)}
+        />
+      );
+    }
+    if (type === FIELD_TYPE.TIME) {
+      return (
+        <input
+          type="time"
+          className={inputCls}
+          value={safeStr}
+          onFocus={focus}
+          onChange={(e) => change(e.target.value)}
+        />
+      );
+    }
+    if (type === FIELD_TYPE.CHECKBOX) {
+      return (
+        <label className="inline-flex items-center gap-2 text-sm text-black dark:text-white">
+          <input
+            type="checkbox"
+            checked={raw === true}
+            onFocus={focus}
+            onChange={(e) => change(e.target.checked)}
+          />
+          <span className="opacity-70">{raw === true ? "Checked" : "Unchecked"}</span>
+        </label>
+      );
+    }
+    if (type === FIELD_TYPE.YESNO) {
+      // Three states: "" (unanswered, never silently No), "yes", "no".
+      const value = raw === "yes" || raw === "no" ? raw : "";
+      return (
+        <select
+          className={inputCls}
+          value={value}
+          onFocus={focus}
+          onChange={(e) => change(e.target.value)}
+        >
+          <option value="">—</option>
+          <option value="yes">Yes</option>
+          <option value="no">No</option>
+        </select>
+      );
+    }
+    if (type === FIELD_TYPE.SELECT) {
+      // Answer stores the stable option id; the label is resolved from the
+      // pinned version's options, so renaming an option in a newer version
+      // never corrupts a note pinned to an older version.
+      const opts = Array.isArray(row.options) ? row.options : [];
+      const value = opts.some((o) => o.id === raw) ? raw : "";
+      return (
+        <select
+          className={inputCls}
+          value={value}
+          onFocus={focus}
+          onChange={(e) => change(e.target.value)}
+        >
+          <option value="">—</option>
+          {opts.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.value}
+            </option>
+          ))}
+        </select>
+      );
+    }
+    // FIELD_TYPE.TEXT — the unified text field: a full-cell textarea (multiline,
+    // preserves line breaks, grows as the row is dragged taller, no inner box).
+    return (
+      <textarea
+        className="
+          flex-grow w-full h-full min-h-full bg-transparent text-sm outline-none
+          resize-none border-0 leading-relaxed px-1 py-0.5
+          text-black dark:text-white
+        "
+        placeholder="Enter details for this field..."
+        value={safeStr}
+        onFocus={focus}
+        onChange={(e) => change(e.target.value)}
+      />
+    );
+  }
+
+  // ---------- BUILDER-MODE FIELD-TYPE EDITOR (per field type) ----------
+  function renderFieldTypeEditor(row) {
+    const type = normalizeType(row.type);
+    return (
+      <div className="flex flex-col gap-2">
+        <label className="text-xs text-black dark:text-white opacity-80">
+          Field type
+          <select
+            className="ml-2 px-2 py-1 text-sm border rounded border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-800 text-black dark:text-white"
+            value={type}
+            onChange={(e) => handleTypeChange(row.id, e.target.value)}
+          >
+            {FIELD_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {type === FIELD_TYPE.SELECT && (
+          <div className="flex flex-col gap-1">
+            <span className="text-xs opacity-70 text-black dark:text-white">
+              Dropdown options
+            </span>
+            {(row.options || []).map((o) => (
+              <div key={o.id} className="flex items-center gap-2">
+                <input
+                  type="text"
+                  className="flex-grow px-2 py-1 text-sm border rounded border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-800 text-black dark:text-white"
+                  placeholder="Option value"
+                  value={o.value}
+                  onChange={(e) => handleOptionRename(row, o.id, e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="w-6 h-6 rounded-full bg-black/70 text-white text-xs flex items-center justify-center shrink-0"
+                  title="Delete option"
+                  onClick={() => handleOptionDelete(row, o.id)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              className="self-start px-2 py-1 text-xs border rounded border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-800 text-black dark:text-white"
+              onClick={() => handleOptionAdd(row)}
+            >
+              Add option
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div ref={containerRef} className="w-full">
       {/* COMPANY LOGO BLOCK */}
@@ -204,7 +429,6 @@ export default function ResizableTwoColTable({
       <div className="border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-neutral-950">
         {rows.map((row, idx) => {
           const imgs = rowImages[row.id] || [];
-          const rightText = rightValues[row.id] || "";
 
           const baseMin = row.px || 120;
           const effectiveMin = imgs.length ? Math.max(baseMin, 170) : baseMin;
@@ -277,22 +501,9 @@ export default function ResizableTwoColTable({
                   </div>
                 )}
 
-                {showRightEditor && (
-                  <textarea
-                    className="
-                      flex-grow w-full bg-transparent text-sm outline-none resize-none
-                      leading-tight
-                      text-black dark:text-white
-                    "
-                    placeholder="Enter details for this field..."
-                    value={rightText}
-                    onFocus={() => onRightFocus && onRightFocus(row.id)}
-                    onChange={(e) => {
-                      if (!onRightChange) return;
-                      onRightChange(row.id, e.target.value);
-                    }}
-                  />
-                )}
+                {showRightEditor && renderAnswerControl(row)}
+
+                {enableFieldTypeEditor && renderFieldTypeEditor(row)}
               </div>
 
               {/* ROW DRAG HANDLE */}
