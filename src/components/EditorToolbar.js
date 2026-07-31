@@ -14,11 +14,17 @@ export default function EditorToolbar({ editor }) {
         <FormattingControls editor={editor} />
         <div className="flex items-center gap-2">
           <ExportMenu editor={editor} />
+          {/* The top-level reusable-template workspace. This is where company
+              templates are CREATED and MANAGED — separate from any one note.
+              The control inside a note only chooses which template that note
+              uses; it never opens this. */}
           <button
             className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50"
             onClick={() => setShowTemplateBuilder(true)}
+            title="Create and manage reusable templates for structured notes and reports"
+            aria-label="Open Template Library — create and manage reusable templates"
           >
-            Templates
+            Template Library
           </button>
         </div>
       </div>

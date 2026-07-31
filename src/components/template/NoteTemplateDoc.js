@@ -15,6 +15,11 @@ import {
   collectKnownOptionIds,
   isAttachmentAssetReferenced,
 } from "../../lib/templateModel";
+import {
+  makeTemplateFormRestorePoint,
+  mergeRestoredAttachments,
+  validateTemplateFormRestorePoint,
+} from "../../lib/noteProgressHistory";
 import { isTextInsertable, normalizeRows } from "../../lib/templateFields";
 import {
   CUSTOM_ROW_MIN_HEIGHT_PX,
@@ -52,6 +57,13 @@ import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
  *   instance stores lightweight references (see src/lib/noteAttachments.js).
  * - Lets the user re-pin the note to a different template via a selector.
  * - Exposes an insert handler so MainArea can push BottomBar text into a row.
+ * - Exposes a Save progress capture/restore handler pair so MainArea's
+ *   "Save progress" control can act on the TEMPLATE FORM view without owning
+ *   this component's state. Both read the current-value refs below, so a click
+ *   can never capture or restore against a stale closure. A restore point holds
+ *   lightweight instance state and attachment REFERENCES only — never Blob or
+ *   base64 content — and applying one never mutates a TemplateVersion and never
+ *   deletes an IndexedDB asset (src/lib/noteProgressHistory.js).
  * - Supports NOTE-SPECIFIC custom rows: an extra project-specific section the
  *   company template did not anticipate, inserted above or below any row. A
  *   custom row lives on THIS note's instance and carries the template it was
@@ -106,6 +118,8 @@ export default function NoteTemplateDoc({
   noteId,
   onRegisterTemplateInsert, // (fn | null) => void
   onSelectRow, // (rowId) => void
+  onRegisterTemplateProgress, // ({ capture, restore } | null) => void
+  isAssetInProgressHistory, // (assetId) => boolean
 }) {
   // The instance pins this note to a specific template version; created
   // against the default template on first use. This component is remounted
@@ -159,6 +173,34 @@ export default function NoteTemplateDoc({
   rowTextRef.current = rowText;
   const rowAttachmentsRef = useRef(rowAttachments);
   rowAttachmentsRef.current = rowAttachments;
+  // Kept current the same way so the async attachment handlers always ask the
+  // LIVE session history whether an asset is still needed.
+  const isAssetInProgressHistoryRef = useRef(isAssetInProgressHistory);
+  isAssetInProgressHistoryRef.current = isAssetInProgressHistory;
+
+  /**
+   * The single deletion decision for an attachment Blob.
+   *
+   * An asset may be deleted only when nothing can still need it:
+   *   1. no note instance references it (persistent state), AND
+   *   2. no active Save progress restore point references it (session state).
+   *
+   * (2) exists because a Template form restore point stores references, not
+   * bytes. Deleting a Blob the moment the CURRENT instance stops referencing it
+   * would leave an earlier restore point pointing at an asset that no longer
+   * exists. Once that point is evicted by the 20-point cap, its note's history
+   * is cleared, or the session ends, the reference goes with it and ordinary
+   * reference-aware cleanup applies again — deletion is deferred, never
+   * abandoned. The check is deliberately conservative: an unknown answer
+   * (no handler wired) keeps the asset.
+   */
+  const canDeleteAttachmentAsset = useCallback((assetId) => {
+    if (!assetId) return false;
+    if (isAttachmentAssetReferenced(assetId)) return false;
+    const inHistory = isAssetInProgressHistoryRef.current;
+    if (typeof inHistory !== "function" || inHistory(assetId)) return false;
+    return true;
+  }, []);
 
   // Load the pinned version's layout. Falls back to the pinned template's
   // current version if that exact version record is missing, then to the
@@ -505,7 +547,7 @@ export default function NoteTemplateDoc({
             `${label}: could not be recorded on this note (${err?.message || err}).`
           );
           try {
-            if (!isAttachmentAssetReferenced(assetId)) await deleteAsset(assetId);
+            if (canDeleteAttachmentAsset(assetId)) await deleteAsset(assetId);
           } catch {
             // The unreferenced asset could not be cleaned up; harmless orphan.
           }
@@ -519,7 +561,7 @@ export default function NoteTemplateDoc({
       });
       if (failures.length) setFieldError(fieldId, failures.join(" "));
     },
-    [clearFieldError, persistAttachments, setFieldError]
+    [clearFieldError, persistAttachments, setFieldError, canDeleteAttachmentAsset]
   );
 
   const handleRemoveAttachment = useCallback(
@@ -543,11 +585,12 @@ export default function NoteTemplateDoc({
         return;
       }
 
-      // 3. Delete the Blob only when it is provably no longer referenced by
-      //    ANY note instance (never assume single ownership).
+      // 3. Delete the Blob only when it is provably no longer needed by ANY
+      //    note instance OR any active session restore point (never assume
+      //    single ownership — see canDeleteAttachmentAsset).
       const assetId =
         entry && typeof entry === "object" ? entry.assetId : null;
-      if (assetId && !isAttachmentAssetReferenced(assetId)) {
+      if (canDeleteAttachmentAsset(assetId)) {
         try {
           await deleteAsset(assetId);
         } catch (err) {
@@ -558,7 +601,7 @@ export default function NoteTemplateDoc({
         }
       }
     },
-    [clearFieldError, persistAttachments, setFieldError]
+    [clearFieldError, persistAttachments, setFieldError, canDeleteAttachmentAsset]
   );
 
   const handleUpdateAttachmentDisplay = useCallback(
@@ -633,12 +676,92 @@ export default function NoteTemplateDoc({
     }
   }, [onRegisterTemplateInsert, insertIntoRow]);
 
+  /* ----------------------- Save progress (Template form) ------------------ */
+
+  // Captures the Template form's current state as a restore point. Reads the
+  // refs, not render-scope state, so the point always reflects what is on
+  // screen at the moment of the click. Returns null when there is nothing to
+  // capture, so MainArea reports that instead of storing an empty point.
+  const captureProgress = useCallback(() => {
+    const current = instanceRef.current;
+    if (!current) return null;
+    return makeTemplateFormRestorePoint({
+      instance: {
+        ...current,
+        answers: rowTextRef.current,
+        attachments: rowAttachmentsRef.current,
+      },
+    });
+  }, []);
+
+  /**
+   * Applies a Template form restore point to THIS note only.
+   *
+   * Fails whole rather than partially: the pinned version is resolved first,
+   * and the instance write is confirmed (throwing save) before any in-memory
+   * state changes, so a refused or failed restore leaves the current form
+   * exactly as it was. Never touches the Free-form note, never writes to a
+   * TemplateVersion, and never deletes an IndexedDB asset — an attachment that
+   * this restore drops keeps its Blob, so a later restore can recover it.
+   */
+  const restoreProgress = useCallback((point) => {
+    const validation = validateTemplateFormRestorePoint(point, {
+      versionExists: (versionId) => !!getVersion(versionId),
+    });
+    if (!validation.ok) return validation;
+
+    const current = instanceRef.current;
+    if (!current) {
+      return { ok: false, error: "This note's Template form is not ready yet." };
+    }
+
+    const next = {
+      ...current,
+      templateId: point.templateId ?? null,
+      templateVersionId: point.templateVersionId ?? null,
+      answers: { ...point.answers },
+      attachments: mergeRestoredAttachments(rowAttachmentsRef.current, point),
+      customRows: (point.customRows || []).map((r) => ({
+        ...r,
+        placement: r?.placement ? { ...r.placement } : r?.placement,
+      })),
+    };
+
+    try {
+      saveNoteTemplateInstanceOrThrow(next);
+    } catch (err) {
+      return {
+        ok: false,
+        error: `The Template form could not be restored (${err?.message || err}). Nothing was changed.`,
+      };
+    }
+
+    instanceRef.current = next;
+    rowTextRef.current = next.answers;
+    rowAttachmentsRef.current = next.attachments;
+    setInstance(next);
+    setRowText(next.answers);
+    setRowAttachments(next.attachments);
+    // Drop transient drag state and stale per-field errors from the state that
+    // no longer exists; the restored rows/branding reload from the pinned
+    // version through the effect above.
+    setPendingHeights({});
+    setFieldErrors({});
+    return { ok: true };
+  }, []);
+
+  useEffect(() => {
+    if (!onRegisterTemplateProgress) return;
+    onRegisterTemplateProgress({ capture: captureProgress, restore: restoreProgress });
+    return () => onRegisterTemplateProgress(null);
+  }, [onRegisterTemplateProgress, captureProgress, restoreProgress]);
+
   return (
     <div className="p-2 text-black dark:text-white">
       {/* Per-note template selection. This control ONLY chooses which template
-          this note uses — it never creates or edits a template. Managing the
-          reusable templates themselves lives behind the top-level "Templates"
-          control (Template Library / Builder). */}
+          this note uses — it never creates or edits a template. Creating and
+          managing the reusable templates themselves lives behind the top-level
+          "Template Library" control in the toolbar. */}
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <label
           htmlFor={`note-template-select-${noteId || "global"}`}
@@ -665,10 +788,22 @@ export default function NoteTemplateDoc({
           ))}
         </select>
         <span className="text-xs text-gray-500 dark:text-gray-400">
-          Chooses which template this note uses. To create or edit templates, use
-          Templates in the toolbar.
+          Select the reusable form used for this note. To create or edit
+          templates, use Template Library in the toolbar.
         </span>
       </div>
+
+      {/* Template form empty state — shown when this note has no template
+          assigned, so the view explains itself rather than presenting an
+          unexplained blank form. */}
+      {!instance?.templateId && (
+        <div
+          className="mb-2 text-sm text-gray-600 dark:text-gray-300"
+          role="status"
+        >
+          Choose a template to complete a structured form.
+        </div>
+      )}
 
       {/* A custom section whose anchor field no longer exists in this template
           keeps its content and is shown at the end of the document. */}

@@ -21,8 +21,10 @@ const btnCls =
 
 /**
  * TemplateLibrary
+ * - The reusable-template workspace: where a company's document structures are
+ *   created and managed, independently of any one note.
  * - Lists all templates with create/rename/duplicate/delete/set-default.
- * - Editing opens the existing Template Builder for the chosen template
+ * - Editing opens the template editor (Builder) for the chosen template
  *   (via onEditTemplate, handled by TemplateBuilderModal).
  * - Deleting a template keeps its versions, so notes pinned to them keep
  *   rendering; the confirm dialog says how many notes reference it.
@@ -83,16 +85,21 @@ export default function TemplateLibrary({ onEditTemplate }) {
 
   return (
     <div className="p-4 text-black dark:text-white">
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-semibold">Templates</h1>
+      <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold">Template Library</h1>
+          <p className="text-sm text-gray-600 dark:text-gray-300">
+            Create and manage reusable templates for structured notes and reports.
+          </p>
+        </div>
         <button className={btnCls} onClick={handleCreate}>
-          New template
+          Create template
         </button>
       </div>
 
       {templates.length === 0 ? (
         <p className="text-sm text-gray-600 dark:text-gray-300">
-          No templates yet. Create one to get started.
+          Create a reusable template for structured notes and reports.
         </p>
       ) : (
         <ul className="space-y-2">
@@ -117,26 +124,45 @@ export default function TemplateLibrary({ onEditTemplate }) {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              {/* Every action names the template it acts on in its accessible
+                  name, so a row of repeated verbs is never ambiguous. */}
+              <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
                 <button
                   className={btnCls}
                   onClick={() => onEditTemplate && onEditTemplate(tpl.id)}
+                  aria-label={`Edit template ${tpl.name || "Untitled"}`}
                 >
-                  Edit
+                  Edit template
                 </button>
-                <button className={btnCls} onClick={() => handleRename(tpl)}>
-                  Rename
+                <button
+                  className={btnCls}
+                  onClick={() => handleRename(tpl)}
+                  aria-label={`Rename template ${tpl.name || "Untitled"}`}
+                >
+                  Rename template
                 </button>
-                <button className={btnCls} onClick={() => handleDuplicate(tpl)}>
-                  Duplicate
+                <button
+                  className={btnCls}
+                  onClick={() => handleDuplicate(tpl)}
+                  aria-label={`Duplicate template ${tpl.name || "Untitled"}`}
+                >
+                  Duplicate template
                 </button>
                 {tpl.id !== defaultId && (
-                  <button className={btnCls} onClick={() => handleSetDefault(tpl)}>
-                    Set default
+                  <button
+                    className={btnCls}
+                    onClick={() => handleSetDefault(tpl)}
+                    aria-label={`Set template ${tpl.name || "Untitled"} as default`}
+                  >
+                    Set as default
                   </button>
                 )}
-                <button className={btnCls} onClick={() => handleDelete(tpl)}>
-                  Delete
+                <button
+                  className={btnCls}
+                  onClick={() => handleDelete(tpl)}
+                  aria-label={`Delete template ${tpl.name || "Untitled"}`}
+                >
+                  Delete template
                 </button>
               </div>
             </li>

@@ -208,7 +208,10 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
 
   return (
     <div className="p-4 text-black dark:text-white">
-      <h1 className="text-xl font-semibold mb-4">Template Builder</h1>
+      {/* Editing the reusable company template itself — not one note's copy.
+          Submitting publishes a new immutable version; existing notes stay
+          pinned to the version they were completed against. */}
+      <h1 className="text-xl font-semibold mb-4">Edit template</h1>
 
       {/* Branding controls are kept separate from the ordinary row controls and
           are collapsed by default, so the A4 document stays visible. */}

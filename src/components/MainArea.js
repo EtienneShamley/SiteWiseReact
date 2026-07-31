@@ -1,5 +1,5 @@
 // src/components/MainArea.js
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
@@ -37,6 +37,19 @@ import "./editor/editor.css";
 import { useRefine } from "../hooks/useRefine";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import ListenInPanel from "./ListenInPanel";
+import {
+  NOTE_VIEW,
+  NOTE_VIEW_LABEL,
+  addRestorePoint,
+  findRestorePoint,
+  isAssetReferencedByHistory,
+  listRestorePointsNewestFirst,
+  makeFreeformRestorePoint,
+  pruneDeletedNoteHistories,
+  restoreHistoryHeading,
+  restorePointAccessibleLabel,
+  restorePointTimeLabel,
+} from "../lib/noteProgressHistory";
 
 const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
@@ -81,8 +94,21 @@ export default function MainArea() {
   });
 
   const [activeTab, setActiveTab] = useState("note");
+  // Which note view is showing. The stored identifiers are unchanged
+  // ("natural" | "template"); the USER-FACING names are "Free-form note" and
+  // "Template form" (see NOTE_VIEW_LABEL).
   const [noteLayout, setNoteLayout] = useState("natural"); // default natural
-  const [snapshots, setSnapshots] = useState({});
+
+  // Save progress restore points, scoped by note id AND note view:
+  //   { [noteId]: { freeform: [point], templateForm: [point] } }
+  // In-memory for this editing session ONLY — deliberately never persisted, so
+  // it is gone after a reload. The note's actual content and its template
+  // instance persist through their own systems (docState / the instance
+  // record); a restore point is a temporary undo target, not a saved copy.
+  const [historyByNote, setHistoryByNote] = useState({});
+  // Restrained, transient feedback for the Save progress control.
+  const [progressStatus, setProgressStatus] = useState(null); // { tone, message }
+
   const [refineBusy, setRefineBusy] = useState(false);
   const [refineBackupHtml, setRefineBackupHtml] = useState(null);
 
@@ -91,6 +117,15 @@ export default function MainArea() {
   // Template integration
   const templateInsertRef = useRef(null); // (rowId, text) => void
   const [activeTemplateRowId, setActiveTemplateRowId] = useState(null);
+  // Template form Save progress handlers, registered by NoteTemplateDoc (same
+  // pattern as templateInsertRef): { capture, restore }.
+  const templateProgressRef = useRef(null);
+  const progressStatusTimerRef = useRef(null);
+
+  // The live history, readable from stable callbacks (the asset-retention check
+  // handed to NoteTemplateDoc) without re-registering them on every save.
+  const historyRef = useRef(historyByNote);
+  historyRef.current = historyByNote;
 
   useEffect(() => {
     try {
@@ -263,24 +298,145 @@ export default function MainArea() {
     handleInsertTextAtCursor(text);
   }
 
-  const saveSnapshot = () => {
-    if (!editor || !noteKey) return;
-    const html = editor.getHTML();
-    setSnapshots((prev) => {
-      const arr = prev[noteKey] ? [...prev[noteKey]] : [];
-      arr.push({ ts: Date.now(), html });
-      return { ...prev, [noteKey]: arr.slice(-5) };
-    });
+  /* ========================= Save progress (per view) ====================== */
+
+  // The view the user is actually looking at, resolved on every render so the
+  // button and the dropdown can never act on the previously active view.
+  const activeView =
+    noteLayout === "template" ? NOTE_VIEW.TEMPLATE_FORM : NOTE_VIEW.FREEFORM;
+  const activeViewLabel = NOTE_VIEW_LABEL[activeView];
+
+  // Only the active view's restore points, newest first.
+  const activeRestorePoints = useMemo(
+    () => listRestorePointsNewestFirst(historyByNote, noteKey, activeView),
+    [historyByNote, noteKey, activeView]
+  );
+
+  function showProgressStatus(tone, message) {
+    if (progressStatusTimerRef.current) clearTimeout(progressStatusTimerRef.current);
+    setProgressStatus({ tone, message });
+    progressStatusTimerRef.current = setTimeout(() => {
+      setProgressStatus(null);
+      progressStatusTimerRef.current = null;
+    }, tone === "error" ? 8000 : 2500);
+  }
+
+  // Clear the transient status (and its timer) when the note or view changes,
+  // so a message can never appear to describe the wrong view.
+  useEffect(() => {
+    setProgressStatus(null);
+    if (progressStatusTimerRef.current) {
+      clearTimeout(progressStatusTimerRef.current);
+      progressStatusTimerRef.current = null;
+    }
+  }, [noteKey, activeView]);
+
+  useEffect(
+    () => () => {
+      if (progressStatusTimerRef.current) clearTimeout(progressStatusTimerRef.current);
+    },
+    []
+  );
+
+  // Creates a restore point for the ACTIVE view only. The other view's history
+  // is never written, and neither view's content is modified.
+  const saveProgress = () => {
+    if (!noteKey) return;
+
+    let point = null;
+    if (activeView === NOTE_VIEW.FREEFORM) {
+      if (!editor) return;
+      point = makeFreeformRestorePoint({ html: editor.getHTML() });
+    } else {
+      const capture = templateProgressRef.current?.capture;
+      point = capture ? capture() : null;
+      if (!point) {
+        showProgressStatus(
+          "error",
+          "This note's Template form could not be captured, so no restore point was created."
+        );
+        return;
+      }
+    }
+
+    // The oldest point is discarded only as part of this successful append.
+    setHistoryByNote((prev) => addRestorePoint(prev, noteKey, point));
+    showProgressStatus("success", `${activeViewLabel} restore point saved`);
   };
 
-  const revertToSnapshot = (ts) => {
-    const arr = snapshots[noteKey] || [];
-    const snap = arr.find((s) => String(s.ts) === String(ts));
-    if (!snap || !editor) return;
-    editor.commands.setContent(snap.html);
+  // Restores a point from the ACTIVE view's history. A Free-form restore never
+  // touches the Template form, and a Template form restore never touches the
+  // Free-form note.
+  const restoreProgressPoint = (pointId) => {
+    const point = findRestorePoint(historyByNote, noteKey, activeView, pointId);
+    if (!point) return;
+
+    if (point.view === NOTE_VIEW.FREEFORM) {
+      if (!editor) return;
+      editor.commands.setContent(point.html);
+      // setContent does not emit an update, so the persisted note content must
+      // be written here as well — otherwise the restore is silently discarded
+      // the next time this note is loaded from docState.
+      setDocState((prev) => ({ ...prev, [noteKey]: point.html }));
+      showProgressStatus("success", "Free-form note restored");
+      return;
+    }
+
+    const restore = templateProgressRef.current?.restore;
+    if (!restore) {
+      showProgressStatus("error", "The Template form is not ready yet, so nothing was changed.");
+      return;
+    }
+    const result = restore(point);
+    if (result?.ok) showProgressStatus("success", "Template form restored");
+    else {
+      showProgressStatus(
+        "error",
+        result?.error || "That restore point could not be applied, so nothing was changed."
+      );
+    }
   };
 
-  const noteSnaps = snapshots[noteKey] || [];
+  const registerTemplateProgress = useCallback((handlers) => {
+    templateProgressRef.current = handlers;
+  }, []);
+
+  // Asset-retention rule handed to NoteTemplateDoc: an attachment Blob must not
+  // be deleted while any ACTIVE restore point still references it, or restoring
+  // that point would resurrect a reference to a missing asset. Reads the ref so
+  // this callback stays stable while always seeing the current history.
+  const isAssetInProgressHistory = useCallback(
+    (assetId) => isAssetReferencedByHistory(historyRef.current, assetId),
+    []
+  );
+
+  // Deleted-note cleanup: drop the in-memory histories of notes that no longer
+  // exist, so a long session cannot accumulate them. The tree is hydrated
+  // synchronously in AppStateContext's state initializer, so by the time this
+  // renders the live set is always the resolved one — an empty set means the
+  // workspace genuinely has no notes, not that hydration is still pending, and
+  // pruning to empty is then correct.
+  const liveNoteIds = useMemo(() => {
+    const ids = new Set();
+    for (const note of rootNotes || []) if (note?.id) ids.add(note.id);
+    for (const projectId of Object.keys(state.folderMap || {})) {
+      for (const folder of state.folderMap[projectId] || []) {
+        for (const note of folder?.notes || []) if (note?.id) ids.add(note.id);
+      }
+    }
+    for (const folderId of Object.keys(state.rootFolderNotesMap || {})) {
+      for (const note of state.rootFolderNotesMap[folderId] || []) {
+        if (note?.id) ids.add(note.id);
+      }
+    }
+    return ids;
+  }, [rootNotes, state]);
+
+  useEffect(() => {
+    // pruneDeletedNoteHistories returns the same reference when nothing needs
+    // removing, so this cannot loop.
+    setHistoryByNote((prev) => pruneDeletedNoteHistories(prev, liveNoteIds));
+  }, [liveNoteIds]);
 
   const refineNote = async () => {
     if (!editor || refineBusy || noteLayout !== "natural") return;
@@ -389,41 +545,65 @@ export default function MainArea() {
                 restore point for the current editing session only — it is not
                 persisted and does not survive a reload. The tooltip and
                 accessible name say so; do not describe it as a durable save
-                unless persistence is actually implemented. */}
+                unless persistence is actually implemented. The note itself is
+                already saved continuously through its own persistence; this
+                does NOT mean the note was previously unsaved.
+                The button and the dropdown always act on the VISIBLY ACTIVE
+                view, and each view keeps its own independent history. */}
             <button
               className={chipBtnCls}
-              onClick={saveSnapshot}
+              onClick={saveProgress}
               disabled={!noteTitle || !editor}
-              title="Save a temporary restore point for this editing session (not kept after a reload)"
-              aria-label="Save progress — a temporary restore point for this editing session, not kept after a reload"
+              title={`Save a temporary restore point for the ${activeViewLabel} in this editing session (not kept after a reload)`}
+              aria-label={`Save progress — a temporary restore point for the ${activeViewLabel} in this editing session, not kept after a reload`}
             >
               Save progress
             </button>
 
-            {noteSnaps.length > 0 && (
+            {activeRestorePoints.length > 0 && (
               <select
                 className={chipSelectCls}
-                onChange={(e) =>
-                  e.target.value && revertToSnapshot(e.target.value)
-                }
-                defaultValue=""
-                title="Revert to a restore point saved in this session"
-                aria-label="Revert to a restore point saved in this session"
+                value=""
+                onChange={(e) => {
+                  if (e.target.value) restoreProgressPoint(e.target.value);
+                }}
+                title={`Restore a ${activeViewLabel} restore point saved in this session`}
+                aria-label={`Restore a ${activeViewLabel} restore point saved in this session`}
               >
                 <option value="" disabled>
-                  Revert to…
+                  Restore…
                 </option>
-                {noteSnaps
-                  .slice()
-                  .reverse()
-                  .map((s) => (
-                    <option key={s.ts} value={s.ts}>
-                      {new Date(s.ts).toLocaleString()}
+                {/* The heading names the view, so each entry needs only its
+                    time — and the list only ever holds the active view's
+                    points, never the other view's or another note's. */}
+                <optgroup label={restoreHistoryHeading(activeView)}>
+                  {activeRestorePoints.map((point) => (
+                    <option
+                      key={point.id}
+                      value={point.id}
+                      aria-label={restorePointAccessibleLabel(point)}
+                    >
+                      {restorePointTimeLabel(point)}
                     </option>
                   ))}
+                </optgroup>
               </select>
             )}
           </div>
+
+          {progressStatus && (
+            <span
+              role="status"
+              className={[
+                "text-xs",
+                progressStatus.tone === "error"
+                  ? "text-red-600 dark:text-red-400"
+                  : "text-gray-500 dark:text-gray-400",
+              ].join(" ")}
+            >
+              {progressStatus.message}
+            </span>
+          )}
 
           <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
             <button
@@ -432,7 +612,7 @@ export default function MainArea() {
               disabled={
                 !noteTitle || !editor || refineBusy || noteLayout !== "natural"
               }
-              title="Refine note with AI (natural view only)"
+              title="Refine note with AI (Free-form note only)"
             >
               {refineBusy ? "Refining…" : "Refine"}
             </button>
@@ -446,22 +626,34 @@ export default function MainArea() {
             </button>
           </div>
 
+          {/* The two note views. "Template form" is the structured company
+              form assigned to THIS note; "Free-form note" is unrestricted
+              rich text. Neither creates or edits a reusable template — that is
+              Template Library in the toolbar. */}
           <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-            <span className="font-medium">Layout</span>
-            <div className="flex items-center rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
+            <span className="font-medium">Note view</span>
+            <div
+              className="flex items-center rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1"
+              role="group"
+              aria-label="Note view"
+            >
               <button
                 className={segmentBtnCls(noteLayout === "template")}
                 onClick={() => setNoteLayout("template")}
                 disabled={!noteTitle}
+                aria-pressed={noteLayout === "template"}
+                title="Complete the structured template form assigned to this note"
               >
-                Template
+                {NOTE_VIEW_LABEL[NOTE_VIEW.TEMPLATE_FORM]}
               </button>
               <button
                 className={segmentBtnCls(noteLayout === "natural")}
                 onClick={() => setNoteLayout("natural")}
                 disabled={!noteTitle}
+                aria-pressed={noteLayout === "natural"}
+                title="Write an unrestricted rich-text note"
               >
-                Natural
+                {NOTE_VIEW_LABEL[NOTE_VIEW.FREEFORM]}
               </button>
             </div>
           </div>
@@ -514,6 +706,8 @@ export default function MainArea() {
                       templateInsertRef.current = fn;
                     }}
                     onSelectRow={(rowId) => setActiveTemplateRowId(rowId)}
+                    onRegisterTemplateProgress={registerTemplateProgress}
+                    isAssetInProgressHistory={isAssetInProgressHistory}
                   />
                 </div>
               </>
