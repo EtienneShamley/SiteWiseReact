@@ -14,6 +14,11 @@
 // freshly retrieved Blob at click time (the authoritative check, so a record
 // that changed underneath us cannot be rendered inline).
 //
+// Because that retrieval is asynchronous, a PDF's new tab is reserved
+// synchronously in the click handler and navigated once the Blob arrives — see
+// safeAttachmentOpen.js. A blocked-popup error is reported ONLY when a tab
+// genuinely could not be opened.
+//
 // Office formats (DOC/DOCX/XLS/XLSX) are Download-only — NoteWise does not
 // preview Office content.
 import React, { useEffect, useRef, useState } from "react";
@@ -21,16 +26,16 @@ import { getAsset } from "../../lib/assetStorage";
 import { formatFileSize, fileKindLabel } from "../../lib/noteAttachments";
 import {
   RENDER_MODE,
+  OPEN_RESULT,
+  NAVIGATION_URL_REVOKE_MS,
   resolveOpenPolicy,
   isInlineRenderable,
   createManagedObjectUrl,
+  reserveNavigationTab,
+  openAttachmentSafely,
 } from "../../lib/safeAttachmentOpen";
 import PhotoPreviewDialog from "./PhotoPreviewDialog";
 import TextPreviewDialog from "./TextPreviewDialog";
-
-// A navigated PDF needs its URL to outlive the click; the new tab reads it
-// immediately after opening. Mirrors the exported-file handling elsewhere.
-const NAVIGATION_URL_REVOKE_MS = 10000;
 
 export default function FileAttachmentRow({
   attachment,
@@ -85,56 +90,67 @@ export default function FileAttachmentRow({
     setPreview(null);
   }
 
+  // Click entry point. A PDF opens in a new tab, but the Blob is retrieved
+  // asynchronously — so the tab is reserved HERE, synchronously, while the
+  // click's user activation is still valid. Anything else is a dialog and
+  // needs no tab.
+  function handleOpenClick() {
+    const needsTab = state.policy?.mode === RENDER_MODE.PDF;
+    const reservedTab = needsTab ? reserveNavigationTab() : null;
+    if (needsTab && !reservedTab) {
+      // The only genuine block: the browser refused the tab up front.
+      onError && onError(`The browser blocked opening "${name}".`);
+      return;
+    }
+    handleOpen(reservedTab);
+  }
+
   // Authoritative open path: re-read the asset and re-evaluate the policy
   // against the Blob we actually hold before presenting anything inline.
-  async function handleOpen() {
-    let asset;
-    try {
-      asset = await getAsset(attachment.assetId);
-    } catch (err) {
-      onError && onError(`Could not read "${name}": ${err?.message || err}`);
-      return;
-    }
-    if (!asset || !asset.blob) {
-      setState({ available: false, policy: null });
-      onError && onError(`"${name}" is missing from storage.`);
-      return;
-    }
+  async function handleOpen(reservedTab) {
+    const result = await openAttachmentSafely({
+      reservedTab,
+      metadataMimeType: attachment.mimeType,
+      getBlob: async () => {
+        const asset = await getAsset(attachment.assetId);
+        return asset?.blob || null;
+      },
+    });
 
-    const policy = resolveOpenPolicy(asset.blob.type, attachment.mimeType);
-    setState({ available: true, policy });
+    if (result.policy) setState({ available: true, policy: result.policy });
 
-    if (!isInlineRenderable(policy)) {
-      // Denial never mutates or removes the attachment — it stays downloadable.
-      onError &&
-        onError(
-          `"${name}" can't be previewed safely in NoteWise. Use Download to open it in another application.`
-        );
-      return;
-    }
-
-    if (policy.mode === RENDER_MODE.PDF) {
-      const managed = createManagedObjectUrl(asset.blob, {
-        revokeAfterMs: NAVIGATION_URL_REVOKE_MS,
-      });
-      const win = window.open(managed.url, "_blank", "noopener");
-      if (!win) {
-        managed.revoke();
+    switch (result.status) {
+      case OPEN_RESULT.READ_ERROR:
+        onError &&
+          onError(
+            `Could not read "${name}": ${result.error?.message || result.error}`
+          );
+        return;
+      case OPEN_RESULT.MISSING:
+        setState({ available: false, policy: null });
+        onError && onError(`"${name}" is missing from storage.`);
+        return;
+      case OPEN_RESULT.DENIED:
+        // Denial never mutates or removes the attachment — it stays downloadable.
+        onError &&
+          onError(
+            `"${name}" can't be previewed safely in NoteWise. Use Download to open it in another application.`
+          );
+        return;
+      case OPEN_RESULT.BLOCKED:
         onError && onError(`The browser blocked opening "${name}".`);
-      }
-      return;
-    }
-
-    if (policy.mode === RENDER_MODE.IMAGE) {
-      const managed = createManagedObjectUrl(asset.blob);
-      setPreview({ kind: "image", url: managed.url, revoke: managed.revoke });
-      return;
-    }
-
-    if (policy.mode === RENDER_MODE.TEXT) {
-      // Read through blob.text() in the dialog and render escaped — no object
-      // URL, no navigation.
-      setPreview({ kind: "text", blob: asset.blob });
+        return;
+      case OPEN_RESULT.IMAGE_PREVIEW:
+        setPreview({ kind: "image", url: result.url, revoke: result.revoke });
+        return;
+      case OPEN_RESULT.TEXT_PREVIEW:
+        // Read through blob.text() in the dialog and render escaped — no object
+        // URL, no navigation.
+        setPreview({ kind: "text", blob: result.blob });
+        return;
+      default:
+        // PDF opened successfully — nothing to show, and no error.
+        return;
     }
   }
 
@@ -186,7 +202,7 @@ export default function FileAttachmentRow({
             type="button"
             className="file-att-btn"
             aria-label={`${openLabel} ${name}`}
-            onClick={handleOpen}
+            onClick={handleOpenClick}
           >
             {openLabel}
           </button>

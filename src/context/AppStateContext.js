@@ -1,5 +1,5 @@
 // src/context/AppStateContext.js
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import {
   savePdfBytes,
   saveAnnotations,
@@ -11,7 +11,7 @@ import {
   savePdfDocs,
 } from "../lib/pdfDocuments";
 import { getNotePdfRefs, saveNotePdfRefs } from "../lib/notePdfRefs";
-import { loadTree, saveTree } from "../lib/treeStorage";
+import { loadTree, saveTree, wouldClobberStoredTree } from "../lib/treeStorage";
 import { migrateLegacyNotePdfs } from "../lib/pdfMigration";
 import { runTemplateMigration } from "../lib/templateMigration";
 import { migrateTemplateLogos } from "../lib/templateLogoMigration";
@@ -111,9 +111,20 @@ export function AppStateProvider({ children }) {
   useEffect(() => { saveVoiceLangMap(noteVoiceLangMap); }, [noteVoiceLangMap]);
 
   // -------- Persist the hierarchy (versioned tree record) --------
+  // The first run after mount is never allowed to replace a stored, non-empty
+  // hierarchy with empty defaults. Hydration above is synchronous, so an empty
+  // initial state means hydration was skipped (TEST_RESET) or failed — not that
+  // the user deleted their work. Deleting everything later is a subsequent run
+  // and still persists normally.
+  const treePersistPrimed = useRef(false);
   useEffect(() => {
+    const tree = { projectData, folderMap, rootFolders, rootFolderNotesMap, rootNotes };
+    if (!treePersistPrimed.current) {
+      treePersistPrimed.current = true;
+      if (wouldClobberStoredTree(tree)) return;
+    }
     try {
-      saveTree({ projectData, folderMap, rootFolders, rootFolderNotesMap, rootNotes });
+      saveTree(tree);
     } catch (err) {
       setPersistenceError("Could not save your projects/folders: " + (err?.message || err));
     }

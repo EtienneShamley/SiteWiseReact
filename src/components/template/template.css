@@ -276,25 +276,39 @@
 
 /* Drag-resize handle (bottom corner; left-side variant for right-aligned
  * photos, which grow leftward). Pointer events; presets are the keyboard
- * alternative. */
+ * alternative.
+ *
+ * Discoverability: the handle is always faintly visible (it was hover-only,
+ * so on a touch device — which has no hover — it could not be found at all),
+ * and reaches full contrast on hover/focus. It stays absolutely positioned, so
+ * none of this affects the block height pagination measures. */
 .photo-att-handle {
   position: absolute;
-  bottom: -4px;
-  right: -4px;
-  width: 14px;
-  height: 14px;
+  bottom: -5px;
+  right: -5px;
+  width: 16px;
+  height: 16px;
   border: 2px solid #39dde9;
   border-radius: 3px;
   background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
   cursor: nwse-resize;
-  opacity: 0;
+  opacity: 0.55;
   touch-action: none;
   z-index: 2;
 }
 
+/* Touch-friendly hit area: extends the grabbable region well past the visible
+ * square without enlarging it or shifting any layout. */
+.photo-att-handle::after {
+  content: "";
+  position: absolute;
+  inset: -12px;
+}
+
 .photo-att-handle--left {
   right: auto;
-  left: -4px;
+  left: -5px;
   cursor: nesw-resize;
 }
 
@@ -302,6 +316,27 @@
 .photo-att-frame:focus-within .photo-att-handle,
 .photo-att-frame:focus .photo-att-handle {
   opacity: 1;
+}
+
+/* Coarse pointers (touch): no hover to reveal anything, and fingers need a
+ * larger target — show it fully and grow both the square and its hit area. */
+@media (pointer: coarse) {
+  .photo-att-handle {
+    width: 22px;
+    height: 22px;
+    bottom: -8px;
+    right: -8px;
+    opacity: 1;
+  }
+
+  .photo-att-handle--left {
+    right: auto;
+    left: -8px;
+  }
+
+  .photo-att-handle::after {
+    inset: -14px;
+  }
 }
 
 /* Loading / unavailable states — clear, never a broken image, never a crash */
