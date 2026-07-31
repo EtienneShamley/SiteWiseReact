@@ -3,7 +3,7 @@ import { useEditorState } from "@tiptap/react";
 import {
   FaBold, FaItalic, FaUnderline, FaStrikethrough, FaListUl, FaListOl,
   FaCheckSquare, FaQuoteRight, FaCode, FaHighlighter, FaLink, FaImage,
-  FaTable, FaUndo, FaRedo, FaHeading, FaCamera, FaRemoveFormat,
+  FaTable, FaUndo, FaRedo, FaHeading, FaGlobe, FaRemoveFormat,
   FaIndent, FaOutdent, FaSubscript, FaSuperscript, FaMinus, FaUnlink,
   FaAlignLeft, FaAlignCenter, FaAlignRight, FaAlignJustify, FaCaretDown,
 } from "react-icons/fa";
@@ -305,25 +305,28 @@ export default function FormattingControls({ editor }) {
           ref={fileInputRef}
           onChange={handleImageUpload}
         />
+        {/* Local file picker — an image icon, never a camera icon: this does
+            NOT take a photo. The camera icon is reserved for real capture. */}
         <button
-          title="Insert Photo"
-          aria-label="Insert photo"
+          title="Upload Photo"
+          aria-label="Upload photo from this device"
           onClick={() => fileInputRef.current?.click()}
           className={btnBase}
         >
-          <FaCamera />
+          <FaImage />
         </button>
 
+        {/* Genuinely remote: inserts an image from a web address. */}
         <button
           onClick={() => {
             const url = window.prompt("Enter image URL");
             if (url) editor.chain().focus().setImage({ src: url }).run();
           }}
           className={btnBase}
-          title="Insert Image by URL"
-          aria-label="Insert image by URL"
+          title="Insert image from a web address"
+          aria-label="Insert image from a web address"
         >
-          <FaImage />
+          <FaGlobe />
         </button>
 
         <button

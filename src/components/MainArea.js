@@ -385,13 +385,19 @@ export default function MainArea() {
         {activeTab === "note" ? (
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
+            {/* Wording is "Save progress", but this creates an IN-MEMORY
+                restore point for the current editing session only — it is not
+                persisted and does not survive a reload. The tooltip and
+                accessible name say so; do not describe it as a durable save
+                unless persistence is actually implemented. */}
             <button
               className={chipBtnCls}
               onClick={saveSnapshot}
               disabled={!noteTitle || !editor}
-              title="Save a quick snapshot to revert later"
+              title="Save a temporary restore point for this editing session (not kept after a reload)"
+              aria-label="Save progress — a temporary restore point for this editing session, not kept after a reload"
             >
-              Save snapshot
+              Save progress
             </button>
 
             {noteSnaps.length > 0 && (
@@ -401,7 +407,8 @@ export default function MainArea() {
                   e.target.value && revertToSnapshot(e.target.value)
                 }
                 defaultValue=""
-                title="Revert to snapshot"
+                title="Revert to a restore point saved in this session"
+                aria-label="Revert to a restore point saved in this session"
               >
                 <option value="" disabled>
                   Revert to…

@@ -38,6 +38,115 @@
   z-index: 1;
 }
 
+/* Column divider drag handle (Builder only). Absolutely positioned, so it adds
+   no height and cannot affect the measured block heights pagination uses. It is
+   faintly visible at rest (a hover-only control cannot be found on a touch
+   device) and reaches full contrast on hover/focus. */
+.twocol-col-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  margin-left: -4px;
+  cursor: col-resize;
+  background: transparent;
+  border-left: 2px solid rgba(57, 221, 233, 0.25); /* restrained NoteWise cyan */
+  touch-action: none;
+  z-index: 2;
+}
+
+.twocol-col-handle:hover,
+.twocol-col-handle:focus-visible {
+  border-left-color: #39dde9;
+  outline: none;
+}
+
+/* Per-row action trigger (insert above/below, delete a custom row).
+   Overlaid on the row's top-right corner and revealed on hover or keyboard
+   focus only, so the paper is never permanently cluttered and the row's
+   printed layout is unchanged. */
+.twocol-row-actions {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 3;
+}
+
+.twocol-row-actions-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(0, 0, 0, 0.55);
+  font-size: 15px;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+  /* Invisible == inert: a hidden trigger must never swallow a click meant for
+     the field underneath it. It becomes clickable exactly when it is shown. */
+  pointer-events: none;
+}
+
+/* Touch-friendly hit area without enlarging the visible control. */
+.twocol-row-actions-btn::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+}
+
+.twocol-row:hover .twocol-row-actions-btn,
+.twocol-row:focus-within .twocol-row-actions-btn,
+.twocol-row-actions-btn:focus-visible,
+.twocol-row-actions-btn[aria-expanded="true"] {
+  opacity: 1;
+  pointer-events: auto;
+  border-color: #d1d5db;
+  background: rgba(255, 255, 255, 0.95);
+  color: #111111;
+}
+
+.twocol-row-actions-btn:hover {
+  background: rgba(57, 221, 233, 0.12);
+}
+
+.twocol-row-actions-btn:focus-visible {
+  outline: 2px solid #39dde9;
+  outline-offset: 1px;
+}
+
+/* Coarse pointers have no hover: keep the trigger discoverable and larger. */
+@media (pointer: coarse) {
+  .twocol-row-actions-btn {
+    opacity: 0.85;
+    pointer-events: auto;
+    width: 32px;
+    height: 32px;
+    border-color: #d1d5db;
+    background: rgba(255, 255, 255, 0.95);
+  }
+}
+
+/* Note-specific custom rows deliberately look identical to template rows — a
+   completed note must read as a professional report, not a form designer. The
+   marker class exists only as a styling hook for future needs. */
+.twocol-row--custom {
+  /* no visual difference by design */
+}
+
+/* Print/export foundation: editing affordances never appear on paper. */
+@media print {
+  .twocol-row-actions,
+  .twocol-col-handle,
+  .twocol-resize-handle {
+    display: none !important;
+  }
+}
+
 /* Logo block — dashed header frame on the white paper */
 .logo-drop {
   border: 1px dashed rgba(120, 120, 120, 0.6);

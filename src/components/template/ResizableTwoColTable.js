@@ -28,6 +28,7 @@ import {
 import PhotoAttachment from "./PhotoAttachment";
 import FileAttachmentRow from "./FileAttachmentRow";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
+import ThreeDotMenu from "../ThreeDotMenu";
 
 /**
  * Two-column template table, rendered as a page-aware A4 document.
@@ -72,6 +73,21 @@ import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
  *   remove calls `onLogoChange(null)`.
  * - In note mode (logoLocked = true): the logo is fixed and consumes header
  *   space like any other document block.
+ *
+ * ROW ACTIONS (`rowActionsMode`):
+ * - "builder": insert a new MASTER template row above/below the chosen row.
+ * - "note": insert a NOTE-SPECIFIC custom row above/below the chosen row, and
+ *   delete a custom row. The two call the same callbacks but the parent routes
+ *   them to different persistence — a note never edits the master template.
+ * - The trigger is absolutely positioned and revealed on hover/focus only, so
+ *   it never changes a block's measured height (pagination stays stable) and is
+ *   hidden in print (see template.css).
+ *
+ * COLUMN DIVIDER (`enableColumnDivider`, builder only):
+ * - Dragging the vertical divider sets the label-column width; the value is the
+ *   template's persisted `leftPct` and is published with the version, so every
+ *   page and every note pinned to that version shares one ratio. In note mode
+ *   the ratio comes from the pinned version and is deliberately not adjustable.
  */
 
 // Unified Text field: a full-cell textarea that grows with its content instead
@@ -151,39 +167,67 @@ export default function ResizableTwoColTable({
   fieldBusy = {}, // { [fieldId]: true while uploading }
   onDismissFieldError, // (fieldId) => void
   onFieldError, // (fieldId, message) => void — e.g. a failed file open
+  // Row actions: "builder" (master template rows) | "note" (note-specific
+  // custom rows) | "none". See the block comment above.
+  rowActionsMode = "none",
+  onInsertRow, // (anchorRowId, "above" | "below") => void
+  onDeleteRow, // (rowId) => void — offered for note-specific custom rows only
+  onRowLabelChange, // (rowId, label) => void
+  onRowHeightChange, // (rowId, px) => void — continuous while dragging
+  onRowHeightCommit, // (rowId, px) => void — once, on drag release
+  lockTemplateLabels = false, // note mode: master labels are read-only
+  enableColumnDivider = false, // builder only (leftPct is a template value)
+  addRowLabel = "Add Row",
 }) {
   const [rowDrag, setRowDrag] = useState(null);
+  const [colDrag, setColDrag] = useState(null);
+  const [menuRowId, setMenuRowId] = useState(null);
+  // Anchor elements for the per-row action menu (never affects layout).
+  const menuAnchors = useRef(new Map());
+  // Last height emitted during a row drag, so release can commit it once.
+  const lastRowHeight = useRef(null);
 
   const leftWidth = useMemo(() => {
     const clamped = Math.max(10, Math.min(40, Number(leftPct) || 18));
     return `${clamped}%`;
   }, [leftPct]);
 
+  const showRowActions = rowActionsMode === "note" || rowActionsMode === "builder";
+
   // ---------- ROW HEIGHT DRAG ----------
-  const startRowDrag = useCallback(
-    (idx, e) => {
-      e.preventDefault();
-      setRowDrag({ idx, startY: e.clientY, startH: rows[idx].px });
-    },
-    [rows]
-  );
+  // Row identity (not array index) drives the drag, because the note view
+  // interleaves note-specific custom rows with the template's own rows.
+  const startRowDrag = useCallback((row, e) => {
+    e.preventDefault();
+    lastRowHeight.current = null;
+    setRowDrag({
+      rowId: row.id,
+      startY: e.clientY,
+      startH: row.px ?? 120,
+      minPx: row.minPx ?? 100,
+    });
+  }, []);
 
   const onMouseMoveRow = useCallback(
     (e) => {
       if (!rowDrag) return;
       const dy = e.clientY - rowDrag.startY;
-      const next = rows.map((r, i) => {
-        if (i !== rowDrag.idx) return r;
-        const base = rowDrag.startH ?? r.px ?? 120;
-        const px = Math.max(r.minPx ?? 100, base + dy);
-        return { ...r, px };
-      });
-      onRowsChange && onRowsChange(next);
+      const px = Math.max(rowDrag.minPx, (rowDrag.startH ?? 120) + dy);
+      lastRowHeight.current = px;
+      onRowHeightChange && onRowHeightChange(rowDrag.rowId, px);
     },
-    [rowDrag, rows, onRowsChange]
+    [rowDrag, onRowHeightChange]
   );
 
-  const stopRowDrag = useCallback(() => setRowDrag(null), []);
+  // Commit on release only: a custom row's preferred height is persisted once
+  // per drag rather than on every pointer move.
+  const stopRowDrag = useCallback(() => {
+    if (rowDrag && lastRowHeight.current != null && onRowHeightCommit) {
+      onRowHeightCommit(rowDrag.rowId, lastRowHeight.current);
+    }
+    lastRowHeight.current = null;
+    setRowDrag(null);
+  }, [rowDrag, onRowHeightCommit]);
 
   React.useEffect(() => {
     if (!rowDrag) return;
@@ -196,6 +240,50 @@ export default function ResizableTwoColTable({
       window.removeEventListener("mouseup", mu);
     };
   }, [rowDrag, onMouseMoveRow, stopRowDrag]);
+
+  // ---------- COLUMN DIVIDER DRAG (builder only) ----------
+  // The divider replaces the former numeric percentage input. It reads the row
+  // element's live rect on every move (so page scrolling during a drag cannot
+  // skew it) and clamps to the same 10–40% range the renderer clamps to.
+  const startColDrag = useCallback((e) => {
+    e.preventDefault();
+    const rowEl = e.currentTarget.parentElement;
+    if (!rowEl) return;
+    setColDrag({ el: rowEl });
+  }, []);
+
+  const onMouseMoveCol = useCallback(
+    (e) => {
+      if (!colDrag?.el || !onLeftPctChange) return;
+      const rect = colDrag.el.getBoundingClientRect();
+      if (!rect.width) return;
+      const pct = ((e.clientX - rect.left) / rect.width) * 100;
+      onLeftPctChange(Math.round(Math.max(10, Math.min(40, pct))));
+    },
+    [colDrag, onLeftPctChange]
+  );
+
+  React.useEffect(() => {
+    if (!colDrag) return;
+    const mm = (e) => onMouseMoveCol(e);
+    const mu = () => setColDrag(null);
+    window.addEventListener("mousemove", mm);
+    window.addEventListener("mouseup", mu);
+    return () => {
+      window.removeEventListener("mousemove", mm);
+      window.removeEventListener("mouseup", mu);
+    };
+  }, [colDrag, onMouseMoveCol]);
+
+  // Keyboard alternative to dragging the divider (1% per arrow press).
+  const nudgeLeftPct = useCallback(
+    (delta) => {
+      if (!onLeftPctChange) return;
+      const current = Math.max(10, Math.min(40, Number(leftPct) || 18));
+      onLeftPctChange(Math.max(10, Math.min(40, current + delta)));
+    },
+    [leftPct, onLeftPctChange]
+  );
 
   // ---------- LOGO UPLOAD (BUILDER ONLY) ----------
   const handleLogoInput = (e) => {
@@ -420,24 +508,112 @@ export default function ResizableTwoColTable({
   }
 
   // ---------- SHARED CELL RENDERERS ----------
+  // A master-template label is editable in the Builder only. In a completed
+  // note it is read-only (it belongs to the company template), while a
+  // note-specific custom row's own label stays editable and is persisted on
+  // the note's instance.
   function renderLabelCell(row) {
+    const editable = !lockTemplateLabels || !!row.isCustom;
     return (
       <div className="twocol-cell-left px-3 py-2 flex items-stretch">
-        <textarea
-          className="
-            w-full h-full bg-transparent text-sm font-medium outline-none
-            resize-none overflow-hidden leading-tight text-black
-          "
-          value={row.label}
-          onChange={(e) => {
-            const text = e.target.value;
-            const next = rows.map((r) =>
-              r.id === row.id ? { ...r, label: text } : r
-            );
-            onRowsChange && onRowsChange(next);
-          }}
-        />
+        {editable ? (
+          <textarea
+            className="
+              w-full h-full bg-transparent text-sm font-medium outline-none
+              resize-none overflow-hidden leading-tight text-black
+            "
+            value={row.label}
+            aria-label={
+              row.isCustom ? "Section label" : `Label for ${row.label || "this field"}`
+            }
+            onChange={(e) => onRowLabelChange && onRowLabelChange(row.id, e.target.value)}
+          />
+        ) : (
+          <div className="w-full text-sm font-medium leading-tight text-black whitespace-pre-wrap break-words">
+            {row.label}
+          </div>
+        )}
       </div>
+    );
+  }
+
+  // Compact per-row actions (hover/focus only, absolutely positioned so the
+  // row's measured height never changes, hidden in print). Icon-free text
+  // trigger with an explicit accessible name.
+  function renderRowActions(row) {
+    if (!showRowActions) return null;
+    const name = row.label || (row.isCustom ? "custom section" : "this field");
+    const options = [
+      {
+        label: "Insert row above",
+        onClick: () => onInsertRow && onInsertRow(row.id, "above"),
+      },
+      {
+        label: "Insert row below",
+        onClick: () => onInsertRow && onInsertRow(row.id, "below"),
+      },
+    ];
+    if (rowActionsMode === "note" && row.isCustom && onDeleteRow) {
+      options.push({ type: "separator" });
+      options.push({
+        label: "Delete row",
+        danger: true,
+        onClick: () => onDeleteRow(row.id),
+      });
+    }
+    return (
+      <div className="twocol-row-actions">
+        <button
+          type="button"
+          className="twocol-row-actions-btn"
+          aria-haspopup="menu"
+          aria-expanded={menuRowId === row.id}
+          aria-label={`Row actions for ${name}`}
+          title={`Row actions for ${name}`}
+          ref={(el) => {
+            if (el) menuAnchors.current.set(row.id, el);
+            else menuAnchors.current.delete(row.id);
+          }}
+          onClick={() => setMenuRowId((prev) => (prev === row.id ? null : row.id))}
+        >
+          <span aria-hidden="true">⋯</span>
+        </button>
+        {menuRowId === row.id && (
+          <ThreeDotMenu
+            anchorRef={menuAnchors.current.get(row.id) || null}
+            theme="light"
+            options={options}
+            onClose={() => setMenuRowId(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // Vertical divider between the two columns (Builder only). Pointer drag plus
+  // an arrow-key alternative; positioned absolutely so it adds no height.
+  function renderColumnDivider() {
+    if (!enableColumnDivider) return null;
+    return (
+      <div
+        className="twocol-col-handle"
+        style={{ left: leftWidth }}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the label column — drag, or use the arrow keys"
+        title="Drag the divider to resize columns"
+        tabIndex={0}
+        onMouseDown={startColDrag}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowLeft") {
+            e.preventDefault();
+            nudgeLeftPct(-1);
+          } else if (e.key === "ArrowRight") {
+            e.preventDefault();
+            nudgeLeftPct(1);
+          }
+        }}
+      />
     );
   }
 
@@ -505,7 +681,7 @@ export default function ResizableTwoColTable({
   // A standard (non-attachment) row. Legacy base64 evidence — and entries
   // migrated from it — attached to this row keeps rendering here through a
   // narrow compatibility strip, since these rows predate the Photo/File types.
-  function renderRowBlock(row, idx) {
+  function renderRowBlock(row) {
     const type = normalizeType(row.type);
     const rawList = showRightEditor ? attachments[row.id] || [] : [];
     const legacyItems = [];
@@ -526,7 +702,7 @@ export default function ResizableTwoColTable({
 
     return (
       <div
-        className="twocol-row grid"
+        className={`twocol-row grid ${row.isCustom ? "twocol-row--custom" : ""}`}
         style={{
           gridTemplateColumns: `${leftWidth} 1fr`,
           minHeight: `${effectiveMin}px`,
@@ -595,10 +771,13 @@ export default function ResizableTwoColTable({
           {enableFieldTypeEditor && renderFieldTypeEditor(row)}
         </div>
 
+        {renderRowActions(row)}
+        {renderColumnDivider()}
+
         {/* ROW DRAG HANDLE */}
         <div
           className="twocol-resize-handle"
-          onMouseDown={(e) => startRowDrag(idx, e)}
+          onMouseDown={(e) => startRowDrag(row, e)}
         />
       </div>
     );
@@ -607,7 +786,7 @@ export default function ResizableTwoColTable({
   // Head block of a compound Photo/File field (note mode): label + upload
   // control + inline status/errors. keepWithNext keeps it with the first
   // attachment so a heading is never orphaned at a page bottom.
-  function renderAttachmentHead(row, idx, type, count) {
+  function renderAttachmentHead(row, type, count) {
     const isPhoto = type === FIELD_TYPE.PHOTO;
     const busy = !!fieldBusy[row.id];
     // The dragged row.px stays the head's preferred height, so row-height
@@ -662,10 +841,13 @@ export default function ResizableTwoColTable({
           {renderFieldError(row.id)}
         </div>
 
+        {renderRowActions(row)}
+        {renderColumnDivider()}
+
         {/* ROW DRAG HANDLE */}
         <div
           className="twocol-resize-handle"
-          onMouseDown={(e) => startRowDrag(idx, e)}
+          onMouseDown={(e) => startRowDrag(row, e)}
         />
       </div>
     );
@@ -765,7 +947,7 @@ export default function ResizableTwoColTable({
       render: renderLogoBlock,
     },
   ];
-  rows.forEach((row, idx) => {
+  rows.forEach((row) => {
     const type = normalizeType(row.type);
     const isAttachmentField =
       showRightEditor &&
@@ -778,7 +960,7 @@ export default function ResizableTwoColTable({
         // Editable rows are not sliced across pages in this phase; they grow
         // their page while being edited (see PagedDocument).
         splittable: false,
-        render: () => renderRowBlock(row, idx),
+        render: () => renderRowBlock(row),
       });
       return;
     }
@@ -794,7 +976,7 @@ export default function ResizableTwoColTable({
       minHeight: Math.max(56, row.px || 56),
       keepWithNext: items.length > 0,
       splittable: false,
-      render: () => renderAttachmentHead(row, idx, type, items.length),
+      render: () => renderAttachmentHead(row, type, items.length),
     });
     items.forEach((item) => {
       blocks.push({
@@ -814,32 +996,24 @@ export default function ResizableTwoColTable({
       {/* CHROME — editing controls on the app surface (not document content) */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
-          <label className="text-sm text-black dark:text-white">
-            Left column (%)
-            <input
-              type="number"
-              min={10}
-              max={40}
-              step={1}
-              className="ml-2 px-2 py-1 border rounded w-20 bg-white dark:bg-neutral-800 text-black dark:text-white"
-              value={Number(leftPct)}
-              onChange={(e) =>
-                onLeftPctChange && onLeftPctChange(Number(e.target.value))
-              }
-            />
-          </label>
-
-          <button
-            className="px-3 py-1 border rounded bg-white dark:bg-neutral-800 text-black dark:text-white"
-            onClick={onAddRow}
-          >
-            Add Row
-          </button>
+          {onAddRow && (
+            <button
+              type="button"
+              className="px-3 py-1 border rounded bg-white dark:bg-neutral-800 text-black dark:text-white"
+              onClick={onAddRow}
+            >
+              {addRowLabel}
+            </button>
+          )}
         </div>
 
+        {/* The numeric left-column percentage input is deliberately gone: the
+            divider itself is the control in the Builder, and a completed note
+            takes its ratio from the pinned template version. */}
         <div className="flex flex-col text-xs text-black dark:text-white opacity-70 text-right">
+          {enableColumnDivider && <span>Drag the divider to resize columns</span>}
           <span>Drag row borders to adjust height</span>
-          <span>Click left column names to edit</span>
+          {showRowActions && <span>Use a row's ⋯ menu to insert a row above or below</span>}
         </div>
       </div>
 

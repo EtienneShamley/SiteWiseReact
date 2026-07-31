@@ -11,6 +11,7 @@ import {
   isLogoAssetReferenced,
 } from "../../lib/templateModel";
 import { FIELD_TYPE, normalizeRows, normalizeType } from "../../lib/templateFields";
+import { appendRow, insertRowAt } from "../../lib/templateRowOps";
 import { createLogoAsset, deleteAsset } from "../../lib/assetStorage";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 
@@ -66,7 +67,20 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     ? "ready"
     : "idle";
 
-  const addRow = () => setRows((prev) => [...prev, makeNewRow("New Field")]);
+  // Master-template row insertion. These edit the DRAFT definition only —
+  // nothing is stored until "Submit template" publishes a new immutable
+  // version, so existing pinned notes are untouched. Every new row gets a
+  // stable id from makeNewRow (newId()).
+  const addRow = () => setRows((prev) => appendRow(prev, makeNewRow("New Field")));
+
+  const insertRow = (anchorRowId, position) =>
+    setRows((prev) => insertRowAt(prev, anchorRowId, position, makeNewRow("New Field")));
+
+  const changeRowLabel = (rowId, label) =>
+    setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, label } : r)));
+
+  const changeRowHeight = (rowId, px) =>
+    setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, px } : r)));
 
   // Validate + store the uploaded file as a Blob asset. On invalid input we
   // show a clear error, create NO asset, and preserve the previous logo.
@@ -168,6 +182,12 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
         onLogoChange={handleLogoRemove}
         logoLocked={false}
         enableFieldTypeEditor={true}
+        rowActionsMode="builder"
+        onInsertRow={insertRow}
+        onRowLabelChange={changeRowLabel}
+        onRowHeightChange={changeRowHeight}
+        enableColumnDivider={true}
+        addRowLabel="Add row at end"
       />
 
       <div className="mt-6 flex items-center gap-3">

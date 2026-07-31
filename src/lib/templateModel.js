@@ -49,7 +49,12 @@ export const saveTemplates = (map) => saveMap(TEMPLATES_KEY, map);
 export const getTemplateVersions = () => loadMap(TEMPLATE_VERSIONS_KEY);
 export const saveTemplateVersions = (map) => saveMap(TEMPLATE_VERSIONS_KEY, map);
 
-// NoteTemplateInstances: { [noteId]: { noteId, templateId, templateVersionId, answers, attachments, createdAt } }
+// NoteTemplateInstances: { [noteId]: { noteId, templateId, templateVersionId, answers, attachments, customRows, createdAt } }
+// `customRows` holds note-specific rows added while COMPLETING the note (see
+// src/lib/noteCustomRows.js). They belong to this note and to the template that
+// was pinned when they were created (each row carries its own `templateId`);
+// they are never written to a TemplateVersion. The field is additive and
+// optional — an instance saved before it existed reads as no custom rows.
 export const getNoteTemplateInstances = () => loadMap(NOTE_TEMPLATE_INSTANCES_KEY);
 export const saveNoteTemplateInstances = (map) => saveMap(NOTE_TEMPLATE_INSTANCES_KEY, map);
 
@@ -325,6 +330,7 @@ export function getOrCreateInstanceForNote(noteId) {
     templateVersionId: tpl?.currentVersionId ?? null,
     answers: {},
     attachments: {},
+    customRows: [],
     createdAt: Date.now(),
   };
   saveNoteTemplateInstance(instance);

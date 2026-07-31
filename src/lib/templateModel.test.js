@@ -21,6 +21,13 @@ import {
   TEMPLATE_VERSIONS_KEY,
 } from "./templateModel";
 import { makeOption, displayTextValue } from "./templateFields";
+import {
+  customRowsForTemplate,
+  insertCustomRow,
+  normalizeCustomRows,
+  resolveCustomRowOrder,
+  updateCustomRow,
+} from "./noteCustomRows";
 
 beforeEach(() => {
   localStorage.clear();
@@ -337,5 +344,222 @@ describe("attachment references on instances (Photo/File fields)", () => {
     });
     setInstanceTemplate("note-att-5", b.id);
     expect(getNoteTemplateInstance("note-att-5").attachments.f_photo[0].assetId).toBe("a1");
+  });
+});
+
+/* ---------------- note-specific custom rows on the instance --------------- */
+// The lifecycle guarantees the completed-note workflow depends on, exercised
+// against real localStorage: reload restoration, note switching, template
+// switching, master-template edits, and TemplateVersion immutability.
+
+describe("note-specific custom rows", () => {
+  const addRow = (list, spec) =>
+    insertCustomRow(list, { templateId: null, ...spec });
+
+  test("custom rows survive a reload with label, answer, height and placement intact", () => {
+    const tpl = createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-cr-1");
+    const { rows: withRow, row } = addRow([], {
+      templateId: tpl.id,
+      anchorFieldId: "f_text",
+      position: "below",
+    });
+    const edited = updateCustomRow(withRow, row.id, {
+      label: "Scaffold defect",
+      answer: "Handrail missing\nSecond line",
+      preferredHeight: 220,
+    });
+    saveNoteTemplateInstanceOrThrow({ ...inst, customRows: edited });
+
+    // Reload = read the record back out of localStorage.
+    const back = normalizeCustomRows(getNoteTemplateInstance("note-cr-1").customRows);
+    expect(back).toHaveLength(1);
+    expect(back[0].id).toBe(row.id);
+    expect(back[0].label).toBe("Scaffold defect");
+    expect(back[0].answer).toBe("Handrail missing\nSecond line");
+    expect(back[0].preferredHeight).toBe(220);
+    expect(back[0].placement).toEqual({ anchorFieldId: "f_text", position: "below" });
+  });
+
+  test("a new instance starts with an empty custom-row list", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    expect(getOrCreateInstanceForNote("note-cr-2").customRows).toEqual([]);
+  });
+
+  test("an instance saved before custom rows existed still reads safely", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-cr-legacy");
+    const { customRows, ...withoutCustomRows } = inst;
+    saveNoteTemplateInstance(withoutCustomRows);
+
+    const back = getNoteTemplateInstance("note-cr-legacy");
+    expect(back.customRows).toBeUndefined();
+    expect(normalizeCustomRows(back.customRows)).toEqual([]);
+    expect(customRowsForTemplate(back.customRows, "anything")).toEqual([]);
+  });
+
+  test("custom rows belong to one note — another note using the same template has none", () => {
+    const tpl = createTemplate("A", { leftPct: 18, rows: rows() });
+    const first = getOrCreateInstanceForNote("note-cr-3");
+    const { rows: withRow } = addRow([], { templateId: tpl.id, anchorFieldId: "f_text" });
+    saveNoteTemplateInstanceOrThrow({ ...first, customRows: withRow });
+
+    const second = getOrCreateInstanceForNote("note-cr-4");
+    expect(second.templateId).toBe(tpl.id);
+    expect(second.customRows).toEqual([]);
+    // ...and switching back to the first note still shows its row.
+    expect(getNoteTemplateInstance("note-cr-3").customRows).toHaveLength(1);
+  });
+
+  test("switching template away and back preserves the rows and copies nothing into the other template", () => {
+    const a = createTemplate("A", { leftPct: 18, rows: rows() });
+    const b = createTemplate("B", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-cr-5");
+    const one = addRow([], { templateId: a.id, anchorFieldId: "f_text", position: "above" });
+    const two = addRow(one.rows, { templateId: a.id, anchorFieldId: "f_text", position: "below" });
+    saveNoteTemplateInstanceOrThrow({ ...inst, customRows: two.rows });
+
+    setInstanceTemplate("note-cr-5", b.id);
+    const onB = getNoteTemplateInstance("note-cr-5");
+    expect(onB.templateId).toBe(b.id);
+    // Stored, but not visible under template B — and B gains nothing.
+    expect(onB.customRows).toHaveLength(2);
+    expect(customRowsForTemplate(onB.customRows, b.id)).toEqual([]);
+
+    setInstanceTemplate("note-cr-5", a.id);
+    const backOnA = customRowsForTemplate(
+      getNoteTemplateInstance("note-cr-5").customRows,
+      a.id
+    );
+    expect(backOnA.map((r) => r.id)).toEqual([one.row.id, two.row.id]);
+    expect(
+      resolveCustomRowOrder(rows(), backOnA).rows.map((r) => r.id)
+    ).toEqual([one.row.id, "f_text", two.row.id, "f_num"]);
+  });
+
+  test("a custom row created under template B does not appear under template A", () => {
+    const a = createTemplate("A", { leftPct: 18, rows: rows() });
+    const b = createTemplate("B", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-cr-6");
+    const onA = addRow([], { templateId: a.id, anchorFieldId: "f_text" });
+    const onB = addRow(onA.rows, { templateId: b.id, anchorFieldId: "f_text" });
+    saveNoteTemplateInstanceOrThrow({ ...inst, customRows: onB.rows });
+
+    const stored = getNoteTemplateInstance("note-cr-6").customRows;
+    expect(customRowsForTemplate(stored, a.id).map((r) => r.id)).toEqual([onA.row.id]);
+    expect(customRowsForTemplate(stored, b.id).map((r) => r.id)).toEqual([onB.row.id]);
+  });
+
+  test("custom rows never reach the TemplateVersion, and publishing a new version keeps them", () => {
+    const tpl = createTemplate("A", { leftPct: 18, rows: rows() });
+    const v1 = tpl.currentVersionId;
+    const inst = getOrCreateInstanceForNote("note-cr-7");
+    const { rows: withRow, row } = addRow([], {
+      templateId: tpl.id,
+      anchorFieldId: "f_text",
+    });
+    saveNoteTemplateInstanceOrThrow({
+      ...inst,
+      customRows: updateCustomRow(withRow, row.id, { answer: "site specific" }),
+    });
+
+    // The company template is edited and republished.
+    publishTemplateVersion(tpl.id, {
+      leftPct: 18,
+      rows: [...rows(), { id: "f_new", label: "Extra", type: "text" }],
+    });
+
+    // No version — old or new — contains the note's custom row.
+    const versionsJson = localStorage.getItem(TEMPLATE_VERSIONS_KEY);
+    expect(versionsJson).not.toContain(row.id);
+    expect(versionsJson).not.toContain("site specific");
+    expect(getVersion(v1).rows).toEqual(rows());
+
+    // The note keeps its pinned version and its custom row.
+    const back = getNoteTemplateInstance("note-cr-7");
+    expect(back.templateVersionId).toBe(v1);
+    expect(normalizeCustomRows(back.customRows)[0].answer).toBe("site specific");
+  });
+
+  test("a newer version that removes the anchor field preserves the row via the end-of-document fallback", () => {
+    const tpl = createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-cr-8");
+    const { rows: withRow, row } = addRow([], {
+      templateId: tpl.id,
+      anchorFieldId: "f_num",
+      position: "below",
+    });
+    saveNoteTemplateInstanceOrThrow({
+      ...inst,
+      customRows: updateCustomRow(withRow, row.id, { answer: "keep me" }),
+    });
+
+    // New version drops f_num; the note is re-pinned to it.
+    const v2 = publishTemplateVersion(tpl.id, {
+      leftPct: 18,
+      rows: [{ id: "f_text", label: "Notes", type: "text", px: 64, minPx: 48 }],
+    });
+    setInstanceTemplate("note-cr-8", tpl.id);
+    const back = getNoteTemplateInstance("note-cr-8");
+    expect(back.templateVersionId).toBe(v2.id);
+
+    const visible = customRowsForTemplate(back.customRows, tpl.id);
+    const resolved = resolveCustomRowOrder(getVersion(v2.id).rows, visible);
+    expect(resolved.rows.map((r) => r.id)).toEqual(["f_text", row.id]);
+    expect(resolved.fallbacks).toEqual([
+      { id: row.id, label: row.label, reason: "missing-anchor" },
+    ]);
+    expect(visible[0].answer).toBe("keep me");
+    // The stored placement is preserved, not rewritten to the fallback.
+    expect(visible[0].placement.anchorFieldId).toBe("f_num");
+  });
+
+  test("custom rows and template answers stay in separate places", () => {
+    const tpl = createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-cr-9");
+    const { rows: withRow, row } = addRow([], {
+      templateId: tpl.id,
+      anchorFieldId: "f_text",
+    });
+    saveNoteTemplateInstanceOrThrow({
+      ...inst,
+      answers: { f_text: "template answer" },
+      customRows: updateCustomRow(withRow, row.id, { answer: "custom answer" }),
+    });
+
+    const back = getNoteTemplateInstance("note-cr-9");
+    expect(back.answers).toEqual({ f_text: "template answer" });
+    expect(Object.keys(back.answers)).not.toContain(row.id);
+    expect(normalizeCustomRows(back.customRows)[0].answer).toBe("custom answer");
+  });
+
+  test("the throwing save confirms a custom-row write before it is trusted", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-cr-10");
+    const { rows: withRow } = addRow([], { anchorFieldId: "f_text" });
+    const saved = saveNoteTemplateInstanceOrThrow({ ...inst, customRows: withRow });
+    expect(saved.customRows).toHaveLength(1);
+
+    // A failing storage write propagates instead of being swallowed.
+    const setItem = jest.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    expect(() =>
+      saveNoteTemplateInstanceOrThrow({ ...inst, customRows: [] })
+    ).toThrow(/Quota/);
+    setItem.mockRestore();
+    // The last confirmed state is still on disk — nothing was lost.
+    expect(getNoteTemplateInstance("note-cr-10").customRows).toHaveLength(1);
+  });
+
+  test("no derived page data is ever persisted with a custom row", () => {
+    const tpl = createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-cr-11");
+    const { rows: withRow } = addRow([], { templateId: tpl.id, anchorFieldId: "f_text" });
+    saveNoteTemplateInstanceOrThrow({ ...inst, customRows: withRow });
+
+    const stored = localStorage.getItem("sitewise-note-template-instances-v1");
+    expect(stored).not.toMatch(/"page"|"pageNumber"|"pageIndex"/);
+    expect(stored).not.toMatch(/data:image|blob:/);
   });
 });

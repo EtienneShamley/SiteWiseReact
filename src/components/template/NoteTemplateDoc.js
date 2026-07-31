@@ -3,7 +3,6 @@ import ResizableTwoColTable from "./ResizableTwoColTable";
 import {
   DEFAULT_LEFT_COL_PCT,
   defaultRows,
-  makeNewRow,
 } from "../../templates/defaultTwoColDoc";
 import {
   getOrCreateInstanceForNote,
@@ -17,6 +16,14 @@ import {
   isAttachmentAssetReferenced,
 } from "../../lib/templateModel";
 import { isTextInsertable, normalizeRows } from "../../lib/templateFields";
+import {
+  CUSTOM_ROW_MIN_HEIGHT_PX,
+  customRowsForTemplate,
+  deleteCustomRow,
+  insertCustomRow,
+  resolveCustomRowOrder,
+  updateCustomRow,
+} from "../../lib/noteCustomRows";
 import {
   validatePhotoFile,
   validateNoteFile,
@@ -44,6 +51,14 @@ import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
  *   instance stores lightweight references (see src/lib/noteAttachments.js).
  * - Lets the user re-pin the note to a different template via a selector.
  * - Exposes an insert handler so MainArea can push BottomBar text into a row.
+ * - Supports NOTE-SPECIFIC custom rows: an extra project-specific section the
+ *   company template did not anticipate, inserted above or below any row. A
+ *   custom row lives on THIS note's instance and carries the template it was
+ *   created under (src/lib/noteCustomRows.js) — it never edits the master
+ *   template, never publishes a TemplateVersion, never appears in another note,
+ *   and is hidden (not destroyed) while the note is on a different template.
+ *   Its label, answer and preferred height are written through the THROWING
+ *   instance save, so a failed write is reported instead of being lost.
  *
  * Attachment write sequence (per selected file — a failed file never blocks or
  * rolls back the others):
@@ -121,9 +136,14 @@ export default function NoteTemplateDoc({
   const [rowAttachments, setRowAttachments] = useState(() => instance?.attachments || {});
   const [rowText, setRowText] = useState(() => instance?.answers || {});
 
-  // Per-field inline error/busy state for attachment operations.
+  // Per-field inline error/busy state for attachment and custom-row operations.
   const [fieldErrors, setFieldErrors] = useState({});
   const [fieldBusy, setFieldBusy] = useState({});
+
+  // Height of a custom row WHILE its border is being dragged. The stored
+  // preferred height is written once on release (see handleRowHeightCommit),
+  // not on every pointer move.
+  const [pendingHeights, setPendingHeights] = useState({});
 
   // Refs kept current so the sequential async attachment handlers always
   // persist against the latest state (same pattern as PagedDocument.heightsRef).
@@ -174,6 +194,54 @@ export default function NoteTemplateDoc({
     });
   }, [noteId, instance, rowText, rowAttachments]);
 
+  /* ------------------------- note-specific custom rows ------------------- */
+
+  // The RAW stored array (all templates) — structural edits work on this so a
+  // row belonging to another template, or carrying fields this version doesn't
+  // know about, is passed through untouched rather than rewritten or dropped.
+  const rawCustomRows = useMemo(
+    () => (Array.isArray(instance?.customRows) ? instance.customRows : []),
+    [instance?.customRows]
+  );
+
+  // Only the rows belonging to the template this note is currently pinned to.
+  const templateCustomRows = useMemo(
+    () => customRowsForTemplate(rawCustomRows, instance?.templateId ?? null),
+    [rawCustomRows, instance?.templateId]
+  );
+
+  const customRowIds = useMemo(
+    () => new Set(templateCustomRows.map((r) => r.id)),
+    [templateCustomRows]
+  );
+
+  // Document order: the pinned version's rows with this note's custom rows
+  // woven in at their anchors. `fallbacks` names any row whose anchor field no
+  // longer exists — it is shown at the end, never deleted (order is derived
+  // here on every render; nothing about placement or pages is persisted).
+  const { rows: orderedRows, fallbacks: placementFallbacks } = useMemo(
+    () => resolveCustomRowOrder(rows, templateCustomRows),
+    [rows, templateCustomRows]
+  );
+
+  // Apply any in-progress drag height without persisting it.
+  const displayRows = useMemo(
+    () =>
+      orderedRows.map((r) =>
+        pendingHeights[r.id] != null ? { ...r, px: pendingHeights[r.id] } : r
+      ),
+    [orderedRows, pendingHeights]
+  );
+
+  // Custom-row answers live on the row itself (never in `answers`), so they
+  // cannot leak into another template's fields; they are merged only for
+  // rendering through the shared two-column table.
+  const rightValues = useMemo(() => {
+    const merged = { ...rowText };
+    for (const r of templateCustomRows) merged[r.id] = r.answer;
+    return merged;
+  }, [rowText, templateCustomRows]);
+
   const refreshTemplates = () => setTemplates(listTemplates());
 
   // Re-pin this note to another template's current version. Answers and
@@ -186,10 +254,14 @@ export default function NoteTemplateDoc({
     if (next) setInstance(next);
   }
 
-  const addRow = () =>
-    setRows((prev) => [...prev, makeNewRow("New Field")]);
-
+  // Answers route by ownership: a template field's answer goes to the
+  // instance `answers` map (unchanged behaviour); a custom row's answer is
+  // written onto that row through the confirmed save path below.
   function handleRightChange(rowId, value) {
+    if (customRowIds.has(rowId)) {
+      handleCustomRowPatch(rowId, { answer: value }, "This section's text could not be saved");
+      return;
+    }
     setRowText((prev) => ({
       ...prev,
       [rowId]: value,
@@ -210,6 +282,139 @@ export default function NoteTemplateDoc({
       return next;
     });
   }, []);
+
+  /* ------------------ note-specific custom-row persistence ---------------- */
+
+  // Every custom-row write goes through the THROWING instance save: the record
+  // is written and read back before any in-memory state changes, so a failed
+  // write surfaces as a visible per-row error instead of silently losing the
+  // user's section. TemplateVersions are never touched.
+  const persistCustomRows = useCallback((nextCustomRows) => {
+    const nextInstance = {
+      ...instanceRef.current,
+      answers: rowTextRef.current,
+      attachments: rowAttachmentsRef.current,
+      customRows: nextCustomRows,
+    };
+    saveNoteTemplateInstanceOrThrow(nextInstance);
+    instanceRef.current = nextInstance;
+    setInstance(nextInstance);
+  }, []);
+
+  const commitCustomRows = useCallback(
+    (nextCustomRows, errorFieldId, whatFailed) => {
+      try {
+        persistCustomRows(nextCustomRows);
+        clearFieldError(errorFieldId);
+        return true;
+      } catch (err) {
+        setFieldError(
+          errorFieldId,
+          `${whatFailed} (${err?.message || err}). The last change was not kept.`
+        );
+        return false;
+      }
+    },
+    [persistCustomRows, clearFieldError, setFieldError]
+  );
+
+  const handleCustomRowPatch = useCallback(
+    (rowId, patch, whatFailed) => {
+      const raw = Array.isArray(instanceRef.current?.customRows)
+        ? instanceRef.current.customRows
+        : [];
+      commitCustomRows(updateCustomRow(raw, rowId, patch), rowId, whatFailed);
+    },
+    [commitCustomRows]
+  );
+
+  // Insert a note-specific section above/below the given row. The anchor may be
+  // a template field or another custom row; placement is stored, order is
+  // derived (see resolveCustomRowOrder).
+  const handleInsertRow = useCallback(
+    (anchorRowId, position) => {
+      const raw = Array.isArray(instanceRef.current?.customRows)
+        ? instanceRef.current.customRows
+        : [];
+      const { rows: next } = insertCustomRow(raw, {
+        templateId: instanceRef.current?.templateId ?? null,
+        anchorFieldId: anchorRowId ?? null,
+        position,
+      });
+      commitCustomRows(next, anchorRowId, "The new section could not be added");
+    },
+    [commitCustomRows]
+  );
+
+  const handleDeleteRow = useCallback(
+    (rowId) => {
+      const raw = Array.isArray(instanceRef.current?.customRows)
+        ? instanceRef.current.customRows
+        : [];
+      const target = raw.find((r) => r && r.id === rowId);
+      if (!target) return;
+      const label = (target.label || "").trim();
+      const confirmed = window.confirm(
+        `Delete the section "${label || "Untitled"}" from this note? Its text will be removed.`
+      );
+      if (!confirmed) return;
+      commitCustomRows(
+        deleteCustomRow(raw, rowId),
+        rowId,
+        "The section could not be deleted"
+      );
+    },
+    [commitCustomRows]
+  );
+
+  // Row height: a custom row's dragged height is shown live and persisted once
+  // on release. A template row's height in a completed note stays transient
+  // (the pinned version is immutable) — unchanged behaviour.
+  const handleRowHeightChange = useCallback(
+    (rowId, px) => {
+      if (customRowIds.has(rowId)) {
+        setPendingHeights((prev) => ({ ...prev, [rowId]: px }));
+        return;
+      }
+      setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, px } : r)));
+    },
+    [customRowIds]
+  );
+
+  const handleRowHeightCommit = useCallback(
+    (rowId, px) => {
+      if (!customRowIds.has(rowId)) return;
+      handleCustomRowPatch(
+        rowId,
+        { preferredHeight: Math.max(CUSTOM_ROW_MIN_HEIGHT_PX, Math.round(px)) },
+        "This section's height could not be saved"
+      );
+      setPendingHeights((prev) => {
+        if (!(rowId in prev)) return prev;
+        const next = { ...prev };
+        delete next[rowId];
+        return next;
+      });
+    },
+    [customRowIds, handleCustomRowPatch]
+  );
+
+  // Only a custom row's own label is editable in a completed note; master
+  // template labels are read-only here (lockTemplateLabels below).
+  const handleRowLabelChange = useCallback(
+    (rowId, label) => {
+      if (!customRowIds.has(rowId)) return;
+      handleCustomRowPatch(rowId, { label }, "This section's label could not be saved");
+    },
+    [customRowIds, handleCustomRowPatch]
+  );
+
+  // "Add section at end" — anchored below the last row currently in the
+  // document so it lands where the user expects.
+  const handleAddRowAtEnd = useCallback(() => {
+    const lastRow = orderedRows[orderedRows.length - 1];
+    handleInsertRow(lastRow ? lastRow.id : null, "below");
+  }, [orderedRows, handleInsertRow]);
 
   // Persist an attachments-map change via the THROWING instance save (the
   // reference write must be confirmed before dependent cleanup decisions), and
@@ -378,29 +583,39 @@ export default function NoteTemplateDoc({
   // Only the free-text destination accepts inserted text; structured fields
   // (number, date, time, checkbox, yes/no, dropdown, photo, file) reject it
   // rather than being corrupted by arbitrary text.
+  const appendText = (existing, text) => {
+    const current = typeof existing === "string" ? existing : "";
+    if (current.trim().length === 0) return text;
+    return current.endsWith("\n") ? current + text : current + "\n" + text;
+  };
+
   const insertIntoRow = useCallback(
     (rowId, text) => {
       if (!rowId || !text) return;
+
+      // A note-specific custom row is always a Text destination; its answer is
+      // written through the confirmed save path, preserving line breaks.
+      if (customRowIds.has(rowId)) {
+        const target = templateCustomRows.find((r) => r.id === rowId);
+        handleCustomRowPatch(
+          rowId,
+          { answer: appendText(target?.answer, text) },
+          "The inserted text could not be saved to this section"
+        );
+        return;
+      }
+
       const row = rows.find((r) => r.id === rowId);
       if (row && !isTextInsertable(row.type)) {
         alert("This field type doesn't accept inserted text. Select a Text field.");
         return;
       }
-      setRowText((prev) => {
-        const existing = typeof prev[rowId] === "string" ? prev[rowId] : "";
-        const next =
-          existing.trim().length === 0
-            ? text
-            : existing.endsWith("\n")
-            ? existing + text
-            : existing + "\n" + text;
-        return {
-          ...prev,
-          [rowId]: next,
-        };
-      });
+      setRowText((prev) => ({
+        ...prev,
+        [rowId]: appendText(prev[rowId], text),
+      }));
     },
-    [rows]
+    [rows, customRowIds, templateCustomRows, handleCustomRowPatch]
   );
 
   // Register/unregister the insert handler with MainArea
@@ -413,13 +628,16 @@ export default function NoteTemplateDoc({
 
   return (
     <div className="p-2 text-black dark:text-white">
-      {/* Per-note template selection */}
-      <div className="mb-2 flex items-center gap-2">
+      {/* Per-note template selection. This control ONLY chooses which template
+          this note uses — it never creates or edits a template. Managing the
+          reusable templates themselves lives behind the top-level "Templates"
+          control (Template Library / Builder). */}
+      <div className="mb-2 flex flex-wrap items-center gap-2">
         <label
           htmlFor={`note-template-select-${noteId || "global"}`}
           className="text-sm text-gray-600 dark:text-gray-300"
         >
-          Template
+          {instance?.templateId ? "Change template" : "Choose template"}
         </label>
         <select
           id={`note-template-select-${noteId || "global"}`}
@@ -439,20 +657,46 @@ export default function NoteTemplateDoc({
             </option>
           ))}
         </select>
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          Chooses which template this note uses. To create or edit templates, use
+          Templates in the toolbar.
+        </span>
       </div>
+
+      {/* A custom section whose anchor field no longer exists in this template
+          keeps its content and is shown at the end of the document. */}
+      {placementFallbacks.length > 0 && (
+        <div
+          className="mb-2 text-xs text-gray-600 dark:text-gray-300"
+          role="status"
+        >
+          {placementFallbacks.length === 1
+            ? `The section "${placementFallbacks[0].label || "Untitled"}" no longer has its original position in this template and is shown at the end of the document.`
+            : `${placementFallbacks.length} sections no longer have their original position in this template and are shown at the end of the document.`}
+        </div>
+      )}
 
       <ResizableTwoColTable
         leftPct={leftPct}
-        rows={rows}
-        onRowsChange={setRows}
-        onAddRow={addRow}
-        onLeftPctChange={setLeftPct}
+        rows={displayRows}
+        onAddRow={handleAddRowAtEnd}
+        addRowLabel="Add section at end"
         logoUrl={logoUrl}
         logoStatus={logoStatus}
         // NOTE: no onLogoFile/onLogoChange here -> logo is fixed in notes
         enableRightEditor={true}
-        rightValues={rowText}
+        rightValues={rightValues}
         onRightChange={handleRightChange}
+        // Note completion: insert/delete NOTE-SPECIFIC rows only. No field-type
+        // editor, no dropdown-option editor, no logo control, no publishing —
+        // those stay in the Template Builder.
+        rowActionsMode="note"
+        onInsertRow={handleInsertRow}
+        onDeleteRow={handleDeleteRow}
+        onRowLabelChange={handleRowLabelChange}
+        onRowHeightChange={handleRowHeightChange}
+        onRowHeightCommit={handleRowHeightCommit}
+        lockTemplateLabels={true}
         onRightFocus={(rowId) => {
           if (onSelectRow) onSelectRow(rowId);
         }}
