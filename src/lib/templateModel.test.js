@@ -13,9 +13,11 @@ import {
   getOrCreateInstanceForNote,
   getNoteTemplateInstance,
   saveNoteTemplateInstance,
+  saveNoteTemplateInstanceOrThrow,
   setInstanceTemplate,
   collectKnownOptionIds,
   isLogoAssetReferenced,
+  isAttachmentAssetReferenced,
   TEMPLATE_VERSIONS_KEY,
 } from "./templateModel";
 import { makeOption, displayTextValue } from "./templateFields";
@@ -245,5 +247,95 @@ describe("answers are keyed by field id and preserved across template switch", (
     const back = setInstanceTemplate("note-3", a.id);
     expect(back.templateId).toBe(a.id);
     expect(getNoteTemplateInstance("note-3").answers.f_text).toBe("kept");
+  });
+});
+
+describe("attachment references on instances (Photo/File fields)", () => {
+  const photoRef = (id, assetId) => ({
+    id,
+    assetId,
+    kind: "photo",
+    name: "p.png",
+    mimeType: "image/png",
+    size: 10,
+    createdAt: 1,
+    intrinsicWidth: 100,
+    intrinsicHeight: 50,
+    display: { widthPct: 60, alignment: "left" },
+  });
+
+  test("attachment references survive a save/load round-trip, keyed by field id, order preserved", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-att-1");
+    const attachments = {
+      f_photo: [photoRef("r1", "a1"), photoRef("r2", "a2")],
+      f_file: [{ id: "r3", assetId: "a3", kind: "file", name: "doc.pdf", mimeType: "application/pdf", size: 5, createdAt: 2 }],
+    };
+    saveNoteTemplateInstance({ ...inst, attachments });
+
+    const back = getNoteTemplateInstance("note-att-1");
+    expect(back.attachments.f_photo.map((a) => a.id)).toEqual(["r1", "r2"]);
+    expect(back.attachments.f_photo[0].display).toEqual({ widthPct: 60, alignment: "left" });
+    expect(back.attachments.f_file[0].assetId).toBe("a3");
+    // Lightweight records only: no base64/blob content in the persisted map.
+    expect(localStorage.getItem("sitewise-note-template-instances-v1")).not.toMatch(/data:image|blob:/);
+  });
+
+  test("saveNoteTemplateInstanceOrThrow persists and returns the record; throws without a noteId", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-att-2");
+    const saved = saveNoteTemplateInstanceOrThrow({
+      ...inst,
+      attachments: { f_photo: [photoRef("r1", "a1")] },
+    });
+    expect(saved.attachments.f_photo[0].assetId).toBe("a1");
+    expect(getNoteTemplateInstance("note-att-2").attachments.f_photo).toHaveLength(1);
+    expect(() => saveNoteTemplateInstanceOrThrow({})).toThrow();
+  });
+
+  test("isAttachmentAssetReferenced finds an asset across instances and skips legacy strings", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-att-3");
+    saveNoteTemplateInstance({
+      ...inst,
+      attachments: { f_photo: ["data:image/png;base64,AAAA", photoRef("r1", "asset-x")] },
+    });
+    expect(isAttachmentAssetReferenced("asset-x")).toBe(true);
+    expect(isAttachmentAssetReferenced("asset-unused")).toBe(false);
+    expect(isAttachmentAssetReferenced(null)).toBe(false);
+  });
+
+  test("publishing a new template version never mutates an existing note's attachments (immutability)", () => {
+    const tpl = createTemplate("A", { leftPct: 18, rows: rows() });
+    const oldVersionId = tpl.currentVersionId;
+    const inst = getOrCreateInstanceForNote("note-att-4");
+    saveNoteTemplateInstance({
+      ...inst,
+      attachments: { f_photo: [photoRef("r1", "a1")] },
+    });
+
+    // Master edit: the photo field becomes a text field in the NEW version.
+    publishTemplateVersion(tpl.id, {
+      leftPct: 18,
+      rows: [{ id: "f_photo", label: "Now Text", px: 64, minPx: 48, type: "text" }],
+    });
+
+    // The pinned old version is untouched and the note keeps its evidence.
+    const back = getNoteTemplateInstance("note-att-4");
+    expect(back.templateVersionId).toBe(oldVersionId);
+    expect(back.attachments.f_photo[0].assetId).toBe("a1");
+    expect(getVersion(oldVersionId).rows).toEqual(rows());
+  });
+
+  test("re-pinning to another template keeps attachments (nothing destroyed)", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const b = createTemplate("B", { leftPct: 18, rows: [] });
+    const inst = getOrCreateInstanceForNote("note-att-5");
+    saveNoteTemplateInstance({
+      ...inst,
+      attachments: { f_photo: [photoRef("r1", "a1")] },
+    });
+    setInstanceTemplate("note-att-5", b.id);
+    expect(getNoteTemplateInstance("note-att-5").attachments.f_photo[0].assetId).toBe("a1");
   });
 });

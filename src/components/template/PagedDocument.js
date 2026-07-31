@@ -33,9 +33,18 @@
 // for future read-only/print/export rendering and future non-atomic blocks; the
 // editable Text row deliberately grows instead of being sliced in this phase.
 //
-// Block interface: { id, minHeight, splittable?, render: () => ReactNode }
+// Block interface:
+//   { id, minHeight, splittable?, group?, keepWithNext?, render: (ctx) => ReactNode }
 //   - `minHeight` is the PREFERRED/minimum height (e.g. a row's dragged height).
 //     Actual height = max(minHeight, measured content height).
+//   - `group` marks the blocks of one compound field (e.g. a Photo field's
+//     header + each photo). When a group resumes at the top of a new page, its
+//     first block there is rendered with ctx.continuedFromPrevPage = true so
+//     the renderer can show a restrained "Field — continued" context label.
+//   - `keepWithNext` keeps this block on the same page as the next one (a field
+//     header is never orphaned at a page bottom) — see paginateBlocks.
+//   - `render(ctx)` receives { continuedFromPrevPage }; existing renderers that
+//     ignore the argument are unaffected.
 
 import React, {
   useCallback,
@@ -51,7 +60,11 @@ import {
   mmToPx,
   PAGE_MARGIN_MM,
 } from "../../lib/pageGeometry";
-import { paginateBlocks, resolveBlockHeight } from "../../lib/paginateBlocks";
+import {
+  annotateGroupContinuations,
+  paginateBlocks,
+  resolveBlockHeight,
+} from "../../lib/paginateBlocks";
 
 const HEIGHT_EPSILON_PX = 0.5;
 // Visual gap between stacked paper sheets (app background shows through).
@@ -167,8 +180,11 @@ export default function PagedDocument({ blocks = [], className = "" }) {
       id: b.id,
       height: resolveBlockHeight(b.minHeight, heights[b.id]),
       splittable: !!b.splittable,
+      group: b.group ?? null,
+      keepWithNext: !!b.keepWithNext,
     }));
     const { pages } = paginateBlocks(measured, USABLE_HEIGHT_PX);
+    annotateGroupContinuations(pages);
 
     // Turn the pure page assignment into on-screen geometry: per-page capacity
     // (a normal page is a full A4; an oversized single block grows its page),
@@ -219,7 +235,9 @@ export default function PagedDocument({ blocks = [], className = "" }) {
           className="paged-block"
           ref={getRefCb(placed.id)}
         >
-          {block.render()}
+          {block.render({
+            continuedFromPrevPage: !!placed.continuedFromPrevPage,
+          })}
         </div>
       );
     }

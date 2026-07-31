@@ -33,6 +33,8 @@ export const FIELD_TYPE = {
   CHECKBOX: "checkbox",
   YESNO: "yesno",
   SELECT: "select",
+  PHOTO: "photo",
+  FILE: "file",
 };
 
 // Ordered catalog for the builder's per-row type selector.
@@ -44,7 +46,16 @@ export const FIELD_TYPES = [
   { value: FIELD_TYPE.CHECKBOX, label: "Checkbox" },
   { value: FIELD_TYPE.YESNO, label: "Yes / No" },
   { value: FIELD_TYPE.SELECT, label: "Dropdown" },
+  { value: FIELD_TYPE.PHOTO, label: "Photo" },
+  { value: FIELD_TYPE.FILE, label: "File" },
 ];
+
+// True for the attachment-bearing field types (evidence lives on the note's
+// NoteTemplateInstance as asset references, never on the TemplateVersion).
+export function isAttachmentFieldType(type) {
+  const t = normalizeType(type);
+  return t === FIELD_TYPE.PHOTO || t === FIELD_TYPE.FILE;
+}
 
 const VALID_TYPES = new Set(FIELD_TYPES.map((t) => t.value));
 

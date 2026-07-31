@@ -257,6 +257,29 @@ export function isLogoAssetReferenced(assetId) {
   return false;
 }
 
+// True if ANY note instance references this asset id from its attachments
+// (mixed arrays: legacy base64 strings are skipped). Attachment removal and
+// upload-failure cleanup delete an asset only when this is false, so an asset
+// shared by multiple references — possible in future — is never destroyed.
+export function isAttachmentAssetReferenced(assetId) {
+  if (!assetId) return false;
+  const instances = getNoteTemplateInstances();
+  for (const noteId of Object.keys(instances)) {
+    const attachments = instances[noteId]?.attachments;
+    if (!attachments || typeof attachments !== "object") continue;
+    for (const fieldId of Object.keys(attachments)) {
+      const list = attachments[fieldId];
+      if (!Array.isArray(list)) continue;
+      for (const entry of list) {
+        if (entry && typeof entry === "object" && entry.assetId === assetId) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 export function getNoteTemplateInstance(noteId) {
   return (noteId && getNoteTemplateInstances()[noteId]) || null;
 }
@@ -266,6 +289,26 @@ export function saveNoteTemplateInstance(instance) {
   const instances = getNoteTemplateInstances();
   instances[instance.noteId] = instance;
   saveNoteTemplateInstances(instances);
+}
+
+// THROWING instance save for writes that must be confirmed before dependent
+// state changes (the attachment write sequence: Blob first, reference second —
+// see NoteTemplateDoc). saveMap/saveNoteTemplateInstance deliberately swallow
+// quota/serialization errors for low-stakes writes; this path propagates them
+// and verifies the record actually landed, mirroring the throwing-write
+// precedent in templateLogoMigration.js.
+export function saveNoteTemplateInstanceOrThrow(instance) {
+  if (!instance?.noteId) {
+    throw new Error("Cannot save a template instance without a noteId");
+  }
+  const instances = getNoteTemplateInstances();
+  instances[instance.noteId] = instance;
+  localStorage.setItem(NOTE_TEMPLATE_INSTANCES_KEY, JSON.stringify(instances));
+  const readBack = getNoteTemplateInstances()[instance.noteId];
+  if (!readBack) {
+    throw new Error("The note's template data could not be persisted");
+  }
+  return readBack;
 }
 
 // A note's instance pins it to the specific template version it was created

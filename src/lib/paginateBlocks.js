@@ -40,10 +40,22 @@ export function resolveBlockHeight(preferredPx, measuredPx) {
   return Math.max(preferred, measured);
 }
 
-// Distribute `blocks` (each `{ id, height, splittable? }`, in order) onto pages
-// of `usableHeightPx`. Returns `{ pages }`, where `pages` is an array of arrays
-// of placed-block descriptors:
-//   { id, height, splittable, part?: 'head'|'tail', continuesToNextPage?, continuedFromPrevPage? }
+// Distribute `blocks` (each `{ id, height, splittable?, group?, keepWithNext? }`,
+// in order) onto pages of `usableHeightPx`. Returns `{ pages }`, where `pages`
+// is an array of arrays of placed-block descriptors:
+//   { id, height, splittable, group, keepWithNext, part?: 'head'|'tail', continuesToNextPage?, continuedFromPrevPage? }
+//
+// Compound-field extensions:
+//   - `group`: an opaque id shared by the blocks of one compound field (e.g. a
+//     Photo field's header + each photo). Grouping does not change placement;
+//     it lets annotateGroupContinuations() mark where a group resumes on a new
+//     page so renderers can show a "Field — continued" context label.
+//   - `keepWithNext: true`: this block must not be orphaned at the bottom of a
+//     page — if it and the NEXT block don't fit together in the remaining
+//     space, both move to the next page (e.g. a field header stays with its
+//     first attachment). If the pair is taller than a whole usable page, they
+//     still stay together on one fresh page, which then grows (the same
+//     oversized-page behavior a single too-tall block gets).
 //
 // A degenerate/invalid usable height falls back to a single page containing all
 // blocks in order, so callers can never produce a divide-by-zero or empty layout
@@ -76,10 +88,40 @@ export function paginateBlocks(blocks, usableHeightPx, options = {}) {
   // A work queue so a split tail can itself be re-processed (and split again).
   const queue = list.map((b) => normalizePlaced(b, b.height));
 
+  // Set when the previous block carried the current one over via keepWithNext:
+  // place this block on the current page unconditionally, so the kept-together
+  // pair can never be re-separated (even when it overflows a fresh page — the
+  // page surface grows, exactly like a single oversized block).
+  let forcePlace = false;
+
   for (let i = 0; i < queue.length; i++) {
     const block = queue[i];
     const h = Number(block.height) || 0;
     const pageIsEmpty = current.length === 0;
+
+    if (forcePlace) {
+      forcePlace = false;
+      current.push(block);
+      remaining -= h;
+      continue;
+    }
+
+    const next = block.keepWithNext ? queue[i + 1] : null;
+    const pairHeight = next ? h + (Number(next.height) || 0) : h;
+
+    // keepWithNext pair that doesn't fit together in the remaining space:
+    // move (or keep) the pair on a fresh page together.
+    if (next && pairHeight > remaining + FIT_EPSILON_PX) {
+      if (!pageIsEmpty) commitPage();
+      current.push(block);
+      remaining -= h;
+      // Pair taller than the fresh page too: force the partner on anyway so
+      // they are never separated; the page surface grows to contain them.
+      if ((Number(next.height) || 0) > remaining + FIT_EPSILON_PX) {
+        forcePlace = true;
+      }
+      continue;
+    }
 
     // Fits in what's left on the current page.
     if (h <= remaining + FIT_EPSILON_PX) {
@@ -127,14 +169,35 @@ export function paginateBlocks(blocks, usableHeightPx, options = {}) {
 }
 
 // Normalize a placed-block descriptor: carry the id, a numeric height, and the
-// splittable flag; strip any render payload so this module stays pure/data-only.
+// layout flags; strip any render payload so this module stays pure/data-only.
 function normalizePlaced(block, height) {
   const b = block || {};
   return {
     id: b.id,
     height: Number(height) || 0,
     splittable: !!b.splittable,
+    group: b.group ?? null,
+    keepWithNext: !!b.keepWithNext,
   };
+}
+
+// Marks, in place, every placed block that RESUMES its group at the top of a
+// new page: the first block of a page whose group matches the group of the
+// LAST block on the previous page gets `continuedFromPrevPage: true` (the same
+// flag a split tail carries — identical semantics for renderers, which show a
+// restrained "Field — continued" context label). Pure: derived from the page
+// distribution only, nothing persisted. Returns the same `pages` array.
+export function annotateGroupContinuations(pages) {
+  if (!Array.isArray(pages)) return pages;
+  for (let p = 1; p < pages.length; p++) {
+    const first = pages[p]?.[0];
+    const prevPage = pages[p - 1];
+    const prevLast = prevPage?.[prevPage.length - 1];
+    if (first && prevLast && first.group != null && first.group === prevLast.group) {
+      first.continuedFromPrevPage = true;
+    }
+  }
+  return pages;
 }
 
 // Count how many pages a distribution used — small convenience for callers/tests.

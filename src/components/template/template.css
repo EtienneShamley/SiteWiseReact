@@ -83,3 +83,315 @@
   object-fit: contain;
   max-width: 100%;
 }
+
+/* ---------- Compound attachment fields (Photo / File) ----------
+ * A Photo/File field is a head block followed by one block per attachment
+ * (see ResizableTwoColTable). Segments visually merge with the block above
+ * (no divider), so the field reads as ONE document cell; when a segment
+ * resumes at the top of a new page it gets its border back plus a restrained
+ * "Label — continued" context in the left cell. */
+.twocol-seg {
+  border-top: none;
+}
+
+.twocol-seg--resume {
+  border-top: 1px solid #d1d5db;
+  margin-top: 0; /* don't pull up over the page gap */
+}
+
+.twocol-seg-left {
+  overflow: hidden;
+}
+
+.twocol-seg-continued {
+  display: block;
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.5);
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Upload control in the head block. Styled as a compact document-appropriate
+ * button; the real input is visually hidden (sr-only) but keyboard focusable —
+ * focus is shown on the label. */
+.attach-upload-btn {
+  display: inline-block;
+  padding: 4px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #111111;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.attach-upload-btn:hover {
+  background: #f3f4f6;
+}
+
+.attach-upload-btn:focus-within {
+  outline: 2px solid #39dde9; /* NoteWise cyan, interaction/focus only */
+  outline-offset: 1px;
+}
+
+.attach-upload-btn--busy {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.attach-empty-hint {
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.attach-builder-placeholder {
+  font-size: 13px;
+  font-style: italic;
+  color: rgba(0, 0, 0, 0.5);
+  margin-bottom: 6px;
+}
+
+/* Inline per-field error (restrained, in-document, dismissible) */
+.attach-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 12px;
+}
+
+.attach-error-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.attach-error-dismiss {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  line-height: 1;
+  border-radius: 9999px;
+  color: #991b1b;
+}
+
+/* Placeholder shown while a legacy migrated image loads / is unavailable */
+.legacy-img-placeholder {
+  padding: 8px 12px;
+  border: 1px dashed #d1d5db;
+  border-radius: 6px;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.5);
+  background: #fafafa;
+}
+
+/* ---------- Photo attachment (in-flow document image) ---------- */
+.photo-att {
+  display: flex; /* justify-content set inline per alignment */
+  width: 100%;
+}
+
+.photo-att-frame {
+  position: relative;
+  min-width: 48px;
+}
+
+.photo-att-frame:focus {
+  outline: 2px solid #39dde9;
+  outline-offset: 2px;
+}
+
+.photo-att-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 2px;
+}
+
+/* Compact controls — overlaid on the photo's top edge so their appearance
+ * never changes the block's measured height (pagination stays stable).
+ * Visible on hover or keyboard focus only; restrained white pill. */
+.photo-att-toolbar {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 2;
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  max-width: calc(100% - 8px);
+  padding: 2px 4px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+.photo-att-frame:hover .photo-att-toolbar,
+.photo-att-frame:focus-within .photo-att-toolbar,
+.photo-att-frame:focus .photo-att-toolbar {
+  display: flex;
+}
+
+.photo-att-btn {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #111111;
+  white-space: nowrap;
+}
+
+.photo-att-btn:hover {
+  background: #f3f4f6;
+}
+
+.photo-att-btn:focus-visible {
+  outline: 2px solid #39dde9;
+  outline-offset: 0;
+}
+
+.photo-att-btn--active {
+  background: rgba(57, 221, 233, 0.16); /* translucent cyan, active only */
+  color: #1f7f88;
+}
+
+.photo-att-btn--danger {
+  color: #991b1b;
+}
+
+.photo-att-toolbar-sep {
+  width: 1px;
+  height: 12px;
+  background: #d1d5db;
+  margin: 0 2px;
+}
+
+/* Drag-resize handle (bottom corner; left-side variant for right-aligned
+ * photos, which grow leftward). Pointer events; presets are the keyboard
+ * alternative. */
+.photo-att-handle {
+  position: absolute;
+  bottom: -4px;
+  right: -4px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #39dde9;
+  border-radius: 3px;
+  background: #ffffff;
+  cursor: nwse-resize;
+  opacity: 0;
+  touch-action: none;
+  z-index: 2;
+}
+
+.photo-att-handle--left {
+  right: auto;
+  left: -4px;
+  cursor: nesw-resize;
+}
+
+.photo-att-frame:hover .photo-att-handle,
+.photo-att-frame:focus-within .photo-att-handle,
+.photo-att-frame:focus .photo-att-handle {
+  opacity: 1;
+}
+
+/* Loading / unavailable states — clear, never a broken image, never a crash */
+.photo-att-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px dashed #d1d5db;
+  border-radius: 6px;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.55);
+  background: #fafafa;
+}
+
+.photo-att-placeholder--missing {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.photo-att-missing-remove {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border: 1px solid #fca5a5;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #991b1b;
+  background: #ffffff;
+}
+
+/* ---------- File attachment rows (compact document rows) ---------- */
+.file-att-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 0;
+  font-size: 13px;
+  color: #111111;
+}
+
+.file-att-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-att-meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.5);
+}
+
+.file-att-row--missing .file-att-meta {
+  color: #991b1b;
+}
+
+.file-att-actions {
+  flex-shrink: 0;
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.file-att-btn {
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #1f7f88; /* accessible cyan-blue on white for action text */
+  text-decoration: underline;
+}
+
+.file-att-btn:hover {
+  background: rgba(57, 221, 233, 0.12);
+}
+
+.file-att-btn:focus-visible {
+  outline: 2px solid #39dde9;
+  outline-offset: 0;
+}
+
+.file-att-btn:disabled {
+  color: rgba(0, 0, 0, 0.35);
+  text-decoration: none;
+  cursor: default;
+}
+
+.file-att-btn--danger {
+  color: #991b1b;
+}

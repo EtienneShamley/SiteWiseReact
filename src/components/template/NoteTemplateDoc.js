@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ResizableTwoColTable from "./ResizableTwoColTable";
 import {
   DEFAULT_LEFT_COL_PCT,
@@ -8,13 +8,28 @@ import {
 import {
   getOrCreateInstanceForNote,
   saveNoteTemplateInstance,
+  saveNoteTemplateInstanceOrThrow,
   setInstanceTemplate,
   listTemplates,
   getVersion,
   getCurrentVersion,
   collectKnownOptionIds,
+  isAttachmentAssetReferenced,
 } from "../../lib/templateModel";
 import { isTextInsertable, normalizeRows } from "../../lib/templateFields";
+import {
+  validatePhotoFile,
+  validateNoteFile,
+  createPhotoAsset,
+  createNoteFileAsset,
+  deleteAsset,
+} from "../../lib/assetStorage";
+import {
+  ATTACHMENT_KIND,
+  makeAttachment,
+  normalizeDisplay,
+} from "../../lib/noteAttachments";
+import { newId } from "../../lib/id";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 
 /**
@@ -23,11 +38,54 @@ import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
  * - Renders from the note's pinned template version (never the live,
  *   editable template) via its NoteTemplateInstance — editing a master
  *   template does not change existing notes.
- * - Maintains per-note text and images for the right-hand fields, persisted
- *   on the instance so they survive note switches and page reloads.
+ * - Maintains per-note answers and attachment evidence for the right-hand
+ *   fields, persisted on the instance so they survive note switches and page
+ *   reloads. Attachment binaries live ONLY in IndexedDB (assetStorage); the
+ *   instance stores lightweight references (see src/lib/noteAttachments.js).
  * - Lets the user re-pin the note to a different template via a selector.
  * - Exposes an insert handler so MainArea can push BottomBar text into a row.
+ *
+ * Attachment write sequence (per selected file — a failed file never blocks or
+ * rolls back the others):
+ *   1. validate (MIME + size, reusable validators in assetStorage)
+ *   2. photos: decode intrinsic dimensions — a corrupt/unreadable image is
+ *      rejected BEFORE anything is written anywhere
+ *   3. persist the Blob to IndexedDB (resolved promise = confirmed write)
+ *   4. persist the lightweight reference on the instance via the THROWING save
+ *   5. on step-4 failure: delete the just-created asset again (only if
+ *      provably unreferenced) and surface a clear inline error
+ * Removal is the reverse: reference removed + confirmed first; the asset is
+ * deleted only when no instance references it any more.
  */
+
+// Reads a photo's intrinsic pixel dimensions from the picked File via a
+// transient object URL (revoked immediately). Rejects for a corrupt or
+// undecodable image, which aborts that file BEFORE any write happens.
+function readImageDimensions(file) {
+  return new Promise((resolve, reject) => {
+    let url = null;
+    try {
+      url = URL.createObjectURL(file);
+    } catch {
+      reject(new Error("The image could not be read."));
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      const width = img.naturalWidth;
+      const height = img.naturalHeight;
+      URL.revokeObjectURL(url);
+      if (width > 0 && height > 0) resolve({ width, height });
+      else reject(new Error("The image appears to be corrupt or unreadable."));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("The image appears to be corrupt or unreadable."));
+    };
+    img.src = url;
+  });
+}
+
 export default function NoteTemplateDoc({
   noteId,
   onRegisterTemplateInsert, // (fn | null) => void
@@ -57,10 +115,24 @@ export default function NoteTemplateDoc({
     [templates, instance?.templateVersionId]
   );
 
-  // Per-note content — initialized from the instance, persisted back below
-  const [rowImages, setRowImages] = useState(() => instance?.attachments || {});
+  // Per-note content — initialized from the instance, persisted back below.
+  // `rowAttachments` holds the RAW stored arrays (mixed legacy strings /
+  // structured references) so entry indexes always match persisted storage.
+  const [rowAttachments, setRowAttachments] = useState(() => instance?.attachments || {});
   const [rowText, setRowText] = useState(() => instance?.answers || {});
-  const [pendingRowId, setPendingRowId] = useState(null);
+
+  // Per-field inline error/busy state for attachment operations.
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [fieldBusy, setFieldBusy] = useState({});
+
+  // Refs kept current so the sequential async attachment handlers always
+  // persist against the latest state (same pattern as PagedDocument.heightsRef).
+  const instanceRef = useRef(instance);
+  instanceRef.current = instance;
+  const rowTextRef = useRef(rowText);
+  rowTextRef.current = rowText;
+  const rowAttachmentsRef = useRef(rowAttachments);
+  rowAttachmentsRef.current = rowAttachments;
 
   // Load the pinned version's layout. Falls back to the pinned template's
   // current version if that exact version record is missing, then to the
@@ -98,15 +170,15 @@ export default function NoteTemplateDoc({
     saveNoteTemplateInstance({
       ...instance,
       answers: rowText,
-      attachments: rowImages,
+      attachments: rowAttachments,
     });
-  }, [noteId, instance, rowText, rowImages]);
+  }, [noteId, instance, rowText, rowAttachments]);
 
   const refreshTemplates = () => setTemplates(listTemplates());
 
-  // Re-pin this note to another template's current version. Answers are
-  // kept — entries keyed by row ids the new template doesn't have simply
-  // stop rendering, nothing is destroyed.
+  // Re-pin this note to another template's current version. Answers and
+  // attachments are kept — entries keyed by row ids the new template doesn't
+  // have simply stop rendering, nothing is destroyed.
   function handleTemplateChange(e) {
     const templateId = e.target.value;
     if (!templateId || templateId === instance?.templateId) return;
@@ -117,51 +189,6 @@ export default function NoteTemplateDoc({
   const addRow = () =>
     setRows((prev) => [...prev, makeNewRow("New Field")]);
 
-  function handleRequestAddImage(rowId) {
-    setPendingRowId(rowId);
-    const input = document.getElementById(
-      `note-template-image-input-${noteId || "global"}`
-    );
-    if (input) input.click();
-  }
-
-  function handleImageSelect(e) {
-    const files = Array.from(e.target.files || []);
-    if (!files.length || !pendingRowId) return;
-
-    const rowId = pendingRowId;
-
-    // Read as base64 data URLs (same representation already used for the
-    // logo) so selected images can be persisted to localStorage, not just
-    // held as in-memory File objects.
-    Promise.all(
-      files.map(
-        (file) =>
-          new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          })
-      )
-    )
-      .then((dataUrls) => {
-        setRowImages((prev) => {
-          const existing = prev[rowId] || [];
-          return {
-            ...prev,
-            [rowId]: [...existing, ...dataUrls],
-          };
-        });
-      })
-      .catch(() => {
-        // ignore unreadable file, mirrors existing silent-failure handling in this file
-      });
-
-    e.target.value = "";
-    setPendingRowId(null);
-  }
-
   function handleRightChange(rowId, value) {
     setRowText((prev) => ({
       ...prev,
@@ -169,31 +196,194 @@ export default function NoteTemplateDoc({
     }));
   }
 
-  function handleRemoveImage(rowId, index) {
-    setRowImages((prev) => {
-      const list = prev[rowId] || [];
-      if (!list.length) return prev;
-      const nextList = [...list];
-      nextList.splice(index, 1);
-      return {
-        ...prev,
-        [rowId]: nextList,
-      };
+  /* --------------------- attachment evidence handlers --------------------- */
+
+  const setFieldError = useCallback((fieldId, message) => {
+    setFieldErrors((prev) => ({ ...prev, [fieldId]: message }));
+  }, []);
+
+  const clearFieldError = useCallback((fieldId) => {
+    setFieldErrors((prev) => {
+      if (!(fieldId in prev)) return prev;
+      const next = { ...prev };
+      delete next[fieldId];
+      return next;
     });
-  }
+  }, []);
+
+  // Persist an attachments-map change via the THROWING instance save (the
+  // reference write must be confirmed before dependent cleanup decisions), and
+  // keep state + ref in sync for the sequential async upload loop.
+  const persistAttachments = useCallback((nextMap) => {
+    saveNoteTemplateInstanceOrThrow({
+      ...instanceRef.current,
+      answers: rowTextRef.current,
+      attachments: nextMap,
+    });
+    rowAttachmentsRef.current = nextMap;
+    setRowAttachments(nextMap);
+  }, []);
+
+  const handleAddAttachments = useCallback(
+    async (fieldId, kind, files) => {
+      if (!files || !files.length) return;
+      clearFieldError(fieldId);
+      setFieldBusy((prev) => ({ ...prev, [fieldId]: true }));
+      const isPhoto = kind === ATTACHMENT_KIND.PHOTO;
+      const failures = [];
+
+      for (const file of files) {
+        const label = file?.name || (isPhoto ? "Photo" : "File");
+
+        // 1. Validate — an invalid file writes nothing anywhere.
+        const check = isPhoto ? validatePhotoFile(file) : validateNoteFile(file);
+        if (!check.ok) {
+          failures.push(`${label}: ${check.error}`);
+          continue;
+        }
+
+        // 2. Photos: decode dimensions — a corrupt image is rejected before
+        //    any Blob or reference is written.
+        let dims = null;
+        if (isPhoto) {
+          try {
+            dims = await readImageDimensions(file);
+          } catch (err) {
+            failures.push(`${label}: ${err?.message || "unreadable image."}`);
+            continue;
+          }
+        }
+
+        // 3. Persist the Blob to IndexedDB first (confirmed by resolution).
+        let assetId = null;
+        try {
+          assetId = isPhoto
+            ? await createPhotoAsset(file)
+            : await createNoteFileAsset(file);
+        } catch (err) {
+          failures.push(
+            `${label}: could not be saved to storage (${err?.message || err}).`
+          );
+          continue;
+        }
+
+        // 4. Persist the lightweight reference on the instance.
+        const attachment = makeAttachment({
+          id: newId(),
+          assetId,
+          kind,
+          name: file.name || null,
+          mimeType: file.type || null,
+          size: file.size,
+          createdAt: Date.now(),
+          intrinsicWidth: dims?.width,
+          intrinsicHeight: dims?.height,
+        });
+        const prevMap = rowAttachmentsRef.current;
+        const nextMap = {
+          ...prevMap,
+          [fieldId]: [...(prevMap[fieldId] || []), attachment],
+        };
+        try {
+          persistAttachments(nextMap);
+        } catch (err) {
+          // 5. Reference write failed — remove the now-unreferenced asset so
+          //    it can't be orphaned, and report. Earlier successful files stay.
+          failures.push(
+            `${label}: could not be recorded on this note (${err?.message || err}).`
+          );
+          try {
+            if (!isAttachmentAssetReferenced(assetId)) await deleteAsset(assetId);
+          } catch {
+            // The unreferenced asset could not be cleaned up; harmless orphan.
+          }
+        }
+      }
+
+      setFieldBusy((prev) => {
+        const next = { ...prev };
+        delete next[fieldId];
+        return next;
+      });
+      if (failures.length) setFieldError(fieldId, failures.join(" "));
+    },
+    [clearFieldError, persistAttachments, setFieldError]
+  );
+
+  const handleRemoveAttachment = useCallback(
+    async (fieldId, index) => {
+      const prevMap = rowAttachmentsRef.current;
+      const list = prevMap[fieldId] || [];
+      const entry = list[index];
+      if (entry === undefined) return;
+      clearFieldError(fieldId);
+
+      // 1.+2. Remove the reference and confirm the instance update.
+      const nextList = list.filter((_, i) => i !== index);
+      const nextMap = { ...prevMap, [fieldId]: nextList };
+      try {
+        persistAttachments(nextMap);
+      } catch (err) {
+        setFieldError(
+          fieldId,
+          `The attachment could not be removed (${err?.message || err}).`
+        );
+        return;
+      }
+
+      // 3. Delete the Blob only when it is provably no longer referenced by
+      //    ANY note instance (never assume single ownership).
+      const assetId =
+        entry && typeof entry === "object" ? entry.assetId : null;
+      if (assetId && !isAttachmentAssetReferenced(assetId)) {
+        try {
+          await deleteAsset(assetId);
+        } catch (err) {
+          setFieldError(
+            fieldId,
+            `The attachment was removed, but its stored file could not be cleaned up (${err?.message || err}).`
+          );
+        }
+      }
+    },
+    [clearFieldError, persistAttachments, setFieldError]
+  );
+
+  const handleUpdateAttachmentDisplay = useCallback(
+    (fieldId, index, patch) => {
+      const prevMap = rowAttachmentsRef.current;
+      const list = prevMap[fieldId] || [];
+      const entry = list[index];
+      if (!entry || typeof entry !== "object") return;
+      const nextEntry = {
+        ...entry,
+        display: normalizeDisplay({ ...entry.display, ...patch }),
+      };
+      const nextList = list.map((e, i) => (i === index ? nextEntry : e));
+      try {
+        persistAttachments({ ...prevMap, [fieldId]: nextList });
+      } catch (err) {
+        setFieldError(
+          fieldId,
+          `The photo's size/alignment could not be saved (${err?.message || err}).`
+        );
+      }
+    },
+    [persistAttachments, setFieldError]
+  );
+
+  /* --------------------------- BottomBar insert --------------------------- */
 
   // Function for MainArea to push BottomBar text into a selected row.
-  // Only free-text destinations (Text / Multiline) accept inserted text;
-  // structured fields (number, date, time, checkbox, yes/no, dropdown) reject
-  // it rather than being corrupted by arbitrary text.
+  // Only the free-text destination accepts inserted text; structured fields
+  // (number, date, time, checkbox, yes/no, dropdown, photo, file) reject it
+  // rather than being corrupted by arbitrary text.
   const insertIntoRow = useCallback(
     (rowId, text) => {
       if (!rowId || !text) return;
       const row = rows.find((r) => r.id === rowId);
       if (row && !isTextInsertable(row.type)) {
-        alert(
-          "This field type doesn't accept inserted text. Select a Text or Multiline field."
-        );
+        alert("This field type doesn't accept inserted text. Select a Text field.");
         return;
       }
       setRowText((prev) => {
@@ -251,16 +441,6 @@ export default function NoteTemplateDoc({
         </select>
       </div>
 
-      {/* Hidden input per note for image/file selection */}
-      <input
-        id={`note-template-image-input-${noteId || "global"}`}
-        type="file"
-        accept="image/*,application/pdf"
-        multiple
-        className="hidden"
-        onChange={handleImageSelect}
-      />
-
       <ResizableTwoColTable
         leftPct={leftPct}
         rows={rows}
@@ -270,17 +450,22 @@ export default function NoteTemplateDoc({
         logoUrl={logoUrl}
         logoStatus={logoStatus}
         // NOTE: no onLogoFile/onLogoChange here -> logo is fixed in notes
-        rowImages={rowImages}
-        onRequestAddImage={handleRequestAddImage}
         enableRightEditor={true}
         rightValues={rowText}
         onRightChange={handleRightChange}
         onRightFocus={(rowId) => {
           if (onSelectRow) onSelectRow(rowId);
         }}
-        onRemoveImage={handleRemoveImage}
         logoLocked={true} // <- NOTE MODE: no upload, no resize handle, no "choose file"
         knownOptionIds={knownOptionIds}
+        attachments={rowAttachments}
+        onAddAttachments={handleAddAttachments}
+        onRemoveAttachment={handleRemoveAttachment}
+        onUpdateAttachmentDisplay={handleUpdateAttachmentDisplay}
+        fieldErrors={fieldErrors}
+        fieldBusy={fieldBusy}
+        onDismissFieldError={clearFieldError}
+        onFieldError={setFieldError}
       />
     </div>
   );

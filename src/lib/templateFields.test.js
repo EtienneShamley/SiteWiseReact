@@ -11,6 +11,7 @@ import {
   normalizeOptions,
   makeOption,
   isTextInsertable,
+  isAttachmentFieldType,
   displayTextValue,
   isInternalIdValue,
   resolveOptionLabel,
@@ -33,6 +34,8 @@ describe("normalizeType", () => {
       "checkbox",
       "yesno",
       "select",
+      "photo",
+      "file",
     ]);
   });
 
@@ -198,5 +201,45 @@ describe("makeNewRow", () => {
   test("new rows get unique ids (not Math.random collisions)", () => {
     const ids = new Set(Array.from({ length: 50 }, () => makeNewRow().id));
     expect(ids.size).toBe(50);
+  });
+});
+
+describe("Photo / File field types", () => {
+  test("photo and file are valid types in the catalog", () => {
+    const values = FIELD_TYPES.map((t) => t.value);
+    expect(values).toContain(FIELD_TYPE.PHOTO);
+    expect(values).toContain(FIELD_TYPE.FILE);
+    expect(normalizeType("photo")).toBe(FIELD_TYPE.PHOTO);
+    expect(normalizeType("file")).toBe(FIELD_TYPE.FILE);
+  });
+
+  test("isAttachmentFieldType is true only for photo/file", () => {
+    expect(isAttachmentFieldType("photo")).toBe(true);
+    expect(isAttachmentFieldType("file")).toBe(true);
+    for (const t of ["text", "number", "date", "time", "checkbox", "yesno", "select", "multiline", undefined]) {
+      expect(isAttachmentFieldType(t)).toBe(false);
+    }
+  });
+
+  test("BottomBar insertion rejects photo/file fields (no corruption path)", () => {
+    expect(isTextInsertable(FIELD_TYPE.PHOTO)).toBe(false);
+    expect(isTextInsertable(FIELD_TYPE.FILE)).toBe(false);
+  });
+
+  test("photo/file rows normalize with their type intact and stable ids", () => {
+    const rows = normalizeRows([
+      { id: "p1", label: "Site Photos", type: "photo" },
+      { label: "Attachments", type: "file" },
+    ]);
+    expect(rows[0].type).toBe("photo");
+    expect(rows[0].id).toBe("p1");
+    expect(rows[1].type).toBe("file");
+    expect(rows[1].id).toBe("row-1"); // deterministic positional fallback
+  });
+
+  test("legacy regression: untyped and multiline rows still normalize to text", () => {
+    expect(normalizeRow({ id: "a", label: "Old" }, 0).type).toBe(FIELD_TYPE.TEXT);
+    expect(normalizeRow({ id: "b", type: "multiline" }, 1).type).toBe(FIELD_TYPE.TEXT);
+    expect(normalizeType("signature")).toBe(FIELD_TYPE.TEXT); // still-unknown types
   });
 });

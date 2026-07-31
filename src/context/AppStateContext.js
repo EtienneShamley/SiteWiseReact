@@ -15,6 +15,7 @@ import { loadTree, saveTree } from "../lib/treeStorage";
 import { migrateLegacyNotePdfs } from "../lib/pdfMigration";
 import { runTemplateMigration } from "../lib/templateMigration";
 import { migrateTemplateLogos } from "../lib/templateLogoMigration";
+import { migrateNoteAttachments } from "../lib/noteAttachmentMigration";
 
 export const AppStateContext = createContext();
 
@@ -150,12 +151,14 @@ export function AppStateProvider({ children }) {
     return () => { cancelled = true; };
   }, []);
 
-  // -------- One-time template logo storage migration (base64 -> IndexedDB) --
+  // -------- One-time template asset storage migrations (base64 -> IndexedDB)
   // Correctness does NOT depend on React effect ordering: this explicitly runs
   // the synchronous, guarded, idempotent template migration FIRST (so the
-  // TemplateVersions exist), then migrates their logos. A failure leaves the
-  // logo-migration guard unset (safe retry next load) and surfaces in the same
-  // persistence-error banner used elsewhere.
+  // TemplateVersions/instances exist), then migrates version logos, then
+  // legacy note-field attachment evidence (rowImages base64). Each migration
+  // is independently guarded; a failure leaves that migration's guard unset
+  // (safe retry next load) and surfaces in the same persistence-error banner
+  // used elsewhere.
   useEffect(() => {
     if (TEST_RESET) return;
     let cancelled = false;
@@ -166,6 +169,15 @@ export function AppStateProvider({ children }) {
       } catch (err) {
         if (!cancelled) {
           setPersistenceError("Could not migrate template logos: " + (err?.message || err));
+        }
+      }
+      try {
+        await migrateNoteAttachments();
+      } catch (err) {
+        if (!cancelled) {
+          setPersistenceError(
+            "Could not migrate note attachments: " + (err?.message || err)
+          );
         }
       }
     })();

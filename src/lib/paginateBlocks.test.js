@@ -6,6 +6,7 @@
 import {
   paginateBlocks,
   resolveBlockHeight,
+  annotateGroupContinuations,
   countPages,
   placedBlockIds,
   FIT_EPSILON_PX,
@@ -187,5 +188,115 @@ describe("derived, not persisted", () => {
         expect(block).not.toHaveProperty("page");
       }
     }
+  });
+});
+
+describe("compound attachment fields: atomic photo blocks", () => {
+  test("a photo block that does not fit moves whole to the next page (never split)", () => {
+    const res = paginateBlocks(
+      [B("head", 100), B("photo-1", 600, { group: "f" }), B("photo-2", 600, { group: "f" })],
+      USABLE
+    );
+    expect(countPages(res)).toBe(2);
+    expect(res.pages[0].map((b) => b.id)).toEqual(["head", "photo-1"]);
+    expect(res.pages[1].map((b) => b.id)).toEqual(["photo-2"]);
+    // Whole blocks only — no head/tail parts.
+    for (const page of res.pages) {
+      for (const b of page) expect(b.part).toBeUndefined();
+    }
+  });
+
+  test("multi-photo fields continue across pages with exact order and no drops/dupes", () => {
+    const blocks = [
+      B("head", 80, { group: "f", keepWithNext: true }),
+      ...Array.from({ length: 6 }, (_, i) => B(`p${i}`, 400, { group: "f" })),
+    ];
+    const res = paginateBlocks(blocks, USABLE);
+    expect(placedBlockIds(res)).toEqual(["head", "p0", "p1", "p2", "p3", "p4", "p5"]);
+  });
+});
+
+describe("keepWithNext (no orphaned field headings)", () => {
+  test("a header alone at a page bottom moves to the next page with its first attachment", () => {
+    // filler leaves exactly 100px; header (80) would fit alone, but its
+    // partner (400) would not — both must move together.
+    const res = paginateBlocks(
+      [
+        B("filler", 900),
+        B("head", 80, { group: "f", keepWithNext: true }),
+        B("p0", 400, { group: "f" }),
+      ],
+      USABLE
+    );
+    expect(countPages(res)).toBe(2);
+    expect(res.pages[0].map((b) => b.id)).toEqual(["filler"]);
+    expect(res.pages[1].map((b) => b.id)).toEqual(["head", "p0"]);
+  });
+
+  test("the pair stays where it is when both fit the remaining space", () => {
+    const res = paginateBlocks(
+      [
+        B("filler", 400),
+        B("head", 80, { group: "f", keepWithNext: true }),
+        B("p0", 400, { group: "f" }),
+      ],
+      USABLE
+    );
+    expect(countPages(res)).toBe(1);
+  });
+
+  test("a pair taller than a whole page still stays together (page grows)", () => {
+    const res = paginateBlocks(
+      [
+        B("filler", 500),
+        B("head", 80, { group: "f", keepWithNext: true }),
+        B("p0", USABLE - 20, { group: "f" }),
+      ],
+      USABLE
+    );
+    expect(countPages(res)).toBe(2);
+    expect(res.pages[1].map((b) => b.id)).toEqual(["head", "p0"]);
+  });
+
+  test("keepWithNext on the last block is a no-op", () => {
+    const res = paginateBlocks([B("head", 80, { keepWithNext: true })], USABLE);
+    expect(countPages(res)).toBe(1);
+    expect(placedBlockIds(res)).toEqual(["head"]);
+  });
+});
+
+describe("annotateGroupContinuations", () => {
+  test("marks the first block of a page that resumes the previous page's group", () => {
+    const res = paginateBlocks(
+      [
+        B("head", 100, { group: "f", keepWithNext: true }),
+        B("p0", 600, { group: "f" }),
+        B("p1", 600, { group: "f" }),
+        B("p2", 600, { group: "f" }),
+      ],
+      USABLE
+    );
+    annotateGroupContinuations(res.pages);
+    expect(countPages(res)).toBe(3);
+    // Page 2 and 3 resume the same field.
+    expect(res.pages[1][0].continuedFromPrevPage).toBe(true);
+    expect(res.pages[2][0].continuedFromPrevPage).toBe(true);
+    // The field's first page is NOT a continuation.
+    expect(res.pages[0][0].continuedFromPrevPage).toBeUndefined();
+  });
+
+  test("does not mark a page whose first block belongs to a different group", () => {
+    const res = paginateBlocks(
+      [B("a", 900, { group: "f1" }), B("b", 900, { group: "f2" })],
+      USABLE
+    );
+    annotateGroupContinuations(res.pages);
+    expect(res.pages[1][0].continuedFromPrevPage).toBeUndefined();
+  });
+
+  test("ungrouped blocks are never marked", () => {
+    const res = paginateBlocks([B("a", 900), B("b", 900)], USABLE);
+    annotateGroupContinuations(res.pages);
+    expect(res.pages[1][0].continuedFromPrevPage).toBeUndefined();
   });
 });

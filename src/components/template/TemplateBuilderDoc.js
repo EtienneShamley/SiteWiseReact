@@ -66,10 +66,6 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     ? "ready"
     : "idle";
 
-  // demo-only image state (not part of template definition)
-  const [rowImages, setRowImages] = useState({});
-  const [pendingRowId, setPendingRowId] = useState(null);
-
   const addRow = () => setRows((prev) => [...prev, makeNewRow("New Field")]);
 
   // Validate + store the uploaded file as a Blob asset. On invalid input we
@@ -116,28 +112,6 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     };
   }, []);
 
-  function handleRequestAddImage(rowId) {
-    setPendingRowId(rowId);
-    const input = document.getElementById("template-image-input");
-    if (input) input.click();
-  }
-
-  function handleImageSelect(e) {
-    const files = Array.from(e.target.files || []);
-    if (!files.length || !pendingRowId) return;
-
-    setRowImages((prev) => {
-      const existing = prev[pendingRowId] || [];
-      return {
-        ...prev,
-        [pendingRowId]: [...existing, ...files],
-      };
-    });
-
-    e.target.value = "";
-    setPendingRowId(null);
-  }
-
   function handleSubmitTemplate() {
     const definition = {
       leftPct,
@@ -182,15 +156,6 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     <div className="p-4 text-black dark:text-white">
       <h1 className="text-xl font-semibold mb-4">Template Builder</h1>
 
-      <input
-        id="template-image-input"
-        type="file"
-        accept="image/*,application/pdf"
-        multiple
-        className="hidden"
-        onChange={handleImageSelect}
-      />
-
       <ResizableTwoColTable
         leftPct={leftPct}
         rows={rows}
@@ -202,8 +167,6 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
         onLogoFile={handleLogoFile}
         onLogoChange={handleLogoRemove}
         logoLocked={false}
-        rowImages={rowImages}
-        onRequestAddImage={handleRequestAddImage}
         enableFieldTypeEditor={true}
       />
 

@@ -15,6 +15,19 @@ import {
   normalizeType,
   displayTextValue,
 } from "../../lib/templateFields";
+import {
+  ALLOWED_PHOTO_MIME_TYPES,
+  ALLOWED_NOTE_FILE_EXTENSIONS,
+} from "../../lib/assetStorage";
+import {
+  ATTACHMENT_KIND,
+  isLegacyAttachmentEntry,
+  isLegacyMigratedAttachment,
+  normalizeAttachment,
+} from "../../lib/noteAttachments";
+import PhotoAttachment from "./PhotoAttachment";
+import FileAttachmentRow from "./FileAttachmentRow";
+import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 
 /**
  * Two-column template table, rendered as a page-aware A4 document.
@@ -22,8 +35,8 @@ import {
  * The document content (logo header + each field row) is emitted as an ordered
  * list of BLOCKS handed to <PagedDocument>, which flows them across real A4
  * pages automatically (see PagedDocument.js). The editing chrome (add row,
- * column width, add image, hints) lives ABOVE the paged document on the app
- * surface — it is not document content and does not consume page space.
+ * column width, hints) lives ABOVE the paged document on the app surface — it
+ * is not document content and does not consume page space.
  *
  * The same component renders the Template Builder and the completed note
  * (parity), so both get identical page geometry. Page assignment is derived by
@@ -33,6 +46,24 @@ import {
  * The unified Text field auto-grows with its content (no inner scrollbar), so a
  * row's actual height = max(preferred height, content-required height); a taller
  * row simply consumes more page space and can push later rows to the next page.
+ *
+ * ATTACHMENT FIELDS (Photo / File, note mode only):
+ * - Evidence lives on the NoteTemplateInstance as lightweight asset references
+ *   (see src/lib/noteAttachments.js); the Blob is in IndexedDB only.
+ * - An attachment field is a COMPOUND document field: a head block (label +
+ *   upload control + inline errors) followed by one block per attachment, all
+ *   sharing the field's `group`. Each attachment is atomic — pagination moves
+ *   it whole to the next page instead of splitting it — while the field as a
+ *   whole may continue across pages ("Label — continued" context in the left
+ *   cell). `keepWithNext` on the head prevents an orphaned heading at a page
+ *   bottom: the head always stays with the first attachment.
+ * - New attachments render ONLY under a Photo/File-typed field (the pinned
+ *   version's type governs). Legacy base64 rowImages evidence — and entries
+ *   migrated from it (source "legacy-rowimages") — keep rendering on whatever
+ *   row they were attached to, via a narrow compatibility strip, because those
+ *   rows predate the Photo/File types.
+ * - The Builder never uploads evidence: Photo/File rows show a static
+ *   placeholder ("Photos/Files can be added when completing this note.").
  *
  * LOGO:
  * - The logo is a Blob asset in IndexedDB (src/lib/assetStorage.js); the parent
@@ -66,8 +97,32 @@ function AutoGrowTextarea({ value, onFocus, onChange, placeholder, className }) 
   );
 }
 
+// Legacy-compatibility thumbnail for an already-MIGRATED legacy image that sits
+// on a row whose pinned type is not Photo/File (the row predates those types).
+// Module-scope so its hook state survives re-renders.
+function LegacyAssetImage({ attachment, maxH }) {
+  const { url, status } = useAssetObjectUrl(attachment.assetId);
+  if (status === "loading" || status === "idle") {
+    return <div className="legacy-img-placeholder">Loading image…</div>;
+  }
+  if (status !== "ready" || !url) {
+    return <div className="legacy-img-placeholder">Image unavailable</div>;
+  }
+  return (
+    <img
+      src={url}
+      alt={attachment.name || "Attached image"}
+      className="twocol-img"
+      style={{ maxHeight: `${maxH}px` }}
+    />
+  );
+}
+
 // Logo asset id used as this block's stable pagination id (constant string).
 const LOGO_BLOCK_ID = "__template_logo__";
+
+const PHOTO_ACCEPT = ALLOWED_PHOTO_MIME_TYPES.join(",");
+const FILE_ACCEPT = ALLOWED_NOTE_FILE_EXTENSIONS.join(",");
 
 export default function ResizableTwoColTable({
   leftPct = 18,
@@ -79,16 +134,23 @@ export default function ResizableTwoColTable({
   logoStatus = "idle",
   onLogoFile,
   onLogoChange,
-  rowImages = {},
-  onRequestAddImage,
   enableRightEditor = false,
   rightValues = {},
   onRightChange,
   onRightFocus,
-  onRemoveImage,
   logoLocked = false,
   enableFieldTypeEditor = false,
   knownOptionIds = null,
+  // Attachment evidence (note mode): raw instance attachments map keyed by
+  // field id; arrays may mix legacy base64 strings and structured references.
+  attachments = {},
+  onAddAttachments, // (fieldId, kind, files: File[]) => void
+  onRemoveAttachment, // (fieldId, index) => void
+  onUpdateAttachmentDisplay, // (fieldId, index, displayPatch) => void
+  fieldErrors = {}, // { [fieldId]: message }
+  fieldBusy = {}, // { [fieldId]: true while uploading }
+  onDismissFieldError, // (fieldId) => void
+  onFieldError, // (fieldId, message) => void — e.g. a failed file open
 }) {
   const [rowDrag, setRowDrag] = useState(null);
 
@@ -144,36 +206,6 @@ export default function ResizableTwoColTable({
     onLogoFile(file);
   };
 
-  // ---------- GLOBAL ADD IMAGE/FILE ----------
-  const handleGlobalAddImage = () => {
-    if (!onRequestAddImage || !rows.length) return;
-
-    const query = prompt(
-      "Type part of the row name OR a row number (1, 2, 3, ...) to add image/file into:"
-    );
-    if (!query) return;
-
-    const trimmed = query.trim();
-
-    if (/^\d+$/.test(trimmed)) {
-      const idx = parseInt(trimmed, 10) - 1;
-      if (idx >= 0 && idx < rows.length) {
-        onRequestAddImage(rows[idx].id);
-        return;
-      }
-    }
-
-    const lower = trimmed.toLowerCase();
-    const target = rows.find((r) =>
-      (r.label || "").toLowerCase().includes(lower)
-    );
-    if (!target) {
-      alert("No matching row found.");
-      return;
-    }
-    onRequestAddImage(target.id);
-  };
-
   const showRightEditor = !!enableRightEditor;
 
   // ---------- ROW MUTATION HELPERS (builder field-type editor) ----------
@@ -227,6 +259,10 @@ export default function ResizableTwoColTable({
     const inputCls =
       "w-full bg-white text-sm outline-none border border-gray-300 " +
       "rounded px-2 py-1 text-black";
+
+    // Attachment fields never take a typed answer control (evidence renders
+    // through the compound-field blocks instead).
+    if (type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE) return null;
 
     if (type === FIELD_TYPE.NUMBER) {
       return (
@@ -383,6 +419,46 @@ export default function ResizableTwoColTable({
     );
   }
 
+  // ---------- SHARED CELL RENDERERS ----------
+  function renderLabelCell(row) {
+    return (
+      <div className="twocol-cell-left px-3 py-2 flex items-stretch">
+        <textarea
+          className="
+            w-full h-full bg-transparent text-sm font-medium outline-none
+            resize-none overflow-hidden leading-tight text-black
+          "
+          value={row.label}
+          onChange={(e) => {
+            const text = e.target.value;
+            const next = rows.map((r) =>
+              r.id === row.id ? { ...r, label: text } : r
+            );
+            onRowsChange && onRowsChange(next);
+          }}
+        />
+      </div>
+    );
+  }
+
+  function renderFieldError(fieldId) {
+    const message = fieldErrors[fieldId];
+    if (!message) return null;
+    return (
+      <div className="attach-error" role="alert">
+        <span className="attach-error-text">{message}</span>
+        <button
+          type="button"
+          className="attach-error-dismiss"
+          aria-label="Dismiss error message"
+          onClick={() => onDismissFieldError && onDismissFieldError(fieldId)}
+        >
+          ×
+        </button>
+      </div>
+    );
+  }
+
   // ---------- BLOCK RENDERERS (document content on the A4 pages) ----------
   function renderLogoBlock() {
     return (
@@ -426,10 +502,26 @@ export default function ResizableTwoColTable({
     );
   }
 
+  // A standard (non-attachment) row. Legacy base64 evidence — and entries
+  // migrated from it — attached to this row keeps rendering here through a
+  // narrow compatibility strip, since these rows predate the Photo/File types.
   function renderRowBlock(row, idx) {
-    const imgs = rowImages[row.id] || [];
+    const type = normalizeType(row.type);
+    const rawList = showRightEditor ? attachments[row.id] || [] : [];
+    const legacyItems = [];
+    rawList.forEach((e, index) => {
+      if (isLegacyAttachmentEntry(e)) {
+        legacyItems.push({ raw: e, norm: e, index });
+        return;
+      }
+      const norm = normalizeAttachment(e);
+      if (norm && isLegacyMigratedAttachment(norm)) {
+        legacyItems.push({ raw: e, norm, index });
+      }
+    });
+
     const baseMin = row.px || 120;
-    const effectiveMin = imgs.length ? Math.max(baseMin, 170) : baseMin;
+    const effectiveMin = legacyItems.length ? Math.max(baseMin, 170) : baseMin;
     const imgMaxH = Math.max(80, effectiveMin * 0.6);
 
     return (
@@ -440,58 +532,65 @@ export default function ResizableTwoColTable({
           minHeight: `${effectiveMin}px`,
         }}
       >
-        {/* LEFT COLUMN — label */}
-        <div className="twocol-cell-left px-3 py-2 flex items-stretch">
-          <textarea
-            className="
-              w-full h-full bg-transparent text-sm font-medium outline-none
-              resize-none overflow-hidden leading-tight text-black
-            "
-            value={row.label}
-            onChange={(e) => {
-              const text = e.target.value;
-              const next = rows.map((r) =>
-                r.id === row.id ? { ...r, label: text } : r
-              );
-              onRowsChange && onRowsChange(next);
-            }}
-          />
-        </div>
+        {renderLabelCell(row)}
 
-        {/* RIGHT COLUMN — image(s) at top, then the field control */}
+        {/* RIGHT COLUMN — legacy evidence strip (compat), then the control */}
         <div className="twocol-cell-right px-3 py-2 text-black flex flex-col">
-          {imgs.length > 0 && (
+          {legacyItems.length > 0 && (
             <div className="flex flex-wrap gap-2 items-start justify-start mb-2">
-              {imgs.map((f, i) => {
-                const src = typeof f === "string" ? f : URL.createObjectURL(f);
-                return (
-                  <div key={`${row.id}_${i}`} className="relative inline-block">
+              {legacyItems.map((item) => (
+                <div
+                  key={`${row.id}_legacy_${item.index}`}
+                  className="relative inline-block"
+                >
+                  {typeof item.norm === "string" ? (
                     <img
-                      src={src}
-                      alt={f.name || `image-${i}`}
+                      src={item.norm}
+                      alt={`Attachment ${item.index + 1}`}
                       className="twocol-img"
                       style={{ maxHeight: `${imgMaxH}px` }}
                     />
-                    {onRemoveImage && (
-                      <button
-                        type="button"
-                        className="
-                          absolute -top-2 -right-2 w-5 h-5 rounded-full
-                          bg-black/70 text-white text-xs flex items-center justify-center
-                        "
-                        onClick={() => onRemoveImage(row.id, i)}
-                        title="Remove image"
-                      >
-                        ×
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
+                  ) : item.norm.kind === ATTACHMENT_KIND.FILE ? (
+                    <FileAttachmentRow
+                      attachment={item.norm}
+                      onRemove={() =>
+                        onRemoveAttachment && onRemoveAttachment(row.id, item.index)
+                      }
+                      onError={(msg) => onFieldError && onFieldError(row.id, msg)}
+                    />
+                  ) : (
+                    <LegacyAssetImage attachment={item.norm} maxH={imgMaxH} />
+                  )}
+                  {onRemoveAttachment && item.norm.kind !== ATTACHMENT_KIND.FILE && (
+                    <button
+                      type="button"
+                      className="
+                        absolute -top-2 -right-2 w-5 h-5 rounded-full
+                        bg-black/70 text-white text-xs flex items-center justify-center
+                      "
+                      onClick={() => onRemoveAttachment(row.id, item.index)}
+                      title="Remove image"
+                      aria-label={`Remove attached image ${item.index + 1}`}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
+          {showRightEditor && renderFieldError(row.id)}
           {showRightEditor && renderAnswerControl(row)}
+
+          {enableFieldTypeEditor &&
+            (type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE) && (
+              <div className="attach-builder-placeholder">
+                {type === FIELD_TYPE.PHOTO
+                  ? "Photos can be added when completing this note."
+                  : "Files can be added when completing this note."}
+              </div>
+            )}
 
           {enableFieldTypeEditor && renderFieldTypeEditor(row)}
         </div>
@@ -505,9 +604,159 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // Ordered document blocks: logo header first, then one block per row. Height
-  // hints are the PREFERRED/minimum heights; PagedDocument measures the real
-  // rendered height and distributes across pages.
+  // Head block of a compound Photo/File field (note mode): label + upload
+  // control + inline status/errors. keepWithNext keeps it with the first
+  // attachment so a heading is never orphaned at a page bottom.
+  function renderAttachmentHead(row, idx, type, count) {
+    const isPhoto = type === FIELD_TYPE.PHOTO;
+    const busy = !!fieldBusy[row.id];
+    // The dragged row.px stays the head's preferred height, so row-height
+    // dragging keeps working on attachment fields (floor of 56 fits the
+    // upload control).
+    const headMin = Math.max(56, row.px || 56);
+    return (
+      <div
+        className="twocol-row grid"
+        style={{
+          gridTemplateColumns: `${leftWidth} 1fr`,
+          minHeight: `${headMin}px`,
+        }}
+      >
+        {renderLabelCell(row)}
+
+        <div className="twocol-cell-right px-3 py-2 text-black flex flex-col items-start gap-1">
+          <label className={`attach-upload-btn ${busy ? "attach-upload-btn--busy" : ""}`}>
+            {busy ? "Uploading…" : isPhoto ? "Upload Photo" : "Add File"}
+            <input
+              type="file"
+              multiple
+              className="sr-only"
+              accept={isPhoto ? PHOTO_ACCEPT : FILE_ACCEPT}
+              disabled={busy}
+              aria-label={
+                isPhoto
+                  ? `Upload photos for ${row.label || "this field"}`
+                  : `Add files for ${row.label || "this field"}`
+              }
+              onFocus={() => onRightFocus && onRightFocus(row.id)}
+              onChange={(e) => {
+                const files = e.target.files ? Array.from(e.target.files) : [];
+                e.target.value = ""; // allow re-selecting the same file
+                if (files.length && onAddAttachments) {
+                  onAddAttachments(
+                    row.id,
+                    isPhoto ? ATTACHMENT_KIND.PHOTO : ATTACHMENT_KIND.FILE,
+                    files
+                  );
+                }
+              }}
+            />
+          </label>
+
+          {count === 0 && !busy && (
+            <span className="attach-empty-hint">
+              {isPhoto ? "No photos added yet." : "No files added yet."}
+            </span>
+          )}
+
+          {renderFieldError(row.id)}
+        </div>
+
+        {/* ROW DRAG HANDLE */}
+        <div
+          className="twocol-resize-handle"
+          onMouseDown={(e) => startRowDrag(idx, e)}
+        />
+      </div>
+    );
+  }
+
+  // One attachment of a compound Photo/File field — an atomic document block.
+  // When the field resumes on a new page, the left cell shows restrained
+  // "Label — continued" context (ctx comes from PagedDocument).
+  function renderAttachmentSegment(row, type, item, ctx) {
+    const continued = !!(ctx && ctx.continuedFromPrevPage);
+    const norm = item.norm;
+
+    let content;
+    if (typeof norm === "string") {
+      // Un-migrated legacy base64 entry keyed to a Photo/File field.
+      content = (
+        <div className="relative inline-block">
+          <img
+            src={norm}
+            alt={`Attachment ${item.index + 1}`}
+            className="twocol-img"
+            style={{ maxHeight: "170px" }}
+          />
+          {onRemoveAttachment && (
+            <button
+              type="button"
+              className="
+                absolute -top-2 -right-2 w-5 h-5 rounded-full
+                bg-black/70 text-white text-xs flex items-center justify-center
+              "
+              onClick={() => onRemoveAttachment(row.id, item.index)}
+              title="Remove image"
+              aria-label={`Remove attached image ${item.index + 1}`}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      );
+    } else if (norm.kind === ATTACHMENT_KIND.FILE) {
+      content = (
+        <FileAttachmentRow
+          attachment={norm}
+          onRemove={() =>
+            onRemoveAttachment && onRemoveAttachment(row.id, item.index)
+          }
+          onError={(msg) => onFieldError && onFieldError(row.id, msg)}
+        />
+      );
+    } else {
+      content = (
+        <PhotoAttachment
+          attachment={norm}
+          onChangeDisplay={(patch) =>
+            onUpdateAttachmentDisplay &&
+            onUpdateAttachmentDisplay(row.id, item.index, patch)
+          }
+          onRemove={() =>
+            onRemoveAttachment && onRemoveAttachment(row.id, item.index)
+          }
+        />
+      );
+    }
+
+    return (
+      <div
+        className={`twocol-row twocol-seg grid ${
+          continued ? "twocol-seg--resume" : ""
+        }`}
+        style={{ gridTemplateColumns: `${leftWidth} 1fr` }}
+      >
+        <div className="twocol-cell-left twocol-seg-left px-3 py-2">
+          {continued && (
+            <span
+              className="twocol-seg-continued"
+              title={`${row.label || "Field"} — continued`}
+            >
+              {row.label || "Field"} — continued
+            </span>
+          )}
+        </div>
+        <div className="twocol-cell-right px-3 py-2 text-black">{content}</div>
+      </div>
+    );
+  }
+
+  // Ordered document blocks: logo header first, then the blocks of each row.
+  // Height hints are the PREFERRED/minimum heights; PagedDocument measures the
+  // real rendered height and distributes across pages. Photo/File fields (note
+  // mode) are compound: a head block + one atomic block per attachment, all
+  // sharing the field's group so continuation context can be rendered.
   const blocks = [
     {
       id: LOGO_BLOCK_ID,
@@ -515,20 +764,50 @@ export default function ResizableTwoColTable({
       splittable: false,
       render: renderLogoBlock,
     },
-    ...rows.map((row, idx) => {
-      const imgs = rowImages[row.id] || [];
-      const baseMin = row.px || 120;
-      const effectiveMin = imgs.length ? Math.max(baseMin, 170) : baseMin;
-      return {
+  ];
+  rows.forEach((row, idx) => {
+    const type = normalizeType(row.type);
+    const isAttachmentField =
+      showRightEditor &&
+      (type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE);
+
+    if (!isAttachmentField) {
+      blocks.push({
         id: row.id,
-        minHeight: effectiveMin,
+        minHeight: row.px || 120,
         // Editable rows are not sliced across pages in this phase; they grow
         // their page while being edited (see PagedDocument).
         splittable: false,
         render: () => renderRowBlock(row, idx),
-      };
-    }),
-  ];
+      });
+      return;
+    }
+
+    const rawList = attachments[row.id] || [];
+    const items = rawList
+      .map((raw, index) => ({ raw, norm: normalizeAttachment(raw), index }))
+      .filter((x) => x.norm !== null);
+
+    blocks.push({
+      id: row.id,
+      group: row.id,
+      minHeight: Math.max(56, row.px || 56),
+      keepWithNext: items.length > 0,
+      splittable: false,
+      render: () => renderAttachmentHead(row, idx, type, items.length),
+    });
+    items.forEach((item) => {
+      blocks.push({
+        id: `${row.id}::att-${
+          typeof item.norm === "string" ? `legacy-${item.index}` : item.norm.id
+        }`,
+        group: row.id,
+        minHeight: type === FIELD_TYPE.FILE ? 36 : 60,
+        splittable: false,
+        render: (ctx) => renderAttachmentSegment(row, type, item, ctx),
+      });
+    });
+  });
 
   return (
     <div className="w-full">
@@ -555,13 +834,6 @@ export default function ResizableTwoColTable({
             onClick={onAddRow}
           >
             Add Row
-          </button>
-
-          <button
-            className="px-3 py-1 border rounded bg-white dark:bg-neutral-800 text-black dark:text-white"
-            onClick={handleGlobalAddImage}
-          >
-            Add image/file
           </button>
         </div>
 

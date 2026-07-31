@@ -18,10 +18,48 @@ const DB_NAME = "notewise-assets";
 const DB_VERSION = 1;
 const STORE = "assets";
 
-// Logo upload constraints (this phase covers template logos only). SVG is
-// intentionally excluded.
+// Logo upload constraints. SVG is intentionally excluded.
 export const ALLOWED_LOGO_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"];
 export const MAX_LOGO_BYTES = 5 * 1024 * 1024; // 5 MB
+
+// Note Photo-field constraints (evidence photos on a completed note).
+export const ALLOWED_PHOTO_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"];
+export const MAX_PHOTO_BYTES = 15 * 1024 * 1024; // 15 MB
+
+// Note File-field constraints. MIME types vary by OS/browser for Office and CSV
+// files, so validation accepts a file when EITHER its MIME type or its
+// extension is on the allowlist (see validateNoteFile).
+export const ALLOWED_NOTE_FILE_MIME_TYPES = [
+  "application/pdf",
+  "application/msword", // .doc
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+  "application/vnd.ms-excel", // .xls (also reported for .csv on some systems)
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
+  "text/csv",
+  "text/plain",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+];
+export const ALLOWED_NOTE_FILE_EXTENSIONS = [
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".xls",
+  ".xlsx",
+  ".csv",
+  ".txt",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+];
+export const MAX_NOTE_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
+
+// Asset kinds for note-field evidence (photo/file attachments referenced from
+// a NoteTemplateInstance — see src/lib/noteAttachments.js).
+export const ASSET_KIND_NOTE_PHOTO = "note-photo";
+export const ASSET_KIND_NOTE_FILE = "note-file";
 
 let dbPromise = null;
 
@@ -126,6 +164,61 @@ export function validateLogoFile(file) {
   return { ok: true };
 }
 
+// Validates a candidate note-Photo File/Blob. Same contract as
+// validateLogoFile: returns { ok: true } or { ok: false, error }, never throws.
+export function validatePhotoFile(file) {
+  if (!file || typeof file.size !== "number") {
+    return { ok: false, error: "No file was selected." };
+  }
+  if (file.size === 0) {
+    return { ok: false, error: "That file is empty or unreadable." };
+  }
+  if (!ALLOWED_PHOTO_MIME_TYPES.includes(file.type)) {
+    return {
+      ok: false,
+      error: "Unsupported photo type. Use a PNG, JPEG or WebP image.",
+    };
+  }
+  if (file.size > MAX_PHOTO_BYTES) {
+    return { ok: false, error: "That photo is larger than the 15 MB limit." };
+  }
+  return { ok: true };
+}
+
+// Extracts a lowercase ".ext" from a filename, or "" when there is none.
+export function fileExtension(name) {
+  if (typeof name !== "string") return "";
+  const idx = name.lastIndexOf(".");
+  if (idx <= 0 || idx === name.length - 1) return "";
+  return name.slice(idx).toLowerCase();
+}
+
+// Validates a candidate note-File attachment. A file passes when its MIME type
+// OR its extension is allowlisted — Office/CSV MIME types are inconsistent
+// across platforms, so extension is an accepted fallback signal; anything
+// matching neither is rejected.
+export function validateNoteFile(file) {
+  if (!file || typeof file.size !== "number") {
+    return { ok: false, error: "No file was selected." };
+  }
+  if (file.size === 0) {
+    return { ok: false, error: "That file is empty or unreadable." };
+  }
+  const mimeOk = ALLOWED_NOTE_FILE_MIME_TYPES.includes(file.type);
+  const extOk = ALLOWED_NOTE_FILE_EXTENSIONS.includes(fileExtension(file.name));
+  if (!mimeOk && !extOk) {
+    return {
+      ok: false,
+      error:
+        "Unsupported file type. Use PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, PNG, JPEG or WebP.",
+    };
+  }
+  if (file.size > MAX_NOTE_FILE_BYTES) {
+    return { ok: false, error: "That file is larger than the 20 MB limit." };
+  }
+  return { ok: true };
+}
+
 // Converts a data: URL (e.g. a legacy base64 logoSrc) into a Blob without
 // fetch(). Returns null for anything that is not a valid, non-empty data URL,
 // so the migration can safely skip non-migratable values.
@@ -201,6 +294,35 @@ export async function createLogoAsset(file) {
     kind: "logo",
     name: file.name || null,
     blob: file,
+  });
+  await saveAsset(record);
+  return record.id;
+}
+
+// Creates and persists a NEW note-Photo asset (validation is the caller's
+// responsibility via validatePhotoFile so per-file errors can be collected for
+// multi-select uploads). Resolves to the new asset id after the IndexedDB
+// transaction completes — a resolved promise IS the write confirmation.
+export async function createPhotoAsset(file, metadata) {
+  const record = makeAssetRecord({
+    id: newId(),
+    kind: ASSET_KIND_NOTE_PHOTO,
+    name: file.name || null,
+    blob: file,
+    metadata,
+  });
+  await saveAsset(record);
+  return record.id;
+}
+
+// Creates and persists a NEW note-File asset. Same contract as createPhotoAsset.
+export async function createNoteFileAsset(file, metadata) {
+  const record = makeAssetRecord({
+    id: newId(),
+    kind: ASSET_KIND_NOTE_FILE,
+    name: file.name || null,
+    blob: file,
+    metadata,
   });
   await saveAsset(record);
   return record.id;
