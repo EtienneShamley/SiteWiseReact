@@ -37,6 +37,7 @@ import {
   normalizeDisplay,
 } from "../../lib/noteAttachments";
 import { newId } from "../../lib/id";
+import { normalizeBranding } from "../../lib/templateBranding";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 
 /**
@@ -118,6 +119,11 @@ export default function NoteTemplateDoc({
   // `legacyLogoSrc` is the fallback for an un-migrated pinned version.
   const [logoAssetId, setLogoAssetId] = useState(null);
   const [legacyLogoSrc, setLegacyLogoSrc] = useState(null);
+  // Company branding comes from the PINNED version and is strictly read-only
+  // here: a completed note renders the branding it was created against and can
+  // never edit or republish the company template. A version published before
+  // branding existed normalizes to defaults that reproduce its old appearance.
+  const [branding, setBranding] = useState(() => normalizeBranding(undefined));
 
   // All known dropdown option ids (across every template version). Used to
   // recognize a stored answer that is actually an option id — e.g. a field
@@ -172,6 +178,7 @@ export default function NoteTemplateDoc({
     }
     setLogoAssetId(version.logoAssetId ?? null);
     setLegacyLogoSrc(version.logoSrc || null);
+    setBranding(normalizeBranding(version.branding));
   }, [instance?.templateVersionId, instance?.templateId]);
 
   // Resolve the pinned version's logo asset to an object URL (lifecycle-managed
@@ -683,7 +690,9 @@ export default function NoteTemplateDoc({
         addRowLabel="Add section at end"
         logoUrl={logoUrl}
         logoStatus={logoStatus}
-        // NOTE: no onLogoFile/onLogoChange here -> logo is fixed in notes
+        branding={branding}
+        // NOTE: no logo upload/remove and no onBrandingLogoChange here — the
+        // header, title and table colours are read-only in a completed note.
         enableRightEditor={true}
         rightValues={rightValues}
         onRightChange={handleRightChange}

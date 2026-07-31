@@ -1,0 +1,234 @@
+/* src/components/template/branding.css
+ *
+ * The branded document header (banner + bounded logo area) and the report title
+ * block. These are DOCUMENT content: they sit on the white A4 paper inside the
+ * page margins and are measured by the page engine like any other block, so
+ * nothing here may add margins or unmeasured overflow.
+ *
+ * Colours are never hardcoded for branding — they arrive as inline style values
+ * produced by src/lib/templateBranding.js (normalized hex only). The rules here
+ * define geometry and the Builder's direct-manipulation affordances.
+ *
+ * The interaction accents use the restrained NoteWise cyan (#39DDE9), matching
+ * the existing document affordances in template.css. */
+
+/* ---- Header box: the bounded region the banner and logo live inside ----
+ *
+ * The gap below the header is PADDING on an outer wrapper, never a margin on
+ * the header itself: a child's bottom margin would collapse out of the block
+ * wrapper's offsetHeight, so the page engine would not count it and content
+ * could creep past the page bottom. Padding is always measured. */
+.brand-header-block {
+  box-sizing: border-box;
+  width: 100%;
+  padding-bottom: 6mm;
+}
+
+.brand-header {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  /* height is supplied inline from branding.header.heightMm */
+  overflow: hidden; /* a shaped banner can never bleed past the header */
+}
+
+/* Brand-colour banner. Position, size, colour and clip-path all come from the
+   layout/shape presets as inline styles. */
+.brand-banner {
+  position: absolute;
+  box-sizing: border-box;
+  /* Branding colours must survive printing rather than being dropped as
+     "background decoration" by the print engine. */
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+/* The bounded area the logo may occupy — a sub-region of the header box, set by
+   the layout preset. The logo is positioned inside THIS box and nowhere else,
+   which is what keeps placement constrained to the branded header. */
+.brand-logo-box {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+/* The logo itself. `left/top` percentages are paired with a matching negative
+   translate (supplied inline), so any value in 0–100 keeps the logo inside the
+   box by construction. Only width is ever set — height stays auto — so the
+   aspect ratio cannot be distorted, and max-height guarantees a tall logo is
+   bounded by the header rather than escaping it. */
+.brand-logo {
+  position: absolute;
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  line-height: 0; /* no descender gap around the image */
+}
+
+.brand-logo-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/* Builder only: the logo becomes directly manipulable. touch-action:none stops
+   the browser claiming the gesture for scrolling, so touch drag works. */
+.brand-logo--editable {
+  cursor: move;
+  touch-action: none;
+  outline: 1px dashed transparent;
+  outline-offset: 3px;
+}
+
+.brand-logo--editable:hover {
+  outline-color: rgba(57, 221, 233, 0.55);
+}
+
+.brand-logo--editable:focus-visible {
+  outline: 2px solid #39dde9;
+  outline-offset: 3px;
+}
+
+/* Visible selection state. */
+.brand-logo--selected,
+.brand-logo--selected:hover {
+  outline: 2px solid #39dde9;
+  outline-offset: 3px;
+}
+
+/* ---- Four corner resize handles (pointer/touch affordance) ----
+ * Pointer-only by design: the keyboard and precision paths are arrow-key
+ * movement on the focused logo and the numeric width/X/Y inputs in the
+ * Document branding panel. They are absolutely positioned, so showing them
+ * never changes the header block's measured height. */
+.brand-logo-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #39dde9;
+  border-radius: 2px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  touch-action: none;
+  z-index: 2;
+}
+
+/* Generous invisible hit area — a finger target without a bigger visible mark. */
+.brand-logo-handle::after {
+  content: "";
+  position: absolute;
+  inset: -10px;
+}
+
+.brand-logo-handle--nw {
+  top: -6px;
+  left: -6px;
+  cursor: nwse-resize;
+}
+.brand-logo-handle--ne {
+  top: -6px;
+  right: -6px;
+  cursor: nesw-resize;
+}
+.brand-logo-handle--sw {
+  bottom: -6px;
+  left: -6px;
+  cursor: nesw-resize;
+}
+.brand-logo-handle--se {
+  bottom: -6px;
+  right: -6px;
+  cursor: nwse-resize;
+}
+
+/* Coarse pointers (touch) have no hover and need larger targets. */
+@media (pointer: coarse) {
+  .brand-logo-handle {
+    width: 18px;
+    height: 18px;
+  }
+  .brand-logo-handle--nw,
+  .brand-logo-handle--ne {
+    top: -9px;
+  }
+  .brand-logo-handle--sw,
+  .brand-logo-handle--se {
+    bottom: -9px;
+  }
+  .brand-logo-handle--nw,
+  .brand-logo-handle--sw {
+    left: -9px;
+  }
+  .brand-logo-handle--ne,
+  .brand-logo-handle--se {
+    right: -9px;
+  }
+  .brand-logo-handle::after {
+    inset: -12px;
+  }
+}
+
+/* ---- Logo placeholder / unavailable states ---- */
+.brand-logo-state {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  max-width: 100%;
+  max-height: 100%;
+  padding: 6px 10px;
+  border: 1px dashed #d1d5db;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: center;
+  background: #fafafa;
+  color: rgba(0, 0, 0, 0.55);
+}
+
+/* A referenced logo asset that could not be read — shown in BOTH the Builder
+   and a completed note, because it means real evidence of branding is missing. */
+.brand-logo-state--missing {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+/* ---- Report title block ---- */
+.brand-title {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0 0 4mm 0;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  /* colour, size, weight and alignment are supplied inline */
+}
+
+.brand-title-placeholder {
+  font-style: italic;
+  opacity: 0.45;
+}
+
+/* ---- Print / export foundation ----
+ * Builder-only affordances never appear on paper; branded colours do. */
+@media print {
+  .brand-logo-handle,
+  .brand-logo-state--empty,
+  .brand-title-placeholder,
+  .branding-panel {
+    display: none !important;
+  }
+
+  .brand-logo--editable,
+  .brand-logo--selected {
+    outline: none !important;
+  }
+
+  .brand-header,
+  .brand-banner {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}

@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import ResizableTwoColTable from "./ResizableTwoColTable";
+import BrandingPanel from "./BrandingPanel";
 import {
   DEFAULT_LEFT_COL_PCT,
   defaultRows,
@@ -13,6 +14,7 @@ import {
 import { FIELD_TYPE, normalizeRows, normalizeType } from "../../lib/templateFields";
 import { appendRow, insertRowAt } from "../../lib/templateRowOps";
 import { createLogoAsset, deleteAsset } from "../../lib/assetStorage";
+import { normalizeBranding } from "../../lib/templateBranding";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 
 // Load the template's current version for editing, so opening the builder
@@ -52,6 +54,17 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     () => loadCurrentDefinition(templateId)?.logoSrc ?? null
   );
 
+  // Company branding for this template. Read straight off the current version
+  // (not via loadCurrentDefinition, which returns null for a row-less template
+  // and would then silently drop the branding). An absent/legacy `branding`
+  // normalizes to defaults that reproduce the previous appearance.
+  const [branding, setBranding] = useState(() =>
+    normalizeBranding(getCurrentVersion(templateId)?.branding)
+  );
+  // Inline error for logo upload — restrained, in-panel, matching the
+  // per-field attachment error pattern rather than a blocking alert().
+  const [logoError, setLogoError] = useState("");
+
   // Asset ids created during THIS builder session. On cancel/unmount, any that
   // were never published (and are provably unreferenced) are cleaned up so
   // temporary uploads don't accumulate. Never touches referenced assets.
@@ -82,22 +95,45 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
   const changeRowHeight = (rowId, px) =>
     setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, px } : r)));
 
+  // Branding edits are DRAFT-ONLY: nothing is stored until "Submit template"
+  // publishes a new immutable version, so a colour picker being dragged cannot
+  // cause version churn. Every write goes back through normalizeBranding, so an
+  // out-of-range or malformed value can never enter the draft.
+  const updateBranding = useCallback((section, patch) => {
+    setBranding((prev) =>
+      normalizeBranding({ ...prev, [section]: { ...prev[section], ...patch } })
+    );
+  }, []);
+
+  // Committed once per gesture by the direct-manipulation header (on pointer
+  // release), and by the panel's numeric width/X/Y inputs.
+  const updateLogoPlacement = useCallback((placement) => {
+    setBranding((prev) =>
+      normalizeBranding({
+        ...prev,
+        header: { ...prev.header, logo: { ...prev.header.logo, ...placement } },
+      })
+    );
+  }, []);
+
   // Validate + store the uploaded file as a Blob asset. On invalid input we
   // show a clear error, create NO asset, and preserve the previous logo.
   async function handleLogoFile(file) {
+    setLogoError("");
     try {
       const id = await createLogoAsset(file);
       draftAssetIds.current.add(id);
       setLogoAssetId(id);
       setLegacyLogoSrc(null);
     } catch (err) {
-      alert(err?.message || "Could not add that logo.");
+      setLogoError(err?.message || "Could not add that logo.");
     }
   }
 
   // Remove clears the draft reference only; publishing this creates a new
   // version. Older versions keep their own logo reference untouched.
   function handleLogoRemove() {
+    setLogoError("");
     setLogoAssetId(null);
     setLegacyLogoSrc(null);
   }
@@ -133,6 +169,10 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
       // Carry a legacy data URL forward ONLY when there is no asset (an
       // un-migrated version saved unchanged), so an existing logo is never lost.
       logoSrc: logoAssetId ? null : legacyLogoSrc ?? null,
+      // Branding travels with the version. Publishing an unchanged template
+      // whose branding is still the defaults stays a no-op (the model
+      // normalizes both sides of its comparison).
+      branding,
       rows: rows.map((r) => {
         const type = normalizeType(r.type);
         const base = {
@@ -170,6 +210,18 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     <div className="p-4 text-black dark:text-white">
       <h1 className="text-xl font-semibold mb-4">Template Builder</h1>
 
+      {/* Branding controls are kept separate from the ordinary row controls and
+          are collapsed by default, so the A4 document stays visible. */}
+      <BrandingPanel
+        branding={branding}
+        onChange={updateBranding}
+        onLogoPlacementChange={updateLogoPlacement}
+        hasLogo={!!(logoAssetId || legacyLogoSrc)}
+        logoError={logoError}
+        onLogoFile={handleLogoFile}
+        onLogoRemove={handleLogoRemove}
+      />
+
       <ResizableTwoColTable
         leftPct={leftPct}
         rows={rows}
@@ -178,8 +230,8 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
         onLeftPctChange={setLeftPct}
         logoUrl={logoUrl}
         logoStatus={logoStatus}
-        onLogoFile={handleLogoFile}
-        onLogoChange={handleLogoRemove}
+        branding={branding}
+        onBrandingLogoChange={updateLogoPlacement}
         logoLocked={false}
         enableFieldTypeEditor={true}
         rowActionsMode="builder"

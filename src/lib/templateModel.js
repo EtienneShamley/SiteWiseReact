@@ -8,6 +8,7 @@ import {
   defaultRows,
 } from "../templates/defaultTwoColDoc";
 import { newId } from "./id";
+import { normalizeBranding } from "./templateBranding";
 
 export const TEMPLATES_KEY = "sitewise-templates-v1";
 export const TEMPLATE_VERSIONS_KEY = "sitewise-template-versions-v1";
@@ -38,7 +39,17 @@ function saveMap(key, map) {
 export const getTemplates = () => loadMap(TEMPLATES_KEY);
 export const saveTemplates = (map) => saveMap(TEMPLATES_KEY, map);
 
-// TemplateVersions: { [versionId]: { id, templateId, createdAt, leftPct, logoAssetId, rows } }
+// TemplateVersions: { [versionId]: { id, templateId, createdAt, leftPct, logoAssetId, branding, rows } }
+// `branding` is the normalized company branding for this version (branded
+// header/banner + logo placement, report title, table colours — see
+// src/lib/templateBranding.js). It is ADDITIVE and OPTIONAL: a version
+// published before branding existed has no such key and normalizes at read time
+// to defaults that reproduce the previous appearance, so no migration is
+// required and no stored version is ever rewritten. Only normalized values
+// (clamped numbers, enums, validated hex colours) are ever written — never a
+// CSS string, a data URL or Blob content. The logo itself stays a lightweight
+// `logoAssetId` reference at the version root; branding stores only its
+// placement.
 // The logo is referenced by `logoAssetId` (a Blob asset in IndexedDB, see
 // src/lib/assetStorage.js). A legacy `logoSrc` base64 data URL may still appear
 // on un-migrated versions and is preserved as a rendering fallback until the
@@ -96,7 +107,7 @@ export function setDefaultTemplateId(templateId) {
   }
 }
 
-// definition: { leftPct, logoSrc, rows }
+// definition: { leftPct, logoAssetId, logoSrc, branding, rows }
 export function createTemplate(name, definition) {
   const now = Date.now();
   const templateId = newId();
@@ -112,6 +123,10 @@ export function createTemplate(name, definition) {
     // when there is no asset (e.g. the seed migration passing a legacy logo).
     logoAssetId: definition?.logoAssetId ?? null,
     logoSrc: definition?.logoSrc ?? null,
+    // Normalized at WRITE time as well as read time, so a version record can
+    // never carry an out-of-range number, an unknown enum value or an
+    // unvalidated colour string.
+    branding: normalizeBranding(definition?.branding),
     rows: definition?.rows ?? [],
   };
   saveTemplateVersions(versions);
@@ -148,6 +163,9 @@ export function duplicateTemplate(templateId) {
     leftPct: version?.leftPct,
     logoAssetId: version?.logoAssetId ?? null,
     logoSrc: version?.logoSrc ?? null,
+    // The copy inherits the source's branding (an absent/legacy branding
+    // normalizes to the same safe defaults the source renders with).
+    branding: version?.branding ?? null,
     rows: (version?.rows || []).map((r) => ({ ...r })),
   });
 }
@@ -181,17 +199,25 @@ export function publishTemplateVersion(templateId, definition) {
     leftPct: definition?.leftPct ?? DEFAULT_LEFT_COL_PCT,
     logoAssetId: definition?.logoAssetId ?? null,
     logoSrc: definition?.logoSrc ?? null,
+    branding: normalizeBranding(definition?.branding),
     rows: definition?.rows ?? [],
   };
 
   const versions = getTemplateVersions();
   const current = versions[tpl.currentVersionId];
+  // The unchanged-definition no-op. Branding participates on BOTH sides, and
+  // the current side is normalized so a legacy version (no `branding` key at
+  // all) compares equal to freshly-normalized defaults — re-saving an untouched
+  // legacy template stays a no-op instead of publishing a spurious version.
+  // Key order is identical on both sides because normalizeBranding always
+  // builds the object in one fixed order.
   if (
     current &&
     JSON.stringify({
       leftPct: current.leftPct,
       logoAssetId: current.logoAssetId ?? null,
       logoSrc: current.logoSrc ?? null,
+      branding: normalizeBranding(current.branding),
       rows: current.rows,
     }) === JSON.stringify(next)
   ) {

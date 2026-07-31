@@ -28,7 +28,11 @@ import {
 import PhotoAttachment from "./PhotoAttachment";
 import FileAttachmentRow from "./FileAttachmentRow";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
+import useOutsideClose from "../../hooks/useOutsideClose";
 import ThreeDotMenu from "../ThreeDotMenu";
+import { BrandedHeaderBlock, BrandedTitleBlock } from "./BrandedDocumentHeader";
+import { brandingStyles, normalizeBranding } from "../../lib/templateBranding";
+import { mmToPx } from "../../lib/pageGeometry";
 
 /**
  * Two-column template table, rendered as a page-aware A4 document.
@@ -66,12 +70,30 @@ import ThreeDotMenu from "../ThreeDotMenu";
  * - The Builder never uploads evidence: Photo/File rows show a static
  *   placeholder ("Photos/Files can be added when completing this note.").
  *
+ * BRANDING (`branding`, normalized by src/lib/templateBranding.js):
+ * - The document begins with a BRANDED HEADER block (brand-colour banner + the
+ *   logo placed inside a bounded header area) and, optionally, a REPORT TITLE
+ *   block. Both are ordinary measured blocks, so they consume real page height
+ *   and participate in pagination like any row — and because they are first in
+ *   document order they appear on page 1 and are never repeated.
+ * - The table's colours (label/content backgrounds and text, border colour and
+ *   width) are applied as CSS custom properties on the wrapper ABOVE
+ *   <PagedDocument>, so they cascade to every row on every page: master rows,
+ *   note-specific custom rows and Photo/File continuation rows all inherit one
+ *   company style. There are no per-row or per-cell overrides.
+ * - The SAME renderer serves the Builder and the completed note; only
+ *   editability differs (see `logoLocked`).
+ *
  * LOGO:
  * - The logo is a Blob asset in IndexedDB (src/lib/assetStorage.js); the parent
  *   resolves it to a display URL and passes it as `logoUrl` (+ `logoStatus`).
- * - In builder mode (logoLocked = false): upload calls `onLogoFile(file)`;
- *   remove calls `onLogoChange(null)`.
- * - In note mode (logoLocked = true): the logo is fixed and consumes header
+ *   Branding stores only its PLACEMENT — the Blob is never duplicated.
+ * - In builder mode (logoLocked = false) the logo is directly manipulable
+ *   inside the header: click to select, drag to move, four corner handles to
+ *   resize, aspect ratio preserved, committed to the draft on pointer release
+ *   (see BrandedDocumentHeader.js). Upload / replace / remove live in the
+ *   Document branding panel, NOT on the document surface.
+ * - In note mode (logoLocked = true): the logo is read-only and consumes header
  *   space like any other document block.
  *
  * ROW ACTIONS (`rowActionsMode`):
@@ -134,8 +156,15 @@ function LegacyAssetImage({ attachment, maxH }) {
   );
 }
 
-// Logo asset id used as this block's stable pagination id (constant string).
-const LOGO_BLOCK_ID = "__template_logo__";
+// Stable pagination ids for the two branding blocks (constant strings, so they
+// can never collide with a row's field id).
+const HEADER_BLOCK_ID = "__template_header__";
+const TITLE_BLOCK_ID = "__template_title__";
+
+// Mirrors the 6mm `.brand-header-block` padding in branding.css. This is only a
+// PRE-MEASUREMENT hint for the first paint — PagedDocument measures the real
+// rendered height immediately afterwards — so a small drift is self-correcting.
+const HEADER_BLOCK_GAP_MM = 6;
 
 const PHOTO_ACCEPT = ALLOWED_PHOTO_MIME_TYPES.join(",");
 const FILE_ACCEPT = ALLOWED_NOTE_FILE_EXTENSIONS.join(",");
@@ -148,8 +177,11 @@ export default function ResizableTwoColTable({
   onLeftPctChange,
   logoUrl = null,
   logoStatus = "idle",
-  onLogoFile,
-  onLogoChange,
+  // Company branding for this template version (normalized defensively below).
+  // Upload/replace/remove are NOT handled here — they live in the Builder's
+  // Document branding panel. Only direct placement is edited on the document.
+  branding = null,
+  onBrandingLogoChange, // ({ widthPct, xPct, yPct }) => void — commit on release
   enableRightEditor = false,
   rightValues = {},
   onRightChange,
@@ -182,6 +214,26 @@ export default function ResizableTwoColTable({
   const [rowDrag, setRowDrag] = useState(null);
   const [colDrag, setColDrag] = useState(null);
   const [menuRowId, setMenuRowId] = useState(null);
+  // Logo selection lives here (not in the header component) because the header
+  // is re-created by a render callback on every pagination pass; selection must
+  // survive that.
+  const [logoSelected, setLogoSelected] = useState(false);
+  const headerBlockRef = useRef(null);
+
+  // Defensive normalization at the component boundary: callers pass state they
+  // already normalized, but a stored value must never reach a style object
+  // unvalidated regardless of the caller.
+  const safeBranding = useMemo(() => normalizeBranding(branding), [branding]);
+  const tableStyleVars = useMemo(
+    () => brandingStyles(safeBranding).table,
+    [safeBranding]
+  );
+
+  // Escape or a click outside the header deselects the logo (the hook binds
+  // both). Setting the same value is a no-op re-render in React, so this is
+  // harmless in note mode where nothing is ever selected.
+  const deselectLogo = useCallback(() => setLogoSelected(false), []);
+  useOutsideClose(headerBlockRef, deselectLogo);
   // Anchor elements for the per-row action menu (never affects layout).
   const menuAnchors = useRef(new Map());
   // Last height emitted during a row drag, so release can commit it once.
@@ -284,15 +336,6 @@ export default function ResizableTwoColTable({
     },
     [leftPct, onLeftPctChange]
   );
-
-  // ---------- LOGO UPLOAD (BUILDER ONLY) ----------
-  const handleLogoInput = (e) => {
-    if (logoLocked) return;
-    const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-selecting the same file after a rejection
-    if (!file || !onLogoFile) return;
-    onLogoFile(file);
-  };
 
   const showRightEditor = !!enableRightEditor;
 
@@ -516,11 +559,14 @@ export default function ResizableTwoColTable({
     const editable = !lockTemplateLabels || !!row.isCustom;
     return (
       <div className="twocol-cell-left px-3 py-2 flex items-stretch">
+        {/* `twocol-label-text` is the styling hook that lets the template's
+            branded label colour override the document's default dark text
+            (see the specificity note in template.css). */}
         {editable ? (
           <textarea
             className="
-              w-full h-full bg-transparent text-sm font-medium outline-none
-              resize-none overflow-hidden leading-tight text-black
+              twocol-label-text w-full h-full bg-transparent text-sm font-medium
+              outline-none resize-none overflow-hidden leading-tight text-black
             "
             value={row.label}
             aria-label={
@@ -529,7 +575,7 @@ export default function ResizableTwoColTable({
             onChange={(e) => onRowLabelChange && onRowLabelChange(row.id, e.target.value)}
           />
         ) : (
-          <div className="w-full text-sm font-medium leading-tight text-black whitespace-pre-wrap break-words">
+          <div className="twocol-label-text w-full text-sm font-medium leading-tight text-black whitespace-pre-wrap break-words">
             {row.label}
           </div>
         )}
@@ -636,46 +682,28 @@ export default function ResizableTwoColTable({
   }
 
   // ---------- BLOCK RENDERERS (document content on the A4 pages) ----------
-  function renderLogoBlock() {
+  // The branded header: brand-colour banner plus the logo, bounded to the
+  // header area. Editable (select / drag / resize) in the Builder, read-only in
+  // a completed note. The wrapper ref is what "click outside to deselect" tests
+  // against.
+  function renderHeaderBlock() {
     return (
-      <div className="logo-drop rounded-xl mb-4">
-        {logoUrl ? (
-          <div className="logo-box">
-            <div className="logo-img-wrapper">
-              <img src={logoUrl} alt="Logo" className="logo-img" />
-            </div>
-            {!logoLocked && (
-              <button
-                type="button"
-                className="mt-2 px-3 py-1 border rounded text-black bg-white"
-                onClick={() => onLogoChange && onLogoChange(null)}
-              >
-                Remove Logo
-              </button>
-            )}
-          </div>
-        ) : (
-          <div className="logo-box">
-            <div className="logo-img-wrapper">
-              <div className="w-full text-center text-sm opacity-80 text-black">
-                {logoStatus === "loading"
-                  ? "Loading logo…"
-                  : logoStatus === "missing" || logoStatus === "error"
-                  ? "[ LOGO UNAVAILABLE ]"
-                  : "[ COMPANY LOGO ]"}
-              </div>
-            </div>
-            {!logoLocked && (
-              <input
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                onChange={handleLogoInput}
-              />
-            )}
-          </div>
-        )}
+      <div ref={headerBlockRef}>
+        <BrandedHeaderBlock
+          branding={safeBranding}
+          logoUrl={logoUrl}
+          logoStatus={logoStatus}
+          editable={!logoLocked}
+          selected={!logoLocked && logoSelected}
+          onSelect={() => setLogoSelected(true)}
+          onLogoPlacementChange={onBrandingLogoChange}
+        />
       </div>
     );
+  }
+
+  function renderTitleBlock() {
+    return <BrandedTitleBlock branding={safeBranding} editable={!logoLocked} />;
   }
 
   // A standard (non-attachment) row. Legacy base64 evidence — and entries
@@ -934,19 +962,43 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // Ordered document blocks: logo header first, then the blocks of each row.
-  // Height hints are the PREFERRED/minimum heights; PagedDocument measures the
-  // real rendered height and distributes across pages. Photo/File fields (note
-  // mode) are compound: a head block + one atomic block per attachment, all
-  // sharing the field's group so continuation context can be rendered.
-  const blocks = [
-    {
-      id: LOGO_BLOCK_ID,
-      minHeight: 150,
+  // Ordered document blocks: the branded header, then the report title, then
+  // the blocks of each row. Height hints are the PREFERRED/minimum heights;
+  // PagedDocument measures the real rendered height and distributes across
+  // pages. Photo/File fields (note mode) are compound: a head block + one
+  // atomic block per attachment, all sharing the field's group so continuation
+  // context can be rendered.
+  //
+  // First-page-only branding is DERIVED, not configured: because the header and
+  // title are simply the first blocks in document order, they land on page 1
+  // and are never repeated. A future compact repeated header would be a
+  // per-page decoration inside PagedDocument, not another entry in this list —
+  // nothing here needs to change for it.
+  const blocks = [];
+
+  if (safeBranding.header.enabled) {
+    blocks.push({
+      id: HEADER_BLOCK_ID,
+      minHeight: mmToPx(safeBranding.header.heightMm + HEADER_BLOCK_GAP_MM),
       splittable: false,
-      render: renderLogoBlock,
-    },
-  ];
+      render: renderHeaderBlock,
+    });
+  }
+
+  // A title with no text still needs a block in the Builder (so the placeholder
+  // is reachable), but a completed note must never print an empty title band.
+  if (
+    safeBranding.title.enabled &&
+    (safeBranding.title.text.trim() !== "" || !logoLocked)
+  ) {
+    blocks.push({
+      id: TITLE_BLOCK_ID,
+      minHeight: 0,
+      splittable: false,
+      render: renderTitleBlock,
+    });
+  }
+
   rows.forEach((row) => {
     const type = normalizeType(row.type);
     const isAttachmentField =
@@ -992,7 +1044,9 @@ export default function ResizableTwoColTable({
   });
 
   return (
-    <div className="w-full">
+    // The branded table colours are CSS custom properties on this wrapper, so
+    // they cascade into every page and every row rendered by <PagedDocument>.
+    <div className="w-full" style={tableStyleVars}>
       {/* CHROME — editing controls on the app surface (not document content) */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">

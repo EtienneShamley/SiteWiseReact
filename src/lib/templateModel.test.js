@@ -22,6 +22,11 @@ import {
 } from "./templateModel";
 import { makeOption, displayTextValue } from "./templateFields";
 import {
+  DEFAULT_BRANDING,
+  HEADER_LAYOUT,
+  normalizeBranding,
+} from "./templateBranding";
+import {
   customRowsForTemplate,
   insertCustomRow,
   normalizeCustomRows,
@@ -231,6 +236,176 @@ describe("template logo asset references (IndexedDB-backed logos)", () => {
     expect(v.logoSrc).toBe(dataUrl);
     expect(v.logoAssetId ?? null).toBeNull();
   });
+});
+
+/* --------------------- company branding on TemplateVersions --------------- */
+// Branding is an ADDITIVE, optional property of an immutable version. These
+// tests pin the guarantees the Builder/note split depends on: publishing
+// branding creates a new version, old pinned notes keep the old branding,
+// legacy versions stay valid, and nothing heavyweight lands in localStorage.
+
+describe("template branding versioning", () => {
+  const brandedInput = {
+    header: {
+      enabled: true,
+      heightMm: 34,
+      backgroundColor: "#1aa3c2",
+      layoutStyle: HEADER_LAYOUT.LOGO_LEFT,
+      bannerShape: "angled-left",
+      logo: { widthPct: 55, xPct: 0, yPct: 50 },
+    },
+    title: {
+      enabled: true,
+      text: "Site Works Inspection Record",
+      color: "#0f172a",
+      fontSizePt: 18,
+      fontWeight: "bold",
+      alignment: "left",
+    },
+    table: {
+      labelBackgroundColor: "#1aa3c2",
+      labelTextColor: "#ffffff",
+      contentBackgroundColor: "#ffffff",
+      contentTextColor: "#111111",
+      borderColor: "#9ca3af",
+      borderWidthPx: 1,
+    },
+  };
+
+  test("a new template stores normalized branding, and no branding stores the defaults", () => {
+    const branded = createTemplate("Branded", { leftPct: 18, rows: rows(), branding: brandedInput });
+    expect(getCurrentVersion(branded.id).branding).toEqual(normalizeBranding(brandedInput));
+
+    const plain = createTemplate("Plain", { leftPct: 18, rows: rows() });
+    expect(getCurrentVersion(plain.id).branding).toEqual(DEFAULT_BRANDING);
+  });
+
+  test("out-of-range branding is clamped at WRITE time, not just on read", () => {
+    const tpl = createTemplate("T", {
+      leftPct: 18,
+      rows: rows(),
+      branding: { header: { heightMm: 9999 }, table: { borderWidthPx: 99 } },
+    });
+    const stored = getCurrentVersion(tpl.id).branding;
+    expect(stored.header.heightMm).toBe(80);
+    expect(stored.table.borderWidthPx).toBe(3);
+  });
+
+  test("publishing changed branding creates a NEW version and leaves the old one intact", () => {
+    const tpl = createTemplate("T", { leftPct: 18, rows: rows() });
+    const v1Id = tpl.currentVersionId;
+
+    const v2 = publishTemplateVersion(tpl.id, {
+      leftPct: 18,
+      rows: rows(),
+      branding: brandedInput,
+    });
+
+    expect(v2.id).not.toBe(v1Id);
+    expect(v2.branding.table.labelBackgroundColor).toBe("#1aa3c2");
+    // The previous version is untouched — still the unbranded defaults.
+    expect(getVersion(v1Id).branding).toEqual(DEFAULT_BRANDING);
+  });
+
+  test("publishing IDENTICAL branding is a no-op (no version churn)", () => {
+    const tpl = createTemplate("T", { leftPct: 18, rows: rows(), branding: brandedInput });
+    const again = publishTemplateVersion(tpl.id, {
+      leftPct: 18,
+      rows: rows(),
+      branding: brandedInput,
+    });
+    expect(again.id).toBe(tpl.currentVersionId);
+  });
+
+  test("re-saving a LEGACY version that has no branding key at all stays a no-op", () => {
+    // Simulate a version published before branding existed by deleting the key
+    // from the stored record, exactly as an old install would have it.
+    const tpl = createTemplate("Legacy", { leftPct: 18, rows: rows() });
+    const versions = JSON.parse(localStorage.getItem(TEMPLATE_VERSIONS_KEY));
+    delete versions[tpl.currentVersionId].branding;
+    localStorage.setItem(TEMPLATE_VERSIONS_KEY, JSON.stringify(versions));
+    expect(getVersion(tpl.currentVersionId).branding).toBeUndefined();
+
+    // Opening and re-saving without touching anything must not publish a
+    // version just because branding normalized into existence.
+    const again = publishTemplateVersion(tpl.id, {
+      leftPct: 18,
+      rows: rows(),
+      branding: normalizeBranding(undefined),
+    });
+    expect(again.id).toBe(tpl.currentVersionId);
+  });
+
+  test("an existing version with no branding remains valid and renders defaults", () => {
+    const tpl = createTemplate("Legacy", { leftPct: 18, rows: rows() });
+    const versions = JSON.parse(localStorage.getItem(TEMPLATE_VERSIONS_KEY));
+    delete versions[tpl.currentVersionId].branding;
+    localStorage.setItem(TEMPLATE_VERSIONS_KEY, JSON.stringify(versions));
+
+    const legacy = getVersion(tpl.currentVersionId);
+    expect(legacy.rows).toHaveLength(2); // still fully usable
+    expect(normalizeBranding(legacy.branding)).toEqual(DEFAULT_BRANDING);
+  });
+
+  test("a note pinned to an old version keeps the OLD branding after the template is rebranded", () => {
+    const tpl = createTemplate("T", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-brand-1");
+    const pinnedVersionId = inst.templateVersionId;
+
+    publishTemplateVersion(tpl.id, { leftPct: 18, rows: rows(), branding: brandedInput });
+
+    // The note still points at v1, whose branding is still the defaults...
+    expect(getNoteTemplateInstance("note-brand-1").templateVersionId).toBe(pinnedVersionId);
+    expect(getVersion(pinnedVersionId).branding).toEqual(DEFAULT_BRANDING);
+    // ...while a NEW note picks up the rebranded current version.
+    const fresh = getOrCreateInstanceForNote("note-brand-2");
+    expect(getVersion(fresh.templateVersionId).branding.table.labelBackgroundColor).toBe(
+      "#1aa3c2"
+    );
+  });
+
+  test("branding travels with a duplicated template", () => {
+    const tpl = createTemplate("T", { leftPct: 18, rows: rows(), branding: brandedInput });
+    const copy = duplicateTemplate(tpl.id);
+    expect(getCurrentVersion(copy.id).branding).toEqual(normalizeBranding(brandedInput));
+  });
+
+  test("the logo stays a lightweight reference — branding never carries the image", () => {
+    createTemplate("T", {
+      leftPct: 18,
+      rows: rows(),
+      logoAssetId: "asset-brand-1",
+      branding: brandedInput,
+    });
+    const raw = localStorage.getItem(TEMPLATE_VERSIONS_KEY);
+    expect(raw).toContain("asset-brand-1");
+    // No Blob, data URL or object URL anywhere in the persisted branding.
+    expect(raw).not.toMatch(/data:|blob:/);
+    // Branding holds placement only, never an asset id of its own.
+    expect(JSON.stringify(getCurrentVersion(getTemplateIdFromRaw(raw)).branding)).not.toContain(
+      "asset-brand-1"
+    );
+  });
+
+  test("no arbitrary CSS or unknown property survives into a published version", () => {
+    createTemplate("T", {
+      leftPct: 18,
+      rows: rows(),
+      branding: {
+        header: { backgroundColor: "url(https://evil.test/x.png)" },
+        table: { cellCss: "position:fixed;z-index:9999" },
+        watermark: "data:image/svg+xml,<svg/>",
+      },
+    });
+    const raw = localStorage.getItem(TEMPLATE_VERSIONS_KEY);
+    expect(raw).not.toMatch(/url\(|cellCss|watermark|svg|https?:/i);
+  });
+
+  // Small helper: the branding assertions above only need any stored template id.
+  function getTemplateIdFromRaw(raw) {
+    const versions = JSON.parse(raw);
+    return Object.values(versions)[0].templateId;
+  }
 });
 
 describe("answers are keyed by field id and preserved across template switch", () => {

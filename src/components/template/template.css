@@ -1,24 +1,57 @@
 /* Template two-column rows now render as document blocks inside the A4 pages
  * (see PagedDocument.js / pagedDocument.css). The paper is always white with
  * dark text in both light and dark app themes, so these document surfaces use
- * light styling only — dark-mode variants are intentionally absent. */
+ * light styling only — dark-mode variants are intentionally absent.
+ *
+ * TABLE BRANDING: the row/cell colours below read CSS custom properties set by
+ * ResizableTwoColTable from the TemplateVersion's branding (one wrapper above
+ * <PagedDocument>, so they cascade to every row on every page). Every fallback
+ * is the value this file used before branding existed, so a template with no
+ * branding configuration renders exactly as it did. There are deliberately no
+ * per-row or per-cell overrides — a company table style is one consistent set.
+ *
+ * The properties are produced only by brandingStyles() in
+ * src/lib/templateBranding.js, which emits validated hex colours and clamped
+ * numbers; no stored string ever reaches a CSS declaration verbatim. */
 
 /* Row block */
 .twocol-row {
   position: relative;
-  background: #ffffff;
-  border: 1px solid #d1d5db;
-  margin-top: -1px; /* collapse the 1px border shared with the row above */
+  background: var(--nw-tpl-content-bg, #ffffff);
+  border: var(--nw-tpl-border-width, 1px) solid var(--nw-tpl-border-color, #d1d5db);
+  /* Collapse the border shared with the row above, whatever its width. */
+  margin-top: calc(-1 * var(--nw-tpl-border-width, 1px));
 }
 
 .twocol-cell-left {
-  background: #ffffff;
-  border-right: 1px solid #d1d5db;
+  background: var(--nw-tpl-label-bg, #ffffff);
+  border-right: var(--nw-tpl-border-width, 1px) solid var(--nw-tpl-border-color, #d1d5db);
 }
 
 .twocol-cell-right {
-  background: #ffffff;
+  background: var(--nw-tpl-content-bg, #ffffff);
 }
+
+/* Branded TEXT colours.
+ *
+ * Specificity note: pagedDocument.css defines `.paged-flow .text-black { color:#111 }`
+ * (0,2,0) and is evaluated AFTER this file, so a plain `.paged-flow .twocol-cell-left`
+ * rule would lose the tie and printed text would ignore the company's colour.
+ * Repeating the class raises these to 0,3,0 so they win — without `!important`,
+ * which would in turn block legitimate inline styling. */
+.paged-flow .twocol-cell-left.twocol-cell-left,
+.paged-flow .twocol-label-text.twocol-label-text {
+  color: var(--nw-tpl-label-text, #111111);
+}
+
+.paged-flow .twocol-cell-right.twocol-cell-right,
+.paged-flow .twocol-text.twocol-text {
+  color: var(--nw-tpl-content-text, #111111);
+}
+
+/* Structured inputs (number/date/time/select) keep their own white field with a
+   dark value, so they stay legible against any cell colour a company picks.
+   They are form controls, not printed cell text — deliberately not rebranded. */
 
 /* Unified Text field: grows with content, never shows an inner scrollbar. */
 .twocol-text {
@@ -138,54 +171,28 @@
   /* no visual difference by design */
 }
 
-/* Print/export foundation: editing affordances never appear on paper. */
+/* Print/export foundation: editing affordances never appear on paper, and
+ * branded cell colours are printed rather than dropped as decoration. */
 @media print {
   .twocol-row-actions,
   .twocol-col-handle,
   .twocol-resize-handle {
     display: none !important;
   }
+
+  .twocol-row,
+  .twocol-cell-left,
+  .twocol-cell-right {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
 }
 
-/* Logo block — dashed header frame on the white paper */
-.logo-drop {
-  border: 1px dashed rgba(120, 120, 120, 0.6);
-  background: #ffffff;
-  padding: 8px 12px;
-}
-
-/* Wrapper for logo + controls */
-.logo-box {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  width: 100%;
-}
-
-/* Bounded, centered logo frame. Constrains size only, so a wide, square or tall
-   logo is preserved (never stretched, squashed or cropped) and centered on both
-   axes. Same frame in the builder and the note. */
-.logo-img-wrapper {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  max-width: 520px;
-  height: 110px; /* header band height */
-  margin: 0 auto;
-  overflow: hidden;
-}
-
-/* Logo image – auto-fit inside the frame, aspect ratio preserved */
-.logo-img {
-  display: block;
-  max-width: 100%;
-  max-height: 100%;
-  width: auto;
-  height: auto;
-  object-fit: contain;
-}
+/* The former standalone logo block (a dashed, centred frame sitting above the
+ * table) has been replaced by the branded document header — see
+ * BrandedDocumentHeader.js / branding.css. Its `.logo-drop` / `.logo-box` /
+ * `.logo-img-wrapper` / `.logo-img` rules are removed with it; no other
+ * component referenced them. */
 
 /* Field images in right column */
 .twocol-img {
@@ -204,7 +211,7 @@
 }
 
 .twocol-seg--resume {
-  border-top: 1px solid #d1d5db;
+  border-top: var(--nw-tpl-border-width, 1px) solid var(--nw-tpl-border-color, #d1d5db);
   margin-top: 0; /* don't pull up over the page gap */
 }
 
@@ -212,10 +219,14 @@
   overflow: hidden;
 }
 
+/* "Label — continued" context. Derived from the label text colour (with reduced
+   opacity rather than a hardcoded translucent black) so it stays readable on a
+   dark branded label column as well as on white. */
 .twocol-seg-continued {
   display: block;
   font-size: 11px;
-  color: rgba(0, 0, 0, 0.5);
+  color: var(--nw-tpl-label-text, #111111);
+  opacity: 0.7;
   font-style: italic;
   white-space: nowrap;
   overflow: hidden;
@@ -251,15 +262,19 @@
   cursor: default;
 }
 
+/* Hints inside the content cell follow the branded content text colour (dimmed
+   by opacity) so they remain readable if a company darkens the content cells. */
 .attach-empty-hint {
   font-size: 12px;
-  color: rgba(0, 0, 0, 0.45);
+  color: var(--nw-tpl-content-text, #111111);
+  opacity: 0.55;
 }
 
 .attach-builder-placeholder {
   font-size: 13px;
   font-style: italic;
-  color: rgba(0, 0, 0, 0.5);
+  color: var(--nw-tpl-content-text, #111111);
+  opacity: 0.6;
   margin-bottom: 6px;
 }
 
@@ -485,7 +500,9 @@
   width: 100%;
   padding: 2px 0;
   font-size: 13px;
-  color: #111111;
+  /* Follows the branded content text colour so a file row stays readable
+     against a custom content cell background. */
+  color: var(--nw-tpl-content-text, #111111);
 }
 
 .file-att-name {
