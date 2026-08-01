@@ -27,6 +27,11 @@ import {
 } from "../../lib/noteAttachments";
 import PhotoAttachment from "./PhotoAttachment";
 import FileAttachmentRow from "./FileAttachmentRow";
+import RowRefineAction from "./RowRefineAction";
+import {
+  ROW_REFINE_STATUS,
+  isRefinableRowType,
+} from "../../lib/templateRowRefine";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import useOutsideClose from "../../hooks/useOutsideClose";
 import ThreeDotMenu from "../ThreeDotMenu";
@@ -199,6 +204,13 @@ export default function ResizableTwoColTable({
   fieldBusy = {}, // { [fieldId]: true while uploading }
   onDismissFieldError, // (fieldId) => void
   onFieldError, // (fieldId, message) => void — e.g. a failed file open
+  // ROW-LEVEL AI (note mode only). All four are optional and inert by default:
+  // with no `onRefineRow` nothing about AI renders at all, which is how the
+  // Template Builder stays entirely free of it.
+  onRefineRow, // (rowId, styleValue) => void — eligible Text rows only
+  onRevertRowRefine, // (rowId) => void
+  rowRefineStatus = {}, // { [rowId]: { status, message } }
+  rowRefineRevertableIds = null, // Set<rowId> with a session Revert backup
   // Row actions: "builder" (master template rows) | "note" (note-specific
   // custom rows) | "none". See the block comment above.
   rowActionsMode = "none",
@@ -583,11 +595,20 @@ export default function ResizableTwoColTable({
     );
   }
 
+  // True for a row that may be refined with AI: note mode, an answer row of the
+  // unified Text type (master or note-specific custom), and a handler wired.
+  // Number/date/time/checkbox/yes-no/dropdown/photo/file rows are excluded here,
+  // once, so no other call site has to remember the rule.
+  function rowAcceptsAiRefine(row) {
+    return !!onRefineRow && showRightEditor && !!row && isRefinableRowType(row.type);
+  }
+
   // Compact per-row actions (hover/focus only, absolutely positioned so the
   // row's measured height never changes, hidden in print). Icon-free text
-  // trigger with an explicit accessible name.
+  // triggers with explicit accessible names.
   function renderRowActions(row) {
-    if (!showRowActions) return null;
+    const canAiRefine = rowAcceptsAiRefine(row);
+    if (!showRowActions && !canAiRefine) return null;
     const name = row.label || (row.isCustom ? "custom section" : "this field");
     const options = [
       {
@@ -609,28 +630,89 @@ export default function ResizableTwoColTable({
     }
     return (
       <div className="twocol-row-actions">
-        <button
-          type="button"
-          className="twocol-row-actions-btn"
-          aria-haspopup="menu"
-          aria-expanded={menuRowId === row.id}
-          aria-label={`Row actions for ${name}`}
-          title={`Row actions for ${name}`}
-          ref={(el) => {
-            if (el) menuAnchors.current.set(row.id, el);
-            else menuAnchors.current.delete(row.id);
-          }}
-          onClick={() => setMenuRowId((prev) => (prev === row.id ? null : row.id))}
-        >
-          <span aria-hidden="true">⋯</span>
-        </button>
-        {menuRowId === row.id && (
-          <ThreeDotMenu
-            anchorRef={menuAnchors.current.get(row.id) || null}
-            theme="light"
-            options={options}
-            onClose={() => setMenuRowId(null)}
+        {canAiRefine && (
+          <RowRefineAction
+            rowId={row.id}
+            rowLabel={row.label}
+            loading={
+              (rowRefineStatus[row.id] || {}).status === ROW_REFINE_STATUS.LOADING
+            }
+            onRefine={onRefineRow}
           />
+        )}
+        {showRowActions && (
+          <>
+            <button
+              type="button"
+              className="twocol-row-actions-btn"
+              aria-haspopup="menu"
+              aria-expanded={menuRowId === row.id}
+              aria-label={`Row actions for ${name}`}
+              title={`Row actions for ${name}`}
+              ref={(el) => {
+                if (el) menuAnchors.current.set(row.id, el);
+                else menuAnchors.current.delete(row.id);
+              }}
+              onClick={() => setMenuRowId((prev) => (prev === row.id ? null : row.id))}
+            >
+              <span aria-hidden="true">⋯</span>
+            </button>
+            {menuRowId === row.id && (
+              <ThreeDotMenu
+                anchorRef={menuAnchors.current.get(row.id) || null}
+                theme="light"
+                options={options}
+                onClose={() => setMenuRowId(null)}
+              />
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // Restrained per-row AI feedback, rendered inside the row's own content cell
+  // so a message is unambiguously ABOUT that field: the loading state, the
+  // outcome, and the Revert control for the last successful refinement of this
+  // row. It renders only when there is something to say, so an untouched form
+  // carries no extra chrome and no extra height.
+  function renderRowRefineStatus(row) {
+    if (!rowAcceptsAiRefine(row)) return null;
+    const entry = rowRefineStatus[row.id] || null;
+    const canRevert = !!(
+      onRevertRowRefine &&
+      rowRefineRevertableIds &&
+      rowRefineRevertableIds.has(row.id)
+    );
+    if (!entry && !canRevert) return null;
+
+    const isError =
+      entry &&
+      (entry.status === ROW_REFINE_STATUS.UNAVAILABLE ||
+        entry.status === ROW_REFINE_STATUS.FAILURE);
+    const name = (row.label || "").trim() || "this field";
+
+    return (
+      <div className="twocol-row-ai-status">
+        {entry && entry.message && (
+          <span
+            role="status"
+            aria-live="polite"
+            className={`twocol-row-ai-msg ${isError ? "twocol-row-ai-msg--error" : ""}`}
+          >
+            {entry.message}
+          </span>
+        )}
+        {canRevert && (
+          <button
+            type="button"
+            className="twocol-row-ai-revert"
+            onClick={() => onRevertRowRefine(row.id)}
+            aria-label={`Revert the AI refinement of ${name}`}
+            title={`Restore ${name} to its text from before the last AI refinement`}
+          >
+            Revert AI refinement
+          </button>
         )}
       </div>
     );
@@ -786,6 +868,7 @@ export default function ResizableTwoColTable({
 
           {showRightEditor && renderFieldError(row.id)}
           {showRightEditor && renderAnswerControl(row)}
+          {showRightEditor && renderRowRefineStatus(row)}
 
           {enableFieldTypeEditor &&
             (type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE) && (

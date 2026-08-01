@@ -5,6 +5,7 @@ import {
   defaultRows,
 } from "../../templates/defaultTwoColDoc";
 import {
+  getNoteTemplateInstance,
   getOrCreateInstanceForNote,
   saveNoteTemplateInstance,
   saveNoteTemplateInstanceOrThrow,
@@ -44,6 +45,33 @@ import {
 import { newId } from "../../lib/id";
 import { normalizeBranding } from "../../lib/templateBranding";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
+import { useRefine } from "../../hooks/useRefine";
+import { REFINE_OUTCOME } from "../../lib/refineContract";
+import {
+  ROW_REFINE_CHANGED_MESSAGE,
+  ROW_REFINE_EMPTY_MESSAGE,
+  ROW_REFINE_REJECTION,
+  ROW_REFINE_REVERTED_MESSAGE,
+  ROW_REFINE_REVERT_FAILED_MESSAGE,
+  ROW_REFINE_SAVE_FAILED_MESSAGE,
+  ROW_REFINE_STATUS,
+  ROW_REFINE_SUCCESS_MESSAGE,
+  applyRowAnswerToInstance,
+  beginRowRefine,
+  canApplyRowRefineResponse,
+  clearRowRefineStatus,
+  createRowRefineState,
+  getRowRefineBackup,
+  hasRefinableText,
+  isRefinableRow,
+  isRowRefineCurrent,
+  makeRowRefineRequest,
+  readRowAnswer,
+  rowIdsWithBackup,
+  rowRefineMessageFor,
+  setRowRefineMessage,
+  settleRowRefine,
+} from "../../lib/templateRowRefine";
 
 /**
  * NoteTemplateDoc
@@ -72,6 +100,15 @@ import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
  *   and is hidden (not destroyed) while the note is on a different template.
  *   Its label, answer and preferred height are written through the THROWING
  *   instance save, so a failed write is reported instead of being lost.
+ * - Supports ROW-LEVEL AI refinement of a single Text answer (master row or
+ *   custom row). It refines ONE row of ONE note: the Free-form note, every other
+ *   row, the attachments, custom-row order/labels/heights and the reusable
+ *   TemplateVersion are all untouched, and the global formatting toolbar stays
+ *   disabled in this view and never targets a row. The rules live in
+ *   src/lib/templateRowRefine.js; the provider contract is the shared one
+ *   (src/lib/refineContract.js + refineClient.js), reused rather than repeated.
+ *   A response is applied only when it still belongs where it came from AND the
+ *   answer has not been edited since — see handleRefineRow.
  *
  * Attachment write sequence (per selected file — a failed file never blocks or
  * rolls back the others):
@@ -120,12 +157,22 @@ export default function NoteTemplateDoc({
   onSelectRow, // (rowId) => void
   onRegisterTemplateProgress, // ({ capture, restore } | null) => void
   isAssetInProgressHistory, // (assetId) => boolean
+  // Row-level AI Revert backups: { [noteId]: { [rowId]: previousAnswer } }.
+  // They are owned by MainArea, NOT by this component, because this component
+  // is remounted per note — a backup held here would be destroyed the moment
+  // the user looked at another note, and a refinement that completes in the
+  // background could not record one at all.
+  rowRefineBackups = {},
+  onSetRowRefineBackup, // (noteId, rowId, previousAnswer) => void
+  onClearRowRefineBackup, // (noteId, rowId) => void
 }) {
   // The instance pins this note to a specific template version; created
   // against the default template on first use. This component is remounted
   // per note (keyed in MainArea), so initializers run for each note.
   const [instance, setInstance] = useState(() => getOrCreateInstanceForNote(noteId));
   const [templates, setTemplates] = useState(() => listTemplates());
+  // The SHARED refine transport (one request per call, no automatic retry).
+  const { refineText } = useRefine();
 
   const [rows, setRows] = useState(() => normalizeRows(defaultRows));
   const [leftPct, setLeftPct] = useState(DEFAULT_LEFT_COL_PCT);
@@ -165,6 +212,10 @@ export default function NoteTemplateDoc({
   // not on every pointer move.
   const [pendingHeights, setPendingHeights] = useState({});
 
+  // Per-row AI Refine lifecycle: { [rowId]: { status, message, requestId } }.
+  // Row-scoped, so a request on one row neither blocks nor reports on another.
+  const [rowRefineStatus, setRowRefineStatus] = useState(createRowRefineState);
+
   // Refs kept current so the sequential async attachment handlers always
   // persist against the latest state (same pattern as PagedDocument.heightsRef).
   const instanceRef = useRef(instance);
@@ -173,6 +224,26 @@ export default function NoteTemplateDoc({
   rowTextRef.current = rowText;
   const rowAttachmentsRef = useRef(rowAttachments);
   rowAttachmentsRef.current = rowAttachments;
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+
+  // Is this note's form still on screen? A refine response can arrive after the
+  // user has switched notes, which unmounts this component (it is keyed by note
+  // id in MainArea). Once unmounted, React state is meaningless and localStorage
+  // is the only truth — see readLiveInstance.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Monotonic request ids, and a synchronous per-row in-flight set. The disabled
+  // button covers the rendered case; this set covers two clicks inside a single
+  // tick, before React has re-rendered the button as disabled.
+  const rowRefineRequestRef = useRef(0);
+  const rowRefineInFlightRef = useRef(new Set());
   // Kept current the same way so the async attachment handlers always ask the
   // LIVE session history whether an asset is still needed.
   const isAssetInProgressHistoryRef = useRef(isAssetInProgressHistory);
@@ -407,13 +478,21 @@ export default function NoteTemplateDoc({
         `Delete the section "${label || "Untitled"}" from this note? Its text will be removed.`
       );
       if (!confirmed) return;
-      commitCustomRows(
+      const deleted = commitCustomRows(
         deleteCustomRow(raw, rowId),
         rowId,
         "The section could not be deleted"
       );
+      // The row is gone, so its session AI backup and its row-level AI feedback
+      // can never be acted on again — drop both rather than leaving them to be
+      // pruned only when the note is deleted. A response still in flight for
+      // this row is separately refused because the row no longer exists.
+      if (deleted) {
+        if (onClearRowRefineBackup) onClearRowRefineBackup(noteId, rowId);
+        setRowRefineStatus((prev) => clearRowRefineStatus(prev, rowId));
+      }
     },
-    [commitCustomRows]
+    [commitCustomRows, noteId, onClearRowRefineBackup]
   );
 
   // Row height: a custom row's dragged height is shown live and persisted once
@@ -668,6 +747,266 @@ export default function NoteTemplateDoc({
     [rows, customRowIds, templateCustomRows, handleCustomRowPatch]
   );
 
+  /* ------------------------ row-level AI refinement ----------------------- */
+
+  /**
+   * The authoritative CURRENT state of the originating note's form.
+   *
+   * While this note is on screen the refs are the truth (they include a
+   * keystroke that the persistence effect has not flushed yet). Once the user
+   * has switched notes this component is unmounted — its state is gone and the
+   * stored record is the only truth. Either way the note is addressed by ID and
+   * never by "whatever is visible now".
+   */
+  const readLiveInstance = useCallback((targetNoteId) => {
+    if (!targetNoteId) return null;
+    if (mountedRef.current && instanceRef.current?.noteId === targetNoteId) {
+      return {
+        ...instanceRef.current,
+        answers: rowTextRef.current,
+        attachments: rowAttachmentsRef.current,
+      };
+    }
+    return getNoteTemplateInstance(targetNoteId);
+  }, []);
+
+  const findCustomRow = useCallback((rowId) => {
+    const raw = Array.isArray(instanceRef.current?.customRows)
+      ? instanceRef.current.customRows
+      : [];
+    return raw.find((r) => r && r.id === rowId) || null;
+  }, []);
+
+  const showRowRefineMessage = useCallback((rowId, status, message) => {
+    setRowRefineStatus((prev) => setRowRefineMessage(prev, rowId, status, message));
+  }, []);
+
+  /**
+   * Refine ONE Text row's answer with AI.
+   *
+   * Exactly one provider request per user action, no automatic retry, and the
+   * result is written only if it still belongs where it started AND the answer
+   * has not been edited since it was sent. Everything else — other rows, other
+   * notes, the Free-form note, attachments, custom-row order/labels/heights and
+   * the immutable TemplateVersion — is untouched in every path, including every
+   * failure path.
+   */
+  const handleRefineRow = useCallback(
+    async (rowId, style) => {
+      const current = instanceRef.current;
+      if (!rowId || !current?.noteId) return;
+      // Synchronous duplicate guard: two clicks in one tick, before React has
+      // re-rendered this row's trigger as disabled.
+      if (rowRefineInFlightRef.current.has(rowId)) return;
+
+      // Eligibility is re-checked here, not trusted from the click: a custom row
+      // is Text by definition; a master row must be a Text row of this note's
+      // pinned version.
+      const isCustomRow = !!findCustomRow(rowId);
+      if (!isCustomRow) {
+        const row = (rowsRef.current || []).find((r) => r && r.id === rowId);
+        if (!isRefinableRow(row)) return;
+      }
+
+      const live = readLiveInstance(current.noteId);
+      const answer = readRowAnswer(live, rowId, isCustomRow);
+      if (answer === null) return;
+
+      // An empty or whitespace-only field never spends a request.
+      if (!hasRefinableText(answer)) {
+        showRowRefineMessage(rowId, ROW_REFINE_STATUS.IDLE, ROW_REFINE_EMPTY_MESSAGE);
+        return;
+      }
+
+      const requestId = rowRefineRequestRef.current + 1;
+      rowRefineRequestRef.current = requestId;
+      const request = makeRowRefineRequest({
+        requestId,
+        noteId: current.noteId,
+        templateId: current.templateId,
+        templateVersionId: current.templateVersionId,
+        rowId,
+        isCustomRow,
+        style,
+        sentText: answer,
+      });
+      if (!request) {
+        // An unusable request (e.g. an off-allowlist style) is refused here
+        // rather than sent — the frontend may select a preset, never author one.
+        showRowRefineMessage(
+          rowId,
+          ROW_REFINE_STATUS.FAILURE,
+          rowRefineMessageFor(REFINE_OUTCOME.FAILURE)
+        );
+        return;
+      }
+
+      const settle = (status, message) => {
+        if (!mountedRef.current) return;
+        setRowRefineStatus((prev) =>
+          settleRowRefine(prev, rowId, { requestId, status, message })
+        );
+      };
+      // Leave loading with nothing to say — used when the result is discarded
+      // for a row/note/template the user has already moved away from. Guarded on
+      // request identity so it cannot clear a NEWER request's loading state.
+      const dismiss = () => {
+        if (!mountedRef.current) return;
+        setRowRefineStatus((prev) =>
+          isRowRefineCurrent(prev, rowId, requestId)
+            ? clearRowRefineStatus(prev, rowId)
+            : prev
+        );
+      };
+
+      rowRefineInFlightRef.current.add(rowId);
+      setRowRefineStatus((prev) => beginRowRefine(prev, rowId, requestId));
+
+      let result = null;
+      try {
+        result = await refineText({ text: request.sentText, style: request.style });
+      } catch {
+        result = null;
+      } finally {
+        rowRefineInFlightRef.current.delete(rowId);
+      }
+
+      // Failure, unavailable, malformed or empty output: the answer is left
+      // exactly as it was and NO backup is created, so Revert is never offered
+      // for a state that was never left. The user may retry manually.
+      if (!result || !result.ok) {
+        settle(
+          result && result.outcome === REFINE_OUTCOME.UNAVAILABLE
+            ? ROW_REFINE_STATUS.UNAVAILABLE
+            : ROW_REFINE_STATUS.FAILURE,
+          rowRefineMessageFor(result && result.outcome)
+        );
+        return;
+      }
+      if (typeof result.refined !== "string" || !result.refined.trim()) {
+        settle(
+          ROW_REFINE_STATUS.FAILURE,
+          rowRefineMessageFor(REFINE_OUTCOME.FAILURE)
+        );
+        return;
+      }
+
+      // The apply gate: same note, same template, same (immutable) version, the
+      // row still exists, and the answer is still the text that was sent.
+      const target = readLiveInstance(request.noteId);
+      const check = canApplyRowRefineResponse(request, target);
+      if (!check.ok) {
+        if (check.reason === ROW_REFINE_REJECTION.ANSWER_CHANGED) {
+          // The user kept typing. Their newer text wins and stays untouched.
+          settle(ROW_REFINE_STATUS.FAILURE, ROW_REFINE_CHANGED_MESSAGE);
+        } else {
+          // Deleted row, re-pinned template/version, or a note that no longer
+          // has template data: discard silently. Nothing is recreated.
+          dismiss();
+        }
+        return;
+      }
+
+      const next = applyRowAnswerToInstance(target, { rowId, isCustomRow }, result.refined);
+      if (!next) {
+        dismiss();
+        return;
+      }
+
+      // Persist FIRST through the confirmed instance save, so the refined answer
+      // is durable before anything on screen claims it succeeded.
+      try {
+        saveNoteTemplateInstanceOrThrow(next);
+      } catch {
+        settle(ROW_REFINE_STATUS.FAILURE, ROW_REFINE_SAVE_FAILED_MESSAGE);
+        return;
+      }
+
+      // The backup is recorded ONLY here — after a valid result has actually
+      // been written. It is owned by MainArea, so it is recorded for the
+      // originating note even when this component has since unmounted.
+      if (onSetRowRefineBackup) {
+        onSetRowRefineBackup(request.noteId, rowId, check.previousAnswer);
+      }
+
+      // Sync the on-screen state only while this note is still the one mounted.
+      if (mountedRef.current && instanceRef.current?.noteId === request.noteId) {
+        instanceRef.current = next;
+        rowTextRef.current = next.answers;
+        setInstance(next);
+        setRowText(next.answers);
+      }
+      settle(ROW_REFINE_STATUS.SUCCESS, ROW_REFINE_SUCCESS_MESSAGE);
+    },
+    [
+      refineText,
+      findCustomRow,
+      readLiveInstance,
+      showRowRefineMessage,
+      onSetRowRefineBackup,
+    ]
+  );
+
+  /**
+   * Restore ONE row's pre-refinement answer. Scoped by note id AND row id, so
+   * another note's backup and another row's backup are both unreachable, and
+   * written through the same confirmed save so the restored answer persists.
+   * Only the answer text is restored — never a label, position, height or
+   * attachment.
+   */
+  const handleRevertRowRefine = useCallback(
+    (rowId) => {
+      const current = instanceRef.current;
+      if (!rowId || !current?.noteId) return;
+      const backup = getRowRefineBackup(rowRefineBackups, current.noteId, rowId);
+      if (backup === null) return;
+
+      const isCustomRow = !!findCustomRow(rowId);
+      const live = readLiveInstance(current.noteId);
+      if (readRowAnswer(live, rowId, isCustomRow) === null) return;
+
+      const next = applyRowAnswerToInstance(live, { rowId, isCustomRow }, backup);
+      if (!next) return;
+
+      try {
+        saveNoteTemplateInstanceOrThrow(next);
+      } catch {
+        showRowRefineMessage(
+          rowId,
+          ROW_REFINE_STATUS.FAILURE,
+          ROW_REFINE_REVERT_FAILED_MESSAGE
+        );
+        return;
+      }
+
+      instanceRef.current = next;
+      rowTextRef.current = next.answers;
+      setInstance(next);
+      setRowText(next.answers);
+      if (onClearRowRefineBackup) onClearRowRefineBackup(current.noteId, rowId);
+      showRowRefineMessage(
+        rowId,
+        ROW_REFINE_STATUS.SUCCESS,
+        ROW_REFINE_REVERTED_MESSAGE
+      );
+    },
+    [
+      rowRefineBackups,
+      findCustomRow,
+      readLiveInstance,
+      showRowRefineMessage,
+      onClearRowRefineBackup,
+    ]
+  );
+
+  // Which of THIS note's rows currently have a Revert backup.
+  const rowRefineRevertableIds = useMemo(
+    () => rowIdsWithBackup(rowRefineBackups, noteId),
+    [rowRefineBackups, noteId]
+  );
+
+  /* ---------------------- BottomBar insert registration ------------------- */
+
   // Register/unregister the insert handler with MainArea
   useEffect(() => {
     if (onRegisterTemplateInsert) {
@@ -840,6 +1179,13 @@ export default function NoteTemplateDoc({
         onRowLabelChange={handleRowLabelChange}
         onRowHeightChange={handleRowHeightChange}
         onRowHeightCommit={handleRowHeightCommit}
+        // Row-level AI: offered for Text answer rows only (master and custom).
+        // The Template Builder passes none of these, so no AI control exists
+        // there at all.
+        onRefineRow={handleRefineRow}
+        onRevertRowRefine={handleRevertRowRefine}
+        rowRefineStatus={rowRefineStatus}
+        rowRefineRevertableIds={rowRefineRevertableIds}
         lockTemplateLabels={true}
         onRightFocus={(rowId) => {
           if (onSelectRow) onSelectRow(rowId);

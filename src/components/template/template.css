@@ -103,6 +103,9 @@
   top: 2px;
   right: 2px;
   z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .twocol-row-actions-btn {
@@ -152,7 +155,64 @@
   outline-offset: 1px;
 }
 
-/* Coarse pointers have no hover: keep the trigger discoverable and larger. */
+/* Row-level "Refine with AI" trigger. It shares the row-actions container, and
+   therefore the same rules: overlaid, revealed on hover/keyboard focus only,
+   inert while invisible, no measured height, hidden in print. It is TEXT, never
+   a bare sparkle icon, so its purpose is readable without a tooltip.
+   Purple is the reserved AI role colour (docs/DESIGN_SYSTEM.md); the value is
+   fixed rather than taken from --nw-ai-accent because the document always
+   renders as white paper regardless of app theme, and the dark-theme token
+   would drop below a readable contrast on white. */
+.twocol-row-ai-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #6d28d9;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  opacity: 0;
+  cursor: pointer;
+  pointer-events: none;
+}
+
+.twocol-row:hover .twocol-row-ai-btn,
+.twocol-row:focus-within .twocol-row-ai-btn,
+.twocol-row-ai-btn:focus-visible,
+.twocol-row-ai-btn[aria-expanded="true"] {
+  opacity: 1;
+  pointer-events: auto;
+  border-color: #ddd6fe;
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.twocol-row-ai-btn:hover:not(:disabled) {
+  background: rgba(109, 40, 217, 0.1);
+}
+
+.twocol-row-ai-btn:focus-visible {
+  outline: 2px solid #6d28d9;
+  outline-offset: 1px;
+}
+
+/* Disabled means disabled: while a request is in flight the control carries the
+   real attribute, and is shown as unavailable rather than merely inactive. */
+.twocol-row-ai-btn:disabled {
+  opacity: 1;
+  pointer-events: none;
+  color: rgba(0, 0, 0, 0.45);
+  border-color: #e5e7eb;
+  background: rgba(255, 255, 255, 0.95);
+  cursor: not-allowed;
+}
+
+/* Coarse pointers have no hover: keep the triggers discoverable and larger. */
 @media (pointer: coarse) {
   .twocol-row-actions-btn {
     opacity: 0.85;
@@ -162,6 +222,55 @@
     border-color: #d1d5db;
     background: rgba(255, 255, 255, 0.95);
   }
+
+  .twocol-row-ai-btn {
+    opacity: 0.85;
+    pointer-events: auto;
+    height: 32px;
+    border-color: #ddd6fe;
+    background: rgba(255, 255, 255, 0.95);
+  }
+}
+
+/* Row-level AI feedback: one restrained line inside the row's own content cell,
+   so a message is unambiguously about THAT field. Muted for loading/success,
+   red for unavailable/failure — the same treatment the note-level Refine status
+   uses, never an alert(). Present only when there is something to say. */
+.twocol-row-ai-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.twocol-row-ai-msg {
+  color: rgba(0, 0, 0, 0.55);
+}
+
+.twocol-row-ai-msg--error {
+  color: #991b1b;
+}
+
+.twocol-row-ai-revert {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 1px 8px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #374151;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.twocol-row-ai-revert:hover {
+  background: rgba(57, 221, 233, 0.12);
+}
+
+.twocol-row-ai-revert:focus-visible {
+  outline: 2px solid #39dde9;
+  outline-offset: 1px;
 }
 
 /* Note-specific custom rows deliberately look identical to template rows — a
@@ -175,6 +284,7 @@
  * branded cell colours are printed rather than dropped as decoration. */
 @media print {
   .twocol-row-actions,
+  .twocol-row-ai-status,
   .twocol-col-handle,
   .twocol-resize-handle {
     display: none !important;

@@ -59,6 +59,11 @@ import {
   isFreeformEditingEnabled,
 } from "../lib/editorToolbarState";
 import {
+  clearRowRefineBackup,
+  pruneRowRefineBackups,
+  setRowRefineBackup,
+} from "../lib/templateRowRefine";
+import {
   EDITOR_IMAGE_READ_MESSAGE,
   validateEditorImageFile,
 } from "../lib/editorImages";
@@ -145,6 +150,17 @@ export default function MainArea() {
   // src/lib/noteProgressHistory.js) and, like them, session-only — the
   // REVERTED CONTENT persists through docState, the backup slot does not.
   const [refineBackups, setRefineBackups] = useState({});
+  // Template form ROW-level Refine backups: { [noteId]: { [rowId]: answer } }.
+  // One previous value per note per row, deliberately separate from the
+  // Free-form backup above and from Save progress history.
+  //
+  // They live HERE rather than in NoteTemplateDoc because that component is
+  // keyed by note id and is therefore destroyed on every note switch: a backup
+  // held there would vanish the moment the user looked at another note, and a
+  // refinement that lands in the background could not record one at all. Here,
+  // Note A's row backup is recorded and still offered when the user returns.
+  // Session-only, like every other history in this component.
+  const [rowRefineBackups, setRowRefineBackups] = useState({});
   // Monotonic request id, read synchronously so two clicks in one tick cannot
   // both start a request before React re-renders the disabled button.
   const refineRequestRef = useRef(0);
@@ -558,7 +574,21 @@ export default function MainArea() {
     // removing, so this cannot loop.
     setHistoryByNote((prev) => pruneDeletedNoteHistories(prev, liveNoteIds));
     setRefineBackups((prev) => pruneRefineBackups(prev, liveNoteIds));
+    setRowRefineBackups((prev) => pruneRowRefineBackups(prev, liveNoteIds));
   }, [liveNoteIds]);
+
+  // Row-level Refine backup writers handed to NoteTemplateDoc. Both are stable,
+  // so the async handler that captured them can still record a backup for the
+  // note it started from after that note's form has been unmounted.
+  const handleSetRowRefineBackup = useCallback((targetNoteId, rowId, previousAnswer) => {
+    setRowRefineBackups((prev) =>
+      setRowRefineBackup(prev, targetNoteId, rowId, previousAnswer)
+    );
+  }, []);
+
+  const handleClearRowRefineBackup = useCallback((targetNoteId, rowId) => {
+    setRowRefineBackups((prev) => clearRowRefineBackup(prev, targetNoteId, rowId));
+  }, []);
 
   /* ============================== AI Refine =============================== */
 
@@ -989,6 +1019,9 @@ export default function MainArea() {
                     onSelectRow={(rowId) => setActiveTemplateRowId(rowId)}
                     onRegisterTemplateProgress={registerTemplateProgress}
                     isAssetInProgressHistory={isAssetInProgressHistory}
+                    rowRefineBackups={rowRefineBackups}
+                    onSetRowRefineBackup={handleSetRowRefineBackup}
+                    onClearRowRefineBackup={handleClearRowRefineBackup}
                   />
                 </div>
               </>
