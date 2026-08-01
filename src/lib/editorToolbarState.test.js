@@ -43,7 +43,7 @@ describe("isFreeformEditingEnabled", () => {
   });
 
   test("the stored view identifiers are unchanged", () => {
-    // MainArea and the Save progress history both depend on these values.
+    // MainArea and the per-view autosave status both depend on these values.
     expect(FREEFORM_LAYOUT).toBe("natural");
     expect(TEMPLATE_LAYOUT).toBe("template");
   });

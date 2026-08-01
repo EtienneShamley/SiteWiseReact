@@ -68,19 +68,15 @@ import useTransientMessage from "../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import ListenInPanel from "./ListenInPanel";
+import { NOTE_VIEW, NOTE_VIEW_LABEL } from "../lib/noteViews";
+import useSaveStatus from "../hooks/useSaveStatus";
 import {
-  NOTE_VIEW,
-  NOTE_VIEW_LABEL,
-  addRestorePoint,
-  findRestorePoint,
-  isAssetReferencedByHistory,
-  listRestorePointsNewestFirst,
-  makeFreeformRestorePoint,
-  pruneDeletedNoteHistories,
-  restoreHistoryHeading,
-  restorePointAccessibleLabel,
-  restorePointTimeLabel,
-} from "../lib/noteProgressHistory";
+  SAVED_LOCALLY_HINT,
+  SAVE_FAILED_DETAIL,
+  getSaveStatus,
+  isSaveFailed,
+  saveStatusLabel,
+} from "../lib/saveStatus";
 
 const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
@@ -130,27 +126,30 @@ export default function MainArea() {
   // "Template form" (see NOTE_VIEW_LABEL).
   const [noteLayout, setNoteLayout] = useState("natural"); // default natural
 
-  // Save progress restore points, scoped by note id AND note view:
-  //   { [noteId]: { freeform: [point], templateForm: [point] } }
-  // In-memory for this editing session ONLY — deliberately never persisted, so
-  // it is gone after a reload. The note's actual content and its template
-  // instance persist through their own systems (docState / the instance
-  // record); a restore point is a temporary undo target, not a saved copy.
-  const [historyByNote, setHistoryByNote] = useState({});
-  // Restrained, transient feedback for the Save progress control.
-  const [progressStatus, setProgressStatus] = useState(null); // { tone, message }
+  // Autosave status, per note id AND per note view. There is no manual save:
+  // editing persists continuously through the existing storage paths and this
+  // only reports what actually happened to those writes. Every rule about what
+  // a status may claim lives in src/lib/saveStatus.js; the hook owns the
+  // sequence numbers and the anti-flicker timers.
+  const {
+    statusByNote: saveStatusByNote,
+    markDirty: markSaveDirty,
+    beginSave: beginSaveStatus,
+    settle: settleSave,
+    markLoaded: markSaveLoaded,
+    prune: pruneSaveStatuses,
+  } = useSaveStatus();
 
   // AI Refine lifecycle: idle | loading | success | unavailable | failure.
   // The model itself is pure and lives in src/lib/refineLifecycle.js.
   const [refineState, setRefineState] = useState(createRefineState);
   // Refine history: exactly ONE pre-refine Free-form state PER NOTE, keyed by
-  // note id. Deliberately separate from Save progress restore points (see
-  // src/lib/noteProgressHistory.js) and, like them, session-only — the
-  // REVERTED CONTENT persists through docState, the backup slot does not.
+  // note id. Session-only — the REVERTED CONTENT persists through docState,
+  // the backup slot does not.
   const [refineBackups, setRefineBackups] = useState({});
   // Template form ROW-level Refine backups: { [noteId]: { [rowId]: answer } }.
   // One previous value per note per row, deliberately separate from the
-  // Free-form backup above and from Save progress history.
+  // Free-form backup above.
   //
   // They live HERE rather than in NoteTemplateDoc because that component is
   // keyed by note id and is therefore destroyed on every note switch: a backup
@@ -180,29 +179,52 @@ export default function MainArea() {
   // Template integration
   const templateInsertRef = useRef(null); // (rowId, text) => void
   const [activeTemplateRowId, setActiveTemplateRowId] = useState(null);
-  // Template form Save progress handlers, registered by NoteTemplateDoc (same
-  // pattern as templateInsertRef): { capture, restore }.
-  const templateProgressRef = useRef(null);
-  const progressStatusTimerRef = useRef(null);
 
-  // The live history, readable from stable callbacks (the asset-retention check
-  // handed to NoteTemplateDoc) without re-registering them on every save.
-  const historyRef = useRef(historyByNote);
-  historyRef.current = historyByNote;
+  // Free-form notes whose change is waiting for the write below: noteId -> the
+  // sequence number stamped on that change. Every Free-form edit is routed
+  // through here, so the write's confirmed outcome settles exactly the notes
+  // that caused it — including a note the user has already navigated away from
+  // (a background refine result), which settles its OWN status and never the
+  // one on screen.
+  const pendingFreeformRef = useRef(new Map());
 
-  // A failed write here means the note is no longer being saved — most often
-  // because an embedded editor image has pushed this origin past its
-  // localStorage budget. It used to be swallowed entirely, so the user kept
-  // typing into content that would silently not survive a reload.
-  const [persistenceError, setPersistenceError] = useState(false);
+  /**
+   * The ONE place Free-form note content reaches storage.
+   *
+   * The write is synchronous and immediate — nothing is debounced, so no recent
+   * edit can be lost. Returning without throwing IS the confirmation; a failure
+   * (most often this origin's localStorage budget, e.g. a large legacy embedded
+   * image) is reported as "Save failed" and never swallowed. The content stays
+   * on screen and editable either way, and the next edit retries through this
+   * same path.
+   */
   useEffect(() => {
+    let ok = true;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(docState));
-      setPersistenceError(false);
     } catch {
-      setPersistenceError(true);
+      ok = false;
     }
-  }, [docState]);
+    const pending = pendingFreeformRef.current;
+    if (pending.size === 0) return; // mount / no user-driven change to report
+    const settled = [...pending.entries()];
+    pending.clear();
+    for (const [targetNoteId, seq] of settled) {
+      settleSave(targetNoteId, NOTE_VIEW.FREEFORM, seq, ok);
+    }
+  }, [docState, settleSave]);
+
+  // Records that a real Free-form change was made to a SPECIFIC note, and
+  // queues it for the write above. The note is always passed explicitly, never
+  // inferred from what is on screen.
+  const markFreeformDirty = useCallback(
+    (targetNoteId) => {
+      if (!targetNoteId) return;
+      const seq = markSaveDirty(targetNoteId, NOTE_VIEW.FREEFORM);
+      if (seq) pendingFreeformRef.current.set(targetNoteId, seq);
+    },
+    [markSaveDirty]
+  );
 
   const { noteTitle, noteKey } = useMemo(() => {
     let noteTitle = null;
@@ -302,19 +324,28 @@ export default function MainArea() {
         },
       },
       onUpdate: ({ editor }) => {
-        if (noteKey)
-          setDocState((prev) => ({ ...prev, [noteKey]: editor.getHTML() }));
+        if (!noteKey) return;
+        // Ordinary typing, formatting and image-reference insertion: a real
+        // change, so the status becomes "Saving…" and the write below settles
+        // it. Unchanged persistence behaviour — the same immediate write.
+        markFreeformDirty(noteKey);
+        setDocState((prev) => ({ ...prev, [noteKey]: editor.getHTML() }));
       },
     },
     [noteKey]
   );
 
+  // Loading a note into the editor is not an edit. `emitUpdate: false` is
+  // explicit because the installed editor emits an update from setContent by
+  // default: without it, simply opening a note would report itself as a change,
+  // rewrite the note it just read, and flash "Saving…" for content that was
+  // already saved.
   useEffect(() => {
     if (!editor) return;
     if (noteKey && docState[noteKey]) {
-      editor.commands.setContent(docState[noteKey]);
+      editor.commands.setContent(docState[noteKey], { emitUpdate: false });
     } else if (noteKey) {
-      editor.commands.setContent(EMPTY_DOC);
+      editor.commands.setContent(EMPTY_DOC, { emitUpdate: false });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, noteKey]);
@@ -344,14 +375,22 @@ export default function MainArea() {
    * editor being the visible one at all. Normal typing persistence is
    * untouched — that still flows through the editor's own onUpdate.
    */
-  const applyFreeformHtml = useCallback((targetNoteId, html) => {
-    if (!targetNoteId || typeof html !== "string") return false;
-    setDocState((prev) => ({ ...prev, [targetNoteId]: html }));
-    if (editorRef.current && noteKeyRef.current === targetNoteId) {
-      editorRef.current.commands.setContent(html);
-    }
-    return true;
-  }, []);
+  const applyFreeformHtml = useCallback(
+    (targetNoteId, html) => {
+      if (!targetNoteId || typeof html !== "string") return false;
+      // This write is what persists, and it reports through the SAME confirmed
+      // status path as typing — for the note it belongs to, not the note on
+      // screen. The editor update below is suppressed so one change produces
+      // exactly one pending write and one status transition.
+      markFreeformDirty(targetNoteId);
+      setDocState((prev) => ({ ...prev, [targetNoteId]: html }));
+      if (editorRef.current && noteKeyRef.current === targetNoteId) {
+        editorRef.current.commands.setContent(html, { emitUpdate: false });
+      }
+      return true;
+    },
+    [markFreeformDirty]
+  );
 
   function handleInsertTextAtCursor(text) {
     if (editor && text) editor.chain().focus().insertContent(text).run();
@@ -442,13 +481,12 @@ export default function MainArea() {
     handleInsertTextAtCursor(text);
   }
 
-  /* ========================= Save progress (per view) ====================== */
+  /* ============================ Autosave status =========================== */
 
   // The view the user is actually looking at, resolved on every render so the
-  // button and the dropdown can never act on the previously active view.
+  // status can never describe the previously active view.
   const activeView =
     noteLayout === "template" ? NOTE_VIEW.TEMPLATE_FORM : NOTE_VIEW.FREEFORM;
-  const activeViewLabel = NOTE_VIEW_LABEL[activeView];
 
   // Is the Free-form editor the surface the user is actually looking at?
   // The editor is only HIDDEN (display:none) behind the Template form, so
@@ -461,111 +499,50 @@ export default function MainArea() {
     noteLayout,
   });
 
-  // Only the active view's restore points, newest first.
-  const activeRestorePoints = useMemo(
-    () => listRestorePointsNewestFirst(historyByNote, noteKey, activeView),
-    [historyByNote, noteKey, activeView]
-  );
+  // The status shown to the user: this note, this view, and nothing else.
+  const activeSaveStatus = getSaveStatus(saveStatusByNote, noteKey, activeView);
+  const activeSaveLabel = saveStatusLabel(activeSaveStatus);
+  const activeSaveFailed = isSaveFailed(activeSaveStatus);
+  const saveStatusHintId = "note-save-status-hint";
 
-  function showProgressStatus(tone, message) {
-    if (progressStatusTimerRef.current) clearTimeout(progressStatusTimerRef.current);
-    setProgressStatus({ tone, message });
-    progressStatusTimerRef.current = setTimeout(() => {
-      setProgressStatus(null);
-      progressStatusTimerRef.current = null;
-    }, tone === "error" ? 8000 : 2500);
-  }
-
-  // Clear the transient status (and its timer) when the note or view changes,
-  // so a message can never appear to describe the wrong view.
+  /**
+   * An EXISTING Free-form note whose stored content was read successfully is
+   * genuinely saved locally and says so without flashing "Saving…".
+   *
+   * `docState` was hydrated from a successful read of the note-content record,
+   * so an entry for this note IS a successfully read stored value. A note with
+   * no entry has never been persisted (a new, empty note): it stays idle and
+   * says nothing until its first change is written and confirmed.
+   */
   useEffect(() => {
-    setProgressStatus(null);
-    if (progressStatusTimerRef.current) {
-      clearTimeout(progressStatusTimerRef.current);
-      progressStatusTimerRef.current = null;
-    }
-  }, [noteKey, activeView]);
-
-  useEffect(
-    () => () => {
-      if (progressStatusTimerRef.current) clearTimeout(progressStatusTimerRef.current);
-    },
-    []
-  );
-
-  // Creates a restore point for the ACTIVE view only. The other view's history
-  // is never written, and neither view's content is modified.
-  const saveProgress = () => {
     if (!noteKey) return;
+    if (typeof docStateRef.current[noteKey] !== "string") return;
+    markSaveLoaded(noteKey, NOTE_VIEW.FREEFORM);
+  }, [noteKey, markSaveLoaded]);
 
-    let point = null;
-    if (activeView === NOTE_VIEW.FREEFORM) {
-      if (!editor) return;
-      point = makeFreeformRestorePoint({ html: editor.getHTML() });
-    } else {
-      const capture = templateProgressRef.current?.capture;
-      point = capture ? capture() : null;
-      if (!point) {
-        showProgressStatus(
-          "error",
-          "This note's Template form could not be captured, so no restore point was created."
-        );
-        return;
-      }
-    }
+  /* --------------------- Template form status reporting ------------------- */
 
-    // The oldest point is discarded only as part of this successful append.
-    setHistoryByNote((prev) => addRestorePoint(prev, noteKey, point));
-    showProgressStatus("success", `${activeViewLabel} restore point saved`);
-  };
-
-  // Restores a point from the ACTIVE view's history. A Free-form restore never
-  // touches the Template form, and a Template form restore never touches the
-  // Free-form note.
-  const restoreProgressPoint = (pointId) => {
-    const point = findRestorePoint(historyByNote, noteKey, activeView, pointId);
-    if (!point) return;
-
-    if (point.view === NOTE_VIEW.FREEFORM) {
-      if (!editor) return;
-      editor.commands.setContent(point.html);
-      // setContent does not emit an update, so the persisted note content must
-      // be written here as well — otherwise the restore is silently discarded
-      // the next time this note is loaded from docState.
-      setDocState((prev) => ({ ...prev, [noteKey]: point.html }));
-      showProgressStatus("success", "Free-form note restored");
-      return;
-    }
-
-    const restore = templateProgressRef.current?.restore;
-    if (!restore) {
-      showProgressStatus("error", "The Template form is not ready yet, so nothing was changed.");
-      return;
-    }
-    const result = restore(point);
-    if (result?.ok) showProgressStatus("success", "Template form restored");
-    else {
-      showProgressStatus(
-        "error",
-        result?.error || "That restore point could not be applied, so nothing was changed."
-      );
-    }
-  };
-
-  const registerTemplateProgress = useCallback((handlers) => {
-    templateProgressRef.current = handlers;
-  }, []);
-
-  // Asset-retention rule handed to NoteTemplateDoc: an attachment Blob must not
-  // be deleted while any ACTIVE restore point still references it, or restoring
-  // that point would resurrect a reference to a missing asset. Reads the ref so
-  // this callback stays stable while always seeing the current history.
-  const isAssetInProgressHistory = useCallback(
-    (assetId) => isAssetReferencedByHistory(historyRef.current, assetId),
-    []
+  // NoteTemplateDoc reports its own confirmed writes through these. The note id
+  // is always passed by the caller (it comes from the instance being written),
+  // never taken from what is on screen — a row refinement that lands after the
+  // user has moved on settles the note it belongs to.
+  const beginTemplateSave = useCallback(
+    (targetNoteId) => beginSaveStatus(targetNoteId, NOTE_VIEW.TEMPLATE_FORM),
+    [beginSaveStatus]
   );
 
-  // Deleted-note cleanup: drop the in-memory histories of notes that no longer
+  const settleTemplateSave = useCallback(
+    (targetNoteId, seq, ok) =>
+      settleSave(targetNoteId, NOTE_VIEW.TEMPLATE_FORM, seq, ok),
+    [settleSave]
+  );
+
+  const markTemplateLoaded = useCallback(
+    (targetNoteId) => markSaveLoaded(targetNoteId, NOTE_VIEW.TEMPLATE_FORM),
+    [markSaveLoaded]
+  );
+
+  // Deleted-note cleanup: drop the in-memory statuses of notes that no longer
   // exist, so a long session cannot accumulate them. The tree is hydrated
   // synchronously in AppStateContext's state initializer, so by the time this
   // renders the live set is always the resolved one — an empty set means the
@@ -588,12 +565,12 @@ export default function MainArea() {
   }, [rootNotes, state]);
 
   useEffect(() => {
-    // pruneDeletedNoteHistories returns the same reference when nothing needs
-    // removing, so this cannot loop.
-    setHistoryByNote((prev) => pruneDeletedNoteHistories(prev, liveNoteIds));
+    // Each of these returns the same reference when nothing needs removing, so
+    // this cannot loop.
+    pruneSaveStatuses(liveNoteIds);
     setRefineBackups((prev) => pruneRefineBackups(prev, liveNoteIds));
     setRowRefineBackups((prev) => pruneRowRefineBackups(prev, liveNoteIds));
-  }, [liveNoteIds]);
+  }, [liveNoteIds, pruneSaveStatuses]);
 
   // Row-level Refine backup writers handed to NoteTemplateDoc. Both are stable,
   // so the async handler that captured them can still record a backup for the
@@ -741,9 +718,6 @@ export default function MainArea() {
   const chipBtnCls =
     "px-3 py-1.5 rounded-md text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-900/70 hover:text-gray-900 dark:hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50";
 
-  const chipSelectCls =
-    "text-xs rounded-md px-2 py-1.5 bg-transparent text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-900/70 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50";
-
   // Note/PDF tab segments use the shared nav accent tokens (see styles/nav.css)
   // so the active tab matches the blue navigation system everywhere.
   const segmentBtnCls = (active) =>
@@ -813,70 +787,48 @@ export default function MainArea() {
       <div className="flex items-center justify-between flex-wrap gap-2">
         {activeTab === "note" ? (
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
-            {/* Wording is "Save progress", but this creates an IN-MEMORY
-                restore point for the current editing session only — it is not
-                persisted and does not survive a reload. The tooltip and
-                accessible name say so; do not describe it as a durable save
-                unless persistence is actually implemented. The note itself is
-                already saved continuously through its own persistence; this
-                does NOT mean the note was previously unsaved.
-                The button and the dropdown always act on the VISIBLY ACTIVE
-                view, and each view keeps its own independent history. */}
-            <button
-              className={chipBtnCls}
-              onClick={saveProgress}
-              disabled={!noteTitle || !editor}
-              title={`Save a temporary restore point for the ${activeViewLabel} in this editing session (not kept after a reload)`}
-              aria-label={`Save progress — a temporary restore point for the ${activeViewLabel} in this editing session, not kept after a reload`}
-            >
-              Save progress
-            </button>
-
-            {activeRestorePoints.length > 0 && (
-              <select
-                className={chipSelectCls}
-                value=""
-                onChange={(e) => {
-                  if (e.target.value) restoreProgressPoint(e.target.value);
-                }}
-                title={`Restore a ${activeViewLabel} restore point saved in this session`}
-                aria-label={`Restore a ${activeViewLabel} restore point saved in this session`}
+          {/* Autosave status for the ACTIVE note and the ACTIVE view. There is
+              no manual save: editing persists continuously, and this reports
+              the confirmed result of those writes — "Saving…" only while a real
+              change is pending or being written, "Saved locally" only after a
+              write has actually completed (never merely because React state or
+              the editor updated), and "Save failed" only after a confirmed
+              failure. It is deliberately "Saved locally", never "Saved": there
+              is no cloud sync. The live region is always present so a change of
+              state is announced; the hint sits OUTSIDE it so the explanation is
+              not re-announced every time. */}
+          <div
+            className="flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-gray-800/70 px-2 py-1.5 min-h-[2rem]"
+            role="status"
+            aria-live="polite"
+          >
+            {activeSaveLabel && (
+              <span
+                tabIndex={0}
+                // On failure the explanation is visible beside the label and is
+                // read with it, so the "saved in this browser" description must
+                // not also be attached — it would describe the wrong outcome.
+                title={activeSaveFailed ? undefined : SAVED_LOCALLY_HINT}
+                aria-describedby={activeSaveFailed ? undefined : saveStatusHintId}
+                className={[
+                  "text-xs font-medium rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50",
+                  activeSaveFailed
+                    ? "text-red-600 dark:text-red-400"
+                    : "text-gray-600 dark:text-gray-300",
+                ].join(" ")}
               >
-                <option value="" disabled>
-                  Restore…
-                </option>
-                {/* The heading names the view, so each entry needs only its
-                    time — and the list only ever holds the active view's
-                    points, never the other view's or another note's. */}
-                <optgroup label={restoreHistoryHeading(activeView)}>
-                  {activeRestorePoints.map((point) => (
-                    <option
-                      key={point.id}
-                      value={point.id}
-                      aria-label={restorePointAccessibleLabel(point)}
-                    >
-                      {restorePointTimeLabel(point)}
-                    </option>
-                  ))}
-                </optgroup>
-              </select>
+                {activeSaveLabel}
+              </span>
+            )}
+            {activeSaveFailed && (
+              <span className="text-xs text-red-600 dark:text-red-400">
+                {SAVE_FAILED_DETAIL}
+              </span>
             )}
           </div>
-
-          {progressStatus && (
-            <span
-              role="status"
-              className={[
-                "text-xs",
-                progressStatus.tone === "error"
-                  ? "text-red-600 dark:text-red-400"
-                  : "text-gray-500 dark:text-gray-400",
-              ].join(" ")}
-            >
-              {progressStatus.message}
-            </span>
-          )}
+          <span id={saveStatusHintId} className="sr-only">
+            {SAVED_LOCALLY_HINT}
+          </span>
 
           {/* AI Refine applies to the Free-form note only. It is unavailable
               in the Template form and never acts on the hidden editor. */}
@@ -951,17 +903,6 @@ export default function MainArea() {
               ].join(" ")}
             >
               {imageInsertBusy ? "Adding image…" : imageNotice.message}
-            </span>
-          )}
-
-          {persistenceError && (
-            <span
-              role="status"
-              aria-live="polite"
-              className="text-xs text-red-600 dark:text-red-400"
-            >
-              This note could not be saved — browser storage is full. Remove a
-              large editor image, then edit again.
             </span>
           )}
 
@@ -1045,8 +986,9 @@ export default function MainArea() {
                       templateInsertRef.current = fn;
                     }}
                     onSelectRow={(rowId) => setActiveTemplateRowId(rowId)}
-                    onRegisterTemplateProgress={registerTemplateProgress}
-                    isAssetInProgressHistory={isAssetInProgressHistory}
+                    onSaveBegin={beginTemplateSave}
+                    onSaveSettle={settleTemplateSave}
+                    onSaveLoaded={markTemplateLoaded}
                     rowRefineBackups={rowRefineBackups}
                     onSetRowRefineBackup={handleSetRowRefineBackup}
                     onClearRowRefineBackup={handleClearRowRefineBackup}

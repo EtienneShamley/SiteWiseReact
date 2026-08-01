@@ -7,20 +7,14 @@ import {
 import {
   getNoteTemplateInstance,
   getOrCreateInstanceForNote,
-  saveNoteTemplateInstance,
   saveNoteTemplateInstanceOrThrow,
-  setInstanceTemplate,
+  getTemplate,
   listTemplates,
   getVersion,
   getCurrentVersion,
   collectKnownOptionIds,
   isAttachmentAssetReferenced,
 } from "../../lib/templateModel";
-import {
-  makeTemplateFormRestorePoint,
-  mergeRestoredAttachments,
-  validateTemplateFormRestorePoint,
-} from "../../lib/noteProgressHistory";
 import { isTextInsertable, normalizeRows } from "../../lib/templateFields";
 import {
   CUSTOM_ROW_MIN_HEIGHT_PX,
@@ -89,13 +83,13 @@ import {
  *   instance stores lightweight references (see src/lib/noteAttachments.js).
  * - Lets the user re-pin the note to a different template via a selector.
  * - Exposes an insert handler so MainArea can push BottomBar text into a row.
- * - Exposes a Save progress capture/restore handler pair so MainArea's
- *   "Save progress" control can act on the TEMPLATE FORM view without owning
- *   this component's state. Both read the current-value refs below, so a click
- *   can never capture or restore against a stale closure. A restore point holds
- *   lightweight instance state and attachment REFERENCES only — never Blob or
- *   base64 content — and applying one never mutates a TemplateVersion and never
- *   deletes an IndexedDB asset (src/lib/noteProgressHistory.js).
+ * - Reports the CONFIRMED outcome of every write it makes to MainArea's
+ *   per-note, per-view autosave status. There is no manual save: each write
+ *   below goes through one wrapper (saveInstanceConfirmed) that reports
+ *   "Saving…" before the throwing instance save and only reports success once
+ *   that save has written AND read the record back. A quota or serialization
+ *   failure is reported as a failure — never swallowed, and never presented as
+ *   saved just because the value is still on screen.
  * - Supports NOTE-SPECIFIC custom rows: an extra project-specific section the
  *   company template did not anticipate, inserted above or below any row. A
  *   custom row lives on THIS note's instance and carries the template it was
@@ -133,8 +127,13 @@ export default function NoteTemplateDoc({
   noteId,
   onRegisterTemplateInsert, // (fn | null) => void
   onSelectRow, // (rowId) => void
-  onRegisterTemplateProgress, // ({ capture, restore } | null) => void
-  isAssetInProgressHistory, // (assetId) => boolean
+  // Autosave status reporting. The note id is always passed explicitly (it
+  // comes from the instance being written), so a write that completes after the
+  // user has moved on settles the note it belongs to and never the note now on
+  // screen.
+  onSaveBegin, // (noteId) => seq
+  onSaveSettle, // (noteId, seq, ok) => void
+  onSaveLoaded, // (noteId) => void  — only after a confirmed read
   // Row-level AI Revert backups: { [noteId]: { [rowId]: previousAnswer } }.
   // They are owned by MainArea, NOT by this component, because this component
   // is remounted per note — a backup held here would be destroyed the moment
@@ -222,32 +221,56 @@ export default function NoteTemplateDoc({
   // tick, before React has re-rendered the button as disabled.
   const rowRefineRequestRef = useRef(0);
   const rowRefineInFlightRef = useRef(new Set());
-  // Kept current the same way so the async attachment handlers always ask the
-  // LIVE session history whether an asset is still needed.
-  const isAssetInProgressHistoryRef = useRef(isAssetInProgressHistory);
-  isAssetInProgressHistoryRef.current = isAssetInProgressHistory;
+
+  // The status reporters, kept current so the sequential async handlers (and a
+  // row refinement that lands after this component has unmounted) always call
+  // the live ones without re-creating every callback below on each render.
+  const onSaveBeginRef = useRef(onSaveBegin);
+  onSaveBeginRef.current = onSaveBegin;
+  const onSaveSettleRef = useRef(onSaveSettle);
+  onSaveSettleRef.current = onSaveSettle;
+
+  /**
+   * The ONE confirmed write path for this note's template instance.
+   *
+   * Every Template form change goes through here — master answers, structured
+   * field values, the template assignment, custom rows, attachment references
+   * and photo display settings, and row-level AI refine/revert. The save writes
+   * the record and reads it back; returning without throwing IS the
+   * confirmation, and only then is success reported. A failure is reported as a
+   * failure and rethrown, so each caller's existing per-field handling is
+   * unchanged and nothing on screen claims a write that did not happen.
+   *
+   * The status is reported for `instance.noteId`, never for whatever note is
+   * currently on screen.
+   */
+  const saveInstanceConfirmed = useCallback((nextInstance) => {
+    const targetNoteId = nextInstance?.noteId || null;
+    const seq = targetNoteId ? onSaveBeginRef.current?.(targetNoteId) : 0;
+    try {
+      const saved = saveNoteTemplateInstanceOrThrow(nextInstance);
+      if (seq) onSaveSettleRef.current?.(targetNoteId, seq, true);
+      return saved;
+    } catch (err) {
+      if (seq) onSaveSettleRef.current?.(targetNoteId, seq, false);
+      throw err;
+    }
+  }, []);
 
   /**
    * The single deletion decision for an attachment Blob.
    *
-   * An asset may be deleted only when nothing can still need it:
-   *   1. no note instance references it (persistent state), AND
-   *   2. no active Save progress restore point references it (session state).
-   *
-   * (2) exists because a Template form restore point stores references, not
-   * bytes. Deleting a Blob the moment the CURRENT instance stops referencing it
-   * would leave an earlier restore point pointing at an asset that no longer
-   * exists. Once that point is evicted by the 20-point cap, its note's history
-   * is cleared, or the session ends, the reference goes with it and ordinary
-   * reference-aware cleanup applies again — deletion is deferred, never
-   * abandoned. The check is deliberately conservative: an unknown answer
-   * (no handler wired) keeps the asset.
+   * An asset may be deleted only when no note instance references it. That is
+   * the check that protects LIVE content, and it is unchanged. The additional
+   * session-history condition this once carried was removed together with the
+   * temporary editing history it existed for — a history that no longer exists
+   * cannot need an asset (see docs/PROJECT_DECISIONS.md). This never sees a Free-form
+   * `editor-image` asset either: those are a different asset kind, owned by the
+   * editor, and are not reachable from this path.
    */
   const canDeleteAttachmentAsset = useCallback((assetId) => {
     if (!assetId) return false;
     if (isAttachmentAssetReferenced(assetId)) return false;
-    const inHistory = isAssetInProgressHistoryRef.current;
-    if (typeof inHistory !== "function" || inHistory(assetId)) return false;
     return true;
   }, []);
 
@@ -282,15 +305,57 @@ export default function NoteTemplateDoc({
     ? "ready"
     : "idle";
 
-  // Persist per-note template field content whenever it changes
+  // The first run of the persistence effect below is the note's ARRIVAL, not a
+  // change: it must never report "Saving…" for simply opening a note.
+  const persistPrimedRef = useRef(false);
+
+  /**
+   * Persist this note's master answers and attachment references.
+   *
+   * First run — nothing has changed yet, so nothing is written for the sake of
+   * writing. Instead the initial status is established from what storage
+   * actually holds: a record that reads back is confirmed saved locally; a
+   * record that does not (the instance creation in this component's initializer
+   * failed, e.g. on a full quota) is written through the confirmed path, which
+   * reports success or failure honestly. A note object existing, or this
+   * component having mounted, is never by itself enough to claim it is saved.
+   *
+   * Later runs — a real change to an answer or an attachment map. The write is
+   * immediate and confirmed; a failure is surfaced by the status rather than
+   * swallowed, which is what the previous non-throwing save did.
+   */
   useEffect(() => {
     if (!noteId || !instance) return;
-    saveNoteTemplateInstance({
-      ...instance,
-      answers: rowText,
-      attachments: rowAttachments,
-    });
-  }, [noteId, instance, rowText, rowAttachments]);
+
+    if (!persistPrimedRef.current) {
+      persistPrimedRef.current = true;
+      if (getNoteTemplateInstance(noteId)) {
+        onSaveLoaded?.(noteId);
+        return;
+      }
+      try {
+        saveInstanceConfirmed({
+          ...instance,
+          answers: rowText,
+          attachments: rowAttachments,
+        });
+      } catch {
+        // Reported as "Save failed" by the wrapper. The form stays usable and
+        // the next edit retries through this same path.
+      }
+      return;
+    }
+
+    try {
+      saveInstanceConfirmed({
+        ...instance,
+        answers: rowText,
+        attachments: rowAttachments,
+      });
+    } catch {
+      // Same: the status is the surface for this failure.
+    }
+  }, [noteId, instance, rowText, rowAttachments, saveInstanceConfirmed, onSaveLoaded]);
 
   /* ------------------------- note-specific custom rows ------------------- */
 
@@ -345,11 +410,28 @@ export default function NoteTemplateDoc({
   // Re-pin this note to another template's current version. Answers and
   // attachments are kept — entries keyed by row ids the new template doesn't
   // have simply stop rendering, nothing is destroyed.
+  //
+  // Written through the confirmed path (rather than the model's non-throwing
+  // helper) so a failed assignment is reported instead of silently reverting on
+  // the next reload: in-memory state changes only after the write is confirmed.
   function handleTemplateChange(e) {
     const templateId = e.target.value;
     if (!templateId || templateId === instance?.templateId) return;
-    const next = setInstanceTemplate(noteId, templateId);
-    if (next) setInstance(next);
+    const tpl = getTemplate(templateId);
+    if (!tpl) return;
+
+    const next = {
+      ...instanceRef.current,
+      templateId: tpl.id,
+      templateVersionId: tpl.currentVersionId,
+    };
+    try {
+      saveInstanceConfirmed(next);
+    } catch {
+      return; // reported as "Save failed"; the note keeps its current template
+    }
+    instanceRef.current = next;
+    setInstance(next);
   }
 
   // Answers route by ownership: a template field's answer goes to the
@@ -387,17 +469,20 @@ export default function NoteTemplateDoc({
   // is written and read back before any in-memory state changes, so a failed
   // write surfaces as a visible per-row error instead of silently losing the
   // user's section. TemplateVersions are never touched.
-  const persistCustomRows = useCallback((nextCustomRows) => {
-    const nextInstance = {
-      ...instanceRef.current,
-      answers: rowTextRef.current,
-      attachments: rowAttachmentsRef.current,
-      customRows: nextCustomRows,
-    };
-    saveNoteTemplateInstanceOrThrow(nextInstance);
-    instanceRef.current = nextInstance;
-    setInstance(nextInstance);
-  }, []);
+  const persistCustomRows = useCallback(
+    (nextCustomRows) => {
+      const nextInstance = {
+        ...instanceRef.current,
+        answers: rowTextRef.current,
+        attachments: rowAttachmentsRef.current,
+        customRows: nextCustomRows,
+      };
+      saveInstanceConfirmed(nextInstance);
+      instanceRef.current = nextInstance;
+      setInstance(nextInstance);
+    },
+    [saveInstanceConfirmed]
+  );
 
   const commitCustomRows = useCallback(
     (nextCustomRows, errorFieldId, whatFailed) => {
@@ -525,15 +610,18 @@ export default function NoteTemplateDoc({
   // Persist an attachments-map change via the THROWING instance save (the
   // reference write must be confirmed before dependent cleanup decisions), and
   // keep state + ref in sync for the sequential async upload loop.
-  const persistAttachments = useCallback((nextMap) => {
-    saveNoteTemplateInstanceOrThrow({
-      ...instanceRef.current,
-      answers: rowTextRef.current,
-      attachments: nextMap,
-    });
-    rowAttachmentsRef.current = nextMap;
-    setRowAttachments(nextMap);
-  }, []);
+  const persistAttachments = useCallback(
+    (nextMap) => {
+      saveInstanceConfirmed({
+        ...instanceRef.current,
+        answers: rowTextRef.current,
+        attachments: nextMap,
+      });
+      rowAttachmentsRef.current = nextMap;
+      setRowAttachments(nextMap);
+    },
+    [saveInstanceConfirmed]
+  );
 
   const handleAddAttachments = useCallback(
     async (fieldId, kind, files) => {
@@ -649,9 +737,9 @@ export default function NoteTemplateDoc({
         return;
       }
 
-      // 3. Delete the Blob only when it is provably no longer needed by ANY
-      //    note instance OR any active session restore point (never assume
-      //    single ownership — see canDeleteAttachmentAsset).
+      // 3. Delete the Blob only when it is provably no longer referenced by ANY
+      //    note instance (never assume single ownership — see
+      //    canDeleteAttachmentAsset).
       const assetId =
         entry && typeof entry === "object" ? entry.assetId : null;
       if (canDeleteAttachmentAsset(assetId)) {
@@ -901,7 +989,7 @@ export default function NoteTemplateDoc({
       // Persist FIRST through the confirmed instance save, so the refined answer
       // is durable before anything on screen claims it succeeded.
       try {
-        saveNoteTemplateInstanceOrThrow(next);
+        saveInstanceConfirmed(next);
       } catch {
         settle(ROW_REFINE_STATUS.FAILURE, ROW_REFINE_SAVE_FAILED_MESSAGE);
         return;
@@ -929,6 +1017,7 @@ export default function NoteTemplateDoc({
       readLiveInstance,
       showRowRefineMessage,
       onSetRowRefineBackup,
+      saveInstanceConfirmed,
     ]
   );
 
@@ -954,7 +1043,7 @@ export default function NoteTemplateDoc({
       if (!next) return;
 
       try {
-        saveNoteTemplateInstanceOrThrow(next);
+        saveInstanceConfirmed(next);
       } catch {
         showRowRefineMessage(
           rowId,
@@ -981,6 +1070,7 @@ export default function NoteTemplateDoc({
       readLiveInstance,
       showRowRefineMessage,
       onClearRowRefineBackup,
+      saveInstanceConfirmed,
     ]
   );
 
@@ -999,86 +1089,6 @@ export default function NoteTemplateDoc({
       return () => onRegisterTemplateInsert(null);
     }
   }, [onRegisterTemplateInsert, insertIntoRow]);
-
-  /* ----------------------- Save progress (Template form) ------------------ */
-
-  // Captures the Template form's current state as a restore point. Reads the
-  // refs, not render-scope state, so the point always reflects what is on
-  // screen at the moment of the click. Returns null when there is nothing to
-  // capture, so MainArea reports that instead of storing an empty point.
-  const captureProgress = useCallback(() => {
-    const current = instanceRef.current;
-    if (!current) return null;
-    return makeTemplateFormRestorePoint({
-      instance: {
-        ...current,
-        answers: rowTextRef.current,
-        attachments: rowAttachmentsRef.current,
-      },
-    });
-  }, []);
-
-  /**
-   * Applies a Template form restore point to THIS note only.
-   *
-   * Fails whole rather than partially: the pinned version is resolved first,
-   * and the instance write is confirmed (throwing save) before any in-memory
-   * state changes, so a refused or failed restore leaves the current form
-   * exactly as it was. Never touches the Free-form note, never writes to a
-   * TemplateVersion, and never deletes an IndexedDB asset — an attachment that
-   * this restore drops keeps its Blob, so a later restore can recover it.
-   */
-  const restoreProgress = useCallback((point) => {
-    const validation = validateTemplateFormRestorePoint(point, {
-      versionExists: (versionId) => !!getVersion(versionId),
-    });
-    if (!validation.ok) return validation;
-
-    const current = instanceRef.current;
-    if (!current) {
-      return { ok: false, error: "This note's Template form is not ready yet." };
-    }
-
-    const next = {
-      ...current,
-      templateId: point.templateId ?? null,
-      templateVersionId: point.templateVersionId ?? null,
-      answers: { ...point.answers },
-      attachments: mergeRestoredAttachments(rowAttachmentsRef.current, point),
-      customRows: (point.customRows || []).map((r) => ({
-        ...r,
-        placement: r?.placement ? { ...r.placement } : r?.placement,
-      })),
-    };
-
-    try {
-      saveNoteTemplateInstanceOrThrow(next);
-    } catch (err) {
-      return {
-        ok: false,
-        error: `The Template form could not be restored (${err?.message || err}). Nothing was changed.`,
-      };
-    }
-
-    instanceRef.current = next;
-    rowTextRef.current = next.answers;
-    rowAttachmentsRef.current = next.attachments;
-    setInstance(next);
-    setRowText(next.answers);
-    setRowAttachments(next.attachments);
-    // Drop transient drag state and stale per-field errors from the state that
-    // no longer exists; the restored rows/branding reload from the pinned
-    // version through the effect above.
-    setPendingHeights({});
-    setFieldErrors({});
-    return { ok: true };
-  }, []);
-
-  useEffect(() => {
-    if (!onRegisterTemplateProgress) return;
-    onRegisterTemplateProgress({ capture: captureProgress, restore: restoreProgress });
-    return () => onRegisterTemplateProgress(null);
-  }, [onRegisterTemplateProgress, captureProgress, restoreProgress]);
 
   return (
     <div className="p-2 text-black dark:text-white">

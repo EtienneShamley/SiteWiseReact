@@ -7,11 +7,11 @@
 // Kept free of React and of the editor so every rule below is directly
 // testable (no DOM testing library is installed — see docs/TESTING.md).
 //
-// Refine history is NOT Save progress history (src/lib/noteProgressHistory.js).
-// Save progress keeps 20 user-created restore points per note per view.
 // Refine keeps exactly ONE automatic pre-refine state per note, created only
-// immediately before a valid AI result is applied. The two never share storage
-// and are never merged.
+// immediately before a valid AI result is applied. It is not a general editing
+// history: TipTap owns undo/redo, and note content itself is saved
+// continuously (see src/lib/saveStatus.js). These never share storage and are
+// never merged.
 
 export const REFINE_STATUS = {
   IDLE: "idle",
@@ -136,7 +136,7 @@ export function clearRefineBackup(backups, noteId) {
 
 /**
  * Drop backups belonging to notes that no longer exist, mirroring the
- * deleted-note cleanup the Save progress history performs. Returns the SAME
+ * deleted-note cleanup the autosave status performs. Returns the SAME
  * reference when nothing needs removing, so it cannot drive a render loop.
  */
 export function pruneRefineBackups(backups, liveNoteIds) {

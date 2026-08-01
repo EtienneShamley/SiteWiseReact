@@ -371,8 +371,6 @@ export function clearRowRefineStatus(map, rowId) {
 // Deliberately separate from:
 //   - the Free-form Refine backup (src/lib/refineLifecycle.js — one HTML state
 //     per note),
-//   - Save progress restore points (src/lib/noteProgressHistory.js — 20 points
-//     per note per view),
 //   - TipTap undo/redo.
 // One previous value per note per row, session-only. The refined answer and the
 // reverted answer both persist normally through the instance record; only the
@@ -424,7 +422,7 @@ export function rowIdsWithBackup(backups, noteId) {
 
 /**
  * Drop backups belonging to notes that no longer exist, mirroring the deleted-
- * note cleanup Save progress and Free-form Refine already perform. Returns the
+ * note cleanup the autosave status and Free-form Refine already perform. Returns the
  * SAME reference when nothing needs removing.
  */
 export function pruneRowRefineBackups(backups, liveNoteIds) {

@@ -69,8 +69,8 @@ export default function FormattingControls({ editor, disabled = false }) {
         taskList: e.isActive("taskList"),
         // Undo/redo availability comes from the editor's own history, exactly
         // like every other active state, so the buttons cannot advertise a
-        // step that does not exist. This history is TipTap's, and is entirely
-        // separate from Save progress restore points.
+        // step that does not exist. This history is TipTap's own, and is
+        // entirely separate from the AI Refine backups.
         canUndo: e.can().undo(),
         canRedo: e.can().redo(),
         canIndent: !!listItemType && e.can().sinkListItem(listItemType),
@@ -299,7 +299,7 @@ export default function FormattingControls({ editor, disabled = false }) {
 
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {/* History — TipTap's editing history, not Save progress restore points */}
+      {/* History — TipTap's own editing history (session-only) */}
       <div className="flex items-center gap-1">
         <button onClick={() => editor.chain().focus().undo().run()} disabled={off || !s.canUndo} className={`${btnBase} ${btnDisabled}`} title="Undo" aria-label="Undo"><FaUndo /></button>
         <button onClick={() => editor.chain().focus().redo().run()} disabled={off || !s.canRedo} className={`${btnBase} ${btnDisabled}`} title="Redo" aria-label="Redo"><FaRedo /></button>

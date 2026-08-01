@@ -6,15 +6,14 @@
 // This exists because the Free-form TipTap editor is not unmounted when the
 // Template form is shown — it is hidden with display:none (see MainArea). A
 // control that stays enabled in that state dispatches into a document nobody
-// is looking at and persists the result, which is the same failure mode the
-// Save progress work already had to correct. The rule is therefore derived
+// is looking at and persists the result. The rule is therefore derived
 // once, here, and used by every affected control.
 //
 // Pure: no React, no editor, no DOM.
 
 // MainArea's stored view identifiers are unchanged ("natural" | "template");
 // the user-facing names are Free-form note / Template form — see
-// src/lib/noteProgressHistory.js NOTE_VIEW_LABEL.
+// src/lib/noteViews.js NOTE_VIEW_LABEL.
 export const FREEFORM_LAYOUT = "natural";
 export const TEMPLATE_LAYOUT = "template";
 

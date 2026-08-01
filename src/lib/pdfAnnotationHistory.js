@@ -3,7 +3,7 @@
 // Bounded, document-scoped Undo/Redo for PDF annotations.
 //
 // This history is deliberately separate from every other history in the app
-// (Free-form TipTap, Save progress, AI Refine, template-row Refine). It is
+// (Free-form TipTap, AI Refine, template-row Refine). It is
 // session-only: annotation STATE persists to IndexedDB normally, the history
 // of how it got there does not. One editor instance exists per PDF document
 // (the editor is remounted per `docId`), so a history object can never span
