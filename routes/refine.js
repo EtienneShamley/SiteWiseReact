@@ -1,82 +1,127 @@
-// server/routes/refine.js
+// routes/refine.js
 const express = require("express");
 const OpenAI = require("openai");
 
+const {
+  PROVIDER_NOT_CONFIGURED,
+  REFINE_OUTCOME,
+  REFINE_TIMEOUT_MS,
+  buildRefineSystemPrompt,
+  classifyProviderError,
+  httpStatusForOutcome,
+  refineMessageFor,
+  validateRefineOutput,
+  validateRefineRequest,
+} = require("../src/lib/refineContract");
+
 const router = express.Router();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const MODEL = "gpt-4o-mini";
+const isDev = process.env.NODE_ENV !== "production";
+
+// The provider client is created LAZILY.
+//
+// It used to be constructed at module load, and the OpenAI v5 constructor
+// throws when no API key is present — so requiring this router with no key
+// took the WHOLE Express server down, including /api/health and the map
+// routes. Startup must never depend on optional provider configuration.
+let client = null;
+function getClient() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    const err = new Error("Refine provider is not configured");
+    err.code = PROVIDER_NOT_CONFIGURED;
+    throw err;
+  }
+  if (!client) {
+    client = new OpenAI({
+      apiKey,
+      // One user action must produce at most one provider request. The SDK
+      // retries twice by default, which would silently triple a single click.
+      maxRetries: 0,
+      timeout: REFINE_TIMEOUT_MS,
+    });
+  }
+  return client;
+}
+
+// Detailed diagnostics stay on the server, and only in development. The note
+// itself is never logged — only its length — so a diagnostic line can never
+// become a copy of someone's field notes.
+function logRefineFailure(outcome, err, textLength) {
+  if (!isDev) return;
+  const detail = err && err.message ? err.message : String(err);
+  // eslint-disable-next-line no-console
+  console.error(
+    `[refine] ${outcome} (input ${textLength} chars):`,
+    err && err.status ? `status ${err.status} — ${detail}` : detail
+  );
+}
 
 router.post("/refine", async (req, res) => {
-  try {
-    const {
-      text,
-      format = "text",
-      language = "English",
-      style = "concise, professional",
-    } = req.body || {};
-
-    if (!text || !text.trim()) {
-      return res.status(400).json({ error: "Missing text" });
-    }
-
-    const isHTML = String(format).toLowerCase() === "html";
-
-    const system = [
-      "You are a careful editing assistant.",
-      "Rewrite the user's content to be concise, clear, structured, and professional.",
-      "Fix grammar, punctuation, and flow. Prefer short, direct sentences.",
-      "Preserve all intentional line breaks and spacing in the user's text where they add structure or clarity.",
-      "If spacing is inconsistent or messy, normalize it — but never flatten clearly separated sections or lists.",
-      "If multiple topics are mixed in one paragraph, split them into separate paragraphs.",
-      "Group related items into bulleted or numbered lists when it improves clarity.",
-      "Add short, helpful headings for sections when appropriate.",
-      "Preserve meaning. Do not add or remove facts. Do not hallucinate.",
-      "Preserve domain-specific terminology and technical snippets.",
-      "If the paragraphing or structure looks cluttered, refactor it for clarity and flow — but preserve the user's hierarchy of ideas.",
-      `Output language: ${language}. Tone/style: ${style}.`,
-
-      // Anti-LLM style constraints
-      "Never start with generic filler like 'Great question' or 'You're right'.",
-      "Do not use cliché phrases such as 'in today's fast-paced world'.",
-      "Do not mention yourself, your role, or that you're an AI.",
-      "Do not close with stock phrases like 'Hope this helps'.",
-      "Avoid hedging words unless uncertainty is real (e.g. 'might', 'perhaps').",
-      "Do not stack hedges (e.g. 'may potentially').",
-      "Do not create symmetrical essay-like paragraphs ('Firstly... Secondly...').",
-      "Do not produce perfect high-school essay structures.",
-      "Avoid title-case headings; use sentence case.",
-      "Replace em dashes with commas, semicolons, or sentence breaks.",
-      'Use straight quotes (") instead of smart quotes.',
-      "Remove Unicode artifacts like non-breaking spaces.",
-      "Never output empty placeholders like '[1]'.",
-
-      isHTML
-        ? [
-            "Input may be HTML. Output HTML using only safe tags:",
-            "<p>, <h1>, <h2>, <h3>, <ul>, <ol>, <li>, <strong>, <em>, <code>, <pre>, <blockquote>, <hr>, <a>, <img>.",
-            "Keep links and images if present. Remove script/style and dangerous attributes.",
-            "Do not include <html>, <head>, or <body> wrappers. Return only inner HTML.",
-          ].join(" ")
-        : "Return plain text only, with paragraph breaks and simple lists as needed.",
-    ].join(" ");
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: text },
-      ],
-      temperature: 0.2,
-      max_tokens: 1200,
-    });
-
-    const refined = completion.choices?.[0]?.message?.content?.trim() || "";
-    return res.json({ refined });
-  } catch (err) {
-    const msg =
-      err?.response?.data?.error?.message || err?.message || "Refine failed";
-    console.error("[refine] error:", msg);
-    return res.status(500).json({ error: msg });
+  // 1. Shape and content validation, against the shared contract. Rejects an
+  //    empty note, an oversized note, an unknown style preset and an
+  //    unsupported language, all as 400s with safe messages.
+  const request = validateRefineRequest(req.body);
+  if (!request.ok) {
+    return res.status(400).json({ error: request.message, code: request.code });
   }
+
+  const { text, instruction, language } = request.value;
+
+  let completion;
+  try {
+    // 2. The system prompt is assembled from ALLOWLISTED values only. The
+    //    note goes in the user role and is never treated as instructions.
+    const system = buildRefineSystemPrompt({ instruction, language });
+
+    completion = await getClient().chat.completions.create(
+      {
+        model: MODEL,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: text },
+        ],
+        temperature: 0.2,
+        max_tokens: 1200,
+      },
+      { timeout: REFINE_TIMEOUT_MS }
+    );
+  } catch (err) {
+    // 3. Configuration/credential problems are "unavailable"; timeouts,
+    //    network errors and transient provider errors are "failure". The
+    //    upstream message is never forwarded to the browser.
+    const outcome = classifyProviderError(err);
+    logRefineFailure(outcome, err, text.length);
+    return res
+      .status(httpStatusForOutcome(outcome))
+      .json({ error: refineMessageFor(outcome), outcome });
+  }
+
+  // 4. Output validation. Empty or malformed output is not a result, and must
+  //    not reach the note as one.
+  const raw =
+    completion &&
+    completion.choices &&
+    completion.choices[0] &&
+    completion.choices[0].message
+      ? completion.choices[0].message.content
+      : null;
+
+  const output = validateRefineOutput(raw);
+  if (!output.ok) {
+    logRefineFailure(REFINE_OUTCOME.FAILURE, new Error("empty or malformed provider output"), text.length);
+    return res
+      .status(httpStatusForOutcome(REFINE_OUTCOME.FAILURE))
+      .json({
+        error: refineMessageFor(REFINE_OUTCOME.FAILURE),
+        outcome: REFINE_OUTCOME.FAILURE,
+      });
+  }
+
+  // 5. Success. The payload carries the refined text and nothing else — no
+  //    provider metadata, no configuration, no key material.
+  return res.json({ refined: output.refined });
 });
 
 module.exports = router;

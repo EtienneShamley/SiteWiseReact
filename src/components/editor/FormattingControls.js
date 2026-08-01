@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useEditorState } from "@tiptap/react";
 import {
   FaBold, FaItalic, FaUnderline, FaStrikethrough, FaListUl, FaListOl,
@@ -9,11 +9,36 @@ import {
 } from "react-icons/fa";
 import { FONT_FAMILIES, FONT_SIZES } from "../../constants/editorOptions";
 import { getNearestListItemType } from "./extensions";
+import {
+  applyHighlightColor,
+  applyLink,
+  applyTextColor,
+  insertImageDataUrl,
+  insertImageFromUrl,
+  removeLink as removeLinkCommand,
+} from "../../lib/editorCommands";
+import {
+  EDITOR_IMAGE_READ_MESSAGE,
+  validateEditorImageFile,
+} from "../../lib/editorImages";
 
-export default function FormattingControls({ editor }) {
+/**
+ * @param editor    the TipTap editor instance
+ * @param disabled  true when the Free-form editor is NOT the surface the user
+ *                  is looking at (no note open, or the Template form visible).
+ *                  Every control below is genuinely disabled in that state —
+ *                  the editor is only hidden with display:none, so an enabled
+ *                  control would otherwise dispatch into a document nobody can
+ *                  see and persist the result.
+ */
+export default function FormattingControls({ editor, disabled = false }) {
   const fileInputRef = useRef();
   const tableMenuRef = useRef(null);
+  const textColorRef = useRef(null);
+  const highlightColorRef = useRef(null);
   const [tableMenuOpen, setTableMenuOpen] = useState(false);
+  // One restrained inline message for a rejected link, image or colour.
+  const [controlError, setControlError] = useState("");
 
   // TipTap v3 does not re-render React on selection changes, so every
   // active/disabled/attribute read the toolbar depends on must go through
@@ -36,6 +61,12 @@ export default function FormattingControls({ editor }) {
         bulletList: e.isActive("bulletList"),
         orderedList: e.isActive("orderedList"),
         taskList: e.isActive("taskList"),
+        // Undo/redo availability comes from the editor's own history, exactly
+        // like every other active state, so the buttons cannot advertise a
+        // step that does not exist. This history is TipTap's, and is entirely
+        // separate from Save progress restore points.
+        canUndo: e.can().undo(),
+        canRedo: e.can().redo(),
         canIndent: !!listItemType && e.can().sinkListItem(listItemType),
         canOutdent: !!listItemType && e.can().liftListItem(listItemType),
         alignLeft: e.isActive({ textAlign: "left" }),
@@ -64,6 +95,46 @@ export default function FormattingControls({ editor }) {
     document.addEventListener("mousedown", onPointerDown);
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [tableMenuOpen]);
+
+  // A message about a rejected control must not outlive the state it
+  // described, so it clears whenever the toolbar becomes unavailable.
+  useEffect(() => {
+    if (disabled) setControlError("");
+  }, [disabled]);
+
+  useEffect(() => {
+    if (disabled) setTableMenuOpen(false);
+  }, [disabled]);
+
+  const report = useCallback((result) => {
+    if (result && result.ok === false && result.error) setControlError(result.error);
+    else setControlError("");
+  }, []);
+
+  // Native colour inputs: COMMIT ONCE per chosen colour.
+  //
+  // React maps onChange for an <input type="color"> onto the DOM `input`
+  // event, which fires continuously while the picker is being dragged — that
+  // is what produced dozens of transactions and undo entries per colour, and
+  // what made the highlight control toggle itself on and off mid-drag. The
+  // native `change` event fires once, when the user commits, so it is
+  // subscribed directly here. The inputs are keyed on the editor's current
+  // colour so the swatch still follows the selection.
+  useEffect(() => {
+    const el = textColorRef.current;
+    if (!el || !editor || disabled) return;
+    const onCommit = (e) => report(applyTextColor(editor, e.target.value));
+    el.addEventListener("change", onCommit);
+    return () => el.removeEventListener("change", onCommit);
+  }, [editor, disabled, report, s?.color]);
+
+  useEffect(() => {
+    const el = highlightColorRef.current;
+    if (!el || !editor || disabled) return;
+    const onCommit = (e) => report(applyHighlightColor(editor, e.target.value));
+    el.addEventListener("change", onCommit);
+    return () => el.removeEventListener("change", onCommit);
+  }, [editor, disabled, report, s?.highlightColor]);
 
   // Font size: uses the official FontSize extension (bundled with
   // @tiptap/extension-text-style) so the value is a real registered
@@ -108,48 +179,46 @@ export default function FormattingControls({ editor }) {
   };
 
   // Insert on empty selection / apply on selection / edit in place when the
-  // cursor is on an existing link (prefilled prompt; clearing the URL
-  // removes the link). extendMarkRange covers the whole link either way.
+  // cursor is on an existing link (prefilled prompt; clearing the URL removes
+  // the link). The URL is validated against a protocol allowlist before
+  // anything is dispatched, so cancelling or entering an unsafe address leaves
+  // the document untouched — see src/lib/editorCommands.js.
   const editLink = () => {
     if (!editor) return;
     const previous = editor.getAttributes("link").href || "";
     const url = window.prompt("Enter URL", previous);
-    if (url === null) return;
-    const href = url.trim();
-    if (!href) {
-      editor.chain().focus().extendMarkRange("link").unsetLink().run();
-      return;
-    }
-    if (editor.state.selection.empty && !editor.isActive("link")) {
-      // No selection: insert the URL itself as linked text —
-      // setLink on an empty range has no visible effect.
-      editor
-        .chain()
-        .focus()
-        .insertContent({
-          type: "text",
-          text: href,
-          marks: [{ type: "link", attrs: { href } }],
-        })
-        .run();
-    } else {
-      editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
-    }
+    report(applyLink(editor, url));
   };
 
   const removeLink = () => {
     if (!editor) return;
-    editor.chain().focus().extendMarkRange("link").unsetLink().run();
+    report(removeLinkCommand(editor));
   };
 
+  // Local upload. The decision is made from the Blob's own type and size, not
+  // from the filename or the input's accept hint, and a rejected file inserts
+  // nothing at all.
   const handleImageUpload = (e) => {
     const file = e.target.files?.[0];
-    if (!file || !editor) return;
-    const reader = new FileReader();
-    reader.onload = (evt) =>
-      editor.chain().focus().setImage({ src: evt.target.result }).run();
-    reader.readAsDataURL(file);
     e.target.value = "";
+    if (!file || !editor) return;
+
+    const check = validateEditorImageFile(file);
+    if (!check.ok) {
+      setControlError(check.error);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onerror = () => setControlError(EDITOR_IMAGE_READ_MESSAGE);
+    reader.onload = (evt) => report(insertImageDataUrl(editor, evt.target?.result));
+    reader.readAsDataURL(file);
+  };
+
+  const insertImageUrl = () => {
+    if (!editor) return;
+    const url = window.prompt("Enter image URL");
+    report(insertImageFromUrl(editor, url));
   };
 
   if (!editor || !s) return null;
@@ -162,11 +231,15 @@ export default function FormattingControls({ editor }) {
     "disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent disabled:hover:text-gray-700 dark:disabled:hover:text-gray-300";
   const activeBg = "bg-gray-200 dark:bg-gray-700";
   const selectCls =
-    "rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50";
+    "rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50 disabled:opacity-40 disabled:cursor-not-allowed";
   const colorInputCls =
-    "w-7 h-7 rounded-md border border-gray-300 dark:border-gray-700 cursor-pointer transition-colors hover:border-gray-400 dark:hover:border-gray-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50";
+    "w-7 h-7 rounded-md border border-gray-300 dark:border-gray-700 cursor-pointer transition-colors hover:border-gray-400 dark:hover:border-gray-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50 disabled:opacity-40 disabled:cursor-not-allowed";
   const menuItemCls =
     "w-full text-left px-3 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent transition-colors";
+
+  // Every control shares the same "is this surface live" gate, so none of them
+  // can act while the Free-form editor is hidden or absent.
+  const off = disabled;
 
   // Subtle vertical separator between toolbar groups.
   const Divider = () => (
@@ -194,10 +267,10 @@ export default function FormattingControls({ editor }) {
 
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {/* History */}
+      {/* History — TipTap's editing history, not Save progress restore points */}
       <div className="flex items-center gap-1">
-        <button onClick={() => editor.chain().focus().undo().run()} className={btnBase} title="Undo" aria-label="Undo"><FaUndo /></button>
-        <button onClick={() => editor.chain().focus().redo().run()} className={btnBase} title="Redo" aria-label="Redo"><FaRedo /></button>
+        <button onClick={() => editor.chain().focus().undo().run()} disabled={off || !s.canUndo} className={`${btnBase} ${btnDisabled}`} title="Undo" aria-label="Undo"><FaUndo /></button>
+        <button onClick={() => editor.chain().focus().redo().run()} disabled={off || !s.canRedo} className={`${btnBase} ${btnDisabled}`} title="Redo" aria-label="Redo"><FaRedo /></button>
       </div>
 
       <Divider />
@@ -207,6 +280,7 @@ export default function FormattingControls({ editor }) {
         <select
           onChange={(e) => setFontFamily(e.target.value)}
           value={s.fontFamily}
+          disabled={off}
           className={selectCls}
           title="Font Family"
           aria-label="Font family"
@@ -220,6 +294,7 @@ export default function FormattingControls({ editor }) {
         <select
           onChange={(e) => setFontSize(e.target.value)}
           value={s.fontSize}
+          disabled={off}
           className={selectCls}
           title="Font Size"
           aria-label="Font size"
@@ -232,7 +307,8 @@ export default function FormattingControls({ editor }) {
 
         <button
           onClick={clearFormatting}
-          className={btnBase}
+          disabled={off}
+          className={`${btnBase} ${btnDisabled}`}
           title="Clear Formatting"
           aria-label="Clear formatting"
         >
@@ -244,36 +320,36 @@ export default function FormattingControls({ editor }) {
 
       {/* Formatting */}
       <div className="flex items-center gap-1">
-        <button onClick={() => editor.chain().focus().toggleBold().run()} className={`${btnBase} ${s.bold ? `${activeBg} font-bold text-blue-600` : ""}`} title="Bold" aria-label="Bold"><FaBold /></button>
-        <button onClick={() => editor.chain().focus().toggleItalic().run()} className={`${btnBase} ${s.italic ? `${activeBg} italic text-blue-600` : ""}`} title="Italic" aria-label="Italic"><FaItalic /></button>
-        <button onClick={() => editor.chain().focus().toggleUnderline().run()} className={`${btnBase} ${s.underline ? `${activeBg} underline text-blue-600` : ""}`} title="Underline" aria-label="Underline"><FaUnderline /></button>
-        <button onClick={() => editor.chain().focus().toggleStrike().run()} className={`${btnBase} ${s.strike ? `${activeBg} line-through text-blue-600` : ""}`} title="Strikethrough" aria-label="Strikethrough"><FaStrikethrough /></button>
-        <button onClick={() => editor.chain().focus().toggleSubscript().run()} className={`${btnBase} ${s.subscript ? `${activeBg} text-blue-600` : ""}`} title="Subscript" aria-label="Subscript"><FaSubscript /></button>
-        <button onClick={() => editor.chain().focus().toggleSuperscript().run()} className={`${btnBase} ${s.superscript ? `${activeBg} text-blue-600` : ""}`} title="Superscript" aria-label="Superscript"><FaSuperscript /></button>
-        <button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} className={`${btnBase} ${s.heading1 ? `${activeBg} font-bold text-purple-600` : ""}`} title="Heading 1" aria-label="Heading 1"><FaHeading /></button>
-        <button onClick={() => editor.chain().focus().toggleBlockquote().run()} className={`${btnBase} ${s.blockquote ? `${activeBg} text-blue-600` : ""}`} title="Quote" aria-label="Quote"><FaQuoteRight /></button>
-        <button onClick={() => editor.chain().focus().toggleCodeBlock().run()} className={`${btnBase} ${s.codeBlock ? `${activeBg} text-yellow-600` : ""}`} title="Code" aria-label="Code block"><FaCode /></button>
+        <button onClick={() => editor.chain().focus().toggleBold().run()} disabled={off} aria-pressed={s.bold} className={`${btnBase} ${btnDisabled} ${s.bold ? `${activeBg} font-bold text-blue-600` : ""}`} title="Bold" aria-label="Bold"><FaBold /></button>
+        <button onClick={() => editor.chain().focus().toggleItalic().run()} disabled={off} aria-pressed={s.italic} className={`${btnBase} ${btnDisabled} ${s.italic ? `${activeBg} italic text-blue-600` : ""}`} title="Italic" aria-label="Italic"><FaItalic /></button>
+        <button onClick={() => editor.chain().focus().toggleUnderline().run()} disabled={off} aria-pressed={s.underline} className={`${btnBase} ${btnDisabled} ${s.underline ? `${activeBg} underline text-blue-600` : ""}`} title="Underline" aria-label="Underline"><FaUnderline /></button>
+        <button onClick={() => editor.chain().focus().toggleStrike().run()} disabled={off} aria-pressed={s.strike} className={`${btnBase} ${btnDisabled} ${s.strike ? `${activeBg} line-through text-blue-600` : ""}`} title="Strikethrough" aria-label="Strikethrough"><FaStrikethrough /></button>
+        <button onClick={() => editor.chain().focus().toggleSubscript().run()} disabled={off} aria-pressed={s.subscript} className={`${btnBase} ${btnDisabled} ${s.subscript ? `${activeBg} text-blue-600` : ""}`} title="Subscript" aria-label="Subscript"><FaSubscript /></button>
+        <button onClick={() => editor.chain().focus().toggleSuperscript().run()} disabled={off} aria-pressed={s.superscript} className={`${btnBase} ${btnDisabled} ${s.superscript ? `${activeBg} text-blue-600` : ""}`} title="Superscript" aria-label="Superscript"><FaSuperscript /></button>
+        <button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} disabled={off} aria-pressed={s.heading1} className={`${btnBase} ${btnDisabled} ${s.heading1 ? `${activeBg} font-bold text-purple-600` : ""}`} title="Heading 1" aria-label="Heading 1"><FaHeading /></button>
+        <button onClick={() => editor.chain().focus().toggleBlockquote().run()} disabled={off} aria-pressed={s.blockquote} className={`${btnBase} ${btnDisabled} ${s.blockquote ? `${activeBg} text-blue-600` : ""}`} title="Quote" aria-label="Quote"><FaQuoteRight /></button>
+        <button onClick={() => editor.chain().focus().toggleCodeBlock().run()} disabled={off} aria-pressed={s.codeBlock} className={`${btnBase} ${btnDisabled} ${s.codeBlock ? `${activeBg} text-yellow-600` : ""}`} title="Code" aria-label="Code block"><FaCode /></button>
       </div>
 
       <Divider />
 
       {/* Lists */}
       <div className="flex items-center gap-1">
-        <button onClick={() => editor.chain().focus().toggleBulletList().run()} className={`${btnBase} ${s.bulletList ? `${activeBg} text-blue-600` : ""}`} title="Bullet List" aria-label="Bullet list"><FaListUl /></button>
-        <button onClick={() => editor.chain().focus().toggleOrderedList().run()} className={`${btnBase} ${s.orderedList ? `${activeBg} text-blue-600` : ""}`} title="Numbered List" aria-label="Numbered list"><FaListOl /></button>
-        <button onClick={() => editor.chain().focus().toggleTaskList().run()} className={`${btnBase} ${s.taskList ? `${activeBg} text-green-600` : ""}`} title="To-do List" aria-label="Task list"><FaCheckSquare /></button>
-        <button onClick={indentListItem} disabled={!s.canIndent} className={`${btnBase} ${btnDisabled}`} title="Indent (Tab)" aria-label="Indent list item"><FaIndent /></button>
-        <button onClick={outdentListItem} disabled={!s.canOutdent} className={`${btnBase} ${btnDisabled}`} title="Outdent (Shift+Tab)" aria-label="Outdent list item"><FaOutdent /></button>
+        <button onClick={() => editor.chain().focus().toggleBulletList().run()} disabled={off} aria-pressed={s.bulletList} className={`${btnBase} ${btnDisabled} ${s.bulletList ? `${activeBg} text-blue-600` : ""}`} title="Bullet List" aria-label="Bullet list"><FaListUl /></button>
+        <button onClick={() => editor.chain().focus().toggleOrderedList().run()} disabled={off} aria-pressed={s.orderedList} className={`${btnBase} ${btnDisabled} ${s.orderedList ? `${activeBg} text-blue-600` : ""}`} title="Numbered List" aria-label="Numbered list"><FaListOl /></button>
+        <button onClick={() => editor.chain().focus().toggleTaskList().run()} disabled={off} aria-pressed={s.taskList} className={`${btnBase} ${btnDisabled} ${s.taskList ? `${activeBg} text-green-600` : ""}`} title="To-do List" aria-label="Task list"><FaCheckSquare /></button>
+        <button onClick={indentListItem} disabled={off || !s.canIndent} className={`${btnBase} ${btnDisabled}`} title="Indent (Tab)" aria-label="Indent list item"><FaIndent /></button>
+        <button onClick={outdentListItem} disabled={off || !s.canOutdent} className={`${btnBase} ${btnDisabled}`} title="Outdent (Shift+Tab)" aria-label="Outdent list item"><FaOutdent /></button>
       </div>
 
       <Divider />
 
       {/* Alignment */}
       <div className="flex items-center gap-1">
-        <button onClick={() => editor.chain().focus().setTextAlign("left").run()} className={`${btnBase} ${s.alignLeft ? `${activeBg} text-blue-600` : ""}`} title="Align Left" aria-label="Align left"><FaAlignLeft /></button>
-        <button onClick={() => editor.chain().focus().setTextAlign("center").run()} className={`${btnBase} ${s.alignCenter ? `${activeBg} text-blue-600` : ""}`} title="Align Centre" aria-label="Align centre"><FaAlignCenter /></button>
-        <button onClick={() => editor.chain().focus().setTextAlign("right").run()} className={`${btnBase} ${s.alignRight ? `${activeBg} text-blue-600` : ""}`} title="Align Right" aria-label="Align right"><FaAlignRight /></button>
-        <button onClick={() => editor.chain().focus().setTextAlign("justify").run()} className={`${btnBase} ${s.alignJustify ? `${activeBg} text-blue-600` : ""}`} title="Justify" aria-label="Justify"><FaAlignJustify /></button>
+        <button onClick={() => editor.chain().focus().setTextAlign("left").run()} disabled={off} aria-pressed={s.alignLeft} className={`${btnBase} ${btnDisabled} ${s.alignLeft ? `${activeBg} text-blue-600` : ""}`} title="Align Left" aria-label="Align left"><FaAlignLeft /></button>
+        <button onClick={() => editor.chain().focus().setTextAlign("center").run()} disabled={off} aria-pressed={s.alignCenter} className={`${btnBase} ${btnDisabled} ${s.alignCenter ? `${activeBg} text-blue-600` : ""}`} title="Align Centre" aria-label="Align centre"><FaAlignCenter /></button>
+        <button onClick={() => editor.chain().focus().setTextAlign("right").run()} disabled={off} aria-pressed={s.alignRight} className={`${btnBase} ${btnDisabled} ${s.alignRight ? `${activeBg} text-blue-600` : ""}`} title="Align Right" aria-label="Align right"><FaAlignRight /></button>
+        <button onClick={() => editor.chain().focus().setTextAlign("justify").run()} disabled={off} aria-pressed={s.alignJustify} className={`${btnBase} ${btnDisabled} ${s.alignJustify ? `${activeBg} text-blue-600` : ""}`} title="Justify" aria-label="Justify"><FaAlignJustify /></button>
       </div>
 
       <Divider />
@@ -282,7 +358,9 @@ export default function FormattingControls({ editor }) {
       <div className="flex items-center gap-1">
         <button
           onClick={editLink}
-          className={`${btnBase} ${s.link ? `${activeBg} text-blue-600` : ""}`}
+          disabled={off}
+          aria-pressed={s.link}
+          className={`${btnBase} ${btnDisabled} ${s.link ? `${activeBg} text-blue-600` : ""}`}
           title="Insert / Edit Link"
           aria-label="Insert or edit link"
         >
@@ -290,7 +368,7 @@ export default function FormattingControls({ editor }) {
         </button>
         <button
           onClick={removeLink}
-          disabled={!s.link}
+          disabled={off || !s.link}
           className={`${btnBase} ${btnDisabled}`}
           title="Remove Link"
           aria-label="Remove link"
@@ -300,7 +378,7 @@ export default function FormattingControls({ editor }) {
 
         <input
           type="file"
-          accept="image/*"
+          accept="image/png,image/jpeg,image/webp"
           style={{ display: "none" }}
           ref={fileInputRef}
           onChange={handleImageUpload}
@@ -311,18 +389,17 @@ export default function FormattingControls({ editor }) {
           title="Upload Photo"
           aria-label="Upload photo from this device"
           onClick={() => fileInputRef.current?.click()}
-          className={btnBase}
+          disabled={off}
+          className={`${btnBase} ${btnDisabled}`}
         >
           <FaImage />
         </button>
 
         {/* Genuinely remote: inserts an image from a web address. */}
         <button
-          onClick={() => {
-            const url = window.prompt("Enter image URL");
-            if (url) editor.chain().focus().setImage({ src: url }).run();
-          }}
-          className={btnBase}
+          onClick={insertImageUrl}
+          disabled={off}
+          className={`${btnBase} ${btnDisabled}`}
           title="Insert image from a web address"
           aria-label="Insert image from a web address"
         >
@@ -331,7 +408,8 @@ export default function FormattingControls({ editor }) {
 
         <button
           onClick={() => editor.chain().focus().setHorizontalRule().run()}
-          className={btnBase}
+          disabled={off}
+          className={`${btnBase} ${btnDisabled}`}
           title="Horizontal Rule"
           aria-label="Insert horizontal rule"
         >
@@ -342,7 +420,8 @@ export default function FormattingControls({ editor }) {
           onClick={() =>
             editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
           }
-          className={btnBase}
+          disabled={off}
+          className={`${btnBase} ${btnDisabled}`}
           title="Table"
           aria-label="Insert table"
         >
@@ -352,7 +431,7 @@ export default function FormattingControls({ editor }) {
         <div className="relative" ref={tableMenuRef}>
           <button
             onClick={() => setTableMenuOpen((open) => !open)}
-            disabled={!s.inTable}
+            disabled={off || !s.inTable}
             className={`${btnBase} ${btnDisabled} ${tableMenuOpen ? activeBg : ""} flex items-center`}
             title="Table Options"
             aria-label="Table options"
@@ -362,7 +441,7 @@ export default function FormattingControls({ editor }) {
             <FaTable />
             <FaCaretDown className="ml-0.5 text-xs" />
           </button>
-          {tableMenuOpen && s.inTable && (
+          {tableMenuOpen && s.inTable && !off && (
             <div
               role="menu"
               className="absolute left-0 top-full mt-1 z-20 min-w-[11rem] py-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg"
@@ -393,28 +472,43 @@ export default function FormattingControls({ editor }) {
 
       <Divider />
 
-      {/* Colours */}
+      {/* Colours. Uncontrolled inputs keyed on the editor's current colour:
+          the input owns its value while the native picker is open, and the
+          committed value is applied once through the native change event. */}
       <div className="flex items-center gap-1">
         <input
+          key={`text-color-${s.color}`}
+          ref={textColorRef}
           type="color"
-          onInput={(e) => editor.chain().focus().setColor(e.target.value).run()}
-          value={s.color}
+          defaultValue={s.color}
+          disabled={off}
           title="Text Color"
           aria-label="Text color"
           className={colorInputCls}
         />
         <input
+          key={`highlight-color-${s.highlightColor}`}
+          ref={highlightColorRef}
           type="color"
-          onInput={(e) =>
-            editor.chain().focus().toggleHighlight({ color: e.target.value }).run()
-          }
-          value={s.highlightColor}
+          defaultValue={s.highlightColor}
+          disabled={off}
           title="Highlight Color"
           aria-label="Highlight color"
           className={colorInputCls}
         />
-        <button onClick={() => editor.chain().focus().toggleHighlight().run()} className={`${btnBase} ${s.highlight ? "bg-yellow-300 dark:bg-yellow-300/80 text-gray-900" : ""}`} title="Highlight" aria-label="Highlight"><FaHighlighter /></button>
+        <button onClick={() => editor.chain().focus().toggleHighlight().run()} disabled={off} aria-pressed={s.highlight} className={`${btnBase} ${btnDisabled} ${s.highlight ? "bg-yellow-300 dark:bg-yellow-300/80 text-gray-900" : ""}`} title="Highlight" aria-label="Highlight"><FaHighlighter /></button>
       </div>
+
+      {/* Restrained inline feedback for a rejected link, image or colour —
+          the document is unchanged whenever this appears. */}
+      {!!controlError && (
+        <span
+          role="status"
+          className="ml-1 text-xs text-red-600 dark:text-red-400 max-w-xs"
+        >
+          {controlError}
+        </span>
+      )}
     </div>
   );
 }

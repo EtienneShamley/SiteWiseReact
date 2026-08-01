@@ -3,6 +3,7 @@ import { useCallback, useState } from "react";
 import useMediaRecorder from "./useMediaRecorder";
 import { useTranscription } from "./useTranscription";
 import { useRefine } from "./useRefine";
+import { MEETING_NOTES_STYLE } from "../lib/refineContract";
 
 /**
  * useListenIn
@@ -61,16 +62,28 @@ export default function useListenIn(initialLanguage = "auto") {
       const transcript = await transcribeBlob(blob, language || "auto");
       setRawTranscript(transcript || "");
 
-      // 2) Summarise into meeting notes + actions
+      // 2) Summarise into meeting notes + actions.
+      // The style is the allowlisted MEETING_NOTES_STYLE preset id; its
+      // instruction text lives server-side in the refine contract, so the
+      // frontend no longer supplies model instructions.
       setPhase("summarising");
-      const style =
-        "meeting notes; summarise key points clearly with headings, and end with a separate 'Action items' list with bullets.";
-      const refined = await refineText({
+      const result = await refineText({
         text: transcript,
         language: "English",
-        style,
+        style: MEETING_NOTES_STYLE,
       });
-      setSummaryText(refined || transcript || "");
+
+      if (!result.ok) {
+        // The summary is unavailable. The raw transcript is real captured work
+        // and stays available to insert — but it is NEVER presented as the AI
+        // summary, and the failure is surfaced rather than hidden.
+        setSummaryText("");
+        setError(new Error(result.message));
+        setPhase("idle");
+        return;
+      }
+
+      setSummaryText(result.refined);
       setPhase("idle");
     } catch (e) {
       console.error("[listen-in] stop/process error:", e);
@@ -81,11 +94,15 @@ export default function useListenIn(initialLanguage = "auto") {
 
   const buildInsertPayload = useCallback(() => {
     if (!summaryText && !rawTranscript) return "";
-    const header = "Meeting summary\n\n";
+    // With no summary (the refinement was unavailable or failed) the payload
+    // is the transcript alone — no "Meeting summary" heading over content the
+    // AI never produced.
+    const summary = (summaryText || "").trim();
     const rawBlock = rawTranscript
-      ? "\n\n---\nRaw transcript (for reference):\n\n" + rawTranscript.trim()
+      ? (summary ? "\n\n---\nRaw transcript (for reference):\n\n" : "") +
+        rawTranscript.trim()
       : "";
-    return header + (summaryText || "").trim() + rawBlock;
+    return summary ? "Meeting summary\n\n" + summary + rawBlock : rawBlock;
   }, [summaryText, rawTranscript]);
 
   return {

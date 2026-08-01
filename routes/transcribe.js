@@ -11,11 +11,30 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
 });
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Created LAZILY. The OpenAI v5 constructor throws with no API key, so
+// building the client at module load made requiring this router crash the
+// whole Express server — health checks and map routes included — whenever
+// transcription happened to be unconfigured. Startup must not depend on
+// optional provider configuration; an unconfigured provider is a per-request
+// condition, answered below.
+let openai = null;
+function getClient() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+  if (!openai) openai = new OpenAI({ apiKey });
+  return openai;
+}
 
 router.post("/transcribe", upload.single("audio"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No audio uploaded" });
+
+    const openai = getClient();
+    if (!openai) {
+      return res
+        .status(503)
+        .json({ error: "Transcription is currently unavailable." });
+    }
 
     // Language hint from form-data. "auto" means do not send a language value.
     const language = (req.body?.language || "auto").toString().trim().toLowerCase();

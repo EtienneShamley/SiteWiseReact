@@ -1,12 +1,12 @@
 // src/components/StylePresetSelect.js
 import React from "react";
+import { userFacingRefinePresets } from "../lib/refineContract";
 
-const PRESETS = [
-  { label: "Concise, professional", value: "concise, professional" },
-  { label: "Formal report", value: "formal, structured, objective" },
-  { label: "Site summary", value: "brief, bullet points, action-focused" },
-  { label: "Casual memo", value: "friendly, plain language, brief" },
-];
+// Sourced from the shared refine contract — the same allowlist the server
+// enforces — so the options offered here can never drift out of step with the
+// values the backend will accept. The values themselves are unchanged; they
+// key the per-note stored style preference.
+const PRESETS = userFacingRefinePresets();
 
 export default function StylePresetSelect({ value, onChange, disabled }) {
   return (

@@ -35,6 +35,34 @@ import {
 } from "./editor/extensions";
 import "./editor/editor.css";
 import { useRefine } from "../hooks/useRefine";
+import { refinedTextToParagraphHtml } from "../lib/refineClient";
+import {
+  DEFAULT_REFINE_STYLE,
+  REFINE_OUTCOME,
+  refineMessageFor,
+} from "../lib/refineContract";
+import {
+  REFINE_STATUS,
+  beginRefine,
+  clearRefineBackup,
+  clearRefineMessage,
+  createRefineState,
+  getRefineBackup,
+  isRefineLoading,
+  pruneRefineBackups,
+  setRefineBackup,
+  settleRefine,
+} from "../lib/refineLifecycle";
+import {
+  canRefine as canRefineNow,
+  canRevertRefine,
+  isFreeformEditingEnabled,
+} from "../lib/editorToolbarState";
+import {
+  EDITOR_IMAGE_READ_MESSAGE,
+  validateEditorImageFile,
+} from "../lib/editorImages";
+import { insertImageDataUrl } from "../lib/editorCommands";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import ListenInPanel from "./ListenInPanel";
 import {
@@ -109,8 +137,20 @@ export default function MainArea() {
   // Restrained, transient feedback for the Save progress control.
   const [progressStatus, setProgressStatus] = useState(null); // { tone, message }
 
-  const [refineBusy, setRefineBusy] = useState(false);
-  const [refineBackupHtml, setRefineBackupHtml] = useState(null);
+  // AI Refine lifecycle: idle | loading | success | unavailable | failure.
+  // The model itself is pure and lives in src/lib/refineLifecycle.js.
+  const [refineState, setRefineState] = useState(createRefineState);
+  // Refine history: exactly ONE pre-refine Free-form state PER NOTE, keyed by
+  // note id. Deliberately separate from Save progress restore points (see
+  // src/lib/noteProgressHistory.js) and, like them, session-only — the
+  // REVERTED CONTENT persists through docState, the backup slot does not.
+  const [refineBackups, setRefineBackups] = useState({});
+  // Monotonic request id, read synchronously so two clicks in one tick cannot
+  // both start a request before React re-renders the disabled button.
+  const refineRequestRef = useRef(0);
+  const refineInFlightRef = useRef(false);
+  // Restrained inline feedback for a rejected editor image insertion.
+  const [editorNotice, setEditorNotice] = useState("");
 
   const notePdfInputRef = useRef(null);
 
@@ -127,10 +167,18 @@ export default function MainArea() {
   const historyRef = useRef(historyByNote);
   historyRef.current = historyByNote;
 
+  // A failed write here means the note is no longer being saved — most often
+  // because an embedded editor image has pushed this origin past its
+  // localStorage budget. It used to be swallowed entirely, so the user kept
+  // typing into content that would silently not survive a reload.
+  const [persistenceError, setPersistenceError] = useState(false);
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(docState));
-    } catch {}
+      setPersistenceError(false);
+    } catch {
+      setPersistenceError(true);
+    }
   }, [docState]);
 
   const { noteTitle, noteKey } = useMemo(() => {
@@ -244,6 +292,40 @@ export default function MainArea() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, noteKey]);
 
+  // Live editor/note/content, readable from stable callbacks that must decide
+  // WHICH note they are acting on (see applyFreeformHtml) without being
+  // recreated on every render.
+  const editorRef = useRef(editor);
+  editorRef.current = editor;
+  const noteKeyRef = useRef(noteKey);
+  noteKeyRef.current = noteKey;
+  const docStateRef = useRef(docState);
+  docStateRef.current = docState;
+
+  /**
+   * The ONE way Free-form note content is replaced programmatically.
+   *
+   * The target note is passed explicitly, never inferred from whatever is on
+   * screen, because a refine result can arrive after the user has moved on:
+   *   - docState is written for THAT note, so the result persists and survives
+   *     note switching and reload;
+   *   - the TipTap editor is only touched while it still represents that note,
+   *     so a background result can never overwrite the note now being viewed.
+   *
+   * docState is written explicitly rather than relying on setContent's update
+   * emission, so persistence does not depend on editor internals or on the
+   * editor being the visible one at all. Normal typing persistence is
+   * untouched — that still flows through the editor's own onUpdate.
+   */
+  const applyFreeformHtml = useCallback((targetNoteId, html) => {
+    if (!targetNoteId || typeof html !== "string") return false;
+    setDocState((prev) => ({ ...prev, [targetNoteId]: html }));
+    if (editorRef.current && noteKeyRef.current === targetNoteId) {
+      editorRef.current.commands.setContent(html);
+    }
+    return true;
+  }, []);
+
   function handleInsertTextAtCursor(text) {
     if (editor && text) editor.chain().focus().insertContent(text).run();
   }
@@ -267,16 +349,44 @@ export default function MainArea() {
     if (f) handleNotePdfImport(f);
   }
 
+  // Images inserted from the BottomBar (including camera capture).
+  //
+  // A File used to be inserted as an object URL that was revoked ten seconds
+  // later, so the image broke while the document still referenced it and was
+  // gone entirely after a reload. It is now validated by real MIME type and
+  // size and embedded as a data URL, exactly like the toolbar upload path, so
+  // what is inserted is what persists. A rejected file inserts nothing.
   function handleInsertImageAtCursor(imgSrc) {
-    if (editor && imgSrc) {
-      if (imgSrc instanceof File) {
-        const url = URL.createObjectURL(imgSrc);
-        editor.chain().focus().setImage({ src: url }).run();
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-      } else {
-        editor.chain().focus().setImage({ src: imgSrc }).run();
-      }
+    if (!editor || !imgSrc) return;
+
+    // The Free-form editor is only hidden behind the Template form, so an
+    // insert from the Template form would land in a document the user cannot
+    // see. Say so instead.
+    if (!freeformEditingEnabled) {
+      setEditorNotice(
+        "Switch to the Free-form note to add an image there. Template form evidence uses the Photo and File fields."
+      );
+      return;
     }
+
+    if (typeof File !== "undefined" && imgSrc instanceof File) {
+      const check = validateEditorImageFile(imgSrc);
+      if (!check.ok) {
+        setEditorNotice(check.error);
+        return;
+      }
+      setEditorNotice("");
+      const reader = new FileReader();
+      reader.onerror = () => setEditorNotice(EDITOR_IMAGE_READ_MESSAGE);
+      reader.onload = (evt) => {
+        const result = insertImageDataUrl(editor, evt.target?.result);
+        if (!result.ok && result.error) setEditorNotice(result.error);
+      };
+      reader.readAsDataURL(imgSrc);
+      return;
+    }
+
+    editor.chain().focus().setImage({ src: imgSrc }).run();
   }
 
   // BottomBar text routing:
@@ -305,6 +415,17 @@ export default function MainArea() {
   const activeView =
     noteLayout === "template" ? NOTE_VIEW.TEMPLATE_FORM : NOTE_VIEW.FREEFORM;
   const activeViewLabel = NOTE_VIEW_LABEL[activeView];
+
+  // Is the Free-form editor the surface the user is actually looking at?
+  // The editor is only HIDDEN (display:none) behind the Template form, so
+  // every control that dispatches into it — the whole formatting toolbar,
+  // Undo/Redo and AI Refine — is gated on this. Without it they act on a
+  // document nobody can see and persist the result.
+  const freeformEditingEnabled = isFreeformEditingEnabled({
+    hasNote: !!noteTitle,
+    hasEditor: !!editor,
+    noteLayout,
+  });
 
   // Only the active view's restore points, newest first.
   const activeRestorePoints = useMemo(
@@ -436,37 +557,135 @@ export default function MainArea() {
     // pruneDeletedNoteHistories returns the same reference when nothing needs
     // removing, so this cannot loop.
     setHistoryByNote((prev) => pruneDeletedNoteHistories(prev, liveNoteIds));
+    setRefineBackups((prev) => pruneRefineBackups(prev, liveNoteIds));
   }, [liveNoteIds]);
 
+  /* ============================== AI Refine =============================== */
+
+  const refineLoading = isRefineLoading(refineState);
+  const refineBackupHtml = getRefineBackup(refineBackups, noteKey);
+
+  /**
+   * Refine the ACTIVE Free-form note.
+   *
+   * Applies to that note and nothing else: not the Template form, not its
+   * answers, custom rows or attachments, and not another note. Exactly one
+   * provider request per click, with no automatic retry.
+   */
   const refineNote = async () => {
-    if (!editor || refineBusy || noteLayout !== "natural") return;
+    // Never runs from the Template form, and never against a hidden editor.
+    if (!freeformEditingEnabled || !editor || !noteKey) return;
+    // Synchronous re-entry guard: the disabled button covers the rendered
+    // case, and refineInFlightRef covers two clicks inside a single tick,
+    // before React has re-rendered the button as disabled.
+    if (refineLoading || refineInFlightRef.current) return;
+
     const plain = editor.getText().trim();
-    if (!plain) return;
-    try {
-      setRefineBusy(true);
-      setRefineBackupHtml(editor.getHTML());
-      const refined = await refineText({
-        text: plain,
-        style: "concise, professional",
-      });
-      const safe =
-        (refined || "")
-          .split(/\n{2,}/)
-          .map((p) => `<p>${p.replace(/\n/g, "<br/>")}</p>`)
-          .join("") || "<p></p>";
-      editor.commands.setContent(safe);
-    } catch (e) {
-      alert(e?.message || "Refine failed");
-    } finally {
-      setRefineBusy(false);
+    if (!plain) {
+      setRefineState((prev) => ({
+        ...prev,
+        status: REFINE_STATUS.FAILURE,
+        message: "There is nothing to refine in this note yet.",
+      }));
+      return;
     }
+
+    // Both identities are captured NOW: the note the result belongs to, and
+    // the request that may settle the UI.
+    const originNoteId = noteKey;
+    const requestId = refineRequestRef.current + 1;
+    refineRequestRef.current = requestId;
+    refineInFlightRef.current = true;
+    setRefineState((prev) => beginRefine(prev, { noteId: originNoteId, requestId }));
+
+    const result = await refineText({ text: plain, style: DEFAULT_REFINE_STYLE });
+
+    refineInFlightRef.current = false;
+    // A superseded request may neither write content nor clear the loading
+    // state of the request that replaced it.
+    if (refineRequestRef.current !== requestId) return;
+
+    if (!result.ok) {
+      // Nothing is applied and NO backup is recorded — a failed refinement
+      // must not leave a Revert action offering a state that was never left.
+      setRefineState((prev) =>
+        settleRefine(prev, {
+          requestId,
+          outcome:
+            result.outcome === REFINE_OUTCOME.UNAVAILABLE
+              ? REFINE_STATUS.UNAVAILABLE
+              : REFINE_STATUS.FAILURE,
+          message: result.message,
+        })
+      );
+      return;
+    }
+
+    const html = refinedTextToParagraphHtml(result.refined);
+    if (!html) {
+      // Valid transport, unusable output: treated as a failure, note untouched.
+      setRefineState((prev) =>
+        settleRefine(prev, {
+          requestId,
+          outcome: REFINE_STATUS.FAILURE,
+          message: refineMessageFor(REFINE_OUTCOME.FAILURE),
+        })
+      );
+      return;
+    }
+
+    // The pre-refine state is captured only here — after a valid result and
+    // immediately before it is applied. If the user has moved to another note
+    // the live editor no longer holds this note's content, so the persisted
+    // copy is the correct source.
+    const previousHtml =
+      noteKeyRef.current === originNoteId && editorRef.current
+        ? editorRef.current.getHTML()
+        : docStateRef.current[originNoteId];
+
+    if (typeof previousHtml === "string") {
+      setRefineBackups((prev) => setRefineBackup(prev, originNoteId, previousHtml));
+    }
+    applyFreeformHtml(originNoteId, html);
+
+    const appliedInBackground = noteKeyRef.current !== originNoteId;
+    setRefineState((prev) =>
+      settleRefine(prev, {
+        requestId,
+        outcome: REFINE_STATUS.SUCCESS,
+        message: appliedInBackground
+          ? "Refinement applied to the note it was started from."
+          : "Note refined",
+      })
+    );
   };
 
+  /**
+   * Revert the active note's refinement. Scoped by note id, so Note A's
+   * backup can never be applied to Note B, and written through the shared
+   * helper so the reverted content persists and survives reload.
+   */
   const revertRefine = () => {
-    if (!editor || !refineBackupHtml) return;
-    editor.commands.setContent(refineBackupHtml);
-    setRefineBackupHtml(null);
+    if (!noteKey) return;
+    const html = getRefineBackup(refineBackups, noteKey);
+    if (html === null) return;
+
+    applyFreeformHtml(noteKey, html);
+    setRefineBackups((prev) => clearRefineBackup(prev, noteKey));
+    setRefineState((prev) => ({
+      ...prev,
+      status: REFINE_STATUS.SUCCESS,
+      message: "Refinement reverted",
+    }));
   };
+
+  // Drop a refine message that no longer describes what the user is looking
+  // at. An in-flight request is deliberately left running: it still owns its
+  // originating note and will apply there.
+  useEffect(() => {
+    setRefineState((prev) => clearRefineMessage(prev));
+    setEditorNotice("");
+  }, [noteKey, noteLayout]);
 
   // Shared control-bar visual language: neutral gray chips/segments,
   // consistent hover/disabled/focus-visible treatment across every control.
@@ -533,8 +752,13 @@ export default function MainArea() {
         </h1>
       )}
 
-      {/* Top toolbar (Note tab only — the PDF tab has its own toolbar) */}
-      {activeTab === "note" && <EditorToolbar editor={editor} />}
+      {/* Top toolbar (Note tab only — the PDF tab has its own toolbar).
+          The formatting controls are disabled whenever the Free-form editor is
+          not the visible surface, so they cannot act on the hidden editor
+          while the Template form is showing. */}
+      {activeTab === "note" && (
+        <EditorToolbar editor={editor} disabled={!freeformEditingEnabled} />
+      )}
 
       {/* Control bar */}
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -605,26 +829,83 @@ export default function MainArea() {
             </span>
           )}
 
+          {/* AI Refine applies to the Free-form note only. It is unavailable
+              in the Template form and never acts on the hidden editor. */}
           <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
             <button
               className={chipBtnCls}
               onClick={refineNote}
               disabled={
-                !noteTitle || !editor || refineBusy || noteLayout !== "natural"
+                !canRefineNow({
+                  freeformEnabled: freeformEditingEnabled,
+                  hasContent: true,
+                  isLoading: refineLoading,
+                })
               }
-              title="Refine note with AI (Free-form note only)"
+              title={
+                noteLayout === "template"
+                  ? "AI Refine is available in the Free-form note only"
+                  : "Refine this Free-form note with AI"
+              }
+              aria-label="Refine this Free-form note with AI"
             >
-              {refineBusy ? "Refining…" : "Refine"}
+              {refineLoading ? "Refining…" : "Refine"}
             </button>
             <button
               className={chipBtnCls}
               onClick={revertRefine}
-              disabled={!noteTitle || !editor || !refineBackupHtml}
-              title="Revert last refine"
+              disabled={
+                !canRevertRefine({
+                  freeformEnabled: freeformEditingEnabled,
+                  hasBackup: refineBackupHtml !== null,
+                  isLoading: refineLoading,
+                })
+              }
+              title="Restore this note's content from before the last refinement"
+              aria-label="Revert the last AI refinement of this Free-form note"
             >
               Revert
             </button>
           </div>
+
+          {/* One restrained live region for the whole refine lifecycle:
+              loading, success, unavailable and failure. */}
+          {(refineLoading || refineState.message) && (
+            <span
+              role="status"
+              aria-live="polite"
+              className={[
+                "text-xs",
+                refineState.status === REFINE_STATUS.UNAVAILABLE ||
+                refineState.status === REFINE_STATUS.FAILURE
+                  ? "text-red-600 dark:text-red-400"
+                  : "text-gray-500 dark:text-gray-400",
+              ].join(" ")}
+            >
+              {refineLoading ? "Refining this note…" : refineState.message}
+            </span>
+          )}
+
+          {!!editorNotice && (
+            <span
+              role="status"
+              aria-live="polite"
+              className="text-xs text-red-600 dark:text-red-400"
+            >
+              {editorNotice}
+            </span>
+          )}
+
+          {persistenceError && (
+            <span
+              role="status"
+              aria-live="polite"
+              className="text-xs text-red-600 dark:text-red-400"
+            >
+              This note could not be saved — browser storage is full. Remove a
+              large editor image, then edit again.
+            </span>
+          )}
 
           {/* The two note views. "Template form" is the structured company
               form assigned to THIS note; "Free-form note" is unrestricted

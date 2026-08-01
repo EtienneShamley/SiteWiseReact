@@ -3,7 +3,16 @@ import FormattingControls from "./editor/FormattingControls";
 import ExportMenu from "./editor/ExportMenu";
 import TemplateBuilderModal from "./template/TemplateBuilderModal";
 
-export default function EditorToolbar({ editor }) {
+/**
+ * @param editor    the Free-form note's TipTap editor
+ * @param disabled  true when the Free-form editor is not the visible surface
+ *                  (no note open, or the Template form showing). Forwarded to
+ *                  the formatting controls so they are genuinely disabled
+ *                  rather than silently acting on a hidden editor. Template
+ *                  Library and Export are NOT gated by it — they are note-level
+ *                  actions that remain valid in either view.
+ */
+export default function EditorToolbar({ editor, disabled = false }) {
   const [showTemplateBuilder, setShowTemplateBuilder] = useState(false);
 
   if (!editor) return null;
@@ -11,7 +20,7 @@ export default function EditorToolbar({ editor }) {
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-2 bg-gray-100 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2">
-        <FormattingControls editor={editor} />
+        <FormattingControls editor={editor} disabled={disabled} />
         <div className="flex items-center gap-2">
           <ExportMenu editor={editor} />
           {/* The top-level reusable-template workspace. This is where company

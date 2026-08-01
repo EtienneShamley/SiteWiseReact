@@ -551,21 +551,28 @@ export default function BottomBar({
   };
   // ----------------------------------------------------------
 
-  // AI refine (unchanged)
+  // AI refine. refineText returns a structured outcome (see useRefine): an
+  // unavailable or failed request must leave the draft exactly as the user
+  // left it and must never be shown as a refinement. `busy` is what prevents
+  // a duplicate submission; there is no automatic retry.
   const runRefine = async () => {
     const text = (refinedDraft ?? input).trim();
-    if (!text) return;
-    try {
-      setBusy(true);
-      setTranscribeError("");
-      if (originalBeforeRefine == null) setOriginalBeforeRefine(input);
-      const refined = await refineText({ text, style: stylePreset });
-      setRefinedDraft(refined);
-    } catch (e) {
-      alert(e?.message || "Refine failed");
-    } finally {
-      setBusy(false);
+    if (!text || busy) return;
+
+    setBusy(true);
+    setTranscribeError("");
+    const result = await refineText({ text, style: stylePreset });
+    setBusy(false);
+
+    if (!result.ok) {
+      // Nothing is written back: no draft change, and no revert point, so the
+      // Revert control cannot offer to undo something that never happened.
+      setTranscribeError(result.message);
+      return;
     }
+
+    if (originalBeforeRefine == null) setOriginalBeforeRefine(input);
+    setRefinedDraft(result.refined);
   };
   const revertRefine = () => {
     if (refinedDraft == null) return;
