@@ -12,10 +12,7 @@
 // returns the caret to the editor and re-applies the stored ProseMirror
 // selection after the click.
 
-import {
-  isAllowedImageDataUrl,
-  EDITOR_IMAGE_READ_MESSAGE,
-} from "./editorImages";
+import { EDITOR_IMAGE_INSERT_MESSAGE } from "./editorImageAssets";
 import { normalizeImageUrl, normalizeLinkUrl } from "./editorUrlSafety";
 
 const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i;
@@ -116,6 +113,10 @@ export function removeLink(editor) {
 
 /**
  * Insert an image from a web address. Rejected URLs never reach the document.
+ *
+ * A remote image stays a remote URL: it is deliberately NOT downloaded into
+ * local asset storage, so a note distinguishes "an address on the web" from
+ * "a file this device holds" by whether the node carries a src or an assetId.
  */
 export function insertImageFromUrl(editor, rawUrl) {
   if (!editor) return noEditor();
@@ -129,15 +130,41 @@ export function insertImageFromUrl(editor, rawUrl) {
 }
 
 /**
- * Insert an already-validated image data URL (produced by the local upload
- * path after validateEditorImageFile). Re-checked here so a reader that
- * produced something unexpected cannot write it into the note.
+ * Insert a reference to an image already persisted in IndexedDB.
+ *
+ * The caller MUST have a confirmed asset write before calling this — the node
+ * is the reference, so inserting one for bytes that do not exist would put a
+ * permanently broken image into the note. No src is set: the runtime object URL
+ * is the renderer's business (see src/components/editor/AssetImage.js) and must
+ * never reach the stored document.
+ *
+ * Returns ok:false when the editor refuses the transaction, so the caller can
+ * delete the now-unreferenced asset rather than orphaning it.
  */
-export function insertImageDataUrl(editor, dataUrl) {
+export function insertImageAsset(editor, { assetId, alt, width, height } = {}) {
   if (!editor) return noEditor();
-  if (!isAllowedImageDataUrl(dataUrl)) {
-    return { ok: false, error: EDITOR_IMAGE_READ_MESSAGE };
+
+  const id = typeof assetId === "string" ? assetId.trim() : "";
+  if (!id) return { ok: false, error: EDITOR_IMAGE_INSERT_MESSAGE };
+
+  let applied = false;
+  try {
+    applied =
+      editor
+        .chain()
+        .focus()
+        .setImage({
+          assetId: id,
+          src: null,
+          alt: typeof alt === "string" && alt.trim() ? alt.trim() : null,
+          width: Number(width) > 0 ? Math.round(Number(width)) : null,
+          height: Number(height) > 0 ? Math.round(Number(height)) : null,
+        })
+        .run() !== false;
+  } catch {
+    applied = false;
   }
-  editor.chain().focus().setImage({ src: dataUrl }).run();
-  return { ok: true };
+
+  if (!applied) return { ok: false, error: EDITOR_IMAGE_INSERT_MESSAGE };
+  return { ok: true, assetId: id };
 }

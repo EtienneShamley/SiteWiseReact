@@ -3,6 +3,7 @@ import React, { useMemo, useState, useEffect } from "react";
 import {
   exportHTMLString, exportPDFString, exportDOCXString, exportMDString, safeFilename
 } from "../lib/exportUtils";
+import { resolveExportImageHtml } from "../lib/exportImageAssets";
 import { downloadZip } from "../lib/zipUtils";
 
 const FORMAT_OPTS = [
@@ -29,6 +30,7 @@ export default function ShareDialog({
   const [format, setFormat] = useState("pdf");
   const [compress, setCompress] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [exportError, setExportError] = useState("");
 
   // Remember last chosen format
   useEffect(() => {
@@ -72,7 +74,12 @@ export default function ShareDialog({
     if (format === "md")   return exportMDString({ title, html });
   };
 
-  const buildBlobFor = async ({ title, html }) => {
+  // The zip path builds its own documents, so it resolves stored image
+  // references through the same helper the single-file exporters use. A note
+  // whose image is missing throws here and fails the whole export rather than
+  // adding a file with a silently missing photo to the archive.
+  const buildBlobFor = async ({ title, html: storedHtml }) => {
+    const html = await resolveExportImageHtml(storedHtml);
     if (format === "html") {
       const doc = new Blob([`<!doctype html>${html}`], { type: "text/html;charset=utf-8" });
       return { name: safeFilename(title, "html"), blob: doc };
@@ -111,6 +118,7 @@ export default function ShareDialog({
   const onExport = async () => {
     try {
       setBusy(true);
+      setExportError("");
       const chosen = flatNotes.filter(n => selected.has(n.id));
       if (chosen.length === 0) return;
 
@@ -131,6 +139,13 @@ export default function ShareDialog({
       }
       await downloadZip(files, `notewise-export_${new Date().toISOString().replace(/[:.]/g,'-')}.zip`);
       onClose?.();
+    } catch (err) {
+      // A refused export must say so and leave the dialog open, never close as
+      // though a file had been produced.
+      setExportError(
+        (err && err.message) ||
+          "The export could not be completed. Nothing was downloaded."
+      );
     } finally {
       setBusy(false);
     }
@@ -226,6 +241,15 @@ export default function ShareDialog({
               <span>Compress to .zip {selected.size > 1 && "(required for multi-file)"}</span>
             </label>
           </div>
+
+          {!!exportError && (
+            <p
+              role="alert"
+              className={`mb-3 text-sm ${isDark ? "text-red-400" : "text-red-600"}`}
+            >
+              {exportError}
+            </p>
+          )}
 
           {/* Footer */}
           <div className={`flex justify-end gap-2 border-t pt-3 ${isDark ? "border-[#333]" : "border-gray-200"}`}>

@@ -7,6 +7,8 @@ import StylePresetSelect from "./StylePresetSelect";
 import { useRefine } from "../hooks/useRefine";
 import { useTranscription } from "../hooks/useTranscription";
 import { useAppState } from "../context/AppStateContext";
+import { validateEditorImageFile } from "../lib/editorImages";
+import { IMAGE_DECODE_MESSAGE } from "../lib/imageProcessing";
 import exifr from "exifr";
 
 // NEW: coordinate converter (offline-first, proj4-backed)
@@ -75,6 +77,14 @@ function saveMap(key, obj) {
 export default function BottomBar({
   editor,
   onInsertText,
+  // Persistent image insertion, owned by MainArea:
+  //   (sourceFile, { blob, name }) => Promise<void>
+  // The stamped Blob is handed over rather than inserted here, so the bytes go
+  // to IndexedDB and the note stores only a reference. This prop was previously
+  // passed by MainArea but never accepted here, which is why photos were still
+  // being inserted as object URLs that died at the next reload.
+  onInsertImage,
+  onImageError,     // (message) => void — pre-stamp rejection, one message channel
   onInsertPDF,      // legacy
   onInsertPDFFile,  // preferred (bytes)
   disabled = false,
@@ -289,7 +299,10 @@ export default function BottomBar({
     ctx.restore();
   }
 
-  async function buildStampedImageBLOB(file) {
+  // `outputType` keeps the stamped result in the SOURCE photo's format: the
+  // canvas would otherwise always emit PNG, turning an ordinary JPEG capture
+  // into a far larger file for no visible gain.
+  async function buildStampedImageBLOB(file, outputType = "image/png") {
     const originalURL = URL.createObjectURL(file);
     let img;
     try { img = await loadImageFromBlobURL(originalURL); }
@@ -381,9 +394,39 @@ export default function BottomBar({
     await drawMapThumbnail(ctx, maxW, maxH, lat, lon);
 
     const stampedBlob = await new Promise((resolve) =>
-      stampedCanvas.toBlob(resolve, "image/png", 0.92)
+      stampedCanvas.toBlob(resolve, outputType, 0.92)
     );
     return stampedBlob;
+  }
+
+  // The ONE image insertion path for this bar — used by both the file picker
+  // and the camera. It never touches the editor itself: the stamped Blob goes
+  // to MainArea, which stores it in IndexedDB and inserts a reference only once
+  // that write is confirmed. Nothing here writes a blob: URL into the note.
+  async function insertStampedPhoto(file) {
+    // The 20 MB source limit is applied to the picked file FIRST, before the
+    // expensive decode/stamp work — and to the file the user actually chose,
+    // never to our own derived canvas output.
+    const check = validateEditorImageFile(file);
+    if (!check.ok) {
+      onImageError?.(check.error);
+      return;
+    }
+    if (!onInsertImage) return;
+
+    let stamped = null;
+    try {
+      stamped = await buildStampedImageBLOB(file, check.mimeType);
+    } catch {
+      onImageError?.(IMAGE_DECODE_MESSAGE);
+      return;
+    }
+
+    await onInsertImage(file, {
+      // A failed stamp falls back to the original photo rather than losing it.
+      blob: stamped || file,
+      name: file.name,
+    });
   }
   // ----------------------------------------------------------
 
@@ -407,13 +450,12 @@ export default function BottomBar({
 
   const handleFilesSelected = async (e) => {
     const files = Array.from(e.target.files || []);
+    // Reset the input up front: the loop below awaits, and a picker that still
+    // holds the previous selection will not re-fire for the same file.
+    e.target.value = "";
     for (const f of files) {
       if (f.type.startsWith("image/")) {
-        const stampedBlob = await buildStampedImageBLOB(f);
-        const stampedURL = URL.createObjectURL(stampedBlob);
-        editor?.chain().focus().insertContent(
-          `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-        ).run();
+        await insertStampedPhoto(f);
         continue;
       }
       if (f.type === "application/pdf") {
@@ -433,11 +475,11 @@ export default function BottomBar({
         setTimeout(() => URL.revokeObjectURL(url), 15000);
       }
     }
-    e.target.value = "";
   };
 
   const handleCameraSelected = async (e) => {
     const f = e.target.files?.[0];
+    e.target.value = "";
     if (!f) return;
     if (!f.type.startsWith("image/")) {
       const url = URL.createObjectURL(f);
@@ -445,15 +487,10 @@ export default function BottomBar({
         `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
       ).run();
       setTimeout(() => URL.revokeObjectURL(url), 15000);
-      e.target.value = "";
       return;
     }
-    const stampedBlob = await buildStampedImageBLOB(f);
-    const stampedURL = URL.createObjectURL(stampedBlob);
-    editor?.chain().focus().insertContent(
-      `<figure class="my-2"><img src="${stampedURL}" alt="photo" style="max-width:100%;height:auto;display:block;border-radius:10px;" /></figure>`
-    ).run();
-    e.target.value = "";
+    // Real capture takes exactly the same persistent path as a picked photo.
+    await insertStampedPhoto(f);
   };
 
   // ---------------- Recording (plus cancel) ----------------

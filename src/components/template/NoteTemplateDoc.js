@@ -38,6 +38,10 @@ import {
   deleteAsset,
 } from "../../lib/assetStorage";
 import {
+  IMAGE_DECODE_MESSAGE,
+  normalizeImageFile,
+} from "../../lib/imageProcessing";
+import {
   ATTACHMENT_KIND,
   makeAttachment,
   normalizeDisplay,
@@ -113,8 +117,10 @@ import {
  * Attachment write sequence (per selected file — a failed file never blocks or
  * rolls back the others):
  *   1. validate (MIME + size, reusable validators in assetStorage)
- *   2. photos: decode intrinsic dimensions — a corrupt/unreadable image is
- *      rejected BEFORE anything is written anywhere
+ *   2. photos: normalize — decode (which is also what rejects a corrupt image
+ *      BEFORE anything is written anywhere), cap the long edge, and re-encode
+ *      only where that helps. Photos share this policy and the 20 MB source
+ *      limit with Free-form editor images: src/lib/imageProcessing.js
  *   3. persist the Blob to IndexedDB (resolved promise = confirmed write)
  *   4. persist the lightweight reference on the instance via the THROWING save
  *   5. on step-4 failure: delete the just-created asset again (only if
@@ -122,34 +128,6 @@ import {
  * Removal is the reverse: reference removed + confirmed first; the asset is
  * deleted only when no instance references it any more.
  */
-
-// Reads a photo's intrinsic pixel dimensions from the picked File via a
-// transient object URL (revoked immediately). Rejects for a corrupt or
-// undecodable image, which aborts that file BEFORE any write happens.
-function readImageDimensions(file) {
-  return new Promise((resolve, reject) => {
-    let url = null;
-    try {
-      url = URL.createObjectURL(file);
-    } catch {
-      reject(new Error("The image could not be read."));
-      return;
-    }
-    const img = new Image();
-    img.onload = () => {
-      const width = img.naturalWidth;
-      const height = img.naturalHeight;
-      URL.revokeObjectURL(url);
-      if (width > 0 && height > 0) resolve({ width, height });
-      else reject(new Error("The image appears to be corrupt or unreadable."));
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("The image appears to be corrupt or unreadable."));
-    };
-    img.src = url;
-  });
-}
 
 export default function NoteTemplateDoc({
   noteId,
@@ -575,14 +553,19 @@ export default function NoteTemplateDoc({
           continue;
         }
 
-        // 2. Photos: decode dimensions — a corrupt image is rejected before
-        //    any Blob or reference is written.
+        // 2. Photos: normalize. The decode inside it is what rejects a corrupt
+        //    image before any Blob or reference is written, and it also yields
+        //    the intrinsic dimensions, so the image is decoded exactly once.
+        //    A File field keeps its own document policy and is stored as-is.
         let dims = null;
+        let blobToStore = file;
         if (isPhoto) {
           try {
-            dims = await readImageDimensions(file);
+            const normalized = await normalizeImageFile(file);
+            blobToStore = normalized.blob;
+            dims = { width: normalized.width, height: normalized.height };
           } catch (err) {
-            failures.push(`${label}: ${err?.message || "unreadable image."}`);
+            failures.push(`${label}: ${err?.message || IMAGE_DECODE_MESSAGE}`);
             continue;
           }
         }
@@ -591,7 +574,7 @@ export default function NoteTemplateDoc({
         let assetId = null;
         try {
           assetId = isPhoto
-            ? await createPhotoAsset(file)
+            ? await createPhotoAsset(blobToStore, undefined, file.name)
             : await createNoteFileAsset(file);
         } catch (err) {
           failures.push(
@@ -600,14 +583,16 @@ export default function NoteTemplateDoc({
           continue;
         }
 
-        // 4. Persist the lightweight reference on the instance.
+        // 4. Persist the lightweight reference on the instance. Size and MIME
+        //    describe the bytes actually STORED, not the picked file, so the
+        //    reference stays an accurate description of the asset.
         const attachment = makeAttachment({
           id: newId(),
           assetId,
           kind,
           name: file.name || null,
-          mimeType: file.type || null,
-          size: file.size,
+          mimeType: blobToStore.type || file.type || null,
+          size: blobToStore.size,
           createdAt: Date.now(),
           intrinsicWidth: dims?.width,
           intrinsicHeight: dims?.height,

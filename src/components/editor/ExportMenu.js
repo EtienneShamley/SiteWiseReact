@@ -13,7 +13,13 @@ export default function ExportMenu({ editor }) {
 
   const safeRun = (fn) => async () => {
     try { await fn(editor); }
-    catch (e) { console.error("Export failed:", e); alert("Export failed. See console for details."); }
+    catch (e) {
+      // A refused export carries a user-facing reason (e.g. an image that is no
+      // longer in storage); show it rather than a generic failure the user
+      // cannot act on. Nothing was downloaded and the note is unchanged.
+      console.error("Export failed:", e);
+      alert(e?.message || "Export failed. See console for details.");
+    }
     finally { setOpen(false); }
   };
 

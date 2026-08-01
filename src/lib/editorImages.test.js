@@ -5,9 +5,12 @@ import {
   EDITOR_IMAGE_SIZE_MESSAGE,
   EDITOR_IMAGE_TYPE_MESSAGE,
   MAX_EDITOR_IMAGE_BYTES,
-  isAllowedImageDataUrl,
   validateEditorImageFile,
 } from "./editorImages";
+import {
+  ALLOWED_IMAGE_MIME_TYPES,
+  MAX_IMAGE_SOURCE_BYTES,
+} from "./imageProcessing";
 
 // A File-shaped stand-in: only `type` and `size` are consulted, which is the
 // point — the decision must not depend on the filename.
@@ -68,9 +71,21 @@ describe("validateEditorImageFile", () => {
     expect(tooBig.error).toBe(EDITOR_IMAGE_SIZE_MESSAGE);
   });
 
-  test("the size limit stays well inside a typical localStorage budget", () => {
-    // Base64 inflates by ~4/3; the whole origin gets roughly 5 MB.
-    expect(MAX_EDITOR_IMAGE_BYTES * (4 / 3)).toBeLessThan(2 * 1024 * 1024);
+  test("the limit is the shared 20 MB source-file policy", () => {
+    // It is no longer a localStorage stopgap: the bytes go to IndexedDB, so the
+    // limit exists to bound one upload, not to protect the note's own record.
+    expect(MAX_EDITOR_IMAGE_BYTES).toBe(MAX_IMAGE_SOURCE_BYTES);
+    expect(MAX_EDITOR_IMAGE_BYTES).toBe(20 * 1024 * 1024);
+  });
+
+  test("an ordinary high-resolution phone photo needs no manual resizing", () => {
+    expect(validateEditorImageFile(fileLike("image/jpeg", 12 * 1024 * 1024)).ok).toBe(
+      true
+    );
+  });
+
+  test("the editor and Template-form Photo fields share one answer", () => {
+    expect(ALLOWED_EDITOR_IMAGE_MIME_TYPES).toBe(ALLOWED_IMAGE_MIME_TYPES);
   });
 
   test("rejects a missing, empty or unreadable file", () => {
@@ -88,23 +103,15 @@ describe("validateEditorImageFile", () => {
   });
 });
 
-describe("isAllowedImageDataUrl", () => {
-  test("accepts a data URL carrying an allowed image type", () => {
-    expect(isAllowedImageDataUrl("data:image/png;base64,iVBORw0KGgo=")).toBe(true);
-    expect(isAllowedImageDataUrl("data:image/jpeg;base64,/9j/4AAQ")).toBe(true);
-    expect(isAllowedImageDataUrl("data:image/webp;base64,UklGRg==")).toBe(true);
-  });
-
-  test("rejects a data URL carrying anything else", () => {
-    expect(isAllowedImageDataUrl("data:text/html;base64,PHNjcmlwdD4=")).toBe(false);
-    expect(isAllowedImageDataUrl("data:image/svg+xml;base64,PHN2Zz4=")).toBe(false);
-    expect(isAllowedImageDataUrl("data:,hello")).toBe(false);
-  });
-
-  test("rejects anything that is not a data URL at all", () => {
-    expect(isAllowedImageDataUrl("https://example.com/x.png")).toBe(false);
-    expect(isAllowedImageDataUrl("javascript:alert(1)")).toBe(false);
-    expect(isAllowedImageDataUrl(null)).toBe(false);
-    expect(isAllowedImageDataUrl(undefined)).toBe(false);
+describe("no base64 insertion path remains", () => {
+  test("the module exposes no data-URL helper for creating new images", async () => {
+    // A new Free-form image is an IndexedDB reference. The former data-URL
+    // helpers were removed so no reachable command can create a base64-backed
+    // image again; legacy base64 in EXISTING notes still renders and exports
+    // (see editorImageAssets.test.js and exportImageAssets.test.js).
+    const mod = await import("./editorImages");
+    expect(mod.isAllowedImageDataUrl).toBeUndefined();
+    const commands = await import("./editorCommands");
+    expect(commands.insertImageDataUrl).toBeUndefined();
   });
 });

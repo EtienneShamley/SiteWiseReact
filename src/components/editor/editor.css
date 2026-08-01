@@ -139,6 +139,42 @@
   height: auto;
 }
 
+/* An image node rendered by the asset NodeView. The wrapper is a block so an
+   image behaves exactly as it did before the NodeView existed. */
+.note-editor .note-image-node {
+  margin: 0.5rem 0;
+}
+
+/* Loading / unavailable states. An image whose stored file cannot be found
+   reads as text rather than showing a broken-image icon — a field note must say
+   what is missing, not just fail to draw it. */
+.note-editor .note-image-placeholder {
+  display: inline-block;
+  padding: 0.5rem 0.75rem;
+  border: 1px dashed #d1d5db;
+  border-radius: 0.375rem;
+  background: #f9fafb;
+  color: #6b7280;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  max-width: 100%;
+}
+.note-editor .note-image-placeholder--missing {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+.dark .note-editor .note-image-placeholder {
+  border-color: #4b5563;
+  background: #1f2937;
+  color: #9ca3af;
+}
+.dark .note-editor .note-image-placeholder--missing {
+  border-color: #7f1d1d;
+  background: #2a1414;
+  color: #fca5a5;
+}
+
 /* Tables */
 .note-editor table {
   border-collapse: collapse;

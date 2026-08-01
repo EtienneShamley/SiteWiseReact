@@ -1,16 +1,19 @@
 // src/lib/editorImages.js
 //
-// Validation for images inserted into the Free-form note (toolbar upload and
-// the BottomBar/camera insert path).
+// The Free-form editor's view of the shared image-upload policy
+// (src/lib/imageProcessing.js). It exists as its own module because the editor
+// surfaces — the toolbar upload and the BottomBar/camera insert — import their
+// rules from here; the rules themselves are defined once, next to the
+// normalization that enforces them, and are shared with Template-form Photo
+// fields.
 //
-// SCOPE BOUNDARY — read before changing the limit below.
-// A Free-form editor image is stored as a data URL inside the note's HTML,
-// which lives in localStorage under "sitewise-notes". That is the current
-// model; replacing it with the IndexedDB asset architecture that Template-form
-// Photo/File evidence uses (src/lib/assetStorage.js) is a storage-architecture
-// change and is explicitly out of scope here. The size limit is therefore a
-// deliberate stopgap chosen so a single insert cannot exhaust the origin's
-// ~5 MB localStorage budget and take every note's persistence down with it.
+// STORAGE MODEL — this changed. A Free-form editor image is no longer embedded
+// in the note's HTML as a data URL. Its bytes go to IndexedDB through the same
+// asset store Template-form Photo/File evidence uses, and the note's document
+// carries only a lightweight `assetId` reference (see
+// src/lib/editorImageAssets.js). That is why the old 1 MB cap is gone: the
+// limit no longer protects the shared ~5 MB localStorage budget, so it can be
+// an ordinary-phone-photo limit instead of a stopgap.
 //
 // SECURITY: the decision is made from the Blob's own `type`, never from the
 // filename, the extension, or the input's `accept` attribute — `accept` is a
@@ -18,29 +21,26 @@
 //
 // Pure: no DOM, no IndexedDB, no React.
 
-// Matches assetStorage.ALLOWED_PHOTO_MIME_TYPES so the application has one
-// answer to "which image types do we accept". SVG is absent deliberately: it
-// is a scriptable XML document format, not an ordinary image.
-export const ALLOWED_EDITOR_IMAGE_MIME_TYPES = [
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-];
+import {
+  ALLOWED_IMAGE_MIME_TYPES,
+  IMAGE_DECODE_MESSAGE,
+  IMAGE_OVERSIZED_MESSAGE,
+  IMAGE_STORAGE_MESSAGE,
+  IMAGE_UNSUPPORTED_MESSAGE,
+  MAX_IMAGE_SOURCE_BYTES,
+  validateImageSource,
+} from "./imageProcessing";
 
-// 1 MB of source bytes — roughly 1.4 MB once base64-encoded into the note.
-export const MAX_EDITOR_IMAGE_BYTES = 1024 * 1024;
+// Re-exported under the editor's own names so the toolbar and BottomBar do not
+// each have to know where the policy lives. SVG is absent deliberately: it is a
+// scriptable XML document format, not an ordinary image.
+export const ALLOWED_EDITOR_IMAGE_MIME_TYPES = ALLOWED_IMAGE_MIME_TYPES;
+export const MAX_EDITOR_IMAGE_BYTES = MAX_IMAGE_SOURCE_BYTES;
 
-export const EDITOR_IMAGE_TYPE_MESSAGE =
-  "That file was not inserted — only PNG, JPEG and WebP images are supported.";
-export const EDITOR_IMAGE_SIZE_MESSAGE =
-  "That image was not inserted — editor images must be 1 MB or smaller.";
-export const EDITOR_IMAGE_READ_MESSAGE =
-  "That image could not be read, so nothing was inserted.";
-
-function normalizeMime(type) {
-  if (typeof type !== "string") return "";
-  return type.split(";")[0].trim().toLowerCase();
-}
+export const EDITOR_IMAGE_TYPE_MESSAGE = IMAGE_UNSUPPORTED_MESSAGE;
+export const EDITOR_IMAGE_SIZE_MESSAGE = IMAGE_OVERSIZED_MESSAGE;
+export const EDITOR_IMAGE_READ_MESSAGE = IMAGE_DECODE_MESSAGE;
+export const EDITOR_IMAGE_STORAGE_MESSAGE = IMAGE_STORAGE_MESSAGE;
 
 /**
  * Decide whether a picked File may be inserted into the Free-form note.
@@ -48,34 +48,5 @@ function normalizeMime(type) {
  * @returns {{ok: true, mimeType: string}} | {{ok: false, error: string}}
  */
 export function validateEditorImageFile(file) {
-  if (!file || typeof file !== "object") {
-    return { ok: false, error: EDITOR_IMAGE_TYPE_MESSAGE };
-  }
-
-  const mimeType = normalizeMime(file.type);
-  if (!ALLOWED_EDITOR_IMAGE_MIME_TYPES.includes(mimeType)) {
-    return { ok: false, error: EDITOR_IMAGE_TYPE_MESSAGE };
-  }
-
-  const size = typeof file.size === "number" ? file.size : NaN;
-  if (!Number.isFinite(size) || size <= 0) {
-    return { ok: false, error: EDITOR_IMAGE_READ_MESSAGE };
-  }
-  if (size > MAX_EDITOR_IMAGE_BYTES) {
-    return { ok: false, error: EDITOR_IMAGE_SIZE_MESSAGE };
-  }
-
-  return { ok: true, mimeType };
-}
-
-/**
- * A data URL is only acceptable if it actually carries one of the allowed
- * image types. This re-checks the produced string rather than trusting that
- * the reader honoured the File's declared type.
- */
-export function isAllowedImageDataUrl(dataUrl) {
-  if (typeof dataUrl !== "string") return false;
-  const match = /^data:([^;,]+)[;,]/.exec(dataUrl);
-  if (!match) return false;
-  return ALLOWED_EDITOR_IMAGE_MIME_TYPES.includes(normalizeMime(match[1]));
+  return validateImageSource(file);
 }

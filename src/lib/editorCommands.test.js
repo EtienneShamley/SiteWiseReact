@@ -9,7 +9,7 @@ import {
   applyHighlightColor,
   applyLink,
   applyTextColor,
-  insertImageDataUrl,
+  insertImageAsset,
   insertImageFromUrl,
   isHexColor,
   removeLink,
@@ -178,25 +178,67 @@ describe("image insertion", () => {
     expect(editor.calls).toEqual([]);
   });
 
-  test("inserts a validated image data URL", () => {
+  test("a remote image is stored as a remote URL, never downloaded", () => {
     const editor = makeEditor();
-    expect(insertImageDataUrl(editor, "data:image/png;base64,iVBORw0KGgo=").ok).toBe(true);
-    expect(names(editor)).toEqual(["focus", "setImage", "run"]);
+    insertImageFromUrl(editor, "https://example.com/site.png");
+    const [, attrs] = editor.calls.find((c) => c[0] === "setImage");
+    expect(attrs).toEqual({ src: "https://example.com/site.png" });
+    expect(attrs.assetId).toBeUndefined();
   });
 
-  test("a data URL of the wrong type inserts nothing", () => {
-    for (const value of [
-      "data:text/html;base64,PHNjcmlwdD4=",
-      "data:image/svg+xml;base64,PHN2Zz4=",
-      "https://example.com/x.png",
-      null,
-      "",
-    ]) {
+  test("inserts an asset reference with no src at all", () => {
+    const editor = makeEditor();
+    const result = insertImageAsset(editor, {
+      assetId: "asset-1",
+      alt: "site.jpg",
+      width: 1600,
+      height: 1200,
+    });
+    expect(result).toEqual({ ok: true, assetId: "asset-1" });
+    expect(names(editor)).toEqual(["focus", "setImage", "run"]);
+    const [, attrs] = editor.calls.find((c) => c[0] === "setImage");
+    expect(attrs).toEqual({
+      assetId: "asset-1",
+      src: null,
+      alt: "site.jpg",
+      width: 1600,
+      height: 1200,
+    });
+  });
+
+  test("a missing or blank assetId inserts nothing", () => {
+    for (const assetId of [null, undefined, "", "   ", 42, {}]) {
       const editor = makeEditor();
-      const result = insertImageDataUrl(editor, value);
+      const result = insertImageAsset(editor, { assetId });
       expect(result.ok).toBe(false);
       expect(editor.calls).toEqual([]);
     }
+  });
+
+  test("a refused transaction reports failure so the caller can clean up", () => {
+    // The asset has no reference anywhere at this point; the caller deletes it.
+    const editor = makeEditor();
+    editor.chain = () => ({
+      focus: () => ({ setImage: () => ({ run: () => false }) }),
+    });
+    expect(insertImageAsset(editor, { assetId: "asset-1" }).ok).toBe(false);
+  });
+
+  test("a throwing transaction is reported, not propagated", () => {
+    const editor = makeEditor();
+    editor.chain = () => {
+      throw new Error("schema refused the node");
+    };
+    expect(insertImageAsset(editor, { assetId: "asset-1" }).ok).toBe(false);
+  });
+
+  test("non-positive dimensions are normalized away rather than stored as 0", () => {
+    const editor = makeEditor();
+    insertImageAsset(editor, { assetId: "a", width: 0, height: -3, alt: "  " });
+    const [, attrs] = editor.calls.find((c) => c[0] === "setImage");
+    expect(attrs.width).toBeNull();
+    expect(attrs.height).toBeNull();
+    expect(attrs.alt).toBeNull();
   });
 
   test("every insertion focuses the editor before dispatching", () => {

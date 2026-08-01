@@ -13,18 +13,31 @@
 // without a real IndexedDB (jsdom has none).
 
 import { newId } from "./id";
+import {
+  ALLOWED_IMAGE_MIME_TYPES,
+  IMAGE_OVERSIZED_MESSAGE,
+  IMAGE_UNSUPPORTED_MESSAGE,
+  MAX_IMAGE_SOURCE_BYTES,
+  isAllowedImageMimeType,
+} from "./imageProcessing";
 
 const DB_NAME = "notewise-assets";
 const DB_VERSION = 1;
 const STORE = "assets";
 
-// Logo upload constraints. SVG is intentionally excluded.
+// Logo upload constraints. SVG is intentionally excluded. The logo is a small
+// brand asset with its own smaller limit and is deliberately NOT governed by
+// the shared image-upload policy used for note evidence and editor images.
 export const ALLOWED_LOGO_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"];
 export const MAX_LOGO_BYTES = 5 * 1024 * 1024; // 5 MB
 
-// Note Photo-field constraints (evidence photos on a completed note).
-export const ALLOWED_PHOTO_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"];
-export const MAX_PHOTO_BYTES = 15 * 1024 * 1024; // 15 MB
+// Note Photo-field constraints (evidence photos on a completed note). These are
+// the SHARED image-upload policy (src/lib/imageProcessing.js): the same accepted
+// types, the same 20 MB source limit and the same normalization as a Free-form
+// editor image, so a user does not meet two different answers to "can I upload
+// this photo" in one product.
+export const ALLOWED_PHOTO_MIME_TYPES = ALLOWED_IMAGE_MIME_TYPES;
+export const MAX_PHOTO_BYTES = MAX_IMAGE_SOURCE_BYTES; // 20 MB
 
 // Note File-field constraints. MIME types vary by OS/browser for Office and CSV
 // files, so validation accepts a file when EITHER its MIME type or its
@@ -60,6 +73,13 @@ export const MAX_NOTE_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
 // a NoteTemplateInstance — see src/lib/noteAttachments.js).
 export const ASSET_KIND_NOTE_PHOTO = "note-photo";
 export const ASSET_KIND_NOTE_FILE = "note-file";
+
+// Asset kind for an image placed in a FREE-FORM note. It is referenced from the
+// note's rich-text document by `data-asset-id` (see src/lib/editorImageAssets.js)
+// rather than from a NoteTemplateInstance, which is why it is its own kind:
+// Template-form cleanup and Free-form cleanup must never reach each other's
+// assets.
+export const ASSET_KIND_EDITOR_IMAGE = "editor-image";
 
 let dbPromise = null;
 
@@ -166,6 +186,10 @@ export function validateLogoFile(file) {
 
 // Validates a candidate note-Photo File/Blob. Same contract as
 // validateLogoFile: returns { ok: true } or { ok: false, error }, never throws.
+//
+// The rules and the wording come from the shared image policy, so a Photo field
+// and the Free-form editor accept exactly the same files and say exactly the
+// same thing when they do not.
 export function validatePhotoFile(file) {
   if (!file || typeof file.size !== "number") {
     return { ok: false, error: "No file was selected." };
@@ -173,14 +197,11 @@ export function validatePhotoFile(file) {
   if (file.size === 0) {
     return { ok: false, error: "That file is empty or unreadable." };
   }
-  if (!ALLOWED_PHOTO_MIME_TYPES.includes(file.type)) {
-    return {
-      ok: false,
-      error: "Unsupported photo type. Use a PNG, JPEG or WebP image.",
-    };
+  if (!isAllowedImageMimeType(file.type)) {
+    return { ok: false, error: IMAGE_UNSUPPORTED_MESSAGE };
   }
   if (file.size > MAX_PHOTO_BYTES) {
-    return { ok: false, error: "That photo is larger than the 15 MB limit." };
+    return { ok: false, error: IMAGE_OVERSIZED_MESSAGE };
   }
   return { ok: true };
 }
@@ -303,12 +324,31 @@ export async function createLogoAsset(file) {
 // responsibility via validatePhotoFile so per-file errors can be collected for
 // multi-select uploads). Resolves to the new asset id after the IndexedDB
 // transaction completes — a resolved promise IS the write confirmation.
-export async function createPhotoAsset(file, metadata) {
+//
+// `blob` may be a normalized Blob rather than the picked File (see
+// src/lib/imageProcessing.js), which is why `name` can be supplied separately —
+// a Blob produced by re-encoding has no filename of its own.
+export async function createPhotoAsset(blob, metadata, name) {
   const record = makeAssetRecord({
     id: newId(),
     kind: ASSET_KIND_NOTE_PHOTO,
-    name: file.name || null,
-    blob: file,
+    name: name || blob.name || null,
+    blob,
+    metadata,
+  });
+  await saveAsset(record);
+  return record.id;
+}
+
+// Creates and persists a NEW Free-form editor-image asset. Same contract as
+// createPhotoAsset: the resolved promise IS the write confirmation, and the
+// caller must not insert an editor node until it resolves.
+export async function createEditorImageAsset(blob, { name, metadata } = {}) {
+  const record = makeAssetRecord({
+    id: newId(),
+    kind: ASSET_KIND_EDITOR_IMAGE,
+    name: name || blob.name || null,
+    blob,
     metadata,
   });
   await saveAsset(record);

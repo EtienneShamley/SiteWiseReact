@@ -11,7 +11,6 @@ import {
   TableHeader,
   TableCell,
 } from "@tiptap/extension-table";
-import Image from "@tiptap/extension-image";
 import Highlight from "@tiptap/extension-highlight";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
@@ -33,6 +32,7 @@ import {
   Subscript,
   Superscript,
 } from "./editor/extensions";
+import { AssetImage } from "./editor/AssetImage";
 import "./editor/editor.css";
 import { useRefine } from "../hooks/useRefine";
 import { refinedTextToParagraphHtml } from "../lib/refineClient";
@@ -63,11 +63,9 @@ import {
   pruneRowRefineBackups,
   setRowRefineBackup,
 } from "../lib/templateRowRefine";
-import {
-  EDITOR_IMAGE_READ_MESSAGE,
-  validateEditorImageFile,
-} from "../lib/editorImages";
-import { insertImageDataUrl } from "../lib/editorCommands";
+import { insertLocalImageAsset } from "../lib/editorImageInsert";
+import useTransientMessage from "../hooks/useTransientMessage";
+import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import ListenInPanel from "./ListenInPanel";
 import {
@@ -165,8 +163,17 @@ export default function MainArea() {
   // both start a request before React re-renders the disabled button.
   const refineRequestRef = useRef(0);
   const refineInFlightRef = useRef(false);
-  // Restrained inline feedback for a rejected editor image insertion.
-  const [editorNotice, setEditorNotice] = useState("");
+  // Restrained inline feedback for a rejected editor image insertion, with a
+  // managed lifetime: it auto-dismisses, a new attempt supersedes it, a success
+  // clears it, and changing note or view clears it (see the effect below). It
+  // previously had no lifecycle and could stay on screen indefinitely.
+  const imageNotice = useTransientMessage();
+  const {
+    clear: clearImageNotice,
+    showError: showImageNoticeError,
+  } = imageNotice;
+  // True while a BottomBar image is being stamped, normalized and written.
+  const [imageInsertBusy, setImageInsertBusy] = useState(false);
 
   const notePdfInputRef = useRef(null);
 
@@ -266,7 +273,11 @@ export default function MainArea() {
         TableRow,
         TableHeader,
         TableCell,
-        Image,
+        // The image node extended with an IndexedDB asset reference: bytes go
+        // to the asset store and the document carries only an assetId, so note
+        // HTML never holds image data. It also parses legacy data: images,
+        // which the stock extension silently drops. See ./editor/AssetImage.js.
+        AssetImage,
         TaskList,
         // nested is required for the toolbar's indent inside task lists
         TaskItem.configure({ nested: true }),
@@ -367,42 +378,49 @@ export default function MainArea() {
 
   // Images inserted from the BottomBar (including camera capture).
   //
-  // A File used to be inserted as an object URL that was revoked ten seconds
-  // later, so the image broke while the document still referenced it and was
-  // gone entirely after a reload. It is now validated by real MIME type and
-  // size and embedded as a data URL, exactly like the toolbar upload path, so
-  // what is inserted is what persists. A rejected file inserts nothing.
-  function handleInsertImageAtCursor(imgSrc) {
-    if (!editor || !imgSrc) return;
+  // A photo used to be inserted as an object URL, which the note HTML then
+  // persisted: the bytes existed only in memory, so the image was permanently
+  // broken after a reload. It now takes the same persistent path as the toolbar
+  // upload — validate the source, store the bytes in IndexedDB, and insert only
+  // a reference once that write is confirmed. A rejected file inserts nothing.
+  //
+  // `sourceFile` is the file the user actually picked (what gets validated);
+  // `options.blob` is the BottomBar's stamped output, which is what is stored.
+  async function handleInsertImageAtCursor(sourceFile, options = {}) {
+    if (!editor || !sourceFile) return;
 
     // The Free-form editor is only hidden behind the Template form, so an
     // insert from the Template form would land in a document the user cannot
     // see. Say so instead.
     if (!freeformEditingEnabled) {
-      setEditorNotice(
+      showImageNoticeError(
         "Switch to the Free-form note to add an image there. Template form evidence uses the Photo and File fields."
       );
       return;
     }
 
-    if (typeof File !== "undefined" && imgSrc instanceof File) {
-      const check = validateEditorImageFile(imgSrc);
-      if (!check.ok) {
-        setEditorNotice(check.error);
-        return;
-      }
-      setEditorNotice("");
-      const reader = new FileReader();
-      reader.onerror = () => setEditorNotice(EDITOR_IMAGE_READ_MESSAGE);
-      reader.onload = (evt) => {
-        const result = insertImageDataUrl(editor, evt.target?.result);
-        if (!result.ok && result.error) setEditorNotice(result.error);
-      };
-      reader.readAsDataURL(imgSrc);
-      return;
-    }
+    // A new attempt supersedes whatever the last one said.
+    clearImageNotice();
 
-    editor.chain().focus().setImage({ src: imgSrc }).run();
+    setImageInsertBusy(true);
+    try {
+      const result = await insertLocalImageAsset({
+        sourceFile,
+        blob: options.blob || sourceFile,
+        editor,
+        name: options.name || sourceFile.name,
+      });
+      if (!result.ok) showImageNoticeError(result.error);
+      else clearImageNotice();
+    } finally {
+      setImageInsertBusy(false);
+    }
+  }
+
+  // The BottomBar's own pre-stamp rejection (an unsupported or oversized source
+  // file), reported through the same one message channel.
+  function handleImageInsertError(message) {
+    if (message) showImageNoticeError(message);
   }
 
   // BottomBar text routing:
@@ -709,13 +727,14 @@ export default function MainArea() {
     }));
   };
 
-  // Drop a refine message that no longer describes what the user is looking
-  // at. An in-flight request is deliberately left running: it still owns its
-  // originating note and will apply there.
+  // Drop a refine or image message that no longer describes what the user is
+  // looking at — changing note, or switching between the Free-form note and the
+  // Template form, makes it irrelevant. An in-flight request is deliberately
+  // left running: it still owns its originating note and will apply there.
   useEffect(() => {
     setRefineState((prev) => clearRefineMessage(prev));
-    setEditorNotice("");
-  }, [noteKey, noteLayout]);
+    clearImageNotice();
+  }, [noteKey, noteLayout, clearImageNotice]);
 
   // Shared control-bar visual language: neutral gray chips/segments,
   // consistent hover/disabled/focus-visible treatment across every control.
@@ -916,13 +935,22 @@ export default function MainArea() {
             </span>
           )}
 
-          {!!editorNotice && (
+          {/* One restrained live region for image insertion: busy while the
+              photo is being stamped, normalized and written, then the outcome.
+              The message auto-dismisses and is cleared by a new attempt, a
+              success, and any note or view change. */}
+          {(imageInsertBusy || !!imageNotice.message) && (
             <span
               role="status"
               aria-live="polite"
-              className="text-xs text-red-600 dark:text-red-400"
+              className={[
+                "text-xs",
+                imageNotice.tone === MESSAGE_TONE.ERROR
+                  ? "text-red-600 dark:text-red-400"
+                  : "text-gray-500 dark:text-gray-400",
+              ].join(" ")}
             >
-              {editorNotice}
+              {imageInsertBusy ? "Adding image…" : imageNotice.message}
             </span>
           )}
 
@@ -1101,6 +1129,7 @@ export default function MainArea() {
               editor={editor}
               onInsertText={handleBottomBarInsert}
               onInsertImage={handleInsertImageAtCursor}
+              onImageError={handleImageInsertError}
               onInsertPDFFile={handleNotePdfImport}
               disabled={!noteTitle || !editor}
             />

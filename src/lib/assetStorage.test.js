@@ -17,7 +17,15 @@ import {
   MAX_PHOTO_BYTES,
   ALLOWED_NOTE_FILE_MIME_TYPES,
   MAX_NOTE_FILE_BYTES,
+  ASSET_KIND_EDITOR_IMAGE,
+  ASSET_KIND_NOTE_PHOTO,
 } from "./assetStorage";
+import {
+  ALLOWED_IMAGE_MIME_TYPES,
+  IMAGE_OVERSIZED_MESSAGE,
+  IMAGE_UNSUPPORTED_MESSAGE,
+  MAX_IMAGE_SOURCE_BYTES,
+} from "./imageProcessing";
 
 function blobOf(bytes, type) {
   return new Blob([new Uint8Array(bytes)], { type });
@@ -108,7 +116,7 @@ describe("dataUrlToBlob / isMigratableLogoSrc", () => {
 });
 
 describe("validatePhotoFile (note Photo fields)", () => {
-  test("accepts PNG, JPEG and WebP within the 15 MB limit", () => {
+  test("accepts PNG, JPEG and WebP", () => {
     for (const type of ALLOWED_PHOTO_MIME_TYPES) {
       expect(validatePhotoFile(blobOf([1, 2, 3], type)).ok).toBe(true);
     }
@@ -118,20 +126,82 @@ describe("validatePhotoFile (note Photo fields)", () => {
     for (const type of ["image/gif", "image/svg+xml", "application/pdf", ""]) {
       const res = validatePhotoFile(blobOf([1], type));
       expect(res.ok).toBe(false);
-      expect(typeof res.error).toBe("string");
+      expect(res.error).toBe(IMAGE_UNSUPPORTED_MESSAGE);
     }
   });
 
-  test("rejects an oversized photo (over 15 MB)", () => {
+  test("shares the 20 MB source limit with Free-form editor images", () => {
+    expect(MAX_PHOTO_BYTES).toBe(MAX_IMAGE_SOURCE_BYTES);
+    expect(MAX_PHOTO_BYTES).toBe(20 * 1024 * 1024);
+    expect(ALLOWED_PHOTO_MIME_TYPES).toBe(ALLOWED_IMAGE_MIME_TYPES);
+  });
+
+  test("a source photo up to 20 MB is accepted", () => {
+    const atLimit = { size: MAX_PHOTO_BYTES, type: "image/jpeg", name: "phone.jpg" };
+    expect(validatePhotoFile(atLimit).ok).toBe(true);
+    // The previous 15 MB cap must no longer reject an ordinary phone photo.
+    const wasOverOldLimit = { size: 16 * 1024 * 1024, type: "image/jpeg" };
+    expect(validatePhotoFile(wasOverOldLimit).ok).toBe(true);
+  });
+
+  test("rejects an oversized photo (over 20 MB)", () => {
     const big = { size: MAX_PHOTO_BYTES + 1, type: "image/png", name: "big.png" };
     const res = validatePhotoFile(big);
     expect(res.ok).toBe(false);
-    expect(res.error).toMatch(/15 MB/);
+    expect(res.error).toBe(IMAGE_OVERSIZED_MESSAGE);
   });
 
   test("rejects empty and missing files", () => {
     expect(validatePhotoFile(blobOf([], "image/png")).ok).toBe(false);
     expect(validatePhotoFile(null).ok).toBe(false);
+  });
+});
+
+describe("the company logo policy is unchanged by the image-upload work", () => {
+  test("the logo keeps its own smaller 5 MB limit", () => {
+    expect(MAX_LOGO_BYTES).toBe(5 * 1024 * 1024);
+    expect(MAX_LOGO_BYTES).not.toBe(MAX_PHOTO_BYTES);
+  });
+
+  test("a file that a Photo field would accept can still be too large for a logo", () => {
+    const between = { size: 8 * 1024 * 1024, type: "image/png", name: "logo.png" };
+    expect(validatePhotoFile(between).ok).toBe(true);
+    expect(validateLogoFile(between).ok).toBe(false);
+  });
+
+  test("the logo's own messages are untouched", () => {
+    expect(validateLogoFile({ size: MAX_LOGO_BYTES + 1, type: "image/png" }).error).toBe(
+      "That image is larger than the 5 MB limit."
+    );
+    expect(validateLogoFile({ size: 10, type: "image/gif" }).error).toBe(
+      "Unsupported image type. Use a PNG, JPEG or WebP file."
+    );
+  });
+});
+
+describe("editor-image assets", () => {
+  test("Free-form images are their own asset kind", () => {
+    // Free-form cleanup and Template-form cleanup must never be able to reach
+    // each other's assets, which is what a distinct kind makes checkable.
+    expect(ASSET_KIND_EDITOR_IMAGE).toBe("editor-image");
+    expect(ASSET_KIND_EDITOR_IMAGE).not.toBe(ASSET_KIND_NOTE_PHOTO);
+  });
+
+  test("an editor-image record carries the metadata a future backend needs", () => {
+    const blob = blobOf([1, 2, 3], "image/jpeg");
+    const rec = makeAssetRecord({
+      id: "a1",
+      kind: ASSET_KIND_EDITOR_IMAGE,
+      name: "site.jpg",
+      blob,
+      metadata: { width: 1600, height: 1200 },
+    });
+    expect(rec.kind).toBe(ASSET_KIND_EDITOR_IMAGE);
+    expect(rec.name).toBe("site.jpg");
+    expect(rec.mimeType).toBe("image/jpeg");
+    expect(rec.size).toBe(3);
+    expect(rec.metadata).toEqual({ width: 1600, height: 1200 });
+    expect(typeof rec.createdAt).toBe("number");
   });
 });
 

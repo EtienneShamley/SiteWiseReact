@@ -13,14 +13,13 @@ import {
   applyHighlightColor,
   applyLink,
   applyTextColor,
-  insertImageDataUrl,
   insertImageFromUrl,
   removeLink as removeLinkCommand,
 } from "../../lib/editorCommands";
-import {
-  EDITOR_IMAGE_READ_MESSAGE,
-  validateEditorImageFile,
-} from "../../lib/editorImages";
+import { validateEditorImageFile } from "../../lib/editorImages";
+import { insertLocalImageAsset } from "../../lib/editorImageInsert";
+import useTransientMessage from "../../hooks/useTransientMessage";
+import { MESSAGE_TONE } from "../../lib/transientMessage";
 
 /**
  * @param editor    the TipTap editor instance
@@ -37,8 +36,15 @@ export default function FormattingControls({ editor, disabled = false }) {
   const textColorRef = useRef(null);
   const highlightColorRef = useRef(null);
   const [tableMenuOpen, setTableMenuOpen] = useState(false);
-  // One restrained inline message for a rejected link, image or colour.
-  const [controlError, setControlError] = useState("");
+  // One restrained inline message for a rejected link, image or colour, with a
+  // managed lifetime — it auto-dismisses, a new attempt supersedes it, and a
+  // success clears it. It used to have no lifecycle at all and stayed on screen
+  // indefinitely. See src/lib/transientMessage.js.
+  const controlMessage = useTransientMessage();
+  const { clear: clearControlMessage, showError: showControlError } = controlMessage;
+  // True while an image is being normalized and written to IndexedDB. The
+  // document is not touched until that write is confirmed.
+  const [imageBusy, setImageBusy] = useState(false);
 
   // TipTap v3 does not re-render React on selection changes, so every
   // active/disabled/attribute read the toolbar depends on must go through
@@ -96,20 +102,29 @@ export default function FormattingControls({ editor, disabled = false }) {
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [tableMenuOpen]);
 
-  // A message about a rejected control must not outlive the state it
-  // described, so it clears whenever the toolbar becomes unavailable.
+  // A message about a rejected control must not outlive the state it described.
+  // It clears when the toolbar becomes unavailable (switching to the Template
+  // form) and when the editor instance changes — the editor is recreated per
+  // note, so this is what clears a stale image message on a note switch.
   useEffect(() => {
-    if (disabled) setControlError("");
-  }, [disabled]);
+    if (disabled) clearControlMessage();
+  }, [disabled, clearControlMessage]);
+
+  useEffect(() => {
+    clearControlMessage();
+  }, [editor, clearControlMessage]);
 
   useEffect(() => {
     if (disabled) setTableMenuOpen(false);
   }, [disabled]);
 
-  const report = useCallback((result) => {
-    if (result && result.ok === false && result.error) setControlError(result.error);
-    else setControlError("");
-  }, []);
+  const report = useCallback(
+    (result) => {
+      if (result && result.ok === false && result.error) showControlError(result.error);
+      else clearControlMessage();
+    },
+    [showControlError, clearControlMessage]
+  );
 
   // Native colour inputs: COMMIT ONCE per chosen colour.
   //
@@ -198,21 +213,38 @@ export default function FormattingControls({ editor, disabled = false }) {
   // Local upload. The decision is made from the Blob's own type and size, not
   // from the filename or the input's accept hint, and a rejected file inserts
   // nothing at all.
-  const handleImageUpload = (e) => {
+  //
+  // The bytes go to IndexedDB and only a reference enters the document, so the
+  // node is inserted ONLY after that write is confirmed — see
+  // src/lib/editorImageInsert.js for the full ordering.
+  const handleImageUpload = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = "";
+    // Cancelling the picker is not a failure: nothing happens and nothing is
+    // said.
     if (!file || !editor) return;
 
+    // A new attempt supersedes whatever the last one said.
+    clearControlMessage();
+
+    // Cheap rejections happen before any decoding work.
     const check = validateEditorImageFile(file);
     if (!check.ok) {
-      setControlError(check.error);
+      showControlError(check.error);
       return;
     }
 
-    const reader = new FileReader();
-    reader.onerror = () => setControlError(EDITOR_IMAGE_READ_MESSAGE);
-    reader.onload = (evt) => report(insertImageDataUrl(editor, evt.target?.result));
-    reader.readAsDataURL(file);
+    setImageBusy(true);
+    try {
+      const result = await insertLocalImageAsset({
+        sourceFile: file,
+        editor,
+        name: file.name,
+      });
+      report(result);
+    } finally {
+      setImageBusy(false);
+    }
   };
 
   const insertImageUrl = () => {
@@ -386,10 +418,11 @@ export default function FormattingControls({ editor, disabled = false }) {
         {/* Local file picker — an image icon, never a camera icon: this does
             NOT take a photo. The camera icon is reserved for real capture. */}
         <button
-          title="Upload Photo"
+          title={imageBusy ? "Adding image…" : "Upload Photo"}
           aria-label="Upload photo from this device"
           onClick={() => fileInputRef.current?.click()}
-          disabled={off}
+          disabled={off || imageBusy}
+          aria-busy={imageBusy || undefined}
           className={`${btnBase} ${btnDisabled}`}
         >
           <FaImage />
@@ -500,13 +533,23 @@ export default function FormattingControls({ editor, disabled = false }) {
       </div>
 
       {/* Restrained inline feedback for a rejected link, image or colour —
-          the document is unchanged whenever this appears. */}
-      {!!controlError && (
+          the document is unchanged whenever this appears. It clears itself
+          after a few seconds, on a new attempt, and on a note or view change,
+          so a failure notice can never describe something that is no longer
+          true. One live region serves the busy state and the message, so the
+          status line's presence does not shift the toolbar twice. */}
+      {(imageBusy || !!controlMessage.message) && (
         <span
           role="status"
-          className="ml-1 text-xs text-red-600 dark:text-red-400 max-w-xs"
+          aria-live="polite"
+          className={[
+            "ml-1 text-xs max-w-xs",
+            controlMessage.tone === MESSAGE_TONE.ERROR
+              ? "text-red-600 dark:text-red-400"
+              : "text-gray-500 dark:text-gray-400",
+          ].join(" ")}
         >
-          {controlError}
+          {imageBusy ? "Adding image…" : controlMessage.message}
         </span>
       )}
     </div>
