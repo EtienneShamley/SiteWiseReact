@@ -1,7 +1,13 @@
 // src/lib/pdfUtils.js
 import * as pdfjsLib from "pdfjs-dist";
-import { PDFDocument, rgb, StandardFonts, degrees } from "pdf-lib";
+import { PDFDocument, rgb, StandardFonts, degrees, LineCapStyle } from "pdf-lib";
 import { makePageToPdf } from "./pdfCoords";
+import {
+  arrowHeadPoints,
+  arrowHeadSize,
+  normalizeAnnotation,
+  sortByZOrder,
+} from "./pdfAnnotationModel";
 
 // Point the worker to the copy placed in /public
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.js";
@@ -77,6 +83,27 @@ export async function renderPageTextLayer(pdfDoc, pageNumber, container, scale) 
   });
   await textLayer.render();
   return textLayer;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Export transaction state                                                   */
+/*                                                                            */
+/* Export is an explicit operation with four states rather than a boolean, so */
+/* a failure can never be presented as a success and a second press cannot    */
+/* start a concurrent export.                                                 */
+/* -------------------------------------------------------------------------- */
+
+export const EXPORT_STATE = {
+  IDLE: "idle",
+  EXPORTING: "exporting",
+  SUCCESS: "success",
+  FAILURE: "failure",
+};
+
+/** True only when a new export may begin. Refuses duplicates and no-document. */
+export function canStartExport(state, { hasDocument = true } = {}) {
+  if (!hasDocument) return false;
+  return state !== EXPORT_STATE.EXPORTING;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -270,27 +297,65 @@ function drawPlainText(page, a, font, conv) {
   });
 }
 
-function drawArrowHead(page, from, tip, size, color, thickness) {
-  const ang = Math.atan2(tip.y - from.y, tip.x - from.x);
-  const spread = Math.PI / 7;
-  const w1 = { x: tip.x - size * Math.cos(ang - spread), y: tip.y - size * Math.sin(ang - spread) };
-  const w2 = { x: tip.x - size * Math.cos(ang + spread), y: tip.y - size * Math.sin(ang + spread) };
-  page.drawLine({ start: tip, end: w1, thickness, color });
-  page.drawLine({ start: tip, end: w2, thickness, color });
+// Arrowhead barbs are computed in PAGE space by the shared helper the editor
+// overlay uses, then converted — so the exported head matches the one drawn
+// on screen instead of being derived from separate maths.
+function drawArrowHead(page, from, tip, size, conv, color, thickness) {
+  const barbs = arrowHeadPoints(from, tip, size);
+  const start = conv.toPdf(tip.x, tip.y);
+  for (const barb of barbs) {
+    const end = conv.toPdf(barb.x, barb.y);
+    page.drawLine({ start, end, thickness, color, lineCap: LineCapStyle.Round });
+  }
 }
 
-function drawArrow(page, a, conv) {
-  const p1 = conv.toPdf(a.x1, a.y1);
-  const p2 = conv.toPdf(a.x2, a.y2);
+// Arrow and line: one two-point segment, optionally with arrowheads.
+function drawSegment(page, a, conv) {
+  const p1 = { x: a.x1, y: a.y1 };
+  const p2 = { x: a.x2, y: a.y2 };
   const strokeColor = hexToRgb01(a.stroke, { r: 0.2, g: 0.2, b: 0.2 });
   const color = rgb(strokeColor.r, strokeColor.g, strokeColor.b);
   const thickness = a.strokeWidth ?? 2;
 
-  page.drawLine({ start: p1, end: p2, thickness, color });
+  page.drawLine({
+    start: conv.toPdf(p1.x, p1.y),
+    end: conv.toPdf(p2.x, p2.y),
+    thickness,
+    color,
+    lineCap: LineCapStyle.Round,
+  });
 
-  const headSize = Math.max(6, thickness * 4);
-  if (a.head === "single" || a.head === "double") drawArrowHead(page, p1, p2, headSize, color, thickness);
-  if (a.head === "double") drawArrowHead(page, p2, p1, headSize, color, thickness);
+  if (a.type !== "arrow") return;
+  const headSize = arrowHeadSize(thickness);
+  if (a.head === "single" || a.head === "double") {
+    drawArrowHead(page, p1, p2, headSize, conv, color, thickness);
+  }
+  if (a.head === "double") drawArrowHead(page, p2, p1, headSize, conv, color, thickness);
+}
+
+// Ellipse: the page-space bounding box becomes a centre plus two radii, and
+// the ellipse is rotated by the page's text angle so it stays correct on
+// rotated pages (exact at 0/90/180/270 degrees).
+function drawEllipseAnn(page, a, conv) {
+  const w = a.w || 0;
+  const h = a.h || 0;
+  if (w <= 0 || h <= 0) return;
+  const centre = conv.toPdf(a.x + w / 2, a.y + h / 2);
+  const hasFill = a.fill && a.fill !== "transparent";
+  const border = hexToRgb01(a.stroke, { r: 0.2, g: 0.2, b: 0.2 });
+  const fill = hasFill ? hexToRgb01(a.fill) : null;
+  page.drawEllipse({
+    x: centre.x,
+    y: centre.y,
+    xScale: w / 2,
+    yScale: h / 2,
+    rotate: degrees(conv.textAngleDeg),
+    color: fill ? rgb(fill.r, fill.g, fill.b) : undefined,
+    opacity: fill ? a.opacity ?? 1 : undefined,
+    borderColor: rgb(border.r, border.g, border.b),
+    borderWidth: a.strokeWidth ?? 2,
+    borderOpacity: 1,
+  });
 }
 
 function drawSticky(page, a, font, conv) {
@@ -324,16 +389,29 @@ function drawRect(page, a, conv) {
   });
 }
 
-function drawPen(page, a, conv) {
+// Freehand pen and freehand highlight: a sampled page-space path drawn as
+// consecutive round-capped segments. The highlight variant carries the same
+// opacity the editor renders it with.
+function drawPath(page, a, conv) {
   const pts = a.pts || [];
   if (pts.length < 2) return;
-  const strokeColor = hexToRgb01(a.stroke, { r: 0.2, g: 0.2, b: 0.2 });
+  const isHighlight = a.type === "freehandHighlight";
+  const strokeColor = hexToRgb01(
+    a.stroke,
+    isHighlight ? { r: 1, g: 0.96, b: 0.61 } : { r: 0.2, g: 0.2, b: 0.2 }
+  );
   const color = rgb(strokeColor.r, strokeColor.g, strokeColor.b);
-  const thickness = a.strokeWidth ?? 3;
+  const thickness = a.strokeWidth ?? (isHighlight ? 16 : 3);
+  const opacity = isHighlight ? a.opacity ?? 0.35 : 1;
   for (let i = 1; i < pts.length; i++) {
-    const p1 = conv.toPdf(pts[i - 1].x, pts[i - 1].y);
-    const p2 = conv.toPdf(pts[i].x, pts[i].y);
-    page.drawLine({ start: p1, end: p2, thickness, color });
+    page.drawLine({
+      start: conv.toPdf(pts[i - 1].x, pts[i - 1].y),
+      end: conv.toPdf(pts[i].x, pts[i].y),
+      thickness,
+      color,
+      opacity,
+      lineCap: LineCapStyle.Round,
+    });
   }
 }
 
@@ -368,7 +446,12 @@ export async function flattenAnnotations(src, annotations, pageMetas = {}) {
   for (let i = 0; i < pages.length; i++) {
     const pageNo = i + 1;
     const page = pages[i];
-    const anns = annotations?.[pageNo] || [];
+    // Validate through the same whitelist the editor and storage use, then
+    // paint in the shared z-order (translucent highlights underneath). A
+    // single malformed annotation is skipped, never fatal.
+    const anns = sortByZOrder(
+      (annotations?.[pageNo] || []).map(normalizeAnnotation).filter(Boolean)
+    );
     if (!anns.length) continue;
 
     const meta = pageMetas?.[pageNo];
@@ -395,7 +478,8 @@ export async function flattenAnnotations(src, annotations, pageMetas = {}) {
             drawPlainText(page, ann, font, conv);
             break;
           case "arrow":
-            drawArrow(page, ann, conv);
+          case "line":
+            drawSegment(page, ann, conv);
             break;
           case "sticky":
             drawSticky(page, ann, font, conv);
@@ -403,8 +487,12 @@ export async function flattenAnnotations(src, annotations, pageMetas = {}) {
           case "rect":
             drawRect(page, ann, conv);
             break;
+          case "ellipse":
+            drawEllipseAnn(page, ann, conv);
+            break;
           case "pen":
-            drawPen(page, ann, conv);
+          case "freehandHighlight":
+            drawPath(page, ann, conv);
             break;
           default:
             break;

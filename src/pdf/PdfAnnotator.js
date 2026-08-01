@@ -6,6 +6,18 @@
 // size is the zoomed size, so a single scale factor drives every conversion.
 // Drawing at one zoom level therefore stays correctly positioned at any other
 // zoom level and in the flattened export.
+//
+// Editing model:
+// - Geometry maths lives in src/lib/pdfAnnotationModel.js (clamping, rect
+//   corner resize, segment endpoints, path simplification, arrowhead points,
+//   paint order) so the editor and the export share one definition.
+// - Undo/Redo lives in src/lib/pdfAnnotationHistory.js: one bounded,
+//   document-scoped entry per COMPLETED gesture, and none for a gesture that
+//   was cancelled or that ended where it started.
+// - Gestures use Pointer Events with pointer capture, so mouse, pen and touch
+//   behave identically and a lost pointer cannot leave the editor stuck.
+//   During a gesture the overlay writes transient geometry only; the single
+//   persisted mutation happens once, on release.
 import React, {
   forwardRef,
   useEffect,
@@ -16,6 +28,38 @@ import React, {
 } from "react";
 import ReactDOM from "react-dom";
 import { clientRectToPageRect, normalizeQuads } from "../lib/pdfCoords";
+import {
+  MIN_SHAPE_SIZE,
+  RECT_CORNERS,
+  arrowHeadPoints,
+  arrowHeadSize,
+  clampPathToPage,
+  clampPointToPage,
+  moveRect,
+  moveSegment,
+  newAnnotationBase,
+  normalizeAnnotationList,
+  rectFromPoints,
+  resizeRectCorner,
+  setSegmentEnd,
+  simplifyPath,
+  sortByZOrder,
+  stampUpdated,
+} from "../lib/pdfAnnotationModel";
+import {
+  beginGesture as beginHistoryGesture,
+  canRedo,
+  canUndo,
+  cancelGesture as cancelHistoryGesture,
+  commitGesture as commitHistoryGesture,
+  createHistory,
+  gestureBaseline,
+  isGestureActive,
+  pushMutation,
+  redo as redoHistory,
+  resetHistory,
+  undo as undoHistory,
+} from "../lib/pdfAnnotationHistory";
 
 /* -------------------------------------------------------------------------- */
 /* Tools & helpers                                                            */
@@ -32,9 +76,12 @@ const TOOL = {
   CALLOUT: "callout",
   STICKY: "sticky",
   ARROW: "arrow",
+  LINE: "line",
   POLYLINE: "polyline",
   RECT: "rect",
+  ELLIPSE: "ellipse",
   PEN: "pen",
+  FREEHAND_HIGHLIGHT: "freehandHighlight",
 };
 
 const MARKUP_TOOLS = [TOOL.HIGHLIGHT, TOOL.UNDERLINE, TOOL.STRIKE];
@@ -59,15 +106,48 @@ const STYLE_MEMORY = {
     fill: "transparent",
   },
   [TOOL.ARROW]: { stroke: "#333333", strokeWidth: 2, head: "single" },
+  [TOOL.LINE]: { stroke: "#333333", strokeWidth: 2 },
   [TOOL.POLYLINE]: { stroke: "#333333", strokeWidth: 2 },
   [TOOL.RECT]: { stroke: "#333333", strokeWidth: 2, fill: "transparent" },
+  [TOOL.ELLIPSE]: { stroke: "#333333", strokeWidth: 2, fill: "transparent" },
   [TOOL.PEN]: { stroke: "#1976D2", strokeWidth: 3 },
+  [TOOL.FREEHAND_HIGHLIGHT]: { stroke: "#FFF59D", strokeWidth: 16, opacity: 0.35 },
 };
 
-const makeId = () => "a_" + Math.random().toString(36).slice(2, 10);
-const clone = (x) => JSON.parse(JSON.stringify(x));
+// Tools whose annotations are created by dragging on the page.
+const DRAG_CREATE_TOOLS = [
+  TOOL.ARROW,
+  TOOL.LINE,
+  TOOL.RECT,
+  TOOL.ELLIPSE,
+  TOOL.TEXTBOX,
+  TOOL.CALLOUT,
+  TOOL.PEN,
+  TOOL.FREEHAND_HIGHLIGHT,
+];
+
+const SELECTION_BLUE = "#3b82f6";
+
 const dist = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
 const angleDeg = (a, b) => (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
+
+// Delete/Backspace must never be stolen from a control where they have their
+// own meaning. Checked against both the event target and the focused element.
+function isTextEntryTarget(el) {
+  if (!el || typeof el !== "object") return false;
+  const tag = el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "OPTION") return true;
+  if (el.isContentEditable) return true;
+  const role = typeof el.getAttribute === "function" ? el.getAttribute("role") : null;
+  if (role === "textbox" || role === "combobox" || role === "searchbox" || role === "spinbutton") {
+    return true;
+  }
+  return false;
+}
+
+export function shouldIgnoreDeleteKey(target, activeElement) {
+  return isTextEntryTarget(target) || isTextEntryTarget(activeElement);
+}
 
 /* -------------------------------------------------------------------------- */
 /* PdfAnnotator                                                               */
@@ -87,9 +167,7 @@ export default forwardRef(function PdfAnnotator(
   },
   ref
 ) {
-  const [items, setItems] = useState(() =>
-    Array.isArray(initialItems) ? clone(initialItems) : []
-  );
+  const [items, setItems] = useState(() => normalizeAnnotationList(initialItems));
   const itemsRef = useRef(items);
   useEffect(() => {
     itemsRef.current = items;
@@ -102,21 +180,20 @@ export default forwardRef(function PdfAnnotator(
   const [toolPanelOpen, setToolPanelOpen] = useState(false);
   const [toolStyle, setToolStyle] = useState(getInitialStyle(activeTool));
 
-  // Sticky note bubble control
+  // Sticky note bubble control — session state, never persisted.
   const [openStickyId, setOpenStickyId] = useState(null);
 
-  // History: past/future snapshots + batched drag
-  const history = useRef({
-    past: [],
-    future: [],
-    batchActive: false,
-    baseline: null,
-  });
+  // Bounded, document-scoped annotation history (session-only).
+  const historyRef = useRef(createHistory());
+
+  // Registered by whichever page overlay currently owns a pointer gesture, so
+  // Escape and unmount can abort it from anywhere.
+  const abortGestureRef = useRef(null);
 
   const notifyHistory = useCallback(() => {
     onHistoryChange?.({
-      canUndo: history.current.past.length > 0,
-      canRedo: history.current.future.length > 0,
+      canUndo: canUndo(historyRef.current),
+      canRedo: canRedo(historyRef.current),
     });
   }, [onHistoryChange]);
 
@@ -124,60 +201,77 @@ export default forwardRef(function PdfAnnotator(
     onSelectionChange?.(activeId != null);
   }, [activeId, onSelectionChange]);
 
-  const write = (next) => {
-    setItems(next);
-    itemsRef.current = next;
-    onItemsChange?.(next);
-  };
+  // `persist: false` writes transient gesture geometry: the overlay updates
+  // immediately, but nothing is handed to the persistence layer until the
+  // gesture completes.
+  const write = useCallback(
+    (next, options) => {
+      itemsRef.current = next;
+      setItems(next);
+      if (options?.persist !== false) onItemsChange?.(next);
+    },
+    [onItemsChange]
+  );
 
-  function startBatch() {
-    if (!history.current.batchActive) {
-      history.current.batchActive = true;
-      history.current.baseline = clone(itemsRef.current);
-    }
-  }
-  function endBatch() {
-    if (!history.current.batchActive) return;
-    history.current.past.push(history.current.baseline);
-    history.current.future = [];
-    history.current.batchActive = false;
-    history.current.baseline = null;
+  const beginGesture = useCallback(() => {
+    beginHistoryGesture(historyRef.current, itemsRef.current);
+  }, []);
+
+  const commitGesture = useCallback(() => {
+    const h = historyRef.current;
+    if (!isGestureActive(h)) return;
+    const before = gestureBaseline(h);
+    // Records one entry, or none when the state came back unchanged.
+    const recorded = commitHistoryGesture(h, itemsRef.current);
+    if (!recorded) return;
+    write(stampUpdated(before, itemsRef.current));
     notifyHistory();
-  }
+  }, [write, notifyHistory]);
+
+  const cancelGesture = useCallback(() => {
+    const before = cancelHistoryGesture(historyRef.current);
+    if (!before) return false;
+    // Gesture writes were transient, so the baseline is still what is stored.
+    write(before, { persist: false });
+    return true;
+  }, [write]);
+
+  const abortActiveGesture = useCallback(() => {
+    if (!isGestureActive(historyRef.current)) return false;
+    abortGestureRef.current?.();
+    return cancelGesture();
+  }, [cancelGesture]);
 
   const undo = useCallback(() => {
-    const h = history.current;
-    if (!h.past.length) return;
-    const prev = h.past.pop();
-    h.future.unshift(itemsRef.current);
-    write(prev);
-    setActiveId(null);
-    notifyHistory();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notifyHistory]);
-
-  const redo = useCallback(() => {
-    const h = history.current;
-    if (!h.future.length) return;
-    const next = h.future.shift();
-    h.past.push(itemsRef.current);
-    write(next);
-    setActiveId(null);
-    notifyHistory();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notifyHistory]);
-
-  const deleteSelected = useCallback(() => {
-    if (!activeId) return;
-    const h = history.current;
-    h.past.push(clone(itemsRef.current));
-    h.future = [];
-    write(itemsRef.current.filter((it) => it.id !== activeId));
+    const previous = undoHistory(historyRef.current, itemsRef.current);
+    if (!previous) return;
+    write(previous);
     setActiveId(null);
     setOpenStickyId(null);
     notifyHistory();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId, notifyHistory]);
+  }, [write, notifyHistory]);
+
+  const redo = useCallback(() => {
+    const next = redoHistory(historyRef.current, itemsRef.current);
+    if (!next) return;
+    write(next);
+    setActiveId(null);
+    setOpenStickyId(null);
+    notifyHistory();
+  }, [write, notifyHistory]);
+
+  const deleteSelected = useCallback(() => {
+    if (!activeId) return false;
+    const before = itemsRef.current;
+    const next = before.filter((it) => it.id !== activeId);
+    if (next.length === before.length) return false;
+    pushMutation(historyRef.current, before);
+    write(next);
+    setActiveId(null);
+    setOpenStickyId(null);
+    notifyHistory();
+    return true;
+  }, [activeId, write, notifyHistory]);
 
   useImperativeHandle(
     ref,
@@ -185,48 +279,48 @@ export default forwardRef(function PdfAnnotator(
       serialize: () => JSON.stringify(itemsRef.current),
       getItems: () => itemsRef.current,
       load: (jsonOrArray) => {
-        try {
-          const arr = Array.isArray(jsonOrArray)
-            ? jsonOrArray
-            : JSON.parse(jsonOrArray || "[]");
-          write(Array.isArray(arr) ? clone(arr) : []);
-          history.current = { past: [], future: [], batchActive: false, baseline: null };
-          setActiveId(null);
-          notifyHistory();
-        } catch {}
+        let parsed = jsonOrArray;
+        if (typeof jsonOrArray === "string") {
+          try {
+            parsed = JSON.parse(jsonOrArray || "[]");
+          } catch {
+            parsed = [];
+          }
+        }
+        write(normalizeAnnotationList(parsed), { persist: false });
+        resetHistory(historyRef.current);
+        setActiveId(null);
+        setOpenStickyId(null);
+        notifyHistory();
       },
       undo,
       redo,
       deleteSelected,
     }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [undo, redo, deleteSelected, notifyHistory]
+    [undo, redo, deleteSelected, notifyHistory, write]
   );
 
-  // Keyboard support: Delete/Backspace removes the selected annotation,
-  // Escape deselects. Ignored while the user is typing inside a text
-  // field/contentEditable so normal text editing isn't hijacked.
+  // Keyboard support: Delete/Backspace removes the selected annotation and
+  // Escape cancels an in-progress gesture or clears the selection. Both are
+  // ignored while the user is typing, and Backspace only suppresses browser
+  // navigation when an annotation was actually deleted.
   useEffect(() => {
-    function isTypingTarget(el) {
-      if (!el) return false;
-      if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") return true;
-      if (el.isContentEditable) return true;
-      return false;
-    }
     function onKeyDown(e) {
-      if (isTypingTarget(e.target)) return;
+      const focused = typeof document !== "undefined" ? document.activeElement : null;
       if (e.key === "Escape") {
+        if (shouldIgnoreDeleteKey(e.target, focused)) return;
+        if (abortActiveGesture()) return;
         setActiveId(null);
         return;
       }
-      if ((e.key === "Delete" || e.key === "Backspace") && activeId) {
-        e.preventDefault();
-        deleteSelected();
-      }
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      if (shouldIgnoreDeleteKey(e.target, focused)) return;
+      if (!activeId) return;
+      if (deleteSelected()) e.preventDefault();
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeId, deleteSelected]);
+  }, [activeId, deleteSelected, abortActiveGesture]);
 
   // When the tool changes: arm creation tools and show their options panel.
   // Switching TO Select (including the auto-switch after placing a text item)
@@ -251,7 +345,7 @@ export default forwardRef(function PdfAnnotator(
   useEffect(() => {
     if (!MARKUP_TOOLS.includes(activeTool)) return;
 
-    function onMouseUp() {
+    function onPointerUp() {
       // Let the browser finalize the selection first.
       window.setTimeout(captureSelection, 0);
     }
@@ -287,12 +381,7 @@ export default forwardRef(function PdfAnnotator(
         ).filter((q) => q.h < p.baseH / 2); // discard whole-layer artifacts
         if (!quads.length) continue;
 
-        const a = {
-          id: makeId(),
-          page: p.pageNo,
-          type: activeTool,
-          quads,
-        };
+        const a = { ...newAnnotationBase(p.pageNo, activeTool), quads };
         if (activeTool === TOOL.HIGHLIGHT) {
           a.fill = toolStyle.color || "#FFF59D";
           a.opacity = toolStyle.opacity ?? 0.35;
@@ -303,17 +392,17 @@ export default forwardRef(function PdfAnnotator(
       }
 
       if (created.length) {
-        startBatch();
+        pushMutation(historyRef.current, itemsRef.current);
         write([...itemsRef.current, ...created]);
-        endBatch();
+        notifyHistory();
         sel.removeAllRanges();
       }
     }
 
-    document.addEventListener("mouseup", onMouseUp);
-    return () => document.removeEventListener("mouseup", onMouseUp);
+    document.addEventListener("pointerup", onPointerUp);
+    return () => document.removeEventListener("pointerup", onPointerUp);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTool, pages, pageEls, scale, toolStyle]);
+  }, [activeTool, pages, pageEls, scale, toolStyle, write, notifyHistory]);
 
   const firstHost = pages?.length ? pageEls?.[pages[0].pageNo] : null;
 
@@ -331,8 +420,16 @@ export default forwardRef(function PdfAnnotator(
             itemsRef={itemsRef}
             items={items}
             write={write}
-            startBatch={startBatch}
-            endBatch={endBatch}
+            beginGesture={beginGesture}
+            commitGesture={commitGesture}
+            cancelGesture={cancelGesture}
+            registerAbort={(fn) => {
+              abortGestureRef.current = fn;
+            }}
+            pushImmediate={(before) => {
+              pushMutation(historyRef.current, before);
+              notifyHistory();
+            }}
             activeId={activeId}
             setActiveId={setActiveId}
             tool={activeTool}
@@ -378,8 +475,11 @@ function PageOverlay({
   itemsRef,
   items,
   write,
-  startBatch,
-  endBatch,
+  beginGesture,
+  commitGesture,
+  cancelGesture,
+  registerAbort,
+  pushImmediate,
   activeId,
   setActiveId,
   tool,
@@ -390,8 +490,14 @@ function PageOverlay({
   onToolConsumed,
 }) {
   const svgRef = useRef(null);
-  const drag = useRef(null);
+  const gesture = useRef(null);
   const holdTimer = useRef(null);
+  const detachRef = useRef(null);
+  // Window listeners dispatch through this ref so a gesture always runs the
+  // CURRENT render's handlers — no stale scale, items or callbacks.
+  const handlersRef = useRef({});
+
+  const bounds = { width: page.baseW, height: page.baseH };
 
   // In Select mode annotations are interactive (click to select, drag to
   // move). Under any other tool existing annotations are inert so they can't
@@ -402,13 +508,19 @@ function PageOverlay({
   // rather than via text selection.
   const isMarkupTool = MARKUP_TOOLS.includes(tool);
   const dragCreates =
-    armed && ((isMarkupTool && !page.hasText) || (!isMarkupTool && tool !== TOOL.SELECT && tool !== TOOL.PAN));
+    armed && ((isMarkupTool && !page.hasText) || DRAG_CREATE_TOOLS.includes(tool));
 
   // Pointer routing:
   // - drag-creation tools own the whole overlay (crosshair);
   // - Select/Pan/markup-on-text pass through (text layer handles selection),
   //   with individual annotations opting back in when interactive.
   const svgPointerEvents = dragCreates ? "auto" : "none";
+
+  // Handles and outlines are sized in page units but drawn at a constant
+  // on-screen size, so they stay usable at every zoom level.
+  const s = scale || 1;
+  const handleSize = 10 / s;
+  const hairline = 1 / s;
 
   // Deselect when clicking empty page area (canvas / text layer) in Select
   // mode — those clicks never reach the overlay, so listen on the container.
@@ -420,220 +532,255 @@ function PageOverlay({
       if (svgRef.current && svgRef.current.contains(e.target)) return;
       setActiveId(null);
     }
-    pageContainer.addEventListener("mousedown", onDown);
-    return () => pageContainer.removeEventListener("mousedown", onDown);
+    pageContainer.addEventListener("pointerdown", onDown);
+    return () => pageContainer.removeEventListener("pointerdown", onDown);
   }, [hostEl, tool, setActiveId]);
 
-  // Arrow marker once
+  /* ------------------------------ Gesture plumbing ------------------------ */
+
+  const releaseCapture = () => {
+    const g = gesture.current;
+    if (!g?.captureEl || g.pointerId == null) return;
+    try {
+      if (g.captureEl.hasPointerCapture?.(g.pointerId)) {
+        g.captureEl.releasePointerCapture(g.pointerId);
+      }
+    } catch {
+      /* the element may already be gone */
+    }
+  };
+
+  const clearHoldTimer = () => {
+    if (holdTimer.current) {
+      window.clearTimeout(holdTimer.current);
+      holdTimer.current = null;
+    }
+  };
+
+  const detachGesture = () => {
+    clearHoldTimer();
+    releaseCapture();
+    detachRef.current?.();
+    detachRef.current = null;
+    gesture.current = null;
+  };
+
+  function attachGesture() {
+    if (detachRef.current) detachRef.current();
+    const move = (ev) => handlersRef.current.move?.(ev);
+    const up = (ev) => handlersRef.current.up?.(ev);
+    const cancel = (ev) => handlersRef.current.cancel?.(ev);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    detachRef.current = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+    };
+  }
+
+  // Abort hook for Escape and for unmount: drop the gesture without recording
+  // history. The caller restores the baseline.
+  const abortGesture = () => {
+    detachGesture();
+  };
+
   useEffect(() => {
-    if (!svgRef.current) return;
-    if (svgRef.current.querySelector("#arrow-defs")) return;
-    const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-    defs.setAttribute("id", "arrow-defs");
-    const m = document.createElementNS("http://www.w3.org/2000/svg", "marker");
-    m.setAttribute("id", "arrow-head");
-    m.setAttribute("viewBox", "0 0 10 10");
-    m.setAttribute("refX", "10");
-    m.setAttribute("refY", "5");
-    m.setAttribute("markerWidth", "6");
-    m.setAttribute("markerHeight", "6");
-    m.setAttribute("orient", "auto-start-reverse");
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
-    path.setAttribute("fill", "currentColor");
-    m.appendChild(path);
-    defs.appendChild(m);
-    svgRef.current.appendChild(defs);
+    return () => {
+      // Never leave a captured pointer, a live listener or a stuck drag behind.
+      if (gesture.current) {
+        detachGesture();
+        cancelGesture();
+      } else {
+        detachGesture();
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /* ------------------------------ Coordinates ----------------------------- */
 
   // Screen px (relative to the overlay) → page space.
   const getLocal = (evt) => {
-    const rect = svgRef.current.getBoundingClientRect();
-    const s = scale || 1;
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
     return { x: (evt.clientX - rect.left) / s, y: (evt.clientY - rect.top) / s };
   };
 
-  function attachGlobalDrag() {
-    window.addEventListener("mousemove", onGlobalMove);
-    window.addEventListener("mouseup", onGlobalUp);
-  }
-  function detachGlobalDrag() {
-    window.removeEventListener("mousemove", onGlobalMove);
-    window.removeEventListener("mouseup", onGlobalUp);
-  }
+  const patchItem = (id, patch, options) => {
+    const cur = itemsRef.current;
+    const idx = cur.findIndex((i) => i.id === id);
+    if (idx < 0) return;
+    const next = cur.slice();
+    next[idx] = { ...next[idx], ...patch };
+    write(next, options);
+  };
 
   /* --------------------------------- Create -------------------------------- */
 
+  const styleFor = (kind) => {
+    switch (kind) {
+      case TOOL.HIGHLIGHT:
+        return {
+          fill: toolStyle.color || "#FFF59D",
+          opacity: toolStyle.opacity ?? 0.35,
+          thickness: toolStyle.thickness ?? 22,
+        };
+      case TOOL.UNDERLINE:
+      case TOOL.STRIKE:
+        return {
+          stroke: toolStyle.stroke || (kind === TOOL.STRIKE ? "#E53935" : "#1976D2"),
+          strokeWidth: toolStyle.strokeWidth || 3,
+          thickness: toolStyle.thickness ?? toolStyle.strokeWidth ?? 3,
+        };
+      default:
+        return {};
+    }
+  };
+
+  const addTransient = (annotation, gestureState) => {
+    beginGesture();
+    write([...itemsRef.current, annotation], { persist: false });
+    setActiveId(annotation.id);
+    gesture.current = gestureState;
+    attachGesture();
+  };
+
   // Drag-band marks (x0,y0)->(x1,y1): kept as the markup fallback for
   // scanned/image-only pages, where there is no text to anchor quads to.
-  function newMark(p0, kind) {
-    const id = makeId();
-    const thickness =
-      kind === TOOL.HIGHLIGHT
-        ? toolStyle.thickness ?? 22
-        : toolStyle.thickness ?? toolStyle.strokeWidth ?? 3;
-
+  function newMark(p0, kind, e) {
     const a = {
-      id,
-      page: page.pageNo,
-      type: kind,
+      ...newAnnotationBase(page.pageNo, kind),
       x0: p0.x,
       y0: p0.y,
       x1: p0.x,
       y1: p0.y,
-      thickness,
-      fill: kind === TOOL.HIGHLIGHT ? (toolStyle.color || "#FFF59D") : undefined,
-      opacity: kind === TOOL.HIGHLIGHT ? (toolStyle.opacity ?? 0.35) : undefined,
-      stroke: kind !== TOOL.HIGHLIGHT ? (toolStyle.stroke || "#333333") : undefined,
-      strokeWidth: kind !== TOOL.HIGHLIGHT ? (toolStyle.strokeWidth || 3) : undefined,
-      angleSnap: null,
+      ...styleFor(kind),
     };
-    startBatch();
-    write([...itemsRef.current, a]);
-    setActiveId(id);
-    drag.current = { mode: "mark", id, p0 };
+    addTransient(a, capture(e, { mode: "create-band", id: a.id }));
     // hold to snap every ~2s
     holdTimer.current = window.setTimeout(() => {
-      const cur = itemsRef.current;
-      const me = cur.find((i) => i.id === id);
+      const me = itemsRef.current.find((i) => i.id === a.id);
       if (!me) return;
       const ang = angleDeg({ x: me.x0, y: me.y0 }, { x: me.x1, y: me.y1 });
-      const snapped = Math.round(ang / 15) * 15;
-      write(cur.map((it) => (it.id === id ? { ...it, angleSnap: snapped } : it)));
+      patchItem(a.id, { angleSnap: Math.round(ang / 15) * 15 }, { persist: false });
     }, 2000);
   }
 
-  function newTextbox(p0, kind = TOOL.TEXTBOX) {
-    const id = makeId();
+  function newBox(p0, kind, e) {
+    const isText = kind === TOOL.TEXTBOX || kind === TOOL.CALLOUT;
     const a = {
-      id,
-      page: page.pageNo,
-      type: kind,
+      ...newAnnotationBase(page.pageNo, kind),
       x: p0.x,
       y: p0.y,
-      w: 2,
-      h: 2,
-      text: "",
-      textColor: toolStyle.textColor || "#111111",
-      fontSize: toolStyle.fontSize || 14,
-      fontFamily:
-        toolStyle.fontFamily ||
-        "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+      w: MIN_SHAPE_SIZE,
+      h: MIN_SHAPE_SIZE,
       stroke: toolStyle.stroke || "#333333",
       strokeWidth: toolStyle.strokeWidth || 2,
       fill: toolStyle.fill ?? "transparent",
-      corner: 8,
-      editing: false,
+      ...(isText
+        ? {
+            text: "",
+            textColor: toolStyle.textColor || "#111111",
+            fontSize: toolStyle.fontSize || 14,
+            fontFamily:
+              toolStyle.fontFamily ||
+              "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+            corner: 8,
+            editing: false,
+          }
+        : {}),
       ...(kind === TOOL.CALLOUT ? { leader: { x: p0.x - 40, y: p0.y - 20 } } : {}),
     };
-    startBatch();
-    write([...itemsRef.current, a]);
-    setActiveId(id);
-    drag.current = { mode: "textbox-new", id, x0: p0.x, y0: p0.y, isNew: true, kind };
+    addTransient(
+      a,
+      capture(e, { mode: "create-box", id: a.id, origin: p0, kind, isNew: true })
+    );
+  }
+
+  function newSegment(p0, kind, e) {
+    const a = {
+      ...newAnnotationBase(page.pageNo, kind),
+      x1: p0.x,
+      y1: p0.y,
+      x2: p0.x,
+      y2: p0.y,
+      stroke: toolStyle.stroke || "#333333",
+      strokeWidth: toolStyle.strokeWidth || 2,
+      ...(kind === TOOL.ARROW ? { head: toolStyle.head || "single" } : {}),
+    };
+    addTransient(
+      a,
+      capture(e, { mode: "segment-end", id: a.id, which: "end", isNewSegment: true, origin: p0 })
+    );
+  }
+
+  function newPath(p0, kind, e) {
+    const isHighlight = kind === TOOL.FREEHAND_HIGHLIGHT;
+    const a = {
+      ...newAnnotationBase(page.pageNo, kind),
+      pts: [p0, p0],
+      stroke: toolStyle.stroke || (isHighlight ? "#FFF59D" : "#1976D2"),
+      strokeWidth: toolStyle.strokeWidth || (isHighlight ? 16 : 3),
+      ...(isHighlight ? { opacity: toolStyle.opacity ?? 0.35 } : {}),
+    };
+    addTransient(a, capture(e, { mode: "create-path", id: a.id, raw: [p0] }));
   }
 
   function newTypewriter(p0) {
-    const id = makeId();
+    const p = clampPointToPage(p0, bounds);
     const a = {
-      id,
-      page: page.pageNo,
-      type: TOOL.TYPEWRITER,
-      x: p0.x,
-      y: p0.y,
+      ...newAnnotationBase(page.pageNo, TOOL.TYPEWRITER),
+      x: p.x,
+      y: p.y,
       text: "",
       textColor: toolStyle.textColor || "#111111",
       fontSize: toolStyle.fontSize || 14,
       fontFamily:
-        toolStyle.fontFamily ||
-        "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+        toolStyle.fontFamily || "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
       editing: true,
     };
-    startBatch();
+    pushImmediate(itemsRef.current);
     write([...itemsRef.current, a]);
-    setActiveId(id);
+    setActiveId(a.id);
     // Hand control back to Select so the fresh item is immediately editable.
     onToolConsumed?.();
   }
 
-  function newArrow(p0) {
-    const id = makeId();
-    const a = {
-      id,
-      page: page.pageNo,
-      type: TOOL.ARROW,
-      x1: p0.x - 30,
-      y1: p0.y - 10,
-      x2: p0.x + 30,
-      y2: p0.y + 10,
-      stroke: toolStyle.stroke || "#333333",
-      strokeWidth: toolStyle.strokeWidth || 2,
-      head: toolStyle.head || "single",
-    };
-    startBatch();
-    write([...itemsRef.current, a]);
-    setActiveId(id);
-    drag.current = { mode: "arrow-end", id, which: "end2" };
-  }
-
   function newSticky(p0) {
-    const id = makeId();
+    const p = clampPointToPage(p0, bounds);
     const a = {
-      id,
-      page: page.pageNo,
-      type: TOOL.STICKY,
-      x: p0.x,
-      y: p0.y,
+      ...newAnnotationBase(page.pageNo, TOOL.STICKY),
+      x: p.x,
+      y: p.y,
       color: "#FFE082",
       note: "",
-      open: true,
     };
-    startBatch();
+    pushImmediate(itemsRef.current);
     write([...itemsRef.current, a]);
-    setActiveId(id);
-    setOpenStickyId(id);
+    setActiveId(a.id);
+    setOpenStickyId(a.id);
     onToolConsumed?.();
-  }
-
-  function newRectAnn(p0) {
-    const id = makeId();
-    const a = {
-      id,
-      page: page.pageNo,
-      type: TOOL.RECT,
-      x: p0.x,
-      y: p0.y,
-      w: 2,
-      h: 2,
-      stroke: toolStyle.stroke || "#333333",
-      strokeWidth: toolStyle.strokeWidth || 2,
-      fill: toolStyle.fill ?? "transparent",
-    };
-    startBatch();
-    write([...itemsRef.current, a]);
-    setActiveId(id);
-    drag.current = { mode: "textbox-new", id, x0: p0.x, y0: p0.y };
-  }
-
-  function newPen(p0) {
-    const id = makeId();
-    const a = {
-      id,
-      page: page.pageNo,
-      type: TOOL.PEN,
-      pts: [{ x: p0.x, y: p0.y }],
-      stroke: toolStyle.stroke || "#1976D2",
-      strokeWidth: toolStyle.strokeWidth || 3,
-    };
-    startBatch();
-    write([...itemsRef.current, a]);
-    setActiveId(id);
-    drag.current = { mode: "pen", id };
   }
 
   /* --------------------------------- Events -------------------------------- */
 
-  function onSvgDown(e) {
-    if (e.button !== 0) return;
+  // Take pointer capture on the element that started the gesture so the drag
+  // survives leaving the page, and register the abort hook for Escape/unmount.
+  function capture(e, state) {
+    const el = e.currentTarget;
+    try {
+      el.setPointerCapture?.(e.pointerId);
+    } catch {
+      /* capture is an optimisation, not a requirement */
+    }
+    registerAbort?.(abortGesture);
+    return { ...state, pointerId: e.pointerId, captureEl: el };
+  }
+
+  function onSvgPointerDown(e) {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
     if (!dragCreates) {
       if (tool === TOOL.SELECT && e.target === svgRef.current) setActiveId(null);
       return;
@@ -641,192 +788,242 @@ function PageOverlay({
     e.preventDefault();
     const p = getLocal(e);
 
-    if (tool === TOOL.HIGHLIGHT || tool === TOOL.UNDERLINE || tool === TOOL.STRIKE) {
-      newMark(p, tool);
-      attachGlobalDrag();
-      return;
-    }
-    if (tool === TOOL.TEXTBOX || tool === TOOL.CALLOUT) {
-      newTextbox(p, tool);
-      attachGlobalDrag();
-      return;
-    }
-    if (tool === TOOL.TYPEWRITER) {
-      newTypewriter(p);
-      return;
-    }
-    if (tool === TOOL.ARROW) {
-      newArrow(p);
-      attachGlobalDrag();
-      return;
-    }
-    if (tool === TOOL.STICKY) {
-      newSticky(p);
-      return;
-    }
-    if (tool === TOOL.RECT) {
-      newRectAnn(p);
-      attachGlobalDrag();
-      return;
-    }
-    if (tool === TOOL.PEN) {
-      newPen(p);
-      attachGlobalDrag();
-      return;
+    switch (tool) {
+      case TOOL.HIGHLIGHT:
+      case TOOL.UNDERLINE:
+      case TOOL.STRIKE:
+        newMark(p, tool, e);
+        break;
+      case TOOL.TEXTBOX:
+      case TOOL.CALLOUT:
+      case TOOL.RECT:
+      case TOOL.ELLIPSE:
+        newBox(p, tool, e);
+        break;
+      case TOOL.ARROW:
+      case TOOL.LINE:
+        newSegment(p, tool, e);
+        break;
+      case TOOL.PEN:
+      case TOOL.FREEHAND_HIGHLIGHT:
+        newPath(p, tool, e);
+        break;
+      case TOOL.TYPEWRITER:
+        newTypewriter(p);
+        break;
+      case TOOL.STICKY:
+        newSticky(p);
+        break;
+      default:
+        break;
     }
   }
 
-  function onGlobalMove(e) {
-    const d = drag.current;
-    if (!d) return;
-    const p = getLocal(e);
-
+  function onGestureMove(e) {
+    const g = gesture.current;
+    if (!g || (g.pointerId != null && e.pointerId !== g.pointerId)) return;
     const cur = itemsRef.current;
-    const idx = cur.findIndex((i) => i.id === d.id);
+    const idx = cur.findIndex((i) => i.id === g.id);
     if (idx < 0) return;
-    const next = cur.slice();
-    const a = clone(next[idx]);
+    const a = cur[idx];
+    const p = getLocal(e);
+    let patch = null;
 
-    if (d.mode === "mark") {
-      a.x1 = p.x;
-      a.y1 = p.y;
-      a.angleSnap = a.angleSnap ?? null; // keep snap if already set
-    } else if (d.mode === "textbox-new") {
-      a.x = Math.min(d.x0, p.x);
-      a.y = Math.min(d.y0, p.y);
-      a.w = Math.max(10, Math.abs(p.x - d.x0));
-      a.h = Math.max(10, Math.abs(p.y - d.y0));
-    } else if (d.mode === "move-box") {
-      a.x = p.x - d.dx;
-      a.y = p.y - d.dy;
-    } else if (d.mode === "rotate-box") {
-      const cx = a.x + a.w / 2;
-      const cy = a.y + a.h / 2;
-      a.rotate = angleDeg({ x: cx, y: cy }, p);
-    } else if (d.mode === "move-text") {
-      a.x = p.x - d.dx;
-      a.y = p.y - d.dy;
-    } else if (d.mode === "move-mark") {
-      // translate both endpoints
-      const dx = p.x - d.pStart.x;
-      const dy = p.y - d.pStart.y;
-      a.x0 = d.x0 + dx;
-      a.y0 = d.y0 + dy;
-      a.x1 = d.x1 + dx;
-      a.y1 = d.y1 + dy;
-    } else if (d.mode === "move-leader") {
-      a.leader.x = p.x;
-      a.leader.y = p.y;
-    } else if (d.mode === "pen") {
-      a.pts = [...(a.pts || []), p];
-    } else if (d.mode === "arrow-end" && a.type === TOOL.ARROW) {
-      if (d.which === "end1") {
-        a.x1 = p.x;
-        a.y1 = p.y;
-      } else {
-        a.x2 = p.x;
-        a.y2 = p.y;
+    switch (g.mode) {
+      case "create-band": {
+        const c = clampPointToPage(p, bounds);
+        patch = { x1: c.x, y1: c.y };
+        break;
+      }
+      case "create-box":
+        patch = rectFromPoints(g.origin, p, bounds);
+        break;
+      case "create-path": {
+        g.raw.push(clampPointToPage(p, bounds));
+        patch = { pts: g.raw.slice() };
+        break;
+      }
+      case "segment-end":
+        patch = setSegmentEnd(a, g.which, p, bounds);
+        break;
+      case "move-segment":
+        patch = moveSegment(g.geom, p.x - g.start.x, p.y - g.start.y, bounds);
+        break;
+      case "move-box":
+        patch = moveRect(g.geom, p.x - g.start.x, p.y - g.start.y, bounds);
+        break;
+      case "resize-box":
+        patch = resizeRectCorner(g.geom, g.corner, p, bounds);
+        break;
+      case "move-point": {
+        const c = clampPointToPage(
+          { x: g.geom.x + (p.x - g.start.x), y: g.geom.y + (p.y - g.start.y) },
+          bounds
+        );
+        patch = { x: c.x, y: c.y };
+        break;
+      }
+      case "move-band": {
+        const moved = moveSegment(
+          { x1: g.geom.x0, y1: g.geom.y0, x2: g.geom.x1, y2: g.geom.y1 },
+          p.x - g.start.x,
+          p.y - g.start.y,
+          bounds
+        );
+        patch = { x0: moved.x1, y0: moved.y1, x1: moved.x2, y1: moved.y2 };
+        break;
+      }
+      case "move-leader": {
+        const c = clampPointToPage(p, bounds);
+        patch = { leader: { x: c.x, y: c.y } };
+        break;
+      }
+      case "rotate-box": {
+        const cx = a.x + a.w / 2;
+        const cy = a.y + a.h / 2;
+        patch = { rotate: angleDeg({ x: cx, y: cy }, p) };
+        break;
+      }
+      default:
+        break;
+    }
+
+    if (!patch) return;
+    if (g.mode !== "create-band") clearHoldTimer();
+    patchItem(g.id, patch, { persist: false });
+  }
+
+  function onGestureUp(e) {
+    const g = gesture.current;
+    if (!g) return;
+    if (g.pointerId != null && e && e.pointerId !== g.pointerId) return;
+
+    // Finish path annotations by sampling the captured pointer trail down to a
+    // bounded, simplified point list; too short a trail creates nothing.
+    if (g.mode === "create-path") {
+      const pts = simplifyPath(clampPathToPage(g.raw, bounds));
+      if (pts.length < 2) {
+        write(
+          itemsRef.current.filter((it) => it.id !== g.id),
+          { persist: false }
+        );
+        setActiveId(null);
+        detachGesture();
+        cancelGesture();
+        return;
+      }
+      patchItem(g.id, { pts }, { persist: false });
+    }
+
+    // A click with the Arrow/Line tool (no meaningful drag) still produces a
+    // usable annotation rather than an invisible zero-length one.
+    if (g.isNewSegment) {
+      const a = itemsRef.current.find((it) => it.id === g.id);
+      if (a && Math.hypot(a.x2 - a.x1, a.y2 - a.y1) < MIN_SHAPE_SIZE) {
+        const from = clampPointToPage({ x: g.origin.x - 30, y: g.origin.y - 10 }, bounds);
+        const to = clampPointToPage({ x: g.origin.x + 30, y: g.origin.y + 10 }, bounds);
+        patchItem(
+          g.id,
+          { x1: from.x, y1: from.y, x2: to.x, y2: to.y },
+          { persist: false }
+        );
       }
     }
 
-    next[idx] = a;
-    write(next);
-  }
-
-  function onGlobalUp() {
-    if (holdTimer.current) {
-      window.clearTimeout(holdTimer.current);
-      holdTimer.current = null;
-    }
-    const d = drag.current;
-    drag.current = null;
-    detachGlobalDrag();
-
     // A freshly drawn textbox/callout goes straight into editing, and the
     // tool returns to Select so typing/adjusting doesn't create another box.
-    if (d?.isNew && (d.kind === TOOL.TEXTBOX || d.kind === TOOL.CALLOUT)) {
-      const cur = itemsRef.current;
-      write(cur.map((it) => (it.id === d.id ? { ...it, editing: true } : it)));
+    if (g.isNew && (g.kind === TOOL.TEXTBOX || g.kind === TOOL.CALLOUT)) {
+      patchItem(g.id, { editing: true }, { persist: false });
       onToolConsumed?.();
     }
-    endBatch();
+
+    detachGesture();
+    commitGesture();
   }
+
+  function onGestureCancel(e) {
+    const g = gesture.current;
+    if (!g) return;
+    if (g.pointerId != null && e && e.pointerId !== g.pointerId) return;
+    detachGesture();
+    // pointercancel restores the state the gesture started from and records
+    // no history entry.
+    cancelGesture();
+    setActiveId(null);
+  }
+
+  // Keep the window listeners pointing at the current render's handlers, so a
+  // gesture never runs against a stale scale, item list or callback.
+  useEffect(() => {
+    handlersRef.current = { move: onGestureMove, up: onGestureUp, cancel: onGestureCancel };
+  });
 
   /* -------------------------- Move/resize handlers ------------------------- */
 
-  const startMove = (a, kind) => (e) => {
+  const startGesture = (a, state) => (e) => {
     if (!interactive) return;
+    if (e.button !== 0 && e.pointerType === "mouse") return;
     e.stopPropagation();
     e.preventDefault();
     setActiveId(a.id);
-    startBatch();
-    const p = getLocal(e);
-    if (kind === "box") drag.current = { mode: "move-box", id: a.id, dx: p.x - a.x, dy: p.y - a.y };
-    if (kind === "text") drag.current = { mode: "move-text", id: a.id, dx: p.x - a.x, dy: p.y - a.y };
-    if (kind === "mark") {
-      drag.current = {
-        mode: "move-mark",
-        id: a.id,
-        pStart: p,
-        x0: a.x0,
-        y0: a.y0,
-        x1: a.x1,
-        y1: a.y1,
-      };
-    }
-    attachGlobalDrag();
+    beginGesture();
+    gesture.current = capture(e, { ...state, id: a.id, start: getLocal(e) });
+    attachGesture();
   };
 
-  const startResizeSE = (a) => (e) => {
-    if (!interactive) return;
-    e.stopPropagation();
-    e.preventDefault();
-    setActiveId(a.id);
-    startBatch();
-    drag.current = { mode: "textbox-new", id: a.id, x0: a.x, y0: a.y };
-    attachGlobalDrag();
-  };
+  const startMoveBox = (a) =>
+    startGesture(a, { mode: "move-box", geom: { x: a.x, y: a.y, w: a.w, h: a.h } });
 
-  const startRotate = (a) => (e) => {
-    if (!interactive) return;
-    e.stopPropagation();
-    e.preventDefault();
-    setActiveId(a.id);
-    startBatch();
-    drag.current = { mode: "rotate-box", id: a.id };
-    attachGlobalDrag();
-  };
+  const startResizeBox = (a, corner) =>
+    startGesture(a, {
+      mode: "resize-box",
+      corner,
+      geom: { x: a.x, y: a.y, w: a.w, h: a.h },
+    });
 
-  const startArrowEnd = (a, which) => (e) => {
-    if (!interactive) return;
-    e.stopPropagation();
-    e.preventDefault();
-    setActiveId(a.id);
-    startBatch();
-    drag.current = { mode: "arrow-end", id: a.id, which };
-    attachGlobalDrag();
-  };
+  const startMovePoint = (a) =>
+    startGesture(a, { mode: "move-point", geom: { x: a.x, y: a.y } });
 
-  const startLeader = (a) => (e) => {
+  const startMoveBand = (a) =>
+    startGesture(a, {
+      mode: "move-band",
+      geom: { x0: a.x0, y0: a.y0, x1: a.x1, y1: a.y1 },
+    });
+
+  const startMoveSegment = (a) =>
+    startGesture(a, {
+      mode: "move-segment",
+      geom: { x1: a.x1, y1: a.y1, x2: a.x2, y2: a.y2 },
+    });
+
+  const startSegmentEnd = (a, which) => startGesture(a, { mode: "segment-end", which });
+
+  const startRotate = (a) => startGesture(a, { mode: "rotate-box" });
+
+  const startLeader = (a) => startGesture(a, { mode: "move-leader" });
+
+  const selectOnly = (a) => (e) => {
     if (!interactive) return;
     e.stopPropagation();
-    e.preventDefault();
     setActiveId(a.id);
-    startBatch();
-    drag.current = { mode: "move-leader", id: a.id };
-    attachGlobalDrag();
   };
 
   /* --------------------------------- Render -------------------------------- */
 
   const cursor = dragCreates ? "crosshair" : "default";
-  const w = page.baseW * (scale || 1);
-  const h = page.baseH * (scale || 1);
+  const w = page.baseW * s;
+  const h = page.baseH * s;
 
   // An item accepts pointer events when annotations are interactive (Select
   // mode) or while it is being edited (fresh textbox/typewriter/sticky).
   const itemPE = (a) =>
     interactive || a.editing || openStickyId === a.id ? "auto" : "none";
+
+  // Gesture surfaces opt out of browser touch panning so a finger drag edits
+  // the annotation instead of scrolling. The page itself stays scrollable.
+  const grab = { touchAction: "none" };
+
+  const pageItems = sortByZOrder(items.filter((a) => a.page === page.pageNo));
 
   return (
     <svg
@@ -842,13 +1039,11 @@ function PageOverlay({
         height: h,
         cursor,
         pointerEvents: svgPointerEvents,
+        touchAction: dragCreates ? "none" : "auto",
       }}
-      onMouseDown={onSvgDown}
+      onPointerDown={onSvgPointerDown}
     >
-      <defs id="arrow-defs" />
-      {items
-        .filter((a) => a.page === page.pageNo)
-        .map((a) => renderItem(a))}
+      {pageItems.map((a) => renderItem(a))}
     </svg>
   );
 
@@ -862,13 +1057,17 @@ function PageOverlay({
       case TOOL.STICKY:
         return renderSticky(a);
       case TOOL.ARROW:
-        return renderArrow(a);
+      case TOOL.LINE:
+        return renderSegment(a);
       case TOOL.POLYLINE:
         return renderPolyline(a);
       case TOOL.RECT:
         return renderRect(a);
+      case TOOL.ELLIPSE:
+        return renderEllipse(a);
       case TOOL.PEN:
-        return renderPen(a);
+      case TOOL.FREEHAND_HIGHLIGHT:
+        return renderPath(a);
       case TOOL.HIGHLIGHT:
       case TOOL.UNDERLINE:
       case TOOL.STRIKE:
@@ -880,21 +1079,82 @@ function PageOverlay({
     }
   }
 
+  /* --------------------------- shared selection UI ------------------------- */
+
+  function selectionOutline(rect) {
+    return (
+      <rect
+        x={rect.x - 2 * hairline}
+        y={rect.y - 2 * hairline}
+        width={rect.w + 4 * hairline}
+        height={rect.h + 4 * hairline}
+        fill="none"
+        stroke={SELECTION_BLUE}
+        strokeDasharray={`${4 * hairline} ${3 * hairline}`}
+        strokeWidth={hairline}
+        pointerEvents="none"
+      />
+    );
+  }
+
+  function cornerHandles(a) {
+    return RECT_CORNERS.map((corner) => {
+      const cx = corner === "nw" || corner === "sw" ? a.x : a.x + a.w;
+      const cy = corner === "nw" || corner === "ne" ? a.y : a.y + a.h;
+      return (
+        <rect
+          key={corner}
+          x={cx - handleSize / 2}
+          y={cy - handleSize / 2}
+          width={handleSize}
+          height={handleSize}
+          fill="#fff"
+          stroke={SELECTION_BLUE}
+          strokeWidth={hairline}
+          style={{ ...grab, cursor: corner === "nw" || corner === "se" ? "nwse-resize" : "nesw-resize" }}
+          onPointerDown={startResizeBox(a, corner)}
+        />
+      );
+    });
+  }
+
+  function endpointHandle(a, which, cx, cy) {
+    return (
+      <circle
+        key={which}
+        cx={cx}
+        cy={cy}
+        r={handleSize / 2}
+        fill="#fff"
+        stroke={SELECTION_BLUE}
+        strokeWidth={hairline}
+        style={{ ...grab, cursor: "move" }}
+        onPointerDown={startSegmentEnd(a, which)}
+      />
+    );
+  }
+
   // Quad-based text markup: one rect per selected line; anchored to text, so
   // selectable/deletable but not draggable.
   function renderQuadMarkup(a) {
     const isActive = activeId === a.id;
     const color = a.type === TOOL.HIGHLIGHT ? a.fill || "#FFF59D" : a.stroke || "#333333";
+    const box = {
+      x: Math.min(...a.quads.map((q) => q.x)),
+      y: Math.min(...a.quads.map((q) => q.y)),
+      w:
+        Math.max(...a.quads.map((q) => q.x + q.w)) -
+        Math.min(...a.quads.map((q) => q.x)),
+      h:
+        Math.max(...a.quads.map((q) => q.y + q.h)) -
+        Math.min(...a.quads.map((q) => q.y)),
+    };
     return (
       <g
         key={a.id}
         pointerEvents={itemPE(a)}
         style={{ cursor: interactive ? "pointer" : undefined }}
-        onMouseDown={(e) => {
-          if (!interactive) return;
-          e.stopPropagation();
-          setActiveId(a.id);
-        }}
+        onPointerDown={selectOnly(a)}
       >
         {a.quads.map((q, i) => {
           if (a.type === TOOL.HIGHLIGHT) {
@@ -911,19 +1171,7 @@ function PageOverlay({
           a.quads.map((q, i) => (
             <rect key={`hit-${i}`} x={q.x} y={q.y} width={q.w} height={q.h} fill="transparent" />
           ))}
-        {isActive && (
-          <rect
-            x={Math.min(...a.quads.map((q) => q.x)) - 2}
-            y={Math.min(...a.quads.map((q) => q.y)) - 2}
-            width={Math.max(...a.quads.map((q) => q.x + q.w)) - Math.min(...a.quads.map((q) => q.x)) + 4}
-            height={Math.max(...a.quads.map((q) => q.y + q.h)) - Math.min(...a.quads.map((q) => q.y)) + 4}
-            fill="none"
-            stroke="#3b82f6"
-            strokeDasharray="4 3"
-            strokeWidth={1}
-            pointerEvents="none"
-          />
-        )}
+        {isActive && selectionOutline(box)}
       </g>
     );
   }
@@ -943,7 +1191,8 @@ function PageOverlay({
             y2={a.y}
             stroke={a.stroke || "#333333"}
             strokeWidth={a.strokeWidth || 2}
-            onMouseDown={startLeader(a)}
+            style={grab}
+            onPointerDown={startLeader(a)}
           />
         )}
         <rect
@@ -956,9 +1205,8 @@ function PageOverlay({
           fill={a.fill ?? "transparent"}
           stroke={a.stroke || "#333333"}
           strokeWidth={a.strokeWidth || 2}
-          style={{ cursor: interactive ? "move" : undefined }}
-          onMouseDown={startMove(a, "box")}
-          onClick={() => interactive && setActiveId(a.id)}
+          style={{ ...grab, cursor: interactive ? "move" : undefined }}
+          onPointerDown={startMoveBox(a)}
         />
         <foreignObject
           x={a.x + 6}
@@ -998,15 +1246,11 @@ function PageOverlay({
             contentEditable
             suppressContentEditableWarning
             spellCheck={false}
-            onFocus={() => setActiveId(a.id)}
-            onInput={(e) => {
-              const cur = itemsRef.current;
-              write(
-                cur.map((it) =>
-                  it.id === a.id ? { ...it, text: e.currentTarget.textContent } : it
-                )
-              );
+            onFocus={() => {
+              setActiveId(a.id);
+              beginGesture();
             }}
+            onInput={(e) => patchItem(a.id, { text: e.currentTarget.textContent })}
             onKeyDown={(e) => {
               const mac = navigator.platform.toLowerCase().includes("mac");
               const ctrl = mac ? e.metaKey : e.ctrlKey;
@@ -1022,35 +1266,32 @@ function PageOverlay({
               finishEdit(a.id);
               cancelIfEmpty(a.id);
             }}
-            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
           />
         </foreignObject>
 
-        {!a.editing && interactive && (
+        {!a.editing && interactive && activeId === a.id && (
           <>
-            <rect
-              x={a.x + a.w - 6}
-              y={a.y + a.h - 6}
-              width={12}
-              height={12}
-              fill="#fff"
-              stroke="#333"
-              onMouseDown={startResizeSE(a)}
-            />
+            {selectionOutline({ x: a.x, y: a.y, w: a.w, h: a.h })}
+            {cornerHandles(a)}
             <circle
               cx={a.x + a.w / 2}
-              cy={a.y - 24}
-              r={6}
+              cy={a.y - 24 * hairline}
+              r={handleSize / 2}
               fill="#fff"
-              stroke="#333"
-              onMouseDown={startRotate(a)}
+              stroke={SELECTION_BLUE}
+              strokeWidth={hairline}
+              style={grab}
+              onPointerDown={startRotate(a)}
             />
             <line
               x1={a.x + a.w / 2}
-              y1={a.y - 24}
+              y1={a.y - 24 * hairline}
               x2={a.x + a.w / 2}
               y2={a.y}
-              stroke="#333"
+              stroke={SELECTION_BLUE}
+              strokeWidth={hairline}
+              pointerEvents="none"
             />
           </>
         )}
@@ -1059,10 +1300,8 @@ function PageOverlay({
   }
 
   function finishEdit(id) {
-    startBatch();
-    const cur = itemsRef.current;
-    write(cur.map((x) => (x.id === id ? { ...x, editing: false } : x)));
-    endBatch();
+    patchItem(id, { editing: false });
+    commitGesture();
     setActiveId(id);
   }
 
@@ -1071,12 +1310,10 @@ function PageOverlay({
     const it = cur.find((x) => x.id === id);
     if (!it) return;
     const content = (it.text ?? it.note ?? "").trim();
-    if (content === "") {
-      startBatch();
-      write(cur.filter((x) => x.id !== id));
-      endBatch();
-      setActiveId(null);
-    }
+    if (content !== "") return;
+    pushImmediate(cur);
+    write(cur.filter((x) => x.id !== id));
+    setActiveId(null);
   }
 
   function renderTypewriter(a) {
@@ -1085,8 +1322,8 @@ function PageOverlay({
         <foreignObject
           x={a.x}
           y={a.y - (a.fontSize || 14)}
-          width={Math.max(160, 260)}
-          height={Math.max(28, 40)}
+          width={260}
+          height={40}
         >
           <div
             dir="ltr"
@@ -1118,15 +1355,11 @@ function PageOverlay({
             contentEditable
             suppressContentEditableWarning
             spellCheck={false}
-            onFocus={() => setActiveId(a.id)}
-            onInput={(e) => {
-              const cur = itemsRef.current;
-              write(
-                cur.map((it) =>
-                  it.id === a.id ? { ...it, text: e.currentTarget.textContent } : it
-                )
-              );
+            onFocus={() => {
+              setActiveId(a.id);
+              beginGesture();
             }}
+            onInput={(e) => patchItem(a.id, { text: e.currentTarget.textContent })}
             onKeyDown={(e) => {
               const mac = navigator.platform.toLowerCase().includes("mac");
               const ctrl = mac ? e.metaKey : e.ctrlKey;
@@ -1142,7 +1375,7 @@ function PageOverlay({
               finishEdit(a.id);
               cancelIfEmpty(a.id);
             }}
-            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
           />
         </foreignObject>
 
@@ -1150,51 +1383,80 @@ function PageOverlay({
           <rect
             x={a.x - 4}
             y={a.y - (a.fontSize || 14) - 4}
-            width={Math.max(160, 260)}
-            height={Math.max(28, 40)}
+            width={260}
+            height={40}
             fill="transparent"
-            onMouseDown={startMove(a, "text")}
-            onClick={() => interactive && setActiveId(a.id)}
+            style={{ ...grab, cursor: interactive ? "move" : undefined }}
+            onPointerDown={startMovePoint(a)}
           />
         )}
+        {!a.editing && interactive && activeId === a.id &&
+          selectionOutline({
+            x: a.x - 4,
+            y: a.y - (a.fontSize || 14) - 4,
+            w: 260,
+            h: 40,
+          })}
       </g>
     );
   }
 
-  function renderArrow(a) {
+  // Arrow and line share one geometry: a two-point segment. The arrowhead is
+  // drawn from the same helper the export uses, so the two match.
+  function renderSegment(a) {
+    const stroke = a.stroke || "#333333";
+    const strokeWidth = a.strokeWidth || 2;
+    const isActive = activeId === a.id;
+    const p1 = { x: a.x1, y: a.y1 };
+    const p2 = { x: a.x2, y: a.y2 };
+    const head = a.type === TOOL.ARROW ? a.head || "single" : "none";
+    const headSize = arrowHeadSize(strokeWidth);
+
+    const barbs = (from, tip) =>
+      arrowHeadPoints(from, tip, headSize).map((b, i) => (
+        <line
+          key={`${tip.x},${tip.y},${i}`}
+          x1={tip.x}
+          y1={tip.y}
+          x2={b.x}
+          y2={b.y}
+          stroke={stroke}
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+          pointerEvents="none"
+        />
+      ));
+
     return (
-      <g key={a.id} pointerEvents={itemPE(a)} onMouseDown={(e) => interactive && e.stopPropagation()}>
+      <g key={a.id} pointerEvents={itemPE(a)}>
+        {/* generous invisible hit halo — a 2pt line is otherwise unclickable */}
         <line
           x1={a.x1}
           y1={a.y1}
           x2={a.x2}
           y2={a.y2}
-          stroke={a.stroke || "#333333"}
-          strokeWidth={a.strokeWidth || 2}
-          markerEnd={
-            a.head === "single" || a.head === "double" ? "url(#arrow-head)" : undefined
-          }
-          markerStart={a.head === "double" ? "url(#arrow-head)" : undefined}
-          onClick={() => interactive && setActiveId(a.id)}
+          stroke="transparent"
+          strokeWidth={Math.max(14 * hairline, strokeWidth + 10 * hairline)}
+          strokeLinecap="round"
+          style={{ ...grab, cursor: interactive ? "move" : undefined }}
+          onPointerDown={startMoveSegment(a)}
         />
-        {activeId === a.id && interactive && (
+        <line
+          x1={a.x1}
+          y1={a.y1}
+          x2={a.x2}
+          y2={a.y2}
+          stroke={stroke}
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+          pointerEvents="none"
+        />
+        {(head === "single" || head === "double") && barbs(p1, p2)}
+        {head === "double" && barbs(p2, p1)}
+        {isActive && interactive && (
           <>
-            <circle
-              cx={a.x1}
-              cy={a.y1}
-              r={6}
-              fill="#fff"
-              stroke="#333"
-              onMouseDown={startArrowEnd(a, "end1")}
-            />
-            <circle
-              cx={a.x2}
-              cy={a.y2}
-              r={6}
-              fill="#fff"
-              stroke="#333"
-              onMouseDown={startArrowEnd(a, "end2")}
-            />
+            {endpointHandle(a, "start", a.x1, a.y1)}
+            {endpointHandle(a, "end", a.x2, a.y2)}
           </>
         )}
       </g>
@@ -1204,19 +1466,30 @@ function PageOverlay({
   function renderPolyline(a) {
     const d = (a.pts || []).map((pt) => `${pt.x},${pt.y}`).join(" ");
     return (
-      <g key={a.id} pointerEvents={itemPE(a)} onMouseDown={(e) => interactive && e.stopPropagation()}>
+      <g key={a.id} pointerEvents={itemPE(a)}>
+        <polyline
+          points={d}
+          fill="none"
+          stroke="transparent"
+          strokeWidth={Math.max(14 * hairline, (a.strokeWidth || 2) + 10 * hairline)}
+          strokeLinecap="round"
+          style={grab}
+          onPointerDown={selectOnly(a)}
+        />
         <polyline
           points={d}
           fill="none"
           stroke={a.stroke || "#333333"}
           strokeWidth={a.strokeWidth || 2}
-          onClick={() => interactive && setActiveId(a.id)}
+          pointerEvents="none"
         />
+        {activeId === a.id && interactive && selectionOutline(pathBox(a))}
       </g>
     );
   }
 
   function renderRect(a) {
+    const isActive = activeId === a.id && interactive;
     return (
       <g key={a.id} pointerEvents={itemPE(a)}>
         <rect
@@ -1227,44 +1500,79 @@ function PageOverlay({
           fill={a.fill ?? "transparent"}
           stroke={a.stroke || "#333333"}
           strokeWidth={a.strokeWidth || 2}
-          style={{ cursor: interactive ? "move" : undefined }}
-          onMouseDown={startMove(a, "box")}
-          onClick={() => interactive && setActiveId(a.id)}
+          style={{ ...grab, cursor: interactive ? "move" : undefined }}
+          onPointerDown={startMoveBox(a)}
         />
-        {activeId === a.id && interactive && (
-          <rect
-            x={a.x + a.w - 6}
-            y={a.y + a.h - 6}
-            width={12}
-            height={12}
-            fill="#fff"
-            stroke="#333"
-            onMouseDown={startResizeSE(a)}
-          />
-        )}
+        {isActive && selectionOutline({ x: a.x, y: a.y, w: a.w, h: a.h })}
+        {isActive && cornerHandles(a)}
       </g>
     );
   }
 
-  function renderPen(a) {
-    const d = (a.pts || []).map((pt) => `${pt.x},${pt.y}`).join(" ");
+  function renderEllipse(a) {
+    const isActive = activeId === a.id && interactive;
     return (
-      <polyline
-        key={a.id}
-        points={d}
-        fill="none"
-        stroke={a.stroke || "#1976D2"}
-        strokeWidth={a.strokeWidth || 3}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        pointerEvents={itemPE(a)}
-        style={{ cursor: interactive ? "pointer" : undefined }}
-        onMouseDown={(e) => {
-          if (!interactive) return;
-          e.stopPropagation();
-          setActiveId(a.id);
-        }}
-      />
+      <g key={a.id} pointerEvents={itemPE(a)}>
+        <ellipse
+          cx={a.x + a.w / 2}
+          cy={a.y + a.h / 2}
+          rx={a.w / 2}
+          ry={a.h / 2}
+          fill={a.fill ?? "transparent"}
+          stroke={a.stroke || "#333333"}
+          strokeWidth={a.strokeWidth || 2}
+          style={{ ...grab, cursor: interactive ? "move" : undefined }}
+          onPointerDown={startMoveBox(a)}
+        />
+        {isActive && selectionOutline({ x: a.x, y: a.y, w: a.w, h: a.h })}
+        {isActive && cornerHandles(a)}
+      </g>
+    );
+  }
+
+  function pathBox(a) {
+    const pts = a.pts || [];
+    if (!pts.length) return { x: 0, y: 0, w: 0, h: 0 };
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    const pad = (a.strokeWidth || 2) / 2;
+    return {
+      x: Math.min(...xs) - pad,
+      y: Math.min(...ys) - pad,
+      w: Math.max(...xs) - Math.min(...xs) + pad * 2,
+      h: Math.max(...ys) - Math.min(...ys) + pad * 2,
+    };
+  }
+
+  // Freehand pen and freehand highlight: same sampled path, different paint.
+  function renderPath(a) {
+    const d = (a.pts || []).map((pt) => `${pt.x},${pt.y}`).join(" ");
+    const strokeWidth = a.strokeWidth || (a.type === TOOL.FREEHAND_HIGHLIGHT ? 16 : 3);
+    const isHighlight = a.type === TOOL.FREEHAND_HIGHLIGHT;
+    return (
+      <g key={a.id} pointerEvents={itemPE(a)}>
+        <polyline
+          points={d}
+          fill="none"
+          stroke="transparent"
+          strokeWidth={Math.max(strokeWidth, 14 * hairline)}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ ...grab, cursor: interactive ? "pointer" : undefined }}
+          onPointerDown={selectOnly(a)}
+        />
+        <polyline
+          points={d}
+          fill="none"
+          stroke={a.stroke || (isHighlight ? "#FFF59D" : "#1976D2")}
+          strokeOpacity={isHighlight ? a.opacity ?? 0.35 : 1}
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          pointerEvents="none"
+        />
+        {activeId === a.id && interactive && selectionOutline(pathBox(a))}
+      </g>
     );
   }
 
@@ -1273,8 +1581,8 @@ function PageOverlay({
   function renderMark(a) {
     const p0 = { x: a.x0, y: a.y0 };
     const p1 = { x: a.x1, y: a.y1 };
-    const w = Math.max(1, dist(p0, p1));
-    const h =
+    const bw = Math.max(1, dist(p0, p1));
+    const bh =
       a.type === TOOL.HIGHLIGHT
         ? Math.max(1, a.thickness ?? 22)
         : Math.max(1, a.thickness ?? a.strokeWidth ?? 3);
@@ -1282,67 +1590,55 @@ function PageOverlay({
     const cy = (a.y0 + a.y1) / 2;
     const ang = a.angleSnap != null ? a.angleSnap : angleDeg(p0, p1);
 
-    const x = cx - w / 2;
+    const x = cx - bw / 2;
     // Strike-through crosses exactly where the user dragged (through the
     // middle of the text). Underline instead hangs just below the dragged
     // line, so the two read as distinct marks rather than identical bars
     // that only differ by color.
-    const y =
-      a.type === TOOL.UNDERLINE ? cy - h / 2 + h : cy - h / 2;
+    const y = a.type === TOOL.UNDERLINE ? cy - bh / 2 + bh : cy - bh / 2;
 
-    const commonProps = {
-      transform: `rotate(${ang} ${cx} ${cy})`,
-      pointerEvents: itemPE(a),
-      onMouseDown: startMove(a, "mark"),
-      onClick: () => interactive && setActiveId(a.id),
-    };
+    const isActive = activeId === a.id && interactive;
 
-    if (a.type === TOOL.HIGHLIGHT) {
-      return (
+    return (
+      <g key={a.id} pointerEvents={itemPE(a)} transform={`rotate(${ang} ${cx} ${cy})`}>
         <rect
-          key={a.id}
           x={x}
           y={y}
-          width={w}
-          height={h}
-          fill={a.fill || "#FFF59D"}
-          fillOpacity={a.opacity ?? 0.35}
-          {...commonProps}
+          width={bw}
+          height={bh}
+          fill={a.type === TOOL.HIGHLIGHT ? a.fill || "#FFF59D" : a.stroke || "#333333"}
+          fillOpacity={a.type === TOOL.HIGHLIGHT ? a.opacity ?? 0.35 : 1}
+          style={{ ...grab, cursor: interactive ? "move" : undefined }}
+          onPointerDown={startMoveBand(a)}
         />
-      );
-    }
-    // UNDERLINE / STRIKE → thin filled rect
-    return (
-      <rect
-        key={a.id}
-        x={x}
-        y={y}
-        width={w}
-        height={h}
-        fill={a.stroke || "#333333"}
-        {...commonProps}
-      />
+        {isActive && selectionOutline({ x, y, w: bw, h: bh })}
+      </g>
     );
   }
 
   function renderSticky(a) {
-    const isOpen = openStickyId === a.id || a.open;
+    const isOpen = openStickyId === a.id;
+    const size = 18;
+    const isActive = activeId === a.id && interactive;
     return (
-      <g key={a.id} pointerEvents={itemPE(a)} onMouseDown={(e) => interactive && e.stopPropagation()}>
+      <g key={a.id} pointerEvents={itemPE(a)}>
         <rect
           x={a.x}
           y={a.y}
-          width={18}
-          height={18}
+          width={size}
+          height={size}
           fill={a.color || "#FFE082"}
           stroke="#333"
-          onMouseDown={startMove(a, "mark")}
+          strokeWidth={hairline}
+          style={{ ...grab, cursor: interactive ? "move" : undefined }}
+          onPointerDown={startMovePoint(a)}
           onClick={() => {
             if (!interactive) return;
             setActiveId(a.id);
             setOpenStickyId(a.id);
           }}
         />
+        {isActive && selectionOutline({ x: a.x, y: a.y, w: size, h: size })}
         {isOpen && (
           <foreignObject x={a.x + 22} y={a.y - 6} width={240} height={160}>
             <div
@@ -1356,25 +1652,16 @@ function PageOverlay({
                 color: "#111",
                 pointerEvents: "auto",
               }}
-              onMouseDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
             >
               <div className="text-xs mb-1">Sticky note</div>
               <textarea
                 dir="ltr"
+                aria-label="Sticky note text"
                 value={a.note || ""}
-                onChange={(e) => {
-                  const cur = itemsRef.current;
-                  write(
-                    cur.map((it) =>
-                      it.id === a.id ? { ...it, note: e.target.value } : it
-                    )
-                  );
-                }}
-                onBlur={() => {
-                  startBatch();
-                  write(itemsRef.current.slice());
-                  endBatch();
-                }}
+                onFocus={() => beginGesture()}
+                onChange={(e) => patchItem(a.id, { note: e.target.value })}
+                onBlur={() => commitGesture()}
                 style={{
                   width: "100%",
                   height: 92,
@@ -1387,23 +1674,23 @@ function PageOverlay({
               />
               <div className="mt-2 flex justify-between">
                 <button
+                  type="button"
                   className="text-xs px-2 py-1 border rounded"
                   onClick={(e) => {
                     e.stopPropagation();
                     setOpenStickyId(null);
-                    const cur = itemsRef.current;
-                    write(cur.map((it) => (it.id === a.id ? { ...it, open: false } : it)));
                   }}
                 >
                   Close
                 </button>
                 <button
+                  type="button"
                   className="text-xs px-2 py-1 border rounded"
                   onClick={(e) => {
                     e.stopPropagation();
-                    startBatch();
-                    write(itemsRef.current.filter((it) => it.id !== a.id));
-                    endBatch();
+                    const before = itemsRef.current;
+                    pushImmediate(before);
+                    write(before.filter((it) => it.id !== a.id));
                     setActiveId(null);
                     setOpenStickyId(null);
                   }}
@@ -1435,13 +1722,17 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
     tool === TOOL.TEXTBOX || tool === TOOL.TYPEWRITER || tool === TOOL.CALLOUT;
   const isStroke =
     tool === TOOL.ARROW ||
+    tool === TOOL.LINE ||
     tool === TOOL.POLYLINE ||
     tool === TOOL.CALLOUT ||
     tool === TOOL.TEXTBOX ||
     tool === TOOL.UNDERLINE ||
     tool === TOOL.STRIKE ||
     tool === TOOL.RECT ||
-    tool === TOOL.PEN;
+    tool === TOOL.ELLIPSE ||
+    tool === TOOL.PEN ||
+    tool === TOOL.FREEHAND_HIGHLIGHT;
+  const hasFill = tool === TOOL.RECT || tool === TOOL.ELLIPSE;
 
   const colorChoices = [
     "#111111",
@@ -1470,15 +1761,16 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
     <div
       className="absolute z-30 px-3 py-2 bg-white dark:bg-[#1b1b1b] border rounded shadow text-xs"
       style={{ left: 8, top: 8, minWidth: 300, pointerEvents: "auto" }}
-      onMouseDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
     >
       <div className="flex items-center justify-between mb-2">
         <div className="font-medium opacity-80">Tool Options — {tool}</div>
         <div className="flex gap-2">
-          <button className="px-2 py-0.5 border rounded" onClick={onCancel}>
+          <button type="button" className="px-2 py-0.5 border rounded" onClick={onCancel}>
             Cancel
           </button>
           <button
+            type="button"
             className="px-2 py-0.5 border rounded bg-blue-50 dark:bg-blue-900/30"
             onClick={onClose}
           >
@@ -1493,6 +1785,7 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
         <div className="flex flex-wrap gap-1">
           {colorChoices.map((c) => (
             <button
+              type="button"
               key={c}
               className="w-6 h-6 rounded"
               style={{
@@ -1503,6 +1796,7 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
                   selectedColor === c ? "0 0 0 2px rgba(59,130,246,0.25)" : "none",
               }}
               title={c}
+              aria-label={`Color ${c}`}
               onClick={() => {
                 if (tool === TOOL.HIGHLIGHT) setStyleState({ ...styleState, color: c });
                 else if (isText) setStyleState({ ...styleState, textColor: c });
@@ -1513,7 +1807,7 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
         </div>
       </div>
 
-      {tool === TOOL.HIGHLIGHT && (
+      {(tool === TOOL.HIGHLIGHT || tool === TOOL.FREEHAND_HIGHLIGHT) && (
         <>
           <label className="block mb-1">
             Opacity: {(styleState.opacity ?? 0.35).toFixed(2)}
@@ -1529,6 +1823,11 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
             }
             className="w-full mb-2"
           />
+        </>
+      )}
+
+      {tool === TOOL.HIGHLIGHT && (
+        <>
           <label className="block mb-1">
             Thickness: {Math.round(styleState.thickness ?? 22)} px
           </label>
@@ -1554,7 +1853,7 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
           <input
             type="range"
             min="1"
-            max="12"
+            max={tool === TOOL.FREEHAND_HIGHLIGHT ? "40" : "12"}
             step="1"
             value={styleState.strokeWidth ?? 2}
             onChange={(e) =>
@@ -1597,7 +1896,7 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
         </div>
       )}
 
-      {tool === TOOL.RECT && (
+      {hasFill && (
         <label className="block mt-2">
           <div className="mb-1">Fill</div>
           <input
@@ -1614,6 +1913,7 @@ function ToolOptionsPanel({ tool, styleState, setStyleState, onClose, onCancel }
           <div className="mb-1">Head</div>
           <select
             className="px-2 py-1 border rounded bg-white dark:bg-[#111]"
+            aria-label="Arrowhead style"
             value={styleState.head || "single"}
             onChange={(e) =>
               setStyleState({ ...styleState, head: e.target.value })

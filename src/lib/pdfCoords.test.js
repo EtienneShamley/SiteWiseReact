@@ -41,6 +41,104 @@ describe("clientRectToPageRect", () => {
   });
 });
 
+describe("zoom, viewport offset and device pixel ratio", () => {
+  const ZOOMS = [0.4, 0.75, 1, 1.1, 1.25, 1.5, 2, 3, 4];
+
+  test("a stored annotation lands on the same screen position at every zoom", () => {
+    const stored = { x: 137.25, y: 402.5 }; // page space, the canonical form
+    for (const scale of ZOOMS) {
+      const onScreen = pointToScreen(stored, scale);
+      expect(pointToPage(onScreen, scale).x).toBeCloseTo(stored.x, 10);
+      expect(pointToPage(onScreen, scale).y).toBeCloseTo(stored.y, 10);
+      // The ratio is exactly the zoom factor — no other term enters.
+      expect(onScreen.x / stored.x).toBeCloseTo(scale, 10);
+    }
+  });
+
+  test("the same page point drawn at any zoom yields identical stored geometry", () => {
+    const target = { x: 250, y: 175 };
+    const stored = ZOOMS.map((scale) =>
+      pointToPage({ x: target.x * scale, y: target.y * scale }, scale)
+    );
+    for (const s of stored) {
+      expect(s.x).toBeCloseTo(target.x, 10);
+      expect(s.y).toBeCloseTo(target.y, 10);
+    }
+  });
+
+  test("a scrolled or offset viewport does not change stored coordinates", () => {
+    // The page container has moved on screen (scroll, resize, narrower window),
+    // but the pointer is over the same spot on the page.
+    const scale = 1.5;
+    const pageX = 90;
+    const pageY = 140;
+    for (const container of [
+      { left: 0, top: 0 },
+      { left: 233, top: -845 },
+      { left: -12.5, top: 4000 },
+    ]) {
+      const clientRect = {
+        left: container.left + pageX * scale,
+        top: container.top + pageY * scale,
+        width: 40 * scale,
+        height: 12 * scale,
+      };
+      const out = clientRectToPageRect(clientRect, container, scale);
+      expect(out.x).toBeCloseTo(pageX, 10);
+      expect(out.y).toBeCloseTo(pageY, 10);
+      expect(out.w).toBeCloseTo(40, 10);
+      expect(out.h).toBeCloseTo(12, 10);
+    }
+  });
+
+  test("device pixel ratio never enters the conversion", () => {
+    // Pointer events and getBoundingClientRect are both in CSS pixels, so a
+    // retina display must not shift placement. Same CSS input, same result.
+    const scale = 1.25;
+    const cssPoint = { x: 300, y: 220 };
+    const onRetina = pointToPage(cssPoint, scale);
+    const onStandard = pointToPage(cssPoint, scale);
+    expect(onRetina).toEqual(onStandard);
+    // Backing-store pixels (CSS x DPR) are NOT what the conversion consumes.
+    for (const dpr of [1, 2, 3]) {
+      const backingStore = { x: cssPoint.x * dpr, y: cssPoint.y * dpr };
+      if (dpr === 1) continue;
+      expect(pointToPage(backingStore, scale).x).not.toBeCloseTo(onStandard.x, 5);
+    }
+  });
+
+  test("export geometry is derived from page space alone, so zoom cannot reach it", () => {
+    const conv = makePageToPdf([1, 0, 0, -1, 0, 792]);
+    const stored = { x: 120, y: 200 };
+    const exported = conv.toPdf(stored.x, stored.y);
+    for (const scale of ZOOMS) {
+      // Whatever the editor was zoomed to, the round trip returns the same
+      // page-space point, and therefore the same PDF user-space point.
+      const roundTripped = pointToPage(pointToScreen(stored, scale), scale);
+      const again = conv.toPdf(roundTripped.x, roundTripped.y);
+      expect(again.x).toBeCloseTo(exported.x, 8);
+      expect(again.y).toBeCloseTo(exported.y, 8);
+    }
+  });
+
+  test("page -> PDF -> page round-trips within tolerance on a rotated page", () => {
+    const transform = [0, 1, 1, 0, 0, 0]; // 90-degree rotated page
+    const conv = makePageToPdf(transform);
+    for (const p of [{ x: 0, y: 0 }, { x: 100, y: 250 }, { x: 611.5, y: 791.25 }]) {
+      const user = conv.toPdf(p.x, p.y);
+      const back = applyTransform(transform, user.x, user.y);
+      expect(back.x).toBeCloseTo(p.x, 8);
+      expect(back.y).toBeCloseTo(p.y, 8);
+    }
+  });
+
+  test("a zero or missing scale degrades to 1 instead of dividing by zero", () => {
+    expect(toPage(50, 0)).toBe(50);
+    expect(toScreen(50, undefined)).toBe(50);
+    expect(pointToPage({ x: 10, y: 20 }, 0)).toEqual({ x: 10, y: 20 });
+  });
+});
+
 describe("affine transforms", () => {
   test("invertTransform inverts an arbitrary affine matrix", () => {
     const m = [0, 1, -1, 0, 595, 10]; // rotation + translation

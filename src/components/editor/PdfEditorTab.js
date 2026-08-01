@@ -12,8 +12,11 @@ import {
   FaComment,
   FaStickyNote,
   FaArrowRight,
+  FaSlash,
   FaRegSquare,
+  FaRegCircle,
   FaPencilAlt,
+  FaPaintBrush,
   FaUndo,
   FaRedo,
   FaTrashAlt,
@@ -33,6 +36,8 @@ import {
   renderPageToCanvas,
   renderPageTextLayer,
   flattenAnnotations,
+  EXPORT_STATE,
+  canStartExport,
 } from "../../lib/pdfUtils";
 import {
   savePdfBytes,
@@ -41,6 +46,10 @@ import {
   loadAnnotations,
 } from "../../lib/pdfStorage";
 import { extractPageIndex, findMatchesInDocument } from "../../lib/pdfSearch";
+import {
+  normalizeAnnotationList,
+  serializeAnnotations,
+} from "../../lib/pdfAnnotationModel";
 import { useAppState } from "../../context/AppStateContext";
 import "../../pdf/pdfLayers.css";
 
@@ -56,9 +65,12 @@ const TOOL = {
   CALLOUT: "callout",
   STICKY: "sticky",
   ARROW: "arrow",
+  LINE: "line",
   POLYLINE: "polyline",
   RECT: "rect",
+  ELLIPSE: "ellipse",
   PEN: "pen",
+  FREEHAND_HIGHLIGHT: "freehandHighlight",
   PAN: "pan",
 };
 
@@ -66,6 +78,10 @@ const MARKUP_TOOLS = [TOOL.HIGHLIGHT, TOOL.UNDERLINE, TOOL.STRIKE];
 const MIN_SCALE = 0.4;
 const MAX_SCALE = 4;
 const ZOOM_STEPS = [50, 75, 100, 125, 150, 175, 200, 300];
+
+// Object URLs for downloads are revoked on a conservative delay: revoking one
+// synchronously after the anchor click cancels the download in some browsers.
+const OBJECT_URL_TTL_MS = 60000;
 
 function ToolButton({ icon, label, active, onClick, disabled }) {
   return (
@@ -194,7 +210,8 @@ export default function PdfEditorTab({
   const [scale, setScale] = useState(1.1);
   const [zoomLabel, setZoomLabel] = useState(1.1);
   const [activeTool, setActiveTool] = useState(TOOL.SELECT);
-  const [busy, setBusy] = useState(false);
+  const [exportState, setExportState] = useState(EXPORT_STATE.IDLE);
+  const [exportMessage, setExportMessage] = useState("");
   const [panning, setPanning] = useState(false);
   const [storageError, setStorageError] = useState(null);
   const [initialAnnotations, setInitialAnnotations] = useState(null); // null = not loaded yet
@@ -216,6 +233,8 @@ export default function PdfEditorTab({
   const saveTimer = useRef(null);
   const zoomTimer = useRef(null);
   const consumedInitialFile = useRef(false);
+  const exportingRef = useRef(false);
+  const objectUrlsRef = useRef(new Map()); // url -> timeout id
 
   const reportStorageError = useCallback((prefix, err) => {
     console.error(prefix, err);
@@ -291,8 +310,11 @@ export default function PdfEditorTab({
           setRenderBytes(cached.slice(0));
         }
       }
-      setInitialAnnotations(Array.isArray(anns) ? anns : []);
-      latestItemsRef.current = Array.isArray(anns) ? anns : [];
+      // Stored records pass the whitelist before they can reach the renderer,
+      // so a malformed record is dropped rather than crashing the editor.
+      const validated = normalizeAnnotationList(anns);
+      setInitialAnnotations(validated);
+      latestItemsRef.current = validated;
     })();
     return () => {
       cancelled = true;
@@ -353,13 +375,16 @@ export default function PdfEditorTab({
 
   /* --------------------------- Annotation persistence ---------------------- */
 
+  // Everything written to storage passes the whitelist first, so transient
+  // editor state (editing flags, drag state, open bubbles) can never persist.
   const handleItemsChange = useCallback(
     (items) => {
-      latestItemsRef.current = items;
+      const record = serializeAnnotations(items);
+      latestItemsRef.current = record;
       if (!docId) return;
       window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
-        saveAnnotations(docId, items).catch((err) =>
+        saveAnnotations(docId, record).catch((err) =>
           reportStorageError("Could not save annotations to browser storage", err)
         );
       }, 600);
@@ -372,12 +397,25 @@ export default function PdfEditorTab({
     return () => {
       window.clearTimeout(saveTimer.current);
       if (docId && latestItemsRef.current) {
-        saveAnnotations(docId, latestItemsRef.current).catch((err) =>
+        saveAnnotations(docId, serializeAnnotations(latestItemsRef.current)).catch((err) =>
           console.error("Final annotation save failed", err)
         );
       }
     };
   }, [docId]);
+
+  // Object URLs are session-only and never persisted; any still outstanding
+  // when the editor closes is revoked immediately.
+  useEffect(() => {
+    const urls = objectUrlsRef.current;
+    return () => {
+      for (const [url, timer] of urls) {
+        window.clearTimeout(timer);
+        URL.revokeObjectURL(url);
+      }
+      urls.clear();
+    };
+  }, []);
 
   /* --------------------------------- Zoom ---------------------------------- */
 
@@ -543,40 +581,73 @@ export default function PdfEditorTab({
 
   /* -------------------------------- Export --------------------------------- */
 
-  const onExport = async () => {
-    if (!sourceBytes || !annotatorRef.current) return;
+  // Hand a generated Blob to the browser as a download. The object URL is
+  // revoked on a delay — Safari and Firefox abort the download when it is
+  // revoked synchronously after the click — and tracked so it is always
+  // released, at the latest when the editor unmounts.
+  const downloadBlob = useCallback((blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    const timer = window.setTimeout(() => {
+      URL.revokeObjectURL(url);
+      objectUrlsRef.current.delete(url);
+    }, OBJECT_URL_TTL_MS);
+    objectUrlsRef.current.set(url, timer);
+  }, []);
+
+  const onExport = useCallback(async () => {
+    // One export at a time: the ref refuses a duplicate press even before the
+    // disabled state has re-rendered.
+    if (exportingRef.current) return;
+    if (!canStartExport(exportState, { hasDocument: !!sourceBytes })) return;
+    if (!annotatorRef.current) return;
+    exportingRef.current = true;
+    setExportState(EXPORT_STATE.EXPORTING);
+    setExportMessage("Preparing the annotated PDF…");
     try {
-      setBusy(true);
-      const items = annotatorRef.current.getItems() || [];
+      // Export reads the same validated geometry the editor renders. Selection
+      // and editor state are untouched, and the canonical source bytes are
+      // only ever read.
+      const items = normalizeAnnotationList(annotatorRef.current.getItems());
       const byPage = {};
-      for (const it of items) {
-        if (!it || !it.page) continue;
-        (byPage[it.page] ||= []).push(it);
-      }
+      for (const it of items) (byPage[it.page] ||= []).push(it);
       const pageMetas = {};
       for (const meta of layout) pageMetas[meta.pageNo] = { transform: meta.transform };
+
       const blob = await flattenAnnotations(sourceBytes, byPage, pageMetas);
+      if (!blob || blob.size === 0) {
+        throw new Error("the generated file was empty");
+      }
+      // Only a complete, non-empty document is ever presented as a download.
       onExportFlattened?.(blob);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `notewise_annotated_${new Date().toISOString().replace(/[:.]/g, "-")}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      downloadBlob(
+        blob,
+        `notewise_annotated_${new Date().toISOString().replace(/[:.]/g, "-")}.pdf`
+      );
+      setExportState(EXPORT_STATE.SUCCESS);
+      setExportMessage("Annotated PDF exported.");
     } catch (err) {
       console.error("PDF export failed", err);
-      alert(`Export failed: ${err?.message || err}`);
+      setExportState(EXPORT_STATE.FAILURE);
+      setExportMessage(
+        `Export failed: ${err?.message || err}. Nothing was downloaded and your annotations are unchanged.`
+      );
     } finally {
-      setBusy(false);
+      exportingRef.current = false;
     }
-  };
+  }, [sourceBytes, exportState, layout, onExportFlattened, downloadBlob]);
 
   /* --------------------------------- Render -------------------------------- */
 
   const idle = "bg-white dark:bg-[#1b1b1b] border-gray-300 dark:border-gray-600";
   const blue = "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700";
+  const exporting = exportState === EXPORT_STATE.EXPORTING;
 
   const zoomPct = Math.round(zoomLabel * 100);
   const zoomOptions = ZOOM_STEPS.includes(zoomPct)
@@ -623,8 +694,16 @@ export default function PdfEditorTab({
         <ToolbarDivider />
 
         <ToolButton icon={<FaArrowRight />} label="Arrow" active={activeTool === TOOL.ARROW} onClick={() => setActiveTool(TOOL.ARROW)} />
+        <ToolButton icon={<FaSlash />} label="Line" active={activeTool === TOOL.LINE} onClick={() => setActiveTool(TOOL.LINE)} />
         <ToolButton icon={<FaRegSquare />} label="Rectangle" active={activeTool === TOOL.RECT} onClick={() => setActiveTool(TOOL.RECT)} />
+        <ToolButton icon={<FaRegCircle />} label="Ellipse" active={activeTool === TOOL.ELLIPSE} onClick={() => setActiveTool(TOOL.ELLIPSE)} />
         <ToolButton icon={<FaPencilAlt />} label="Freehand Pen" active={activeTool === TOOL.PEN} onClick={() => setActiveTool(TOOL.PEN)} />
+        <ToolButton
+          icon={<FaPaintBrush />}
+          label="Freehand Highlight"
+          active={activeTool === TOOL.FREEHAND_HIGHLIGHT}
+          onClick={() => setActiveTool(TOOL.FREEHAND_HIGHLIGHT)}
+        />
 
         <ToolbarDivider />
 
@@ -658,15 +737,45 @@ export default function PdfEditorTab({
         <ToolButton icon={<FaExpand />} label="Fit page" disabled={!pdfDoc} onClick={fitPage} />
 
         <button
+          type="button"
           onClick={onExport}
-          disabled={!pdfDoc || busy}
+          disabled={!pdfDoc || exporting}
           title="Export flattened PDF"
-          className={`ml-2 flex items-center gap-2 px-3 py-1.5 rounded text-sm border shrink-0 ${(!pdfDoc || busy) ? idle : blue}`}
+          aria-label="Export flattened PDF"
+          className={`ml-2 flex items-center gap-2 px-3 py-1.5 rounded text-sm border shrink-0 ${(!pdfDoc || exporting) ? idle : blue}`}
         >
           <FaFileExport />
-          {busy ? "Exporting…" : "Export"}
+          {exporting ? "Exporting…" : "Export"}
         </button>
       </div>
+
+      {/* Export status — announced, and never presented as a silent failure */}
+      <div aria-live="polite" className="sr-only">
+        {exportMessage}
+      </div>
+      {exportState !== EXPORT_STATE.IDLE && exportMessage && (
+        <div
+          className={`flex items-center justify-between gap-2 px-3 py-1.5 text-sm border-b ${
+            exportState === EXPORT_STATE.FAILURE
+              ? "bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800"
+              : "bg-gray-50 dark:bg-[#1d1d1d] text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700"
+          }`}
+        >
+          <span>{exportMessage}</span>
+          {exportState !== EXPORT_STATE.EXPORTING && (
+            <button
+              type="button"
+              className="text-xs underline shrink-0"
+              onClick={() => {
+                setExportState(EXPORT_STATE.IDLE);
+                setExportMessage("");
+              }}
+            >
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Find bar */}
       {findOpen && (
