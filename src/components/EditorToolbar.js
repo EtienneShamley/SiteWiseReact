@@ -4,15 +4,28 @@ import ExportMenu from "./editor/ExportMenu";
 import TemplateBuilderModal from "./template/TemplateBuilderModal";
 
 /**
- * @param editor    the Free-form note's TipTap editor
- * @param disabled  true when the Free-form editor is not the visible surface
- *                  (no note open, or the Template form showing). Forwarded to
- *                  the formatting controls so they are genuinely disabled
- *                  rather than silently acting on a hidden editor. Template
- *                  Library and Export are NOT gated by it — they are note-level
- *                  actions that remain valid in either view.
+ * @param editor        the editor this toolbar currently OWNS — the Free-form
+ *                      note's editor, or the active Template Text-row editor.
+ *                      MainArea resolves the owner; this component never
+ *                      guesses it from focus.
+ * @param disabled      true when nothing owns the toolbar (no note open, or the
+ *                      Template form showing with no active Text answer).
+ *                      Forwarded to the formatting controls so they are
+ *                      genuinely disabled rather than silently acting on a
+ *                      hidden editor. Template Library and Export are NOT gated
+ *                      by it — they are note-level actions valid in either view.
+ * @param controls      the permitted control set (null = all). A Template Text
+ *                      answer supports a restrained subset; see
+ *                      TEMPLATE_TEXT_CONTROLS in src/lib/editorToolbarState.js.
+ * @param disabledHint  why the controls are disabled, when there is something
+ *                      useful to say.
  */
-export default function EditorToolbar({ editor, disabled = false }) {
+export default function EditorToolbar({
+  editor,
+  disabled = false,
+  controls = null,
+  disabledHint = null,
+}) {
   const [showTemplateBuilder, setShowTemplateBuilder] = useState(false);
 
   if (!editor) return null;
@@ -20,7 +33,12 @@ export default function EditorToolbar({ editor, disabled = false }) {
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-2 bg-gray-100 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2">
-        <FormattingControls editor={editor} disabled={disabled} />
+        <FormattingControls
+          editor={editor}
+          disabled={disabled}
+          controls={controls}
+          disabledHint={disabledHint}
+        />
         <div className="flex items-center gap-2">
           <ExportMenu editor={editor} />
           {/* The top-level reusable-template workspace. This is where company

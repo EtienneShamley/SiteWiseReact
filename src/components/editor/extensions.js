@@ -74,11 +74,17 @@ export const TextAlign = Extension.create({
     return {
       setTextAlign:
         (alignment) =>
-        ({ commands }) => {
+        ({ commands, state }) => {
           if (!ALIGNMENTS.includes(alignment)) return false;
-          return ALIGNABLE_TYPES.map((type) =>
-            commands.updateAttributes(type, { textAlign: alignment })
-          ).every((ok) => ok);
+          // Only types this editor's schema actually has. The Template Text
+          // editor has paragraphs but no headings, and updateAttributes throws
+          // for a node type that does not exist. Behaviour in the Free-form
+          // editor, where both types exist, is unchanged.
+          const types = ALIGNABLE_TYPES.filter((type) => !!state.schema.nodes[type]);
+          if (types.length === 0) return false;
+          return types
+            .map((type) => commands.updateAttributes(type, { textAlign: alignment }))
+            .every((ok) => ok);
         },
     };
   },

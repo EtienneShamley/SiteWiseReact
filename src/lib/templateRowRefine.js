@@ -32,6 +32,12 @@ import {
 import { REFINE_STATUS } from "./refineLifecycle";
 import { FIELD_TYPE, normalizeType } from "./templateFields";
 import { updateCustomRow } from "./noteCustomRows";
+import {
+  answersEqual,
+  isAnswerValue,
+  normalizeAnswerValue,
+  richAnswerText,
+} from "./templateRichText";
 
 // The row lifecycle uses the SAME status vocabulary as note-level Refine —
 // re-exported rather than redefined so the two can never drift apart.
@@ -103,8 +109,10 @@ export function isRefinableRow(row) {
 }
 
 // Whitespace is not content: an all-space field must not spend a request.
+// A Text answer may be a plain string or a tagged rich value, so emptiness is
+// judged on the value's PLAIN-TEXT projection — never on its markup.
 export function hasRefinableText(value) {
-  return typeof value === "string" && value.trim().length > 0;
+  return richAnswerText(value).trim().length > 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -114,9 +122,13 @@ export function hasRefinableText(value) {
 /**
  * Everything a response needs to prove it still belongs where it was sent from.
  *
- * `sentText` is the RAW answer at click time (not the trimmed copy the
- * transport sends), because it is compared byte-for-byte against the row's
- * current answer before the result is applied — see canApplyRowRefineResponse.
+ * Two values are captured, and they do different jobs:
+ *   - `sentValue` is the row's COMPLETE answer representation at click time (a
+ *     plain string or a tagged rich value). It is what the apply gate compares
+ *     against, so a formatting-only edit made while the model was working
+ *     counts as an edit and protects the user's work.
+ *   - `sentText` is the plain-text projection of that value. It is what the
+ *     provider receives: meaningful prose, never raw markup.
  *
  * Returns null for anything unusable, so a malformed request can never be
  * started at all: no note, no row, an off-allowlist style (the frontend may
@@ -130,13 +142,14 @@ export function makeRowRefineRequest({
   rowId,
   isCustomRow = false,
   style,
-  sentText,
+  sentValue,
 } = {}) {
   if (!requestId || typeof requestId !== "number") return null;
   if (!noteId || typeof noteId !== "string") return null;
   if (!rowId || typeof rowId !== "string") return null;
   if (!isAllowedRefineStyle(style)) return null;
-  if (!hasRefinableText(sentText)) return null;
+  if (!isAnswerValue(sentValue)) return null;
+  if (!hasRefinableText(sentValue)) return null;
 
   return {
     requestId,
@@ -146,7 +159,8 @@ export function makeRowRefineRequest({
     rowId,
     isCustomRow: !!isCustomRow,
     style,
-    sentText,
+    sentValue: normalizeAnswerValue(sentValue),
+    sentText: richAnswerText(sentValue),
   };
 }
 
@@ -155,7 +169,8 @@ export function makeRowRefineRequest({
 /* ------------------------------------------------------------------------ */
 
 /**
- * The current answer for a row, through the correct storage path.
+ * The current answer for a row, through the correct storage path, canonicalized
+ * (a plain string stays a string; a stored rich value is re-validated).
  *
  * Master rows: the instance `answers` map, keyed by the stable field id.
  * Custom rows: the answer lives ON the row object inside `customRows` and is
@@ -171,14 +186,13 @@ export function readRowAnswer(instance, rowId, isCustomRow) {
     const rows = Array.isArray(instance.customRows) ? instance.customRows : [];
     const row = rows.find((r) => r && r.id === rowId);
     if (!row) return null;
-    return typeof row.answer === "string" ? row.answer : "";
+    return normalizeAnswerValue(row.answer);
   }
 
   const answers = instance.answers && typeof instance.answers === "object"
     ? instance.answers
     : {};
-  const value = answers[rowId];
-  return typeof value === "string" ? value : "";
+  return normalizeAnswerValue(answers[rowId]);
 }
 
 /**
@@ -194,19 +208,21 @@ export function readRowAnswer(instance, rowId, isCustomRow) {
  * Attachments and every other row are passed through by reference. Returns null
  * when there is nothing valid to write.
  */
-export function applyRowAnswerToInstance(instance, { rowId, isCustomRow }, text) {
-  if (!instance || !rowId || typeof text !== "string") return null;
+export function applyRowAnswerToInstance(instance, { rowId, isCustomRow }, value) {
+  // A plain string (AI output, ordinary typing) or a tagged rich value (Revert
+  // restoring a formatted answer). Nothing else may be written into an answer.
+  if (!instance || !rowId || !isAnswerValue(value)) return null;
 
   if (isCustomRow) {
     const rows = Array.isArray(instance.customRows) ? instance.customRows : [];
     if (!rows.some((r) => r && r.id === rowId)) return null;
-    return { ...instance, customRows: updateCustomRow(rows, rowId, { answer: text }) };
+    return { ...instance, customRows: updateCustomRow(rows, rowId, { answer: value }) };
   }
 
   const answers = instance.answers && typeof instance.answers === "object"
     ? instance.answers
     : {};
-  return { ...instance, answers: { ...answers, [rowId]: text } };
+  return { ...instance, answers: { ...answers, [rowId]: value } };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -240,9 +256,12 @@ export const ROW_REFINE_REJECTION = {
  *                     row set — and the target row's type — is still exactly
  *                     what the request was built against.
  *   row-missing       a custom row was deleted while the request was in flight
- *   answer-changed    the user kept typing. Their newer text is what they mean;
- *                     the model was working from text that no longer exists, so
- *                     applying it would silently destroy a manual edit.
+ *   answer-changed    the user kept editing. Their newer answer is what they
+ *                     mean; the model was working from content that no longer
+ *                     exists, so applying it would silently destroy that edit.
+ *                     The comparison is on the COMPLETE canonical answer
+ *                     representation, so applying bold while a request is in
+ *                     flight counts as an edit just as typing does.
  */
 export function canApplyRowRefineResponse(request, instance) {
   if (!request) return { ok: false, reason: ROW_REFINE_REJECTION.MISSING_INSTANCE };
@@ -261,10 +280,11 @@ export function canApplyRowRefineResponse(request, instance) {
   if (current === null) {
     return { ok: false, reason: ROW_REFINE_REJECTION.ROW_MISSING };
   }
-  if (current !== request.sentText) {
+  if (!answersEqual(current, request.sentValue)) {
     return { ok: false, reason: ROW_REFINE_REJECTION.ANSWER_CHANGED };
   }
 
+  // The COMPLETE prior representation, so Revert restores formatting exactly.
   return { ok: true, previousAnswer: current };
 }
 
@@ -378,7 +398,9 @@ export function clearRowRefineStatus(map, rowId) {
 
 export function setRowRefineBackup(backups, noteId, rowId, previousAnswer) {
   const base = backups || {};
-  if (!noteId || !rowId || typeof previousAnswer !== "string") return base;
+  // The COMPLETE previous value — a plain string or a tagged rich value — so
+  // Revert restores the answer's formatting, not just its words.
+  if (!noteId || !rowId || !isAnswerValue(previousAnswer)) return base;
   return { ...base, [noteId]: { ...(base[noteId] || {}), [rowId]: previousAnswer } };
 }
 
@@ -392,7 +414,7 @@ export function getRowRefineBackup(backups, noteId, rowId) {
   const forNote = backups[noteId];
   if (!forNote || typeof forNote !== "object") return null;
   const value = forNote[rowId];
-  return typeof value === "string" ? value : null;
+  return isAnswerValue(value) ? value : null;
 }
 
 export function hasRowRefineBackup(backups, noteId, rowId) {

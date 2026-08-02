@@ -54,9 +54,13 @@ import {
   settleRefine,
 } from "../lib/refineLifecycle";
 import {
+  TEMPLATE_TEXT_CONTROLS,
+  TEMPLATE_TOOLBAR_HINT,
+  TOOLBAR_OWNER,
   canRefine as canRefineNow,
   canRevertRefine,
   isFreeformEditingEnabled,
+  resolveToolbarOwner,
 } from "../lib/editorToolbarState";
 import {
   clearRowRefineBackup,
@@ -179,6 +183,13 @@ export default function MainArea() {
   // Template integration
   const templateInsertRef = useRef(null); // (rowId, text) => void
   const [activeTemplateRowId, setActiveTemplateRowId] = useState(null);
+  // The single active Template Text-row editor, registered by NoteTemplateDoc.
+  // It is what the shared formatting toolbar targets while the Template form is
+  // showing — never the hidden Free-form editor.
+  const [templateRowEditor, setTemplateRowEditor] = useState(null);
+  const handleRegisterTemplateRowEditor = useCallback((rowEditor) => {
+    setTemplateRowEditor(rowEditor || null);
+  }, []);
 
   // Free-form notes whose change is waiting for the write below: noteId -> the
   // sequence number stamped on that change. Every Free-form edit is routed
@@ -270,6 +281,14 @@ export default function MainArea() {
     setActiveTemplateRowId(null);
     setActiveTab("note");
   }, [noteKey]);
+
+  // Leaving the Template form drops the selected row as well: a row id kept
+  // across a view change could otherwise receive a BottomBar insertion meant
+  // for somewhere else. The Template row editor gives up toolbar ownership
+  // through its own unmount (see NoteTemplateDoc's `viewActive`).
+  useEffect(() => {
+    if (noteLayout !== "template") setActiveTemplateRowId(null);
+  }, [noteLayout]);
 
   const editor = useEditor(
     {
@@ -498,6 +517,31 @@ export default function MainArea() {
     hasEditor: !!editor,
     noteLayout,
   });
+
+  /**
+   * Which editor the one shared formatting toolbar acts on.
+   *
+   * Derived explicitly rather than inferred from focus, so clicking a toolbar
+   * button — which blurs whatever had focus — cannot change the target. In the
+   * Template form the target is the active Text row's editor and nothing else;
+   * with no active Text answer nobody owns the toolbar and every control is
+   * genuinely disabled, because the Free-form editor behind this view is merely
+   * hidden and must never be dispatched into.
+   */
+  const toolbarOwner = resolveToolbarOwner({
+    hasNote: !!noteTitle,
+    noteLayout,
+    hasFreeformEditor: !!editor,
+    hasTemplateRowEditor: !!templateRowEditor,
+  });
+  const templateFormVisible = noteLayout === "template";
+  const toolbarEditor =
+    toolbarOwner === TOOLBAR_OWNER.TEMPLATE_ROW ? templateRowEditor : editor;
+  const toolbarControls = templateFormVisible ? TEMPLATE_TEXT_CONTROLS : null;
+  const toolbarHint =
+    templateFormVisible && toolbarOwner === TOOLBAR_OWNER.NONE
+      ? TEMPLATE_TOOLBAR_HINT
+      : null;
 
   // The status shown to the user: this note, this view, and nothing else.
   const activeSaveStatus = getSaveStatus(saveStatusByNote, noteKey, activeView);
@@ -776,11 +820,18 @@ export default function MainArea() {
       )}
 
       {/* Top toolbar (Note tab only — the PDF tab has its own toolbar).
-          The formatting controls are disabled whenever the Free-form editor is
-          not the visible surface, so they cannot act on the hidden editor
-          while the Template form is showing. */}
+          ONE toolbar with one explicit owner: the Free-form editor in the
+          Free-form view, the active Template Text-row editor in the Template
+          form, and nobody at all when neither is available — in which case
+          every control is genuinely disabled rather than acting on the hidden
+          Free-form document. */}
       {activeTab === "note" && (
-        <EditorToolbar editor={editor} disabled={!freeformEditingEnabled} />
+        <EditorToolbar
+          editor={toolbarEditor}
+          disabled={toolbarOwner === TOOLBAR_OWNER.NONE}
+          controls={toolbarControls}
+          disabledHint={toolbarHint}
+        />
       )}
 
       {/* Control bar */}
@@ -982,6 +1033,8 @@ export default function MainArea() {
                   <NoteTemplateDoc
                     noteId={noteKey}
                     key={noteKey}
+                    viewActive={noteLayout === "template"}
+                    onRegisterRowEditor={handleRegisterTemplateRowEditor}
                     onRegisterTemplateInsert={(fn) => {
                       templateInsertRef.current = fn;
                     }}

@@ -58,6 +58,10 @@ import {
   saveNoteTemplateInstanceOrThrow,
 } from "./templateModel";
 import { FIELD_TYPE } from "./templateFields";
+import {
+  RICH_TEXT_FORMAT,
+  answerToModel,
+} from "./templateRichText";
 
 const NOTE_A = "note-a";
 const NOTE_B = "note-b";
@@ -111,7 +115,7 @@ function request(overrides = {}) {
     rowId: MASTER_ROW,
     isCustomRow: false,
     style: PRESET,
-    sentText: "heavy rain overnight",
+    sentValue: "heavy rain overnight",
     ...overrides,
   });
 }
@@ -170,8 +174,8 @@ describe("empty content makes no request", () => {
   });
 
   test("no request can even be BUILT for an empty answer", () => {
-    expect(request({ sentText: "" })).toBeNull();
-    expect(request({ sentText: "   " })).toBeNull();
+    expect(request({ sentValue: "" })).toBeNull();
+    expect(request({ sentValue: "   " })).toBeNull();
   });
 
   test("there is a specific message for it, and it is not an error message", () => {
@@ -192,12 +196,15 @@ describe("request identity", () => {
       rowId: MASTER_ROW,
       isCustomRow: false,
       style: PRESET,
+      // The complete answer representation the gate compares against, and the
+      // plain-text projection the provider receives.
+      sentValue: "heavy rain overnight",
       sentText: "heavy rain overnight",
     });
   });
 
   test("a custom-row request records that it is a custom row", () => {
-    const req = request({ rowId: CUSTOM_ROW, isCustomRow: true, sentText: "x" });
+    const req = request({ rowId: CUSTOM_ROW, isCustomRow: true, sentValue: "x" });
     expect(req.isCustomRow).toBe(true);
     expect(req.rowId).toBe(CUSTOM_ROW);
   });
@@ -205,7 +212,7 @@ describe("request identity", () => {
   test("sentText is the RAW answer, not a trimmed copy", () => {
     // The gate compares it byte-for-byte with the stored answer, so trimming
     // here would make a legitimately trailing-newline field never applicable.
-    expect(request({ sentText: "  padded  " }).sentText).toBe("  padded  ");
+    expect(request({ sentValue: "  padded  " }).sentText).toBe("  padded  ");
   });
 
   test("no note, no row or no request id means no request", () => {
@@ -329,7 +336,7 @@ describe("apply gate", () => {
     const req = request({
       rowId: CUSTOM_ROW,
       isCustomRow: true,
-      sentText: "loose gravel on the ramp",
+      sentValue: "loose gravel on the ramp",
     });
     const deleted = instanceFixture({ customRows: [] });
     expect(canApplyRowRefineResponse(req, deleted).reason).toBe(
@@ -350,7 +357,7 @@ describe("apply gate", () => {
     const req = request({
       rowId: CUSTOM_ROW,
       isCustomRow: true,
-      sentText: "loose gravel on the ramp",
+      sentValue: "loose gravel on the ramp",
     });
     const edited = instanceFixture({
       customRows: [customRow({ answer: "loose gravel on the ramp — now barriered" })],
@@ -728,8 +735,8 @@ async function runRowRefine({
   mutateBefore, // simulates the world changing while the request is in flight
 }) {
   const stored = getNoteTemplateInstance(noteId);
-  const sentText = readRowAnswer(stored, rowId, isCustomRow);
-  if (!hasRefinableText(sentText)) {
+  const sentValue = readRowAnswer(stored, rowId, isCustomRow);
+  if (!hasRefinableText(sentValue)) {
     return { requested: false, reason: "empty", backups };
   }
 
@@ -741,7 +748,7 @@ async function runRowRefine({
     rowId,
     isCustomRow,
     style,
-    sentText,
+    sentValue,
   });
   if (!req) return { requested: false, reason: "invalid-request", backups };
 
@@ -1131,5 +1138,141 @@ describe("end to end (mocked provider, real localStorage)", () => {
     );
     expect(raw).not.toContain("<p>");
     expect(raw).not.toContain("<br");
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* Rich-text answers                                                         */
+/* ------------------------------------------------------------------------ */
+//
+// A Text answer may be a plain string or a tagged rich value. Row AI must work
+// with both without ever sending markup to the provider, and without ever
+// letting provider output become markup.
+
+describe("AI compatibility with formatted answers", () => {
+  const richValue = {
+    format: RICH_TEXT_FORMAT,
+    html: "<p><strong>Heavy</strong> rain</p><ul><li><p>bund failed</p></li></ul>",
+  };
+
+  test("a formatted answer is sent to the provider as MEANINGFUL PLAIN TEXT", () => {
+    const req = request({ sentValue: richValue });
+    expect(req.sentText).toBe("Heavy rain\n- bund failed");
+    expect(req.sentText).not.toMatch(/[<>]/);
+  });
+
+  test("the request still carries the complete representation for the gate", () => {
+    const req = request({ sentValue: richValue });
+    expect(req.sentValue).toEqual(richValue);
+  });
+
+  test("a formatted answer that is only whitespace still makes no request", () => {
+    expect(request({ sentValue: { format: RICH_TEXT_FORMAT, html: "<p> </p>" } })).toBeNull();
+  });
+
+  test("a malformed value cannot start a request at all", () => {
+    expect(request({ sentValue: { format: "richtext/9", html: "<p>x</p>" } })).toBeNull();
+    expect(request({ sentValue: 42 })).toBeNull();
+    expect(request({ sentValue: null })).toBeNull();
+  });
+
+  test("a FORMATTING-ONLY edit during the request blocks the response", () => {
+    // The words are identical; only the markup changed. Comparing plain text
+    // would silently destroy the user's formatting — comparing the complete
+    // representation protects it, exactly as a typed edit is protected.
+    const req = request({ sentValue: "heavy rain overnight" });
+    const formatted = instanceFixture({
+      answers: {
+        [MASTER_ROW]: {
+          format: RICH_TEXT_FORMAT,
+          html: "<p><strong>heavy rain overnight</strong></p>",
+        },
+        [OTHER_ROW]: "untouched neighbour",
+      },
+    });
+    expect(canApplyRowRefineResponse(req, formatted).reason).toBe(
+      ROW_REFINE_REJECTION.ANSWER_CHANGED
+    );
+  });
+
+  test("an unchanged formatted answer still applies, and reports its full value", () => {
+    const req = request({ sentValue: richValue });
+    const stored = instanceFixture({
+      answers: { [MASTER_ROW]: richValue, [OTHER_ROW]: "untouched neighbour" },
+    });
+    const check = canApplyRowRefineResponse(req, stored);
+    expect(check.ok).toBe(true);
+    expect(check.previousAnswer).toEqual(richValue);
+  });
+
+  test("readRowAnswer canonicalizes a stored rich answer instead of blanking it", () => {
+    const stored = instanceFixture({
+      answers: { [MASTER_ROW]: richValue, [OTHER_ROW]: "x" },
+    });
+    expect(readRowAnswer(stored, MASTER_ROW, false)).toEqual(richValue);
+  });
+
+  test("provider output is written as PLAIN TEXT — never interpreted as markup", () => {
+    const stored = instanceFixture();
+    const next = applyRowAnswerToInstance(
+      stored,
+      { rowId: MASTER_ROW, isCustomRow: false },
+      "<b>Heavy rain</b> was recorded overnight."
+    );
+    // Stored as a string, so it renders as those literal characters.
+    expect(typeof next.answers[MASTER_ROW]).toBe("string");
+    expect(next.answers[MASTER_ROW]).toBe("<b>Heavy rain</b> was recorded overnight.");
+    expect(answerToModel(next.answers[MASTER_ROW])[0].content[0].text).toBe(
+      "<b>Heavy rain</b> was recorded overnight."
+    );
+  });
+
+  test("Revert restores the COMPLETE previous representation, formatting included", () => {
+    let backups = setRowRefineBackup({}, NOTE_A, MASTER_ROW, richValue);
+    expect(getRowRefineBackup(backups, NOTE_A, MASTER_ROW)).toEqual(richValue);
+
+    const refined = instanceFixture({
+      answers: { [MASTER_ROW]: "Heavy rain fell overnight.", [OTHER_ROW]: "x" },
+    });
+    const reverted = applyRowAnswerToInstance(
+      refined,
+      { rowId: MASTER_ROW, isCustomRow: false },
+      getRowRefineBackup(backups, NOTE_A, MASTER_ROW)
+    );
+    expect(reverted.answers[MASTER_ROW]).toEqual(richValue);
+
+    backups = clearRowRefineBackup(backups, NOTE_A, MASTER_ROW);
+    expect(getRowRefineBackup(backups, NOTE_A, MASTER_ROW)).toBeNull();
+  });
+
+  test("a rich value round-trips through a CUSTOM row untouched", () => {
+    const stored = instanceFixture();
+    const next = applyRowAnswerToInstance(
+      stored,
+      { rowId: CUSTOM_ROW, isCustomRow: true },
+      richValue
+    );
+    const row = next.customRows.find((r) => r.id === CUSTOM_ROW);
+    expect(row.answer).toEqual(richValue);
+    // Identity, label, placement and height are carried through, as before.
+    expect(row.label).toBe("Extra observations");
+    expect(row.placement).toEqual({ anchorFieldId: MASTER_ROW, position: "below" });
+    expect(row.preferredHeight).toBe(140);
+    expect(readRowAnswer(next, CUSTOM_ROW, true)).toEqual(richValue);
+  });
+
+  test("a value that is neither a string nor a tagged rich value is refused", () => {
+    const stored = instanceFixture();
+    for (const bad of [42, true, null, { html: "<p>x</p>" }, ["x"]]) {
+      expect(
+        applyRowAnswerToInstance(stored, { rowId: MASTER_ROW, isCustomRow: false }, bad)
+      ).toBeNull();
+    }
+  });
+
+  test("a backup is only ever a real answer value", () => {
+    expect(setRowRefineBackup({}, NOTE_A, MASTER_ROW, 42)).toEqual({});
+    expect(setRowRefineBackup({}, NOTE_A, MASTER_ROW, null)).toEqual({});
+    expect(setRowRefineBackup({}, NOTE_A, MASTER_ROW, { html: "x" })).toEqual({});
   });
 });

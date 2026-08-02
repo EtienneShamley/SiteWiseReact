@@ -42,6 +42,20 @@ import {
 } from "../../lib/noteAttachments";
 import { newId } from "../../lib/id";
 import { normalizeBranding } from "../../lib/templateBranding";
+import {
+  answersEqual,
+  appendTextToAnswer,
+  serializeAnswerFromHtml,
+  textInsertionNodes,
+} from "../../lib/templateRichText";
+import {
+  TEMPLATE_FOCUS,
+  applyRowEditorRegistration,
+  canCommitRowEdit,
+  nextActiveTextRow,
+  resolveActiveRowIdentity,
+  templateRowEditorIdentity,
+} from "../../lib/editorToolbarState";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import { useRefine } from "../../hooks/useRefine";
 import { REFINE_OUTCOME } from "../../lib/refineContract";
@@ -127,6 +141,14 @@ export default function NoteTemplateDoc({
   noteId,
   onRegisterTemplateInsert, // (fn | null) => void
   onSelectRow, // (rowId) => void
+  // True while the Template form is the view the user is actually looking at.
+  // Leaving the view clears the active Text row, so no editor is left owning
+  // the shared toolbar behind a view nobody can see.
+  viewActive = true,
+  // The active Template Text-row editor, handed up so the shared formatting
+  // toolbar can target it. Registered by INSTANCE: a recreated editor replaces
+  // its predecessor, and unmounting clears ownership.
+  onRegisterRowEditor, // (editor | null) => void
   // Autosave status reporting. The note id is always passed explicitly (it
   // comes from the instance being written), so a write that completes after the
   // user has moved on settles the note it belongs to and never the note now on
@@ -192,6 +214,19 @@ export default function NoteTemplateDoc({
   // Per-row AI Refine lifecycle: { [rowId]: { status, message, requestId } }.
   // Row-scoped, so a request on one row neither blocks nor reports on another.
   const [rowRefineStatus, setRowRefineStatus] = useState(createRowRefineState);
+
+  // The ONE Text answer currently being edited with rich text, and the token
+  // that forces its editor to be rebuilt after a PROGRAMMATIC content change
+  // (an AI refinement or a Revert landing in the row being edited). Rebuilding
+  // is how that replacement reaches the editor without emitting a false update
+  // and without leaving a stale document on screen.
+  const [activeTextRowId, setActiveTextRowId] = useState(null);
+  const [rowEditorToken, setRowEditorToken] = useState(0);
+  const activeTextRowIdRef = useRef(null);
+  activeTextRowIdRef.current = activeTextRowId;
+  // The one registered editor, held as { identity, editor } so a cleanup
+  // belonging to a replaced editor cannot unregister its replacement.
+  const rowEditorRegistrationRef = useRef(null);
 
   // Refs kept current so the sequential async attachment handlers always
   // persist against the latest state (same pattern as PagedDocument.heightsRef).
@@ -447,6 +482,193 @@ export default function NoteTemplateDoc({
       [rowId]: value,
     }));
   }
+
+  /* ---------------------- contextual rich-text editing -------------------- */
+
+  // True for a row whose answer is the unified Text field. Note-specific custom
+  // rows are Text by definition; a master row must be Text in THIS note's
+  // pinned version. Anything else — number, date, time, checkbox, yes/no,
+  // dropdown, Photo, File — stays an ordinary structured control.
+  const isTextAnswerRow = useCallback(
+    (rowId) => {
+      if (!rowId) return false;
+      if (customRowIds.has(rowId)) return true;
+      const row = (rowsRef.current || []).find((r) => r && r.id === rowId);
+      return !!row && isTextInsertable(row.type);
+    },
+    [customRowIds]
+  );
+
+  /**
+   * The COMPLETE identity of one row's editor, as the note is pinned RIGHT NOW.
+   *
+   * Note + assigned template + pinned immutable version + row + row kind. The
+   * row id alone would not do: the same field id exists in every version
+   * published from a template, and may exist in another template entirely, so a
+   * row id can address a different answer with a different history after the
+   * note is re-pinned. Returns null when the row is not part of what this note
+   * is currently pinned to.
+   */
+  const rowIdentityFor = useCallback(
+    (rowId) => {
+      if (!rowId) return null;
+      const isCustom = customRowIds.has(rowId);
+      const exists = isCustom || isTextAnswerRow(rowId);
+      return resolveActiveRowIdentity({
+        noteId,
+        templateId: instanceRef.current?.templateId ?? null,
+        templateVersionId: instanceRef.current?.templateVersionId ?? null,
+        rowId,
+        isCustomRow: isCustom,
+        rowExists: exists,
+      });
+    },
+    [noteId, customRowIds, isTextAnswerRow]
+  );
+
+  // Focusing a Text answer makes it the toolbar's owner; focusing anything else
+  // — a structured control, or a row's own label — clears ownership, so a
+  // formatting command can never reach the answer of a row the caret has left.
+  // Returns the identity that was activated (or null), so the caller's caret
+  // intent can be stamped with it.
+  const handleAnswerFocus = useCallback(
+    (rowId) => {
+      if (onSelectRow) onSelectRow(rowId);
+      const next = nextActiveTextRow({
+        target: TEMPLATE_FOCUS.ANSWER,
+        rowId,
+        isTextRow: isTextAnswerRow(rowId),
+      });
+      setActiveTextRowId(next);
+      return next ? rowIdentityFor(next) : null;
+    },
+    [onSelectRow, isTextAnswerRow, rowIdentityFor]
+  );
+
+  const handleStructuredFocus = useCallback(
+    (rowId) => {
+      if (onSelectRow) onSelectRow(rowId);
+      setActiveTextRowId(
+        nextActiveTextRow({ target: TEMPLATE_FOCUS.STRUCTURED, rowId, isTextRow: false })
+      );
+    },
+    [onSelectRow]
+  );
+
+  // A row label is plain text and is never a rich-text target. It deliberately
+  // does not change the BottomBar's selected row either — only which editor,
+  // if any, the toolbar owns.
+  const handleLabelFocus = useCallback(() => {
+    setActiveTextRowId(
+      nextActiveTextRow({ target: TEMPLATE_FOCUS.LABEL, rowId: null, isTextRow: false })
+    );
+  }, []);
+
+  /**
+   * The identity of the editor that should exist right now — recomputed from
+   * the LIVE instance on every render, so re-pinning this note to another
+   * template or another immutable version produces a different identity (or
+   * none) without anything having to notice the change explicitly.
+   *
+   * Null means there is no active editor: the row the user was editing does not
+   * exist under what the note is now pinned to, so the toolbar has no owner and
+   * says so.
+   */
+  const activeRowIdentity = useMemo(() => {
+    if (!activeTextRowId) return null;
+    const isCustom = customRowIds.has(activeTextRowId);
+    const exists =
+      isCustom ||
+      (() => {
+        const row = (rows || []).find((r) => r && r.id === activeTextRowId);
+        return !!row && isTextInsertable(row.type);
+      })();
+    return resolveActiveRowIdentity({
+      noteId,
+      templateId: instance?.templateId ?? null,
+      templateVersionId: instance?.templateVersionId ?? null,
+      rowId: activeTextRowId,
+      isCustomRow: isCustom,
+      rowExists: exists,
+    });
+  }, [
+    noteId,
+    activeTextRowId,
+    customRowIds,
+    rows,
+    instance?.templateId,
+    instance?.templateVersionId,
+  ]);
+
+  const activeRowIdentityRef = useRef(null);
+  activeRowIdentityRef.current = activeRowIdentity;
+
+  // The row the user was editing is not part of the newly assigned template or
+  // version: drop the selection so nothing — the toolbar, BottomBar insertion,
+  // or a later insertion — still addresses it.
+  useEffect(() => {
+    if (activeTextRowId && !activeRowIdentity) setActiveTextRowId(null);
+  }, [activeTextRowId, activeRowIdentity]);
+
+  // The editor's own change handler. It routes through the SAME confirmed write
+  // path the plain textarea used — master answers via `answers`, custom rows via
+  // their own row — so there is exactly one persistence route per edit and the
+  // autosave status is unchanged.
+  const handleRowEditorChange = useCallback(
+    (identity, rowId, html) => {
+      // A callback from an editor that has already been replaced may not write
+      // anywhere. The comparison is on the COMPLETE identity, so an update from
+      // an editor whose template or pinned version has since changed is refused
+      // even when the row id is unchanged.
+      if (!canCommitRowEdit(activeRowIdentityRef.current, identity)) return;
+
+      const next = serializeAnswerFromHtml(html);
+      const current = customRowIds.has(rowId)
+        ? (instanceRef.current?.customRows || []).find((r) => r && r.id === rowId)?.answer
+        : rowTextRef.current?.[rowId];
+
+      // Selecting text, or a command that changed nothing, must not produce a
+      // save. Only a real difference in the answer's meaning is written.
+      if (answersEqual(current, next)) return;
+
+      handleRightChange(rowId, next);
+    },
+    // handleRightChange is a stable route (master vs custom) recreated each
+    // render; the identity of this callback does not drive editor creation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [customRowIds]
+  );
+
+  // Registration is by identity: registering takes ownership, and unregistering
+  // only succeeds for the identity that currently holds it — so the cleanup of
+  // an editor that has just been replaced (a row switch, or a template/version
+  // change) can never remove the registration of its replacement, in whichever
+  // order the two callbacks arrive.
+  const handleRegisterRowEditor = useCallback(
+    (identity, editor) => {
+      const current = rowEditorRegistrationRef.current;
+      const next = applyRowEditorRegistration(current, { identity, editor });
+      if (next === current) return; // stale unregister: refused
+      rowEditorRegistrationRef.current = next;
+      if (onRegisterRowEditor) onRegisterRowEditor(next ? next.editor : null);
+    },
+    [onRegisterRowEditor]
+  );
+
+  // Leaving the Template form gives up rich-text ownership: the editor unmounts
+  // (which clears the registration) and no hidden row keeps the toolbar.
+  useEffect(() => {
+    if (!viewActive) setActiveTextRowId(null);
+  }, [viewActive]);
+
+  // Switching notes destroys this component; make sure the toolbar is not left
+  // holding an editor that no longer exists.
+  useEffect(() => {
+    return () => {
+      rowEditorRegistrationRef.current = null;
+      if (onRegisterRowEditor) onRegisterRowEditor(null);
+    };
+  }, [onRegisterRowEditor]);
 
   /* --------------------- attachment evidence handlers --------------------- */
 
@@ -782,42 +1004,86 @@ export default function NoteTemplateDoc({
   /* --------------------------- BottomBar insert --------------------------- */
 
   // Function for MainArea to push BottomBar text into a selected row.
+  //
   // Only the free-text destination accepts inserted text; structured fields
   // (number, date, time, checkbox, yes/no, dropdown, photo, file) reject it
-  // rather than being corrupted by arbitrary text.
-  const appendText = (existing, text) => {
-    const current = typeof existing === "string" ? existing : "";
-    if (current.trim().length === 0) return text;
-    return current.endsWith("\n") ? current + text : current + "\n" + text;
-  };
-
+  // rather than being corrupted by arbitrary text — now through the same
+  // restrained inline per-field message the rest of this view uses, rather than
+  // a blocking dialog.
+  //
+  // Targeting is verified before anything is written: the row must exist in
+  // THIS note's pinned version or in THIS note's custom rows. A row id left
+  // over from another note, template or version matches neither and is refused,
+  // so a stale selection can never create an orphan answer.
   const insertIntoRow = useCallback(
     (rowId, text) => {
       if (!rowId || !text) return;
 
-      // A note-specific custom row is always a Text destination; its answer is
-      // written through the confirmed save path, preserving line breaks.
-      if (customRowIds.has(rowId)) {
-        const target = templateCustomRows.find((r) => r.id === rowId);
-        handleCustomRowPatch(
+      const isCustom = customRowIds.has(rowId);
+      const masterRow = isCustom
+        ? null
+        : (rowsRef.current || []).find((r) => r && r.id === rowId);
+      if (!isCustom && !masterRow) return; // stale / unknown row: refused
+
+      if (!isCustom && !isTextInsertable(masterRow.type)) {
+        setFieldError(
           rowId,
-          { answer: appendText(target?.answer, text) },
-          "The inserted text could not be saved to this section"
+          "This field type doesn't accept inserted text. Select a Text field."
         );
         return;
       }
 
-      const row = rows.find((r) => r.id === rowId);
-      if (row && !isTextInsertable(row.type)) {
-        alert("This field type doesn't accept inserted text. Select a Text field.");
+      // The row being edited takes the text AT THE CURSOR, as literal text
+      // nodes — never parsed as HTML, so transcribed or pasted characters like
+      // "<" stay characters. Persistence follows through the editor's own
+      // change handler, so this adds no second write path.
+      //
+      // The registered editor must be the one for THIS row under the template
+      // and version the note is pinned to right now: an insertion aimed at a
+      // row of a template the note has since been re-pinned away from is not
+      // delivered to whatever editor happens to be open.
+      const registration = rowEditorRegistrationRef.current;
+      const targetIdentity = rowIdentityFor(rowId);
+      if (
+        registration &&
+        canCommitRowEdit(registration.identity, targetIdentity) &&
+        rowId === activeTextRowIdRef.current
+      ) {
+        const nodes = textInsertionNodes(text);
+        if (nodes.length) {
+          registration.editor.chain().focus().insertContent(nodes).run();
+        }
         return;
       }
-      setRowText((prev) => ({
-        ...prev,
-        [rowId]: appendText(prev[rowId], text),
-      }));
+
+      // Not currently being edited: append at the end, preserving the answer's
+      // representation, then make the row the active one so the next insertion
+      // and the toolbar both address it. Focus is deliberately NOT taken — the
+      // user is working in the BottomBar.
+      if (isCustom) {
+        const target = templateCustomRows.find((r) => r.id === rowId);
+        handleCustomRowPatch(
+          rowId,
+          { answer: appendTextToAnswer(target?.answer, text) },
+          "The inserted text could not be saved to this section"
+        );
+      } else {
+        const nextText = {
+          ...rowTextRef.current,
+          [rowId]: appendTextToAnswer(rowTextRef.current?.[rowId], text),
+        };
+        rowTextRef.current = nextText;
+        setRowText(nextText);
+      }
+      setActiveTextRowId(rowId);
     },
-    [rows, customRowIds, templateCustomRows, handleCustomRowPatch]
+    [
+      customRowIds,
+      templateCustomRows,
+      handleCustomRowPatch,
+      setFieldError,
+      rowIdentityFor,
+    ]
   );
 
   /* ------------------------ row-level AI refinement ----------------------- */
@@ -901,7 +1167,12 @@ export default function NoteTemplateDoc({
         rowId,
         isCustomRow,
         style,
-        sentText: answer,
+        // The COMPLETE answer representation. The provider receives its
+        // plain-text projection (built inside makeRowRefineRequest), never
+        // markup; the representation itself is what the apply gate compares, so
+        // a formatting-only edit made while the request is in flight counts as
+        // an edit and protects the user's work.
+        sentValue: answer,
       });
       if (!request) {
         // An unusable request (e.g. an off-allowlist style) is refused here
@@ -1008,6 +1279,25 @@ export default function NoteTemplateDoc({
         rowTextRef.current = next.answers;
         setInstance(next);
         setRowText(next.answers);
+        // If the editor open right now is the one this result was written for —
+        // same note, template, pinned version, row and row kind — its document
+        // is the pre-refinement one: rebuild it from the value just written.
+        // An editor for a different template or version is left alone.
+        const appliedIdentity = templateRowEditorIdentity({
+          noteId: request.noteId,
+          templateId: request.templateId,
+          templateVersionId: request.templateVersionId,
+          rowId,
+          isCustomRow,
+        });
+        if (
+          canCommitRowEdit(
+            rowEditorRegistrationRef.current?.identity,
+            appliedIdentity
+          )
+        ) {
+          setRowEditorToken((t) => t + 1);
+        }
       }
       settle(ROW_REFINE_STATUS.SUCCESS, ROW_REFINE_SUCCESS_MESSAGE);
     },
@@ -1057,6 +1347,17 @@ export default function NoteTemplateDoc({
       rowTextRef.current = next.answers;
       setInstance(next);
       setRowText(next.answers);
+      // Restoring the complete previous value — formatting included — must also
+      // reach the editor, but only when the editor open right now is genuinely
+      // this row under this template and version.
+      if (
+        canCommitRowEdit(
+          rowEditorRegistrationRef.current?.identity,
+          rowIdentityFor(rowId)
+        )
+      ) {
+        setRowEditorToken((t) => t + 1);
+      }
       if (onClearRowRefineBackup) onClearRowRefineBackup(current.noteId, rowId);
       showRowRefineMessage(
         rowId,
@@ -1071,6 +1372,7 @@ export default function NoteTemplateDoc({
       showRowRefineMessage,
       onClearRowRefineBackup,
       saveInstanceConfirmed,
+      rowIdentityFor,
     ]
   );
 
@@ -1182,8 +1484,22 @@ export default function NoteTemplateDoc({
         rowRefineStatus={rowRefineStatus}
         rowRefineRevertableIds={rowRefineRevertableIds}
         lockTemplateLabels={true}
-        onRightFocus={(rowId) => {
-          if (onSelectRow) onSelectRow(rowId);
+        // Structured controls (number/date/time/checkbox/yes-no/dropdown and
+        // the Photo/File upload controls) select the row for BottomBar
+        // insertion and CLEAR rich-text ownership.
+        onRightFocus={handleStructuredFocus}
+        onRowLabelFocus={handleLabelFocus}
+        // Contextual rich text for Text answers. One editor, on the active row.
+        richText={{
+          // The editor mounts only for a row with a resolved identity, so a row
+          // that no longer exists under the newly assigned template or version
+          // never gets one.
+          activeRowId: activeRowIdentity ? activeTextRowId : null,
+          activeIdentity: activeRowIdentity,
+          reloadToken: rowEditorToken,
+          onActivate: handleAnswerFocus,
+          onChange: handleRowEditorChange,
+          onRegisterEditor: handleRegisterRowEditor,
         }}
         logoLocked={true} // <- NOTE MODE: no upload, no resize handle, no "choose file"
         knownOptionIds={knownOptionIds}

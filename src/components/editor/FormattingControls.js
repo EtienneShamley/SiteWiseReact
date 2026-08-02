@@ -18,19 +18,34 @@ import {
 } from "../../lib/editorCommands";
 import { validateEditorImageFile } from "../../lib/editorImages";
 import { insertLocalImageAsset } from "../../lib/editorImageInsert";
+import { isToolbarControlAllowed } from "../../lib/editorToolbarState";
 import useTransientMessage from "../../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../../lib/transientMessage";
 
 /**
- * @param editor    the TipTap editor instance
- * @param disabled  true when the Free-form editor is NOT the surface the user
- *                  is looking at (no note open, or the Template form visible).
- *                  Every control below is genuinely disabled in that state —
- *                  the editor is only hidden with display:none, so an enabled
- *                  control would otherwise dispatch into a document nobody can
- *                  see and persist the result.
+ * @param editor    the editor this toolbar currently OWNS. In the Free-form
+ *                  view that is the note's editor; in the Template form it is
+ *                  the single active Text-row editor.
+ * @param disabled  true when nothing owns the toolbar (no note open, or the
+ *                  Template form visible with no active Text answer). Every
+ *                  control below is genuinely disabled in that state — the
+ *                  Free-form editor is only hidden with display:none, so an
+ *                  enabled control would otherwise dispatch into a document
+ *                  nobody can see and persist the result.
+ * @param controls  the permitted control set, or null for all of them. A
+ *                  Template Text answer is a form field, not a document: images,
+ *                  files, tables, headings and document-wide actions stay
+ *                  present but disabled there (TEMPLATE_TEXT_CONTROLS in
+ *                  src/lib/editorToolbarState.js), so the toolbar keeps one
+ *                  shape and one position in every view.
+ * @param disabledHint  a short explanation shown when nothing owns the toolbar.
  */
-export default function FormattingControls({ editor, disabled = false }) {
+export default function FormattingControls({
+  editor,
+  disabled = false,
+  controls = null,
+  disabledHint = null,
+}) {
   const fileInputRef = useRef();
   const tableMenuRef = useRef(null);
   const textColorRef = useRef(null);
@@ -135,21 +150,27 @@ export default function FormattingControls({ editor, disabled = false }) {
   // native `change` event fires once, when the user commits, so it is
   // subscribed directly here. The inputs are keyed on the editor's current
   // colour so the swatch still follows the selection.
+  // A control that is not permitted in the current view is as inert as a
+  // disabled one — including its native event listener.
+  const textColorOff = disabled || !isToolbarControlAllowed(controls, "textColor");
+  const highlightColorOff =
+    disabled || !isToolbarControlAllowed(controls, "highlightColor");
+
   useEffect(() => {
     const el = textColorRef.current;
-    if (!el || !editor || disabled) return;
+    if (!el || !editor || textColorOff) return;
     const onCommit = (e) => report(applyTextColor(editor, e.target.value));
     el.addEventListener("change", onCommit);
     return () => el.removeEventListener("change", onCommit);
-  }, [editor, disabled, report, s?.color]);
+  }, [editor, textColorOff, report, s?.color]);
 
   useEffect(() => {
     const el = highlightColorRef.current;
-    if (!el || !editor || disabled) return;
+    if (!el || !editor || highlightColorOff) return;
     const onCommit = (e) => report(applyHighlightColor(editor, e.target.value));
     el.addEventListener("change", onCommit);
     return () => el.removeEventListener("change", onCommit);
-  }, [editor, disabled, report, s?.highlightColor]);
+  }, [editor, highlightColorOff, report, s?.highlightColor]);
 
   // Font size: uses the official FontSize extension (bundled with
   // @tiptap/extension-text-style) so the value is a real registered
@@ -270,8 +291,29 @@ export default function FormattingControls({ editor, disabled = false }) {
     "w-full text-left px-3 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent transition-colors";
 
   // Every control shares the same "is this surface live" gate, so none of them
-  // can act while the Free-form editor is hidden or absent.
+  // can act while the editor they would target is hidden or absent — plus the
+  // per-view permitted set, so a control the current surface does not support
+  // is disabled rather than quietly doing something inappropriate to it.
   const off = disabled;
+  const offFor = (key) => off || !isToolbarControlAllowed(controls, key);
+
+  // A control that cannot act must not advertise a state either. The editor
+  // state snapshot belongs to whichever editor last owned the toolbar, so
+  // without this a control could still look "on" after ownership moved away
+  // from the row that made it so.
+  const pressed = (flag) => !off && !!flag;
+
+  // A toolbar press must not destroy the active editor's selection before the
+  // command runs. Preventing the default mousedown keeps focus (and therefore
+  // the selection, and therefore the row the command applies to) exactly where
+  // it was; every command then re-focuses through editor.chain().focus().
+  // Only buttons are guarded: <select> and <input type="color"> need their own
+  // native mousedown behaviour to open at all.
+  const preserveSelectionOnPress = (event) => {
+    if (event.target && event.target.closest && event.target.closest("button")) {
+      event.preventDefault();
+    }
+  };
 
   // Subtle vertical separator between toolbar groups.
   const Divider = () => (
@@ -298,11 +340,14 @@ export default function FormattingControls({ editor, disabled = false }) {
   ];
 
   return (
-    <div className="flex flex-wrap items-center gap-1">
-      {/* History — TipTap's own editing history (session-only) */}
+    <div className="flex flex-wrap items-center gap-1" onMouseDown={preserveSelectionOnPress}>
+      {/* History — the OWNING editor's own history (session-only). In the
+          Template form that is the active row's editor, so Undo/Redo can only
+          ever step through that row's edits, never another row's and never the
+          Free-form note's. */}
       <div className="flex items-center gap-1">
-        <button onClick={() => editor.chain().focus().undo().run()} disabled={off || !s.canUndo} className={`${btnBase} ${btnDisabled}`} title="Undo" aria-label="Undo"><FaUndo /></button>
-        <button onClick={() => editor.chain().focus().redo().run()} disabled={off || !s.canRedo} className={`${btnBase} ${btnDisabled}`} title="Redo" aria-label="Redo"><FaRedo /></button>
+        <button onClick={() => editor.chain().focus().undo().run()} disabled={offFor("undo") || !s.canUndo} className={`${btnBase} ${btnDisabled}`} title="Undo" aria-label="Undo"><FaUndo /></button>
+        <button onClick={() => editor.chain().focus().redo().run()} disabled={offFor("redo") || !s.canRedo} className={`${btnBase} ${btnDisabled}`} title="Redo" aria-label="Redo"><FaRedo /></button>
       </div>
 
       <Divider />
@@ -312,7 +357,7 @@ export default function FormattingControls({ editor, disabled = false }) {
         <select
           onChange={(e) => setFontFamily(e.target.value)}
           value={s.fontFamily}
-          disabled={off}
+          disabled={offFor("fontFamily")}
           className={selectCls}
           title="Font Family"
           aria-label="Font family"
@@ -326,7 +371,7 @@ export default function FormattingControls({ editor, disabled = false }) {
         <select
           onChange={(e) => setFontSize(e.target.value)}
           value={s.fontSize}
-          disabled={off}
+          disabled={offFor("fontSize")}
           className={selectCls}
           title="Font Size"
           aria-label="Font size"
@@ -339,7 +384,7 @@ export default function FormattingControls({ editor, disabled = false }) {
 
         <button
           onClick={clearFormatting}
-          disabled={off}
+          disabled={offFor("clearFormatting")}
           className={`${btnBase} ${btnDisabled}`}
           title="Clear Formatting"
           aria-label="Clear formatting"
@@ -352,36 +397,39 @@ export default function FormattingControls({ editor, disabled = false }) {
 
       {/* Formatting */}
       <div className="flex items-center gap-1">
-        <button onClick={() => editor.chain().focus().toggleBold().run()} disabled={off} aria-pressed={s.bold} className={`${btnBase} ${btnDisabled} ${s.bold ? `${activeBg} font-bold text-blue-600` : ""}`} title="Bold" aria-label="Bold"><FaBold /></button>
-        <button onClick={() => editor.chain().focus().toggleItalic().run()} disabled={off} aria-pressed={s.italic} className={`${btnBase} ${btnDisabled} ${s.italic ? `${activeBg} italic text-blue-600` : ""}`} title="Italic" aria-label="Italic"><FaItalic /></button>
-        <button onClick={() => editor.chain().focus().toggleUnderline().run()} disabled={off} aria-pressed={s.underline} className={`${btnBase} ${btnDisabled} ${s.underline ? `${activeBg} underline text-blue-600` : ""}`} title="Underline" aria-label="Underline"><FaUnderline /></button>
-        <button onClick={() => editor.chain().focus().toggleStrike().run()} disabled={off} aria-pressed={s.strike} className={`${btnBase} ${btnDisabled} ${s.strike ? `${activeBg} line-through text-blue-600` : ""}`} title="Strikethrough" aria-label="Strikethrough"><FaStrikethrough /></button>
-        <button onClick={() => editor.chain().focus().toggleSubscript().run()} disabled={off} aria-pressed={s.subscript} className={`${btnBase} ${btnDisabled} ${s.subscript ? `${activeBg} text-blue-600` : ""}`} title="Subscript" aria-label="Subscript"><FaSubscript /></button>
-        <button onClick={() => editor.chain().focus().toggleSuperscript().run()} disabled={off} aria-pressed={s.superscript} className={`${btnBase} ${btnDisabled} ${s.superscript ? `${activeBg} text-blue-600` : ""}`} title="Superscript" aria-label="Superscript"><FaSuperscript /></button>
-        <button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} disabled={off} aria-pressed={s.heading1} className={`${btnBase} ${btnDisabled} ${s.heading1 ? `${activeBg} font-bold text-purple-600` : ""}`} title="Heading 1" aria-label="Heading 1"><FaHeading /></button>
-        <button onClick={() => editor.chain().focus().toggleBlockquote().run()} disabled={off} aria-pressed={s.blockquote} className={`${btnBase} ${btnDisabled} ${s.blockquote ? `${activeBg} text-blue-600` : ""}`} title="Quote" aria-label="Quote"><FaQuoteRight /></button>
-        <button onClick={() => editor.chain().focus().toggleCodeBlock().run()} disabled={off} aria-pressed={s.codeBlock} className={`${btnBase} ${btnDisabled} ${s.codeBlock ? `${activeBg} text-yellow-600` : ""}`} title="Code" aria-label="Code block"><FaCode /></button>
+        <button onClick={() => editor.chain().focus().toggleBold().run()} disabled={offFor("bold")} aria-pressed={pressed(s.bold)} className={`${btnBase} ${btnDisabled} ${pressed(s.bold) ? `${activeBg} font-bold text-blue-600` : ""}`} title="Bold" aria-label="Bold"><FaBold /></button>
+        <button onClick={() => editor.chain().focus().toggleItalic().run()} disabled={offFor("italic")} aria-pressed={pressed(s.italic)} className={`${btnBase} ${btnDisabled} ${pressed(s.italic) ? `${activeBg} italic text-blue-600` : ""}`} title="Italic" aria-label="Italic"><FaItalic /></button>
+        <button onClick={() => editor.chain().focus().toggleUnderline().run()} disabled={offFor("underline")} aria-pressed={pressed(s.underline)} className={`${btnBase} ${btnDisabled} ${pressed(s.underline) ? `${activeBg} underline text-blue-600` : ""}`} title="Underline" aria-label="Underline"><FaUnderline /></button>
+        <button onClick={() => editor.chain().focus().toggleStrike().run()} disabled={offFor("strike")} aria-pressed={pressed(s.strike)} className={`${btnBase} ${btnDisabled} ${pressed(s.strike) ? `${activeBg} line-through text-blue-600` : ""}`} title="Strikethrough" aria-label="Strikethrough"><FaStrikethrough /></button>
+        <button onClick={() => editor.chain().focus().toggleSubscript().run()} disabled={offFor("subscript")} aria-pressed={pressed(s.subscript)} className={`${btnBase} ${btnDisabled} ${pressed(s.subscript) ? `${activeBg} text-blue-600` : ""}`} title="Subscript" aria-label="Subscript"><FaSubscript /></button>
+        <button onClick={() => editor.chain().focus().toggleSuperscript().run()} disabled={offFor("superscript")} aria-pressed={pressed(s.superscript)} className={`${btnBase} ${btnDisabled} ${pressed(s.superscript) ? `${activeBg} text-blue-600` : ""}`} title="Superscript" aria-label="Superscript"><FaSuperscript /></button>
+        <button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} disabled={offFor("heading1")} aria-pressed={pressed(s.heading1)} className={`${btnBase} ${btnDisabled} ${pressed(s.heading1) ? `${activeBg} font-bold text-purple-600` : ""}`} title="Heading 1" aria-label="Heading 1"><FaHeading /></button>
+        <button onClick={() => editor.chain().focus().toggleBlockquote().run()} disabled={offFor("blockquote")} aria-pressed={pressed(s.blockquote)} className={`${btnBase} ${btnDisabled} ${pressed(s.blockquote) ? `${activeBg} text-blue-600` : ""}`} title="Quote" aria-label="Quote"><FaQuoteRight /></button>
+        <button onClick={() => editor.chain().focus().toggleCodeBlock().run()} disabled={offFor("codeBlock")} aria-pressed={pressed(s.codeBlock)} className={`${btnBase} ${btnDisabled} ${pressed(s.codeBlock) ? `${activeBg} text-yellow-600` : ""}`} title="Code" aria-label="Code block"><FaCode /></button>
       </div>
 
       <Divider />
 
       {/* Lists */}
       <div className="flex items-center gap-1">
-        <button onClick={() => editor.chain().focus().toggleBulletList().run()} disabled={off} aria-pressed={s.bulletList} className={`${btnBase} ${btnDisabled} ${s.bulletList ? `${activeBg} text-blue-600` : ""}`} title="Bullet List" aria-label="Bullet list"><FaListUl /></button>
-        <button onClick={() => editor.chain().focus().toggleOrderedList().run()} disabled={off} aria-pressed={s.orderedList} className={`${btnBase} ${btnDisabled} ${s.orderedList ? `${activeBg} text-blue-600` : ""}`} title="Numbered List" aria-label="Numbered list"><FaListOl /></button>
-        <button onClick={() => editor.chain().focus().toggleTaskList().run()} disabled={off} aria-pressed={s.taskList} className={`${btnBase} ${btnDisabled} ${s.taskList ? `${activeBg} text-green-600` : ""}`} title="To-do List" aria-label="Task list"><FaCheckSquare /></button>
-        <button onClick={indentListItem} disabled={off || !s.canIndent} className={`${btnBase} ${btnDisabled}`} title="Indent (Tab)" aria-label="Indent list item"><FaIndent /></button>
-        <button onClick={outdentListItem} disabled={off || !s.canOutdent} className={`${btnBase} ${btnDisabled}`} title="Outdent (Shift+Tab)" aria-label="Outdent list item"><FaOutdent /></button>
+        <button onClick={() => editor.chain().focus().toggleBulletList().run()} disabled={offFor("bulletList")} aria-pressed={pressed(s.bulletList)} className={`${btnBase} ${btnDisabled} ${pressed(s.bulletList) ? `${activeBg} text-blue-600` : ""}`} title="Bullet List" aria-label="Bullet list"><FaListUl /></button>
+        <button onClick={() => editor.chain().focus().toggleOrderedList().run()} disabled={offFor("orderedList")} aria-pressed={pressed(s.orderedList)} className={`${btnBase} ${btnDisabled} ${pressed(s.orderedList) ? `${activeBg} text-blue-600` : ""}`} title="Numbered List" aria-label="Numbered list"><FaListOl /></button>
+        <button onClick={() => editor.chain().focus().toggleTaskList().run()} disabled={offFor("taskList")} aria-pressed={pressed(s.taskList)} className={`${btnBase} ${btnDisabled} ${pressed(s.taskList) ? `${activeBg} text-green-600` : ""}`} title="To-do List" aria-label="Task list"><FaCheckSquare /></button>
+        {/* Indent/outdent are LIST NESTING only — they act on the nearest list
+            item and are disabled outside a list. There is deliberately no
+            arbitrary paragraph indent, and no margin/padding is ever stored. */}
+        <button onClick={indentListItem} disabled={offFor("indent") || !s.canIndent} className={`${btnBase} ${btnDisabled}`} title="Indent (Tab)" aria-label="Indent list item"><FaIndent /></button>
+        <button onClick={outdentListItem} disabled={offFor("outdent") || !s.canOutdent} className={`${btnBase} ${btnDisabled}`} title="Outdent (Shift+Tab)" aria-label="Outdent list item"><FaOutdent /></button>
       </div>
 
       <Divider />
 
       {/* Alignment */}
       <div className="flex items-center gap-1">
-        <button onClick={() => editor.chain().focus().setTextAlign("left").run()} disabled={off} aria-pressed={s.alignLeft} className={`${btnBase} ${btnDisabled} ${s.alignLeft ? `${activeBg} text-blue-600` : ""}`} title="Align Left" aria-label="Align left"><FaAlignLeft /></button>
-        <button onClick={() => editor.chain().focus().setTextAlign("center").run()} disabled={off} aria-pressed={s.alignCenter} className={`${btnBase} ${btnDisabled} ${s.alignCenter ? `${activeBg} text-blue-600` : ""}`} title="Align Centre" aria-label="Align centre"><FaAlignCenter /></button>
-        <button onClick={() => editor.chain().focus().setTextAlign("right").run()} disabled={off} aria-pressed={s.alignRight} className={`${btnBase} ${btnDisabled} ${s.alignRight ? `${activeBg} text-blue-600` : ""}`} title="Align Right" aria-label="Align right"><FaAlignRight /></button>
-        <button onClick={() => editor.chain().focus().setTextAlign("justify").run()} disabled={off} aria-pressed={s.alignJustify} className={`${btnBase} ${btnDisabled} ${s.alignJustify ? `${activeBg} text-blue-600` : ""}`} title="Justify" aria-label="Justify"><FaAlignJustify /></button>
+        <button onClick={() => editor.chain().focus().setTextAlign("left").run()} disabled={offFor("alignLeft")} aria-pressed={pressed(s.alignLeft)} className={`${btnBase} ${btnDisabled} ${pressed(s.alignLeft) ? `${activeBg} text-blue-600` : ""}`} title="Align Left" aria-label="Align left"><FaAlignLeft /></button>
+        <button onClick={() => editor.chain().focus().setTextAlign("center").run()} disabled={offFor("alignCenter")} aria-pressed={pressed(s.alignCenter)} className={`${btnBase} ${btnDisabled} ${pressed(s.alignCenter) ? `${activeBg} text-blue-600` : ""}`} title="Align Centre" aria-label="Align centre"><FaAlignCenter /></button>
+        <button onClick={() => editor.chain().focus().setTextAlign("right").run()} disabled={offFor("alignRight")} aria-pressed={pressed(s.alignRight)} className={`${btnBase} ${btnDisabled} ${pressed(s.alignRight) ? `${activeBg} text-blue-600` : ""}`} title="Align Right" aria-label="Align right"><FaAlignRight /></button>
+        <button onClick={() => editor.chain().focus().setTextAlign("justify").run()} disabled={offFor("alignJustify")} aria-pressed={pressed(s.alignJustify)} className={`${btnBase} ${btnDisabled} ${pressed(s.alignJustify) ? `${activeBg} text-blue-600` : ""}`} title="Justify" aria-label="Justify"><FaAlignJustify /></button>
       </div>
 
       <Divider />
@@ -390,9 +438,9 @@ export default function FormattingControls({ editor, disabled = false }) {
       <div className="flex items-center gap-1">
         <button
           onClick={editLink}
-          disabled={off}
-          aria-pressed={s.link}
-          className={`${btnBase} ${btnDisabled} ${s.link ? `${activeBg} text-blue-600` : ""}`}
+          disabled={offFor("link")}
+          aria-pressed={pressed(s.link)}
+          className={`${btnBase} ${btnDisabled} ${pressed(s.link) ? `${activeBg} text-blue-600` : ""}`}
           title="Insert / Edit Link"
           aria-label="Insert or edit link"
         >
@@ -400,7 +448,7 @@ export default function FormattingControls({ editor, disabled = false }) {
         </button>
         <button
           onClick={removeLink}
-          disabled={off || !s.link}
+          disabled={offFor("unlink") || !s.link}
           className={`${btnBase} ${btnDisabled}`}
           title="Remove Link"
           aria-label="Remove link"
@@ -421,7 +469,7 @@ export default function FormattingControls({ editor, disabled = false }) {
           title={imageBusy ? "Adding image…" : "Upload Photo"}
           aria-label="Upload photo from this device"
           onClick={() => fileInputRef.current?.click()}
-          disabled={off || imageBusy}
+          disabled={offFor("imageUpload") || imageBusy}
           aria-busy={imageBusy || undefined}
           className={`${btnBase} ${btnDisabled}`}
         >
@@ -431,7 +479,7 @@ export default function FormattingControls({ editor, disabled = false }) {
         {/* Genuinely remote: inserts an image from a web address. */}
         <button
           onClick={insertImageUrl}
-          disabled={off}
+          disabled={offFor("imageUrl")}
           className={`${btnBase} ${btnDisabled}`}
           title="Insert image from a web address"
           aria-label="Insert image from a web address"
@@ -441,7 +489,7 @@ export default function FormattingControls({ editor, disabled = false }) {
 
         <button
           onClick={() => editor.chain().focus().setHorizontalRule().run()}
-          disabled={off}
+          disabled={offFor("horizontalRule")}
           className={`${btnBase} ${btnDisabled}`}
           title="Horizontal Rule"
           aria-label="Insert horizontal rule"
@@ -453,7 +501,7 @@ export default function FormattingControls({ editor, disabled = false }) {
           onClick={() =>
             editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
           }
-          disabled={off}
+          disabled={offFor("table")}
           className={`${btnBase} ${btnDisabled}`}
           title="Table"
           aria-label="Insert table"
@@ -464,7 +512,7 @@ export default function FormattingControls({ editor, disabled = false }) {
         <div className="relative" ref={tableMenuRef}>
           <button
             onClick={() => setTableMenuOpen((open) => !open)}
-            disabled={off || !s.inTable}
+            disabled={offFor("tableOptions") || !s.inTable}
             className={`${btnBase} ${btnDisabled} ${tableMenuOpen ? activeBg : ""} flex items-center`}
             title="Table Options"
             aria-label="Table options"
@@ -474,7 +522,7 @@ export default function FormattingControls({ editor, disabled = false }) {
             <FaTable />
             <FaCaretDown className="ml-0.5 text-xs" />
           </button>
-          {tableMenuOpen && s.inTable && !off && (
+          {tableMenuOpen && s.inTable && !offFor("tableOptions") && (
             <div
               role="menu"
               className="absolute left-0 top-full mt-1 z-20 min-w-[11rem] py-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg"
@@ -514,7 +562,7 @@ export default function FormattingControls({ editor, disabled = false }) {
           ref={textColorRef}
           type="color"
           defaultValue={s.color}
-          disabled={off}
+          disabled={textColorOff}
           title="Text Color"
           aria-label="Text color"
           className={colorInputCls}
@@ -524,13 +572,29 @@ export default function FormattingControls({ editor, disabled = false }) {
           ref={highlightColorRef}
           type="color"
           defaultValue={s.highlightColor}
-          disabled={off}
+          disabled={highlightColorOff}
           title="Highlight Color"
           aria-label="Highlight color"
           className={colorInputCls}
         />
-        <button onClick={() => editor.chain().focus().toggleHighlight().run()} disabled={off} aria-pressed={s.highlight} className={`${btnBase} ${btnDisabled} ${s.highlight ? "bg-yellow-300 dark:bg-yellow-300/80 text-gray-900" : ""}`} title="Highlight" aria-label="Highlight"><FaHighlighter /></button>
+        <button onClick={() => editor.chain().focus().toggleHighlight().run()} disabled={offFor("highlight")} aria-pressed={pressed(s.highlight)} className={`${btnBase} ${btnDisabled} ${pressed(s.highlight) ? "bg-yellow-300 dark:bg-yellow-300/80 text-gray-900" : ""}`} title="Highlight" aria-label="Highlight"><FaHighlighter /></button>
       </div>
+
+      {/* Why the controls are inert right now. Present only when there is
+          something useful to say — in the Template form with no Text answer
+          selected — so a toolbar full of disabled controls explains itself
+          instead of looking broken. It is text, never colour or an icon
+          alone, and lives in a polite live region so the change of ownership
+          is announced once rather than on every keystroke. */}
+      {disabledHint && (
+        <span
+          role="status"
+          aria-live="polite"
+          className="ml-1 text-xs text-gray-500 dark:text-gray-400"
+        >
+          {disabledHint}
+        </span>
+      )}
 
       {/* Restrained inline feedback for a rejected link, image or colour —
           the document is unchanged whenever this appears. It clears itself

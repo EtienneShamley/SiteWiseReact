@@ -28,6 +28,7 @@ import {
 import PhotoAttachment from "./PhotoAttachment";
 import FileAttachmentRow from "./FileAttachmentRow";
 import RowRefineAction from "./RowRefineAction";
+import TemplateTextCell from "./TemplateTextCell";
 import {
   ROW_REFINE_STATUS,
   isRefinableRowType,
@@ -191,6 +192,12 @@ export default function ResizableTwoColTable({
   rightValues = {},
   onRightChange,
   onRightFocus,
+  onRowLabelFocus, // (rowId) => void — a label is plain text; it must clear
+  // rich-text toolbar ownership so formatting can never reach the answer of the
+  // row whose label the caret is in.
+  // Contextual rich text for Text answers (note mode only). Absent — as in the
+  // Template Builder — leaves the previous plain textarea in place untouched.
+  richText = null,
   logoLocked = false,
   enableFieldTypeEditor = false,
   knownOptionIds = null,
@@ -489,8 +496,32 @@ export default function ResizableTwoColTable({
         </select>
       );
     }
-    // FIELD_TYPE.TEXT — the unified Text field: a full-cell auto-growing
-    // textarea (multiline, preserves line breaks, no inner scrollbar).
+    // FIELD_TYPE.TEXT — the unified Text field.
+    //
+    // In a completed note it is the contextual rich-text cell: read-only React
+    // rendering until this row is the active one, then the single Template
+    // editor. The raw stored value is passed through (a plain string or a
+    // tagged rich value); only a STRING is put through the internal-id guard,
+    // because a rich value can never be an option id.
+    if (richText) {
+      return (
+        <TemplateTextCell
+          identity={richText.activeRowId === row.id ? richText.activeIdentity : null}
+          rowId={row.id}
+          label={row.label}
+          value={typeof raw === "string" ? safeStr : raw}
+          placeholder="Enter details for this field..."
+          active={richText.activeRowId === row.id}
+          reloadToken={richText.reloadToken}
+          onActivate={richText.onActivate}
+          onChange={richText.onChange}
+          onRegisterEditor={richText.onRegisterEditor}
+        />
+      );
+    }
+
+    // Builder / any caller without the rich-text cell: the previous full-cell
+    // auto-growing textarea, unchanged.
     return (
       <AutoGrowTextarea
         className="
@@ -584,6 +615,7 @@ export default function ResizableTwoColTable({
             aria-label={
               row.isCustom ? "Section label" : `Label for ${row.label || "this field"}`
             }
+            onFocus={() => onRowLabelFocus && onRowLabelFocus(row.id)}
             onChange={(e) => onRowLabelChange && onRowLabelChange(row.id, e.target.value)}
           />
         ) : (
