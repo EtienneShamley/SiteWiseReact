@@ -21,6 +21,13 @@
 //
 // Office formats (DOC/DOCX/XLS/XLSX) are Download-only — NoteWise does not
 // preview Office content.
+//
+// Messages here are FIXED and restrained: they never carry an exception
+// message, a storage detail or an object URL. Raw exception text is not
+// something a user can act on, and showing it only describes how the
+// application is built. The download filename goes through the shared
+// safeDownloadFilename helper, so Template-form evidence and Free-form note
+// attachments cannot hold different ideas of what a safe filename is.
 import React, { useEffect, useRef, useState } from "react";
 import { getAsset } from "../../lib/assetStorage";
 import { formatFileSize, fileKindLabel } from "../../lib/noteAttachments";
@@ -28,11 +35,16 @@ import {
   RENDER_MODE,
   OPEN_RESULT,
   NAVIGATION_URL_REVOKE_MS,
+  ATTACHMENT_DOWNLOAD_FAILED_MESSAGE,
+  ATTACHMENT_OPEN_FAILED_MESSAGE,
+  ATTACHMENT_PREVIEW_DENIED_MESSAGE,
+  ATTACHMENT_UNAVAILABLE_MESSAGE,
   resolveOpenPolicy,
   isInlineRenderable,
   createManagedObjectUrl,
   reserveNavigationTab,
   openAttachmentSafely,
+  safeDownloadFilename,
 } from "../../lib/safeAttachmentOpen";
 import PhotoPreviewDialog from "./PhotoPreviewDialog";
 import TextPreviewDialog from "./TextPreviewDialog";
@@ -99,7 +111,7 @@ export default function FileAttachmentRow({
     const reservedTab = needsTab ? reserveNavigationTab() : null;
     if (needsTab && !reservedTab) {
       // The only genuine block: the browser refused the tab up front.
-      onError && onError(`The browser blocked opening "${name}".`);
+      onError && onError(ATTACHMENT_OPEN_FAILED_MESSAGE);
       return;
     }
     handleOpen(reservedTab);
@@ -121,24 +133,18 @@ export default function FileAttachmentRow({
 
     switch (result.status) {
       case OPEN_RESULT.READ_ERROR:
-        onError &&
-          onError(
-            `Could not read "${name}": ${result.error?.message || result.error}`
-          );
+        onError && onError(ATTACHMENT_OPEN_FAILED_MESSAGE);
         return;
       case OPEN_RESULT.MISSING:
         setState({ available: false, policy: null });
-        onError && onError(`"${name}" is missing from storage.`);
+        onError && onError(ATTACHMENT_UNAVAILABLE_MESSAGE);
         return;
       case OPEN_RESULT.DENIED:
         // Denial never mutates or removes the attachment — it stays downloadable.
-        onError &&
-          onError(
-            `"${name}" can't be previewed safely in NoteWise. Use Download to open it in another application.`
-          );
+        onError && onError(ATTACHMENT_PREVIEW_DENIED_MESSAGE);
         return;
       case OPEN_RESULT.BLOCKED:
-        onError && onError(`The browser blocked opening "${name}".`);
+        onError && onError(ATTACHMENT_OPEN_FAILED_MESSAGE);
         return;
       case OPEN_RESULT.IMAGE_PREVIEW:
         setPreview({ kind: "image", url: result.url, revoke: result.revoke });
@@ -158,26 +164,32 @@ export default function FileAttachmentRow({
     let asset;
     try {
       asset = await getAsset(attachment.assetId);
-    } catch (err) {
-      onError && onError(`Could not read "${name}": ${err?.message || err}`);
+    } catch {
+      onError && onError(ATTACHMENT_DOWNLOAD_FAILED_MESSAGE);
       return;
     }
     if (!asset || !asset.blob) {
       setState({ available: false, policy: null });
-      onError && onError(`"${name}" is missing from storage.`);
+      onError && onError(ATTACHMENT_UNAVAILABLE_MESSAGE);
       return;
     }
-    // `download` saves the file rather than rendering it, so this is safe for
-    // every type — including those refused inline above.
-    const managed = createManagedObjectUrl(asset.blob, {
-      revokeAfterMs: NAVIGATION_URL_REVOKE_MS,
-    });
-    const a = document.createElement("a");
-    a.href = managed.url;
-    a.download = attachment.name || "attachment";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    try {
+      // `download` saves the file rather than rendering it, so this is safe for
+      // every type — including those refused inline above.
+      const managed = createManagedObjectUrl(asset.blob, {
+        revokeAfterMs: NAVIGATION_URL_REVOKE_MS,
+      });
+      const a = document.createElement("a");
+      a.href = managed.url;
+      // Sanitized: a filename is user-controlled data reaching a real
+      // filesystem, and it grants no permission of any kind.
+      a.download = safeDownloadFilename(attachment.name);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch {
+      onError && onError(ATTACHMENT_DOWNLOAD_FAILED_MESSAGE);
+    }
   }
 
   const unavailable = state.available === false;

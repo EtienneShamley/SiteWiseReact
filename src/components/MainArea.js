@@ -33,6 +33,7 @@ import {
   Superscript,
 } from "./editor/extensions";
 import { AssetImage } from "./editor/AssetImage";
+import { FileAttachment } from "./editor/FileAttachment";
 import "./editor/editor.css";
 import { useRefine } from "../hooks/useRefine";
 import { refinedTextToParagraphHtml } from "../lib/refineClient";
@@ -68,6 +69,7 @@ import {
   setRowRefineBackup,
 } from "../lib/templateRowRefine";
 import { insertLocalImageAsset } from "../lib/editorImageInsert";
+import { insertFreeformFileAttachment } from "../lib/editorFileInsert";
 import useTransientMessage from "../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
@@ -166,17 +168,21 @@ export default function MainArea() {
   // both start a request before React re-renders the disabled button.
   const refineRequestRef = useRef(0);
   const refineInFlightRef = useRef(false);
-  // Restrained inline feedback for a rejected editor image insertion, with a
-  // managed lifetime: it auto-dismisses, a new attempt supersedes it, a success
-  // clears it, and changing note or view clears it (see the effect below). It
-  // previously had no lifecycle and could stay on screen indefinitely.
-  const imageNotice = useTransientMessage();
+  // ONE restrained inline feedback channel for every Free-form insertion —
+  // images and file attachments alike — with a managed lifetime: it
+  // auto-dismisses, a new attempt supersedes it, a success clears it, and
+  // changing note or view clears it (see the effect below). Deliberately one
+  // channel and one live region: two would talk over each other, and a screen
+  // reader would announce both.
+  const insertNotice = useTransientMessage();
   const {
-    clear: clearImageNotice,
-    showError: showImageNoticeError,
-  } = imageNotice;
-  // True while a BottomBar image is being stamped, normalized and written.
-  const [imageInsertBusy, setImageInsertBusy] = useState(false);
+    clear: clearInsertNotice,
+    showError: showInsertNoticeError,
+  } = insertNotice;
+  // What is currently being written, if anything: null | "image" | "file".
+  // A BottomBar image is stamped, normalized and written; a file is validated
+  // and written. Both report through the one status above.
+  const [insertBusy, setInsertBusy] = useState(null);
 
   const notePdfInputRef = useRef(null);
 
@@ -319,6 +325,11 @@ export default function MainArea() {
         // HTML never holds image data. It also parses legacy data: images,
         // which the stock extension silently drops. See ./editor/AssetImage.js.
         AssetImage,
+        // A file attached to this note: a selectable atom block carrying only
+        // an IndexedDB reference and its display metadata. The bytes never
+        // enter the document, and nothing the card does at runtime is
+        // persisted. See ./editor/FileAttachment.js.
+        FileAttachment,
         TaskList,
         // nested is required for the toolbar's indent inside task lists
         TaskItem.configure({ nested: true }),
@@ -378,6 +389,10 @@ export default function MainArea() {
   noteKeyRef.current = noteKey;
   const docStateRef = useRef(docState);
   docStateRef.current = docState;
+  // Which view is on screen, readable from an async insertion that started
+  // before the user switched away.
+  const noteLayoutRef = useRef(noteLayout);
+  noteLayoutRef.current = noteLayout;
 
   /**
    * The ONE way Free-form note content is replaced programmatically.
@@ -451,16 +466,16 @@ export default function MainArea() {
     // insert from the Template form would land in a document the user cannot
     // see. Say so instead.
     if (!freeformEditingEnabled) {
-      showImageNoticeError(
+      showInsertNoticeError(
         "Switch to the Free-form note to add an image there. Template form evidence uses the Photo and File fields."
       );
       return;
     }
 
     // A new attempt supersedes whatever the last one said.
-    clearImageNotice();
+    clearInsertNotice();
 
-    setImageInsertBusy(true);
+    setInsertBusy("image");
     try {
       const result = await insertLocalImageAsset({
         sourceFile,
@@ -468,17 +483,70 @@ export default function MainArea() {
         editor,
         name: options.name || sourceFile.name,
       });
-      if (!result.ok) showImageNoticeError(result.error);
-      else clearImageNotice();
+      if (!result.ok) showInsertNoticeError(result.error);
+      else clearInsertNotice();
     } finally {
-      setImageInsertBusy(false);
+      setInsertBusy(null);
     }
   }
 
-  // The BottomBar's own pre-stamp rejection (an unsupported or oversized source
-  // file), reported through the same one message channel.
-  function handleImageInsertError(message) {
-    if (message) showImageNoticeError(message);
+  /**
+   * A FILE attached from the BottomBar.
+   *
+   * Same persistent shape as an image and the same guarantees: validate, store
+   * the bytes in IndexedDB, and insert a reference only once that write is
+   * confirmed. A rejected file inserts nothing, and no `blob:` URL ever reaches
+   * the note.
+   *
+   * The originating note is captured BEFORE the write and re-checked after it.
+   * The editor is recreated per note, so an insertion that resolved after a
+   * note switch would otherwise land in whichever note is now on screen. When
+   * that happens the new, still-unreferenced asset is deleted and nothing is
+   * said — the message would describe a note the user is no longer looking at.
+   */
+  async function handleInsertFileAtCursor(file) {
+    if (!editor || !file) return;
+
+    if (!freeformEditingEnabled) {
+      showInsertNoticeError(
+        "Switch to the Free-form note to attach a file there. Template form evidence uses the Photo and File fields."
+      );
+      return;
+    }
+
+    const originNoteId = noteKeyRef.current;
+    if (!originNoteId) return;
+    const originEditor = editor;
+
+    clearInsertNotice();
+
+    setInsertBusy("file");
+    try {
+      const result = await insertFreeformFileAttachment({
+        file,
+        editor: originEditor,
+        isCurrentTarget: () =>
+          noteKeyRef.current === originNoteId &&
+          noteLayoutRef.current === "natural" &&
+          editorRef.current === originEditor,
+      });
+      if (result.ok) {
+        clearInsertNotice();
+        return;
+      }
+      // A stale write reports nothing: it belongs to a note that is no longer
+      // on screen, and its asset has already been removed.
+      if (result.stale) return;
+      showInsertNoticeError(result.error);
+    } finally {
+      setInsertBusy(null);
+    }
+  }
+
+  // The BottomBar's own rejection before it hands anything over (an unsupported
+  // or oversized source file), reported through the same one message channel.
+  function handleInsertError(message) {
+    if (message) showInsertNoticeError(message);
   }
 
   // BottomBar text routing:
@@ -754,8 +822,8 @@ export default function MainArea() {
   // left running: it still owns its originating note and will apply there.
   useEffect(() => {
     setRefineState((prev) => clearRefineMessage(prev));
-    clearImageNotice();
-  }, [noteKey, noteLayout, clearImageNotice]);
+    clearInsertNotice();
+  }, [noteKey, noteLayout, clearInsertNotice]);
 
   // Shared control-bar visual language: neutral gray chips/segments,
   // consistent hover/disabled/focus-visible treatment across every control.
@@ -938,22 +1006,27 @@ export default function MainArea() {
             </span>
           )}
 
-          {/* One restrained live region for image insertion: busy while the
-              photo is being stamped, normalized and written, then the outcome.
-              The message auto-dismisses and is cleared by a new attempt, a
-              success, and any note or view change. */}
-          {(imageInsertBusy || !!imageNotice.message) && (
+          {/* One restrained live region for BOTH insertion kinds: busy while
+              the photo is stamped, normalized and written or the file is
+              validated and written, then the outcome. The message
+              auto-dismisses and is cleared by a new attempt, a success, and any
+              note or view change. */}
+          {(!!insertBusy || !!insertNotice.message) && (
             <span
               role="status"
               aria-live="polite"
               className={[
                 "text-xs",
-                imageNotice.tone === MESSAGE_TONE.ERROR
+                insertNotice.tone === MESSAGE_TONE.ERROR
                   ? "text-red-600 dark:text-red-400"
                   : "text-gray-500 dark:text-gray-400",
               ].join(" ")}
             >
-              {imageInsertBusy ? "Adding image…" : imageNotice.message}
+              {insertBusy === "image"
+                ? "Adding image…"
+                : insertBusy === "file"
+                ? "Adding file…"
+                : insertNotice.message}
             </span>
           )}
 
@@ -1120,12 +1193,17 @@ export default function MainArea() {
         >
           <div className="px-4 py-3 flex flex-col gap-2">
             {noteTitle && <ListenInPanel onInsert={handleBottomBarInsert} />}
+            {/* No PDF prop: a PDF chosen through the BottomBar attachment
+                picker becomes a Free-form attachment card. Importing a PDF into
+                the PDF workspace remains the dedicated Note → PDF workflow
+                below, which is unchanged. */}
             <BottomBar
               editor={editor}
               onInsertText={handleBottomBarInsert}
               onInsertImage={handleInsertImageAtCursor}
-              onImageError={handleImageInsertError}
-              onInsertPDFFile={handleNotePdfImport}
+              onImageError={handleInsertError}
+              onInsertFile={handleInsertFileAtCursor}
+              onFileError={handleInsertError}
               disabled={!noteTitle || !editor}
             />
           </div>

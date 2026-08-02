@@ -31,6 +31,89 @@
 // Blob retrieval as injectable parameters, so the open sequence is testable
 // too.
 
+/* -------------------------------------------------------------------------
+ * Shared user-facing attachment messages.
+ *
+ * Restrained and FIXED: they never carry an exception message, a stack trace,
+ * a storage key, an object URL, an internal module name or any other
+ * implementation detail. A user cannot act on "DataError: key not found", and
+ * showing it only leaks how the application is built.
+ * ---------------------------------------------------------------------- */
+
+export const ATTACHMENT_UNAVAILABLE_MESSAGE = "This attached file is unavailable.";
+export const ATTACHMENT_OPEN_FAILED_MESSAGE = "This file could not be opened.";
+export const ATTACHMENT_DOWNLOAD_FAILED_MESSAGE =
+  "This file could not be downloaded.";
+export const ATTACHMENT_PREVIEW_DENIED_MESSAGE =
+  "This file can't be previewed in NoteWise. Use Download to open it in another application.";
+
+/* -------------------------------------------------------------------------
+ * Safe download filenames
+ *
+ * A filename is user-controlled data that reaches a real filesystem through
+ * the `download` attribute. It is sanitized STRUCTURALLY here — path
+ * separators, traversal segments, control characters and reserved characters
+ * are removed — and the result is only ever used as a download name or as
+ * escaped React text. It is never interpreted as HTML, and it never grants any
+ * permission: what a file may DO is decided by the retrieved Blob's own MIME
+ * type (see resolveOpenPolicy above), never by its name.
+ *
+ * Shared deliberately: Template-form File evidence and Free-form note
+ * attachments must not each grow their own idea of what a safe filename is.
+ * ---------------------------------------------------------------------- */
+
+export const DOWNLOAD_FILENAME_FALLBACK = "attachment";
+export const MAX_DOWNLOAD_FILENAME_LENGTH = 120;
+
+// A structurally plausible extension, so a long name can be truncated without
+// losing the suffix that tells the operating system what to open it with. This
+// is a SHAPE check only — which extensions are ACCEPTABLE is a policy question
+// answered where files are validated, not here.
+const SIMPLE_EXTENSION_RE = /\.[A-Za-z0-9]{1,8}$/;
+
+/**
+ * Reduce a user-supplied filename to something safe to hand to a download.
+ *
+ * Always returns a non-empty string; a name with nothing usable left becomes
+ * DOWNLOAD_FILENAME_FALLBACK rather than an empty `download` attribute.
+ */
+export function safeDownloadFilename(name) {
+  if (typeof name !== "string") return DOWNLOAD_FILENAME_FALLBACK;
+
+  let value = name
+    // Control characters, including NUL — these can truncate or confuse a path.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    // Path separators: a filename must never be able to address a directory.
+    .replace(/[\\/]+/g, " ")
+    // Reserved or awkward on common filesystems.
+    .replace(/[:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Drop traversal segments left behind by the separator removal above
+  // ("../../etc/passwd" -> ".. .. etc passwd" -> "etc passwd").
+  value = value
+    .split(" ")
+    .filter((part) => part && !/^\.+$/.test(part))
+    .join(" ");
+
+  // A leading dot makes a hidden file on Unix-like systems.
+  value = value.replace(/^\.+/, "").trim();
+
+  if (!value) return DOWNLOAD_FILENAME_FALLBACK;
+
+  if (value.length > MAX_DOWNLOAD_FILENAME_LENGTH) {
+    const match = SIMPLE_EXTENSION_RE.exec(value);
+    const ext = match ? match[0] : "";
+    const stem = ext ? value.slice(0, value.length - ext.length) : value;
+    const room = Math.max(1, MAX_DOWNLOAD_FILENAME_LENGTH - ext.length);
+    value = `${stem.slice(0, room).trim()}${ext}`;
+  }
+
+  return value || DOWNLOAD_FILENAME_FALLBACK;
+}
+
 // How an attachment may be presented once its Blob has been retrieved.
 export const RENDER_MODE = {
   // Open the PDF itself (object URL). Only for an exact application/pdf Blob.

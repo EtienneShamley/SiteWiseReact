@@ -1,9 +1,9 @@
 // src/components/ShareDialog.js
 import React, { useMemo, useState, useEffect } from "react";
 import {
-  exportHTMLString, exportPDFString, exportDOCXString, exportMDString, safeFilename
+  exportHTMLString, exportPDFString, exportDOCXString, exportMDString,
+  resolveExportHtml, safeFilename
 } from "../lib/exportUtils";
-import { resolveExportImageHtml } from "../lib/exportImageAssets";
 import { downloadZip } from "../lib/zipUtils";
 
 const FORMAT_OPTS = [
@@ -74,12 +74,14 @@ export default function ShareDialog({
     if (format === "md")   return exportMDString({ title, html });
   };
 
-  // The zip path builds its own documents, so it resolves stored image
-  // references through the same helper the single-file exporters use. A note
-  // whose image is missing throws here and fails the whole export rather than
-  // adding a file with a silently missing photo to the archive.
+  // The zip path builds its own documents, so it resolves stored references
+  // through the same helper the single-file exporters use. A note whose image
+  // is missing throws here and fails the whole export rather than adding a file
+  // with a silently missing photo to the archive. Attachment binaries are NOT
+  // bundled into the archive: each attachment travels as the same honest
+  // metadata reference every other format uses.
   const buildBlobFor = async ({ title, html: storedHtml }) => {
-    const html = await resolveExportImageHtml(storedHtml);
+    const html = await resolveExportHtml(storedHtml);
     if (format === "html") {
       const doc = new Blob([`<!doctype html>${html}`], { type: "text/html;charset=utf-8" });
       return { name: safeFilename(title, "html"), blob: doc };

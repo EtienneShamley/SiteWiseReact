@@ -9,6 +9,12 @@ import { useTranscription } from "../hooks/useTranscription";
 import { useAppState } from "../context/AppStateContext";
 import { validateEditorImageFile } from "../lib/editorImages";
 import { IMAGE_DECODE_MESSAGE } from "../lib/imageProcessing";
+import {
+  ALLOWED_FILE_EXTENSIONS,
+  ALLOWED_FILE_MIME_TYPES,
+  FILE_INSERT_MESSAGE,
+  bottomBarRouteFor,
+} from "../lib/editorFileAttachments";
 import exifr from "exifr";
 
 // NEW: coordinate converter (offline-first, proj4-backed)
@@ -85,8 +91,15 @@ export default function BottomBar({
   // being inserted as object URLs that died at the next reload.
   onInsertImage,
   onImageError,     // (message) => void — pre-stamp rejection, one message channel
-  onInsertPDF,      // legacy
-  onInsertPDFFile,  // preferred (bytes)
+  // Persistent FILE attachment, owned by MainArea:
+  //   (file) => Promise<void>
+  // Every non-image selection goes here. Nothing in this bar writes a `blob:`
+  // URL into the note any more: the previous path created an object URL, handed
+  // it to insertContent (where TipTap's own protocol check silently dropped the
+  // href) and revoked it 15 seconds later, so an attached document was
+  // unreachable almost immediately and gone for good after a reload.
+  onInsertFile,
+  onFileError,      // (message) => void — same one message channel
   disabled = false,
 }) {
   const { currentNoteId } = useAppState();
@@ -448,32 +461,34 @@ export default function BottomBar({
     setTranscribeError("");
   };
 
+  // The ONE non-image insertion path for this bar. It hands the picked file to
+  // MainArea, which validates it, stores the bytes in IndexedDB and inserts a
+  // reference only once that write is confirmed. Nothing is inserted here.
+  //
+  // A PDF selected through THIS picker becomes a Free-form attachment card. It
+  // is deliberately NOT imported into the global PDF workspace: that is the
+  // dedicated Note → PDF workflow's job, and it is unchanged.
+  async function insertAttachedFile(file) {
+    if (!onInsertFile) {
+      onFileError?.(FILE_INSERT_MESSAGE);
+      return;
+    }
+    await onInsertFile(file);
+  }
+
   const handleFilesSelected = async (e) => {
     const files = Array.from(e.target.files || []);
     // Reset the input up front: the loop below awaits, and a picker that still
     // holds the previous selection will not re-fire for the same file.
     e.target.value = "";
+    // A cancelled picker yields no files: nothing is inserted and nothing is
+    // said.
     for (const f of files) {
-      if (f.type.startsWith("image/")) {
+      if (bottomBarRouteFor(f) === "image") {
         await insertStampedPhoto(f);
         continue;
       }
-      if (f.type === "application/pdf") {
-        const ab = await f.arrayBuffer();
-        const bytes = new Uint8Array(ab);
-        if (onInsertPDFFile) {
-          await onInsertPDFFile({ fileName: f.name, bytes });
-        } else if (onInsertPDF) {
-          const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
-          onInsertPDF(url);
-        }
-      } else {
-        const url = URL.createObjectURL(f);
-        editor?.chain().focus().insertContent(
-          `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-        ).run();
-        setTimeout(() => URL.revokeObjectURL(url), 15000);
-      }
+      await insertAttachedFile(f);
     }
   };
 
@@ -481,12 +496,11 @@ export default function BottomBar({
     const f = e.target.files?.[0];
     e.target.value = "";
     if (!f) return;
-    if (!f.type.startsWith("image/")) {
-      const url = URL.createObjectURL(f);
-      editor?.chain().focus().insertContent(
-        `<p><a href="${url}" target="_blank" rel="noopener noreferrer">${f.name}</a></p>`
-      ).run();
-      setTimeout(() => URL.revokeObjectURL(url), 15000);
+    if (bottomBarRouteFor(f) !== "image") {
+      // The camera is an image path, but a device that hands back something
+      // else must not lose the file to a temporary link. It goes through the
+      // same persistent attachment path, which accepts it or says why not.
+      await insertAttachedFile(f);
       return;
     }
     // Real capture takes exactly the same persistent path as a picked photo.
@@ -698,11 +712,20 @@ export default function BottomBar({
             ref={fileInputRef}
             onChange={handleFilesSelected}
             style={{ display: "none" }}
-            accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+            aria-label="Attach photos or documents to this note"
+            // A picker HINT only. It is user-controlled and any file can be
+            // dropped past it, so it decides nothing — validation happens
+            // against the file itself (see editorImages / editorFileAttachments).
+            accept={[
+              "image/*",
+              ...ALLOWED_FILE_MIME_TYPES,
+              ...ALLOWED_FILE_EXTENSIONS,
+            ].join(",")}
           />
           <button
             type="button"
-            title="Add files"
+            title="Attach photos or documents"
+            aria-label="Attach photos or documents to this note"
             onClick={() => fileInputRef.current?.click()}
             className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
             disabled={isDisabled}
@@ -717,10 +740,12 @@ export default function BottomBar({
             ref={cameraInputRef}
             onChange={handleCameraSelected}
             style={{ display: "none" }}
+            aria-label="Take a photo with the camera"
           />
           <button
             type="button"
             title="Take photo"
+            aria-label="Take a photo with the camera"
             onClick={() => cameraInputRef.current?.click()}
             className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
             disabled={isDisabled}

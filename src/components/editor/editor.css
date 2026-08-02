@@ -175,6 +175,176 @@
   color: #fca5a5;
 }
 
+/* An attached file: a compact document card carrying a reference, never the
+   file itself. Its states are distinguished by border, background AND text —
+   never by colour alone, so the unavailable and selected states are readable
+   without colour perception. */
+.note-editor .note-file-attachment {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-left: 3px solid #9ca3af;
+  border-radius: 0.375rem;
+  background: #f9fafb;
+}
+.note-editor .note-file-attachment__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+  flex: 1 1 14rem;
+}
+/* A long filename wraps rather than being clipped: the whole point of the card
+   is knowing which file it is. */
+.note-editor .note-file-attachment__name {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #111827;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.note-editor .note-file-attachment__meta {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+.note-editor .note-file-attachment__unavailable {
+  font-size: 0.75rem;
+  color: #b91c1c;
+}
+.note-editor .note-file-attachment__error {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 0.75rem;
+  color: #b91c1c;
+}
+.note-editor .note-file-attachment__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+.note-editor .note-file-attachment__btn {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.25rem;
+  background: #ffffff;
+  color: #1f2937;
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+  cursor: pointer;
+}
+.note-editor .note-file-attachment__btn:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+.note-editor .note-file-attachment__btn:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 1px;
+}
+.note-editor .note-file-attachment__btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.note-editor .note-file-attachment__btn--danger {
+  color: #b91c1c;
+}
+.note-editor .note-file-attachment--missing {
+  border-color: #fca5a5;
+  border-left-color: #dc2626;
+  background: #fef2f2;
+}
+/* Selection is shown as a heavier border plus a ring, not a colour swap. */
+.note-editor .note-file-attachment--selected {
+  border-color: #3b82f6;
+  border-left-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.35);
+}
+/* Shown only on paper — see the print block at the end of this file. */
+.note-editor .note-file-attachment__print-note {
+  display: none;
+}
+
+.dark .note-editor .note-file-attachment {
+  border-color: #4b5563;
+  border-left-color: #6b7280;
+  background: #1f2937;
+}
+.dark .note-editor .note-file-attachment__name {
+  color: #f3f4f6;
+}
+.dark .note-editor .note-file-attachment__meta {
+  color: #9ca3af;
+}
+.dark .note-editor .note-file-attachment__unavailable,
+.dark .note-editor .note-file-attachment__error {
+  color: #fca5a5;
+}
+.dark .note-editor .note-file-attachment__btn {
+  border-color: #4b5563;
+  background: #111827;
+  color: #e5e7eb;
+}
+.dark .note-editor .note-file-attachment__btn:hover:not(:disabled) {
+  background: #374151;
+}
+.dark .note-editor .note-file-attachment__btn--danger {
+  color: #fca5a5;
+}
+.dark .note-editor .note-file-attachment--missing {
+  border-color: #7f1d1d;
+  border-left-color: #dc2626;
+  background: #2a1414;
+}
+.dark .note-editor .note-file-attachment--selected {
+  border-color: #60a5fa;
+  border-left-color: #3b82f6;
+}
+
+/* Legacy temporary attachment links.
+   The previous path inserted <a href="blob:…">. TipTap's own link-protocol
+   check refuses `blob:` when note HTML is parsed, so such a link normally
+   arrives as plain filename text and nothing renders here. This rule is
+   defence in depth for any route that still produces one: it reads as
+   unavailable through text and border, not through colour, and the bytes it
+   pointed at are gone — a blob: URL dies with the document that created it. */
+.note-editor a[href^="blob:"] {
+  color: #6b7280;
+  text-decoration: line-through;
+  border-bottom: 1px dashed #9ca3af;
+  cursor: not-allowed;
+}
+.note-editor a[href^="blob:"]::after {
+  content: " (attached file unavailable)";
+  font-size: 0.75rem;
+  text-decoration: none;
+}
+.dark .note-editor a[href^="blob:"] {
+  color: #9ca3af;
+  border-bottom-color: #6b7280;
+}
+
+/* Browser print: an attachment's editing controls are not part of the printed
+   note, and paper cannot carry the file — so the card prints as a plain
+   reference that says exactly that. */
+@media print {
+  .note-editor .note-file-attachment {
+    background: transparent;
+    page-break-inside: avoid;
+  }
+  .note-editor .note-file-attachment__actions,
+  .note-editor .note-file-attachment__error {
+    display: none !important;
+  }
+  .note-editor .note-file-attachment__print-note {
+    display: block;
+    font-size: 0.75rem;
+    color: #374151;
+  }
+}
+
 /* Tables */
 .note-editor table {
   border-collapse: collapse;

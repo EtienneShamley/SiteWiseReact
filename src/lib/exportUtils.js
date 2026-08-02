@@ -1,16 +1,32 @@
 // Heavy libs will load only when needed (keeps bundle lean)
 import { resolveExportImageHtml } from "./exportImageAssets";
+import { resolveExportFileAttachmentHtml } from "./exportFileAttachments";
 
 let TurndownServiceMod = null;
 let gfmPluginFn = null;
 
-// A Free-form image is stored as a reference to an IndexedDB Blob, so every
-// export must resolve those references to inline data URLs first. This is the
-// ONE place that happens, and it happens on a copy: the editor document and the
-// stored note HTML are never touched. It throws with a user-facing message when
-// a referenced image cannot be produced, which aborts the export rather than
-// downloading a document with a photo silently missing from it.
-const exportableEditorHTML = (editor) => resolveExportImageHtml(editor.getHTML());
+/**
+ * The ONE place stored note HTML is turned into exportable HTML.
+ *
+ * Two resolutions, in order, both on a detached copy — the editor document, the
+ * stored note HTML and the stored assets are never touched:
+ *
+ *   1. Images are references to IndexedDB Blobs, and an exported file has to
+ *      stand alone, so they are inlined as data URLs. This step THROWS with a
+ *      user-facing message when an image cannot be produced, which aborts the
+ *      export rather than downloading a document with a photo silently missing.
+ *   2. File attachments cannot be embedded in any of these formats, so each
+ *      becomes a static reference that says so. A missing attachment does not
+ *      abort the export — it is reported in place. This step also neutralizes
+ *      any legacy `blob:` anchor, so no dead temporary URL can reach a file.
+ *
+ * Both are idempotent, so calling this on already-resolved HTML is a scan
+ * rather than a second read.
+ */
+export const resolveExportHtml = async (html) =>
+  resolveExportFileAttachmentHtml(await resolveExportImageHtml(html));
+
+const exportableEditorHTML = (editor) => resolveExportHtml(editor.getHTML());
 
 export const suggestedTitle = (editor) => {
   if (!editor) return "notewise-note";
@@ -136,18 +152,24 @@ const buildHTMLDoc = (html) => `
       pre { background:#f5f5f5; padding:8px; overflow:auto; }
       h1, h2, h3 { page-break-after: avoid; }
       .page-break { page-break-before: always; }
+      /* An attached file cannot be embedded in this format. It is rendered as
+         a plain, honest reference — never as something that looks clickable. */
+      .note-file-attachment-export {
+        border:1px solid var(--border); border-radius:4px;
+        padding:6px 8px; margin:8px 0; font-size:0.95em;
+        page-break-inside: avoid;
+      }
+      .note-file-attachment-export span { color: var(--muted); }
     </style>
   </head>
   <body><div class="tiptap-content">${html}</div></body></html>
 `;
 
 // The `*String` variants take note HTML read straight from storage (see
-// ShareDialog), so they resolve image references through the same helper.
-// Resolution is idempotent — an already-resolved string contains no reference
-// left to resolve — so calling it again on the ShareDialog path is a no-op scan
-// rather than a second read.
+// ShareDialog), so they resolve image and attachment references through the
+// same helper the editor-based exporters use.
 export const exportHTMLString = async ({ title, html }) => {
-  const resolved = await resolveExportImageHtml(html);
+  const resolved = await resolveExportHtml(html);
   const file = new Blob([buildHTMLDoc(resolved)], { type: "text/html;charset=utf-8" });
   const a = document.createElement("a");
   const url = URL.createObjectURL(file);
@@ -160,7 +182,7 @@ export const exportHTMLString = async ({ title, html }) => {
 };
 
 export const exportPDFString = async ({ title, html }) => {
-  const resolved = await resolveExportImageHtml(html);
+  const resolved = await resolveExportHtml(html);
   const [{ default: html2pdf }] = await Promise.all([import("html2pdf.js")]);
   const container = document.createElement("div");
   container.innerHTML = buildHTMLDoc(resolved);
@@ -175,7 +197,7 @@ export const exportPDFString = async ({ title, html }) => {
 };
 
 export const exportDOCXString = async ({ title, html }) => {
-  const resolved = await resolveExportImageHtml(html);
+  const resolved = await resolveExportHtml(html);
   // ESM path (matches your installed package)
   const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
   const htmlToDocx = mod.default || mod;
@@ -199,7 +221,7 @@ export const exportDOCXString = async ({ title, html }) => {
 };
 
 export const exportMDString = async ({ title, html }) => {
-  const resolved = await resolveExportImageHtml(html);
+  const resolved = await resolveExportHtml(html);
   const modTD = await import("turndown");
   const TurndownService = modTD.default || modTD;
   const modGFM = await import("turndown-plugin-gfm");

@@ -81,6 +81,14 @@ export const ASSET_KIND_NOTE_FILE = "note-file";
 // assets.
 export const ASSET_KIND_EDITOR_IMAGE = "editor-image";
 
+// Asset kind for a FILE attached to a Free-form note (an ordinary business
+// document — see src/lib/editorFileAttachments.js). Referenced from the note's
+// rich-text document by `data-file-asset-id`, which is why it is its own kind
+// rather than reusing note-file: Template-form File cleanup, Free-form image
+// cleanup and Free-form file cleanup must never reach each other's assets, and
+// the kind is checked before a stored Blob is ever opened or downloaded.
+export const ASSET_KIND_EDITOR_FILE = "editor-file";
+
 let dbPromise = null;
 
 function openDb() {
@@ -347,6 +355,27 @@ export async function createEditorImageAsset(blob, { name, metadata } = {}) {
   const record = makeAssetRecord({
     id: newId(),
     kind: ASSET_KIND_EDITOR_IMAGE,
+    name: name || blob.name || null,
+    blob,
+    metadata,
+  });
+  await saveAsset(record);
+  return record.id;
+}
+
+// Creates and persists a NEW Free-form file-attachment asset. Same contract as
+// createPhotoAsset: the resolved promise IS the write confirmation, and the
+// caller must not insert an editor node until it resolves.
+//
+// `blob` may be the picked File itself, or the same bytes re-wrapped with the
+// canonical MIME type when the browser reported a generic one — which is why
+// `name` is supplied separately (a re-wrapped Blob has no filename of its own).
+// The record's mimeType comes from the Blob, so the stored type is always the
+// one the safe-open policy will later read.
+export async function createEditorFileAsset(blob, { name, metadata } = {}) {
+  const record = makeAssetRecord({
+    id: newId(),
+    kind: ASSET_KIND_EDITOR_FILE,
     name: name || blob.name || null,
     blob,
     metadata,

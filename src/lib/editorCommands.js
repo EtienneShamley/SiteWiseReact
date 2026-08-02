@@ -13,6 +13,13 @@
 // selection after the click.
 
 import { EDITOR_IMAGE_INSERT_MESSAGE } from "./editorImageAssets";
+import {
+  FILE_ATTACHMENT_NODE_NAME,
+  FILE_INSERT_MESSAGE,
+  isAllowedFileMimeType,
+  isSafeAssetId,
+} from "./editorFileAttachments";
+import { normalizeMimeType, safeDownloadFilename } from "./safeAttachmentOpen";
 import { normalizeImageUrl, normalizeLinkUrl } from "./editorUrlSafety";
 
 const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i;
@@ -166,5 +173,86 @@ export function insertImageAsset(editor, { assetId, alt, width, height } = {}) {
   }
 
   if (!applied) return { ok: false, error: EDITOR_IMAGE_INSERT_MESSAGE };
+  return { ok: true, assetId: id };
+}
+
+// Does the document actually contain an attachment node for this asset?
+//
+// insertContent() reports success generously, so the transaction's own return
+// value is not enough to conclude that a reference now exists — and the caller
+// deletes the asset when it does not. This confirms it from the resulting
+// document. A fake editor with no `state` (unit tests) skips the check.
+function documentReferencesAsset(editor, assetId) {
+  const doc = editor && editor.state && editor.state.doc;
+  if (!doc || typeof doc.descendants !== "function") return true;
+  let found = false;
+  try {
+    doc.descendants((node) => {
+      if (found) return false;
+      if (
+        node &&
+        node.type &&
+        node.type.name === FILE_ATTACHMENT_NODE_NAME &&
+        node.attrs &&
+        node.attrs.assetId === assetId
+      ) {
+        found = true;
+      }
+      return !found;
+    });
+  } catch {
+    return false;
+  }
+  return found;
+}
+
+/**
+ * Insert a reference to a FILE already persisted in IndexedDB.
+ *
+ * The caller MUST have a confirmed asset write before calling this — the node
+ * IS the reference, so inserting one for bytes that do not exist would put a
+ * permanently unavailable attachment into the note.
+ *
+ * Only the four reference attributes are written. No object URL, no Blob and no
+ * runtime state reaches the document (see src/lib/editorFileAttachments.js).
+ * The filename is sanitized here as well as at serialization time, so a hostile
+ * name cannot enter the document by any route.
+ *
+ * Returns ok:false when the editor refuses the transaction or the node does not
+ * appear, so the caller can delete the now-unreferenced asset rather than
+ * orphaning it.
+ */
+export function insertFileAttachment(
+  editor,
+  { assetId, name, mimeType, size } = {}
+) {
+  if (!editor) return noEditor();
+
+  const id = typeof assetId === "string" ? assetId.trim() : "";
+  if (!isSafeAssetId(id)) return { ok: false, error: FILE_INSERT_MESSAGE };
+
+  const mime = normalizeMimeType(mimeType);
+  const attrs = {
+    assetId: id,
+    name: safeDownloadFilename(name),
+    mimeType: isAllowedFileMimeType(mime) ? mime : null,
+    size: Number(size) > 0 ? Math.round(Number(size)) : 0,
+  };
+
+  let applied = false;
+  try {
+    applied =
+      editor
+        .chain()
+        .focus()
+        .insertContent({ type: FILE_ATTACHMENT_NODE_NAME, attrs })
+        .run() !== false;
+  } catch {
+    applied = false;
+  }
+
+  if (!applied || !documentReferencesAsset(editor, id)) {
+    return { ok: false, error: FILE_INSERT_MESSAGE };
+  }
   return { ok: true, assetId: id };
 }
