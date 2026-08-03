@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { FaDownload, FaChevronDown } from "react-icons/fa";
 import useOutsideClose from "../../hooks/useOutsideClose";
 import { exportPDF, exportDOCX, exportHTML, exportMD } from "../../lib/exportUtils";
+import { captureFreeformExportSnapshot } from "../../lib/freeformExportPdf";
 import {
   exportTemplateForm,
   TEMPLATE_EXPORT_FORMAT,
@@ -47,30 +48,34 @@ import {
  * neither report an outcome nor clear a newer request's status.
  */
 
+// Each entry states how the FREE-FORM view produces its file. The PDF is the
+// one format that paginates against measured content, so it consumes the
+// captured immutable snapshot rather than a live editor; the other three are
+// unchanged and still read the captured editor directly.
 const FORMATS = [
   {
     key: TEMPLATE_EXPORT_FORMAT.PDF,
     name: "PDF",
     item: "PDF (.pdf)",
-    freeform: exportPDF,
+    freeform: ({ snapshot }) => exportPDF(snapshot),
   },
   {
     key: TEMPLATE_EXPORT_FORMAT.DOCX,
     name: "Word",
     item: "Word (.docx)",
-    freeform: exportDOCX,
+    freeform: ({ editor }) => exportDOCX(editor),
   },
   {
     key: TEMPLATE_EXPORT_FORMAT.HTML,
     name: "HTML",
     item: "HTML (.html)",
-    freeform: exportHTML,
+    freeform: ({ editor }) => exportHTML(editor),
   },
   {
     key: TEMPLATE_EXPORT_FORMAT.MD,
     name: "Markdown",
     item: "Markdown (.md)",
-    freeform: exportMD,
+    freeform: ({ editor }) => exportMD(editor),
   },
 ];
 
@@ -136,6 +141,22 @@ export default function ExportMenu({ source }) {
       });
     }
 
+    // The Free-form DOCUMENT itself, captured synchronously in this same tick —
+    // before the first await, before any state update, and before React can
+    // re-render with another note. Everything downstream reads this immutable
+    // string, so switching notes or views mid-export cannot change the content,
+    // the filename or the file that lands.
+    const capturedSnapshot =
+      capturedView === NOTE_VIEW.FREEFORM
+        ? captureFreeformExportSnapshot({
+            identity,
+            noteId: capturedNoteId,
+            noteTitle: capturedTitle,
+            view: capturedView,
+            editor: capturedEditor,
+          })
+        : null;
+
     const requestId = requestRef.current + 1;
     requestRef.current = requestId;
     inFlightRef.current = true;
@@ -170,8 +191,12 @@ export default function ExportMenu({ source }) {
           ? exportSuccessMessage(capturedView)
           : exportFailureMessage(capturedView);
       } else {
-        // The captured editor, not "whatever the toolbar owns now".
-        await format.freeform(capturedEditor);
+        // The captured snapshot and the captured editor — never "whatever the
+        // toolbar owns now", and never anything re-read from the live view.
+        await format.freeform({
+          snapshot: capturedSnapshot,
+          editor: capturedEditor,
+        });
         ok = true;
         message = exportSuccessMessage(capturedView);
       }

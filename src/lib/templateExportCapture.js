@@ -1,6 +1,15 @@
 // src/lib/templateExportCapture.js
 //
-// The rasterisation geometry for the Template PDF export.
+// The rasterisation geometry SHARED by both PDF exporters.
+//
+// Despite the file name (kept because renaming a verified module for tidiness
+// is not worth the churn), nothing here is Template-specific: it is the
+// physical A4 and html2pdf capture arithmetic, and the Free-form PDF planner
+// reads exactly these values. Only the arithmetic is shared — the Template row
+// pagination model (templateExportPagination.js) and the Free-form rich-text
+// block model (freeformExportBlocks.js) stay entirely separate. See
+// docs/PROJECT_DECISIONS.md → "Free-form PDF pagination uses measured block
+// planning".
 //
 // html2pdf renders the whole document into ONE tall canvas and then slices that
 // canvas into A4 pages. Three separate roundings decide where those slices land,

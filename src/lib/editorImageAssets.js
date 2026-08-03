@@ -34,6 +34,13 @@ export const EDITOR_IMAGE_LOADING_TEXT = "Loading image…";
 export const EDITOR_IMAGE_INSERT_MESSAGE =
   "This image could not be added to the note. Nothing was changed.";
 
+// An image an export could not produce. The export says so in place rather than
+// leaving a gap, so a reader can never mistake a missing photo for one that was
+// never there. It carries no internal asset id — that identifier means nothing
+// outside this browser and has no business in a downloaded document.
+export const EXPORT_IMAGE_PLACEHOLDER_CLASS = "note-image-unavailable-export";
+export const EXPORT_IMAGE_UNAVAILABLE_TEXT = "Image unavailable in this export.";
+
 /** True for a transient object URL, which must never be persisted. */
 export function isBlobUrl(src) {
   return typeof src === "string" && /^blob:/i.test(src.trim());

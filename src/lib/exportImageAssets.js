@@ -27,7 +27,12 @@
 
 import { getAsset, ASSET_KIND_EDITOR_IMAGE } from "./assetStorage";
 import { isAllowedImageMimeType, normalizeMimeType } from "./imageProcessing";
-import { EDITOR_IMAGE_ASSET_ATTR, isBlobUrl } from "./editorImageAssets";
+import {
+  EDITOR_IMAGE_ASSET_ATTR,
+  EXPORT_IMAGE_PLACEHOLDER_CLASS,
+  EXPORT_IMAGE_UNAVAILABLE_TEXT,
+  isBlobUrl,
+} from "./editorImageAssets";
 
 // Only images owned by the Free-form editor may be inlined by this path.
 export const EXPORTABLE_IMAGE_ASSET_KINDS = [ASSET_KIND_EDITOR_IMAGE];
@@ -69,21 +74,60 @@ function defaultParseHtml(html) {
 }
 
 /**
+ * How an image that cannot be produced is handled.
+ *
+ * `ABORT` is the long-standing behaviour and stays the DEFAULT: the DOCX, HTML
+ * and Markdown exporters refuse the whole document rather than shipping one
+ * with a photo silently missing, and their output is unchanged by this option.
+ *
+ * `PLACEHOLDER` is used by the paginated PDF exporter. A PDF is planned page by
+ * page against measured content, and losing a whole multi-page report because
+ * one photo is gone is a worse outcome than saying so where the photo was — so
+ * that one image degrades locally, in place, and the rest of the note still
+ * exports. Nothing is re-persisted and no internal asset id is emitted.
+ */
+export const EXPORT_MISSING_IMAGE = Object.freeze({
+  ABORT: "abort",
+  PLACEHOLDER: "placeholder",
+});
+
+// A visible, restrained stand-in. `textContent`, never innerHTML: the alt text
+// is the user's own data, not markup.
+function buildImagePlaceholder(doc, altText) {
+  const block = doc.createElement("div");
+  block.setAttribute("class", EXPORT_IMAGE_PLACEHOLDER_CLASS);
+  const alt = typeof altText === "string" ? altText.trim() : "";
+  block.textContent = alt
+    ? `${EXPORT_IMAGE_UNAVAILABLE_TEXT} (${alt})`
+    : EXPORT_IMAGE_UNAVAILABLE_TEXT;
+  return block;
+}
+
+/**
  * Resolve every `data-asset-id` image in `html` to an inline data URL.
  *
  * Each distinct asset id is loaded and converted EXACTLY ONCE per call, however
  * many times the note references it, so a note that repeats one photo does not
  * repeat the work or the read.
  *
+ * @param deps.onMissing EXPORT_MISSING_IMAGE.ABORT (default) or PLACEHOLDER
  * @returns {Promise<string>} export-only HTML
- * @throws {Error} with a user-facing message; the caller must abort the export
+ * @throws {Error} with a user-facing message, in ABORT mode only; the caller
+ *   must abort the export
  */
 export async function resolveExportImageHtml(html, deps = {}) {
   const {
     loadAsset = getAsset,
     blobToDataUrl = defaultBlobToDataUrl,
     parseHtml = defaultParseHtml,
+    onMissing = EXPORT_MISSING_IMAGE.ABORT,
   } = deps;
+
+  const degrade = onMissing === EXPORT_MISSING_IMAGE.PLACEHOLDER;
+  const refuse = (message) => {
+    if (!degrade) throw new Error(message);
+    return null;
+  };
 
   if (typeof html !== "string" || !html) return "";
   // Nothing to resolve and nothing to check for the common case of a note with
@@ -91,37 +135,50 @@ export async function resolveExportImageHtml(html, deps = {}) {
   if (!/<img/i.test(html)) return html;
 
   const container = parseHtml(html);
+  const doc = container.ownerDocument || document;
   const images = Array.from(container.querySelectorAll("img"));
 
   // A dead reference is refused before any storage work happens.
+  const dead = new Set();
   for (const img of images) {
-    if (isBlobUrl(img.getAttribute("src"))) {
-      throw new Error(EXPORT_BLOB_URL_MESSAGE);
-    }
+    if (!isBlobUrl(img.getAttribute("src"))) continue;
+    refuse(EXPORT_BLOB_URL_MESSAGE);
+    dead.add(img);
   }
 
   const ids = [];
   for (const img of images) {
+    if (dead.has(img)) continue;
     const id = (img.getAttribute(EDITOR_IMAGE_ASSET_ATTR) || "").trim();
     if (id && !ids.includes(id)) ids.push(id);
   }
-  if (ids.length === 0) return container.innerHTML;
 
   const resolved = new Map();
+  const failed = new Set();
   for (const id of ids) {
     let asset;
     try {
       asset = await loadAsset(id);
     } catch {
-      throw new Error(EXPORT_UNREADABLE_ASSET_MESSAGE);
+      refuse(EXPORT_UNREADABLE_ASSET_MESSAGE);
+      failed.add(id);
+      continue;
     }
-    if (!asset || !asset.blob) throw new Error(EXPORT_MISSING_ASSET_MESSAGE);
+    if (!asset || !asset.blob) {
+      refuse(EXPORT_MISSING_ASSET_MESSAGE);
+      failed.add(id);
+      continue;
+    }
     if (asset.kind && !EXPORTABLE_IMAGE_ASSET_KINDS.includes(asset.kind)) {
-      throw new Error(EXPORT_UNSUPPORTED_ASSET_MESSAGE);
+      refuse(EXPORT_UNSUPPORTED_ASSET_MESSAGE);
+      failed.add(id);
+      continue;
     }
     // Decided from the retrieved Blob's own type, never from the reference.
     if (!isAllowedImageMimeType(normalizeMimeType(asset.blob.type))) {
-      throw new Error(EXPORT_UNSUPPORTED_ASSET_MESSAGE);
+      refuse(EXPORT_UNSUPPORTED_ASSET_MESSAGE);
+      failed.add(id);
+      continue;
     }
 
     let dataUrl;
@@ -131,13 +188,20 @@ export async function resolveExportImageHtml(html, deps = {}) {
       // Deliberately OUR message, never the underlying error text: an internal
       // failure string is not something a user can act on, and this string is
       // shown to them verbatim.
-      throw new Error(EXPORT_UNREADABLE_ASSET_MESSAGE);
+      refuse(EXPORT_UNREADABLE_ASSET_MESSAGE);
+      failed.add(id);
+      continue;
     }
     resolved.set(id, dataUrl);
   }
 
   for (const img of images) {
     const id = (img.getAttribute(EDITOR_IMAGE_ASSET_ATTR) || "").trim();
+    if (dead.has(img) || (id && failed.has(id))) {
+      // Only reachable in PLACEHOLDER mode — ABORT already threw.
+      img.replaceWith(buildImagePlaceholder(doc, img.getAttribute("alt")));
+      continue;
+    }
     if (!id) continue;
     img.setAttribute("src", resolved.get(id));
     // The reference is meaningless outside this browser; the export carries the

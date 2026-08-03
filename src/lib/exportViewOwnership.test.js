@@ -272,6 +272,97 @@ describe("Free-form export is preserved", () => {
     expect(exportMenu).toMatch(
       /import \{ exportPDF, exportDOCX, exportHTML, exportMD \}/
     );
-    expect(exportMenu).toMatch(/format\.freeform\(capturedEditor\)/);
+    // Every format is handed the CAPTURED snapshot and the CAPTURED editor —
+    // never live state, and never anything re-read from the current view.
+    expect(exportMenu).toMatch(
+      /format\.freeform\(\{\s*snapshot: capturedSnapshot,\s*editor: capturedEditor,?\s*\}\)/
+    );
+    expect(exportMenu).not.toMatch(/format\.freeform\(editor\)/);
+    expect(exportMenu).not.toMatch(/format\.freeform\(freeformEditor\)/);
+  });
+
+  test("the Free-form document is captured before the first await", () => {
+    // The snapshot is built in the same synchronous tick as the click, so a
+    // note or view switch during the export cannot substitute the content.
+    const capture = exportMenu.indexOf("captureFreeformExportSnapshot({");
+    const firstAwait = exportMenu.indexOf("await ");
+    expect(capture).toBeGreaterThan(-1);
+    expect(firstAwait).toBeGreaterThan(-1);
+    expect(capture).toBeLessThan(firstAwait);
+    // ...and the editor is still never read by the control itself.
+    expect(exportMenu).not.toMatch(/getHTML/);
+  });
+});
+
+describe("one Free-form PDF layout, produced in exactly one place", () => {
+  const exportUtils = withoutComments(read("lib/exportUtils.js"));
+  const runner = withoutComments(read("lib/freeformExportPdf.js"));
+
+  test("every Free-form PDF path goes through the shared planner", () => {
+    // The export control, the ShareDialog single file and the ZIP entries.
+    expect(exportUtils).toMatch(/exportPDF[\s\S]{0,400}exportFreeformPdf/);
+    expect(exportUtils).toMatch(/exportPDFString[\s\S]{0,400}exportFreeformPdf/);
+    expect(shareDialog).toMatch(/buildFreeformPdfFile\(/);
+  });
+
+  test("no Free-form PDF path builds its own html2pdf options any more", () => {
+    // Three hard-coded copies of margin/scale/format used to exist; the runner
+    // is the only place they may be stated.
+    for (const source of [exportUtils, shareDialog]) {
+      // The html2pdf option, not the `margin:10px 0` in the shared HTML/DOCX
+      // stylesheet, which is deliberately unchanged.
+      expect(source).not.toMatch(/margin:\s*10\s*,/);
+      expect(source).not.toMatch(/html2canvas:\s*\{/);
+      expect(source).not.toMatch(/jsPDF:\s*\{/);
+    }
+    expect(runner).toMatch(/margin:\s*20\s*,/);
+  });
+
+  test("the geometry comes from the shared, alignment-tested arithmetic", () => {
+    expect(runner).toMatch(/captureWidthPx\(\)/);
+    expect(runner).toMatch(/captureHeightPx\(pageCount\)/);
+    // No independently hard-coded paper dimension anywhere in the runner.
+    expect(runner).not.toMatch(/\b(210|297|170|257)\b\s*[*/]/);
+  });
+
+  test("the Free-form planner never reaches for Template row pagination", () => {
+    for (const file of [
+      "lib/freeformExportPdf.js",
+      "lib/freeformExportPlan.js",
+      "lib/freeformExportBlocks.js",
+      "lib/freeformExportPdfHtml.js",
+    ]) {
+      const source = withoutComments(read(file));
+      expect(source).not.toMatch(/templateExportPagination/);
+      expect(source).not.toMatch(/templateExportHtml/);
+      expect(source).not.toMatch(/templateExportModel/);
+    }
+  });
+
+  test("no attachment binary is bundled and no network call is made", () => {
+    for (const file of [
+      "lib/freeformExportPdf.js",
+      "lib/freeformExportPlan.js",
+      "lib/freeformExportBlocks.js",
+      "lib/freeformExportPdfHtml.js",
+    ]) {
+      const source = withoutComments(read(file));
+      expect(source).not.toMatch(/\bfetch\(/);
+      expect(source).not.toMatch(/XMLHttpRequest/);
+      expect(source).not.toMatch(/downloadZip|jszip/i);
+    }
+  });
+
+  test("the abandoned-overlay cleanup is ownership-safe, never by class", () => {
+    const cleanup = withoutComments(read("lib/html2pdfExportJob.js"));
+    const templateExport = withoutComments(read("lib/templateExport.js"));
+    // A class-only sweep would tear down a concurrent export's DOM.
+    expect(cleanup).toMatch(/EXPORT_JOB_ATTR/);
+    expect(cleanup).toMatch(/getAttribute\(EXPORT_JOB_ATTR\) === id/);
+    for (const source of [runner, templateExport]) {
+      expect(source).toMatch(/markExportJob\(/);
+      expect(source).toMatch(/releaseExportJob\(/);
+      expect(source).not.toMatch(/querySelectorAll\(["'`]\.html2pdf__overlay/);
+    }
   });
 });

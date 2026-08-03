@@ -24,6 +24,7 @@ import {
   EXPORT_UNREADABLE_ASSET_MESSAGE,
   EXPORT_UNSUPPORTED_ASSET_MESSAGE,
 } from "./exportImageAssets";
+import { EXPORT_UNSPLITTABLE_MESSAGE } from "./freeformExportPlan";
 
 export const EXPORT_STATUS = {
   IDLE: "idle",
@@ -94,6 +95,10 @@ const FREEFORM_EXPORT_DETAIL = new Map([
   [
     EXPORT_BLOB_URL_MESSAGE,
     "It contains a temporary image reference that is no longer valid.",
+  ],
+  [
+    EXPORT_UNSPLITTABLE_MESSAGE,
+    "Part of it is too large to fit on a single page and could not be divided safely.",
   ],
 ]);
 

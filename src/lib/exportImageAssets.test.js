@@ -11,13 +11,18 @@
 
 import {
   EXPORT_BLOB_URL_MESSAGE,
+  EXPORT_MISSING_IMAGE,
   EXPORT_MISSING_ASSET_MESSAGE,
   EXPORT_UNREADABLE_ASSET_MESSAGE,
   EXPORT_UNSUPPORTED_ASSET_MESSAGE,
   resolveExportImageHtml,
 } from "./exportImageAssets";
 import { ASSET_KIND_EDITOR_IMAGE, ASSET_KIND_NOTE_PHOTO } from "./assetStorage";
-import { EDITOR_IMAGE_ASSET_ATTR } from "./editorImageAssets";
+import {
+  EDITOR_IMAGE_ASSET_ATTR,
+  EXPORT_IMAGE_PLACEHOLDER_CLASS,
+  EXPORT_IMAGE_UNAVAILABLE_TEXT,
+} from "./editorImageAssets";
 
 const imgRef = (id, extra = "") => `<img ${EDITOR_IMAGE_ASSET_ATTR}="${id}"${extra}>`;
 
@@ -246,5 +251,83 @@ describe("no network is involved", () => {
     } finally {
       global.fetch = realFetch;
     }
+  });
+});
+
+describe("the missing-image policy is opt-in, so other formats cannot change", () => {
+  // The paginated PDF exporter degrades ONE unavailable image to a visible
+  // placeholder so a long report is not lost to a single missing photo. DOCX,
+  // HTML and Markdown keep the long-standing refusal, and they get it by
+  // DEFAULT — nothing has to remember to ask for it.
+
+  test("the default is still to refuse the whole export", async () => {
+    const s = store({});
+    await expect(
+      resolveExportImageHtml(imgRef("gone"), {
+        loadAsset: s.loadAsset,
+        blobToDataUrl,
+      })
+    ).rejects.toThrow(EXPORT_MISSING_ASSET_MESSAGE);
+  });
+
+  test("ABORT stated explicitly behaves identically to the default", async () => {
+    const s = store({});
+    await expect(
+      resolveExportImageHtml(imgRef("gone"), {
+        loadAsset: s.loadAsset,
+        blobToDataUrl,
+        onMissing: EXPORT_MISSING_IMAGE.ABORT,
+      })
+    ).rejects.toThrow(EXPORT_MISSING_ASSET_MESSAGE);
+  });
+
+  test("PLACEHOLDER degrades one image and keeps every other one", async () => {
+    const s = store({ good: asset("image/png") });
+    const html = await resolveExportImageHtml(
+      `<p>lead</p>${imgRef("gone")}${imgRef("good")}<p>tail</p>`,
+      {
+        loadAsset: s.loadAsset,
+        blobToDataUrl,
+        onMissing: EXPORT_MISSING_IMAGE.PLACEHOLDER,
+      }
+    );
+    expect(html).toContain("lead");
+    expect(html).toContain("tail");
+    expect(html).toContain(EXPORT_IMAGE_PLACEHOLDER_CLASS);
+    expect(html).toContain(EXPORT_IMAGE_UNAVAILABLE_TEXT);
+    // The image that WAS available is still embedded.
+    expect(html).toContain("data:image/png;base64,QUJD");
+    expect(html.match(/<img/g)).toHaveLength(1);
+  });
+
+  test("PLACEHOLDER keeps safe alt text and emits no internal id", async () => {
+    const s = store({});
+    const html = await resolveExportImageHtml(
+      imgRef("internal-42", ' alt="North elevation"'),
+      {
+        loadAsset: s.loadAsset,
+        blobToDataUrl,
+        onMissing: EXPORT_MISSING_IMAGE.PLACEHOLDER,
+      }
+    );
+    expect(html).toContain("North elevation");
+    expect(html).not.toContain("internal-42");
+    expect(html).not.toContain(EDITOR_IMAGE_ASSET_ATTR);
+  });
+
+  test("PLACEHOLDER never lets a dead blob: reference reach the document", async () => {
+    const html = await resolveExportImageHtml('<img src="blob:http://x/1">', {
+      onMissing: EXPORT_MISSING_IMAGE.PLACEHOLDER,
+    });
+    expect(html).not.toContain("blob:");
+    expect(html).toContain(EXPORT_IMAGE_PLACEHOLDER_CLASS);
+  });
+
+  test("PLACEHOLDER still leaves a note with no images completely untouched", async () => {
+    const source = '<p>text</p><img src="https://example.com/remote.png">';
+    const html = await resolveExportImageHtml(source, {
+      onMissing: EXPORT_MISSING_IMAGE.PLACEHOLDER,
+    });
+    expect(html).toBe(source);
   });
 });

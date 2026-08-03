@@ -50,21 +50,21 @@ export const safeFilename = (base, ext) => {
   return `${clean || "notewise-note"}_${ts}.${ext}`;
 };
 
-export async function exportPDF(editor) {
-  // Resolve images BEFORE loading the exporter, so a refused export costs
-  // nothing and cannot half-start.
-  const html = await exportableEditorHTML(editor);
-  const [{ default: html2pdf }] = await Promise.all([import("html2pdf.js")]);
-  const container = document.createElement("div");
-  container.innerHTML = buildHTMLDoc(html);
-  const opt = {
-    margin: 10,
-    filename: safeFilename(suggestedTitle(editor), "pdf"),
-    image: { type: "jpeg", quality: 0.98 },
-    html2canvas: { scale: 2, useCORS: true },
-    jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-  };
-  return html2pdf().from(container).set(opt).save();
+/**
+ * The Free-form PDF.
+ *
+ * Unlike the other three formats this takes a captured SNAPSHOT, not a live
+ * editor: the PDF is paginated against measured content, which is asynchronous
+ * work, and a live editor must not be read across it. The snapshot is built
+ * synchronously by the caller (see freeformExportPdf.captureFreeformExportSnapshot).
+ *
+ * The runner is loaded lazily, exactly like html2pdf itself — it also keeps
+ * this module free of a static cycle, since the runner needs `safeFilename`
+ * from here.
+ */
+export async function exportPDF(snapshot) {
+  const { exportFreeformPdf } = await import("./freeformExportPdf");
+  return exportFreeformPdf(snapshot);
 }
 
 export async function exportDOCX(editor) {
@@ -181,19 +181,17 @@ export const exportHTMLString = async ({ title, html }) => {
   URL.revokeObjectURL(url);
 };
 
+// Stored note HTML goes through the SAME paginated runner the export control
+// uses, so the ShareDialog cannot produce a differently laid-out Free-form PDF.
+// It resolves its own images and attachments, which is why the raw stored HTML
+// is handed over rather than a pre-resolved string.
 export const exportPDFString = async ({ title, html }) => {
-  const resolved = await resolveExportHtml(html);
-  const [{ default: html2pdf }] = await Promise.all([import("html2pdf.js")]);
-  const container = document.createElement("div");
-  container.innerHTML = buildHTMLDoc(resolved);
-  const opt = {
-    margin: 10,
-    filename: safeFilename(title, "pdf"),
-    image: { type: "jpeg", quality: 0.98 },
-    html2canvas: { scale: 2, useCORS: true },
-    jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-  };
-  return html2pdf().from(container).set(opt).save();
+  const { captureFreeformExportSnapshot, exportFreeformPdf } = await import(
+    "./freeformExportPdf"
+  );
+  return exportFreeformPdf(
+    captureFreeformExportSnapshot({ noteTitle: title, html })
+  );
 };
 
 export const exportDOCXString = async ({ title, html }) => {

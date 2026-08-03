@@ -51,6 +51,12 @@ import {
   captureHeightPx,
   captureWidthPx,
 } from "./templateExportCapture";
+import { decodeImageSize } from "./exportImageDecode";
+import {
+  createExportJobId,
+  markExportJob,
+  releaseExportJob,
+} from "./html2pdfExportJob";
 
 export const TEMPLATE_EXPORT_FORMAT = {
   PDF: "pdf",
@@ -158,11 +164,6 @@ function downloadBlob(blob, filename) {
 
 const HEAD_BLOCK_ID = "__nw_tpl_head__";
 
-// How long a single evidence photo may take to decode before the export gives
-// up on measuring it exactly. Everything is a local data URL — no network is
-// involved — so this only bounds a pathological decode, never a request.
-const PHOTO_DECODE_TIMEOUT_MS = 5000;
-
 // An offscreen probe laid out at the real usable page width. Only the
 // class-scoped export rules are injected (every selector starts with
 // `.nw-tpl-`), so the running application cannot be restyled while it exists.
@@ -210,40 +211,6 @@ function createMeasureProbe() {
 /* ------------------------------------------------------------------------ */
 /* Measurement preparation                                                   */
 /* ------------------------------------------------------------------------ */
-
-/**
- * One image's real pixel dimensions, from its already-resolved data URL.
- *
- * Never rejects and never waits indefinitely: an image that cannot be decoded
- * resolves to `null` and keeps the existing CSS `max-height` behaviour, which
- * scales down and still cannot crop.
- */
-function decodeImageSize(dataUrl) {
-  return new Promise((resolve) => {
-    let settled = false;
-    let timer = null;
-    const done = (value) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      resolve(value);
-    };
-    try {
-      const img = new Image();
-      img.onload = () =>
-        done(
-          img.naturalWidth > 0 && img.naturalHeight > 0
-            ? { width: img.naturalWidth, height: img.naturalHeight }
-            : null
-        );
-      img.onerror = () => done(null);
-      timer = setTimeout(() => done(null), PHOTO_DECODE_TIMEOUT_MS);
-      img.src = dataUrl;
-    } catch {
-      done(null);
-    }
-  });
-}
 
 /**
  * Give every photo real intrinsic dimensions BEFORE anything is measured.
@@ -462,15 +429,25 @@ async function runPdf(model) {
   }
   if (!layout.ok) return layout;
 
+  // html2pdf removes its own click-blocking overlay only on the SUCCESS path.
+  // The container is stamped so a failed run can take down THIS job's overlay
+  // and no other's — a concurrent export's DOM is never touched. Nothing about
+  // a successful export changes: the stamp is an attribute, and the overlay is
+  // already gone by the time this releases.
+  const jobId = createExportJobId();
   try {
     const { default: html2pdf } = await import("html2pdf.js");
+    const container = buildPdfContainer(model, layout);
+    markExportJob(container, jobId);
     await html2pdf()
-      .from(buildPdfContainer(model, layout))
+      .from(container)
       .set(pdfOptions(layout.pages.length, exportFilename(model, "pdf")))
       .save();
     return { ok: true, evidence: model.evidence };
   } catch {
     return { ok: false, reason: TEMPLATE_EXPORT_RUNTIME_FAILURE.RENDER_FAILED };
+  } finally {
+    releaseExportJob(jobId);
   }
 }
 
@@ -608,12 +585,19 @@ export async function buildTemplateExportFile({ identity, noteTitle, format }, d
     if (format === TEMPLATE_EXPORT_FORMAT.PDF) {
       const layout = await planPdf(model);
       if (!layout.ok) return layout;
-      const { default: html2pdf } = await import("html2pdf.js");
-      const blob = await html2pdf()
-        .from(buildPdfContainer(model, layout))
-        .set(pdfOptions(layout.pages.length))
-        .outputPdf("blob");
-      return { ok: true, name: exportFilename(model, "pdf"), blob };
+      const jobId = createExportJobId();
+      try {
+        const { default: html2pdf } = await import("html2pdf.js");
+        const container = buildPdfContainer(model, layout);
+        markExportJob(container, jobId);
+        const blob = await html2pdf()
+          .from(container)
+          .set(pdfOptions(layout.pages.length))
+          .outputPdf("blob");
+        return { ok: true, name: exportFilename(model, "pdf"), blob };
+      } finally {
+        releaseExportJob(jobId);
+      }
     }
   } catch {
     return { ok: false, reason: TEMPLATE_EXPORT_RUNTIME_FAILURE.RENDER_FAILED };

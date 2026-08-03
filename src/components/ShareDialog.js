@@ -13,6 +13,10 @@ import {
 } from "../lib/templateExport";
 import { resolveTemplateExportSource } from "../lib/templateExportModel";
 import { getNoteTemplateInstance } from "../lib/templateModel";
+import {
+  buildFreeformPdfFile,
+  captureFreeformExportSnapshot,
+} from "../lib/freeformExportPdf";
 
 const FORMAT_OPTS = [
   { label: "PDF (.pdf)", value: "pdf" },
@@ -117,6 +121,15 @@ export default function ShareDialog({
   // bundled into the archive: each attachment travels as the same honest
   // metadata reference every other format uses.
   const buildBlobFor = async ({ title, html: storedHtml }) => {
+    // The PDF is produced by the ONE Free-form planner, exactly as the export
+    // control and the single-file path produce theirs, so an archived note and
+    // a directly exported note are the same document. It resolves its own
+    // images and attachments, so it takes the raw stored HTML.
+    if (format === "pdf") {
+      return buildFreeformPdfFile(
+        captureFreeformExportSnapshot({ noteTitle: title, html: storedHtml })
+      );
+    }
     const html = await resolveExportHtml(storedHtml);
     if (format === "html") {
       const doc = new Blob([`<!doctype html>${html}`], { type: "text/html;charset=utf-8" });
@@ -131,16 +144,6 @@ export default function ShareDialog({
       if (gfm) td.use(gfm);
       const md = td.turndown(html);
       return { name: safeFilename(title, "md"), blob: new Blob([md], { type: "text/markdown;charset=utf-8" }) };
-    }
-    if (format === "pdf") {
-      const [{ default: html2pdf }] = await Promise.all([import("html2pdf.js")]);
-      const container = document.createElement("div");
-      container.innerHTML = `
-        <html><head><meta charset="utf-8"/></head>
-        <body><div class="tiptap-content">${html}</div></body></html>`;
-      const opt = { margin: 10, image: { type: "jpeg", quality: 0.98 }, html2canvas: { scale: 2, useCORS: true }, jsPDF: { unit: "mm", format: "a4", orientation: "portrait" } };
-      const pdf = await html2pdf().from(container).set(opt).outputPdf("blob");
-      return { name: safeFilename(title, "pdf"), blob: pdf };
     }
     // docx
     const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
