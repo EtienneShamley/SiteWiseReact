@@ -8,6 +8,7 @@ import {
 } from "../../lib/templateExport";
 import { getNoteTemplateInstance } from "../../lib/templateModel";
 import { NOTE_VIEW, noteViewLabel } from "../../lib/noteViews";
+import { actionButtonClass, menuItemClass } from "../../lib/interactionStyles";
 import {
   EXPORT_STATUS,
   beginExport,
@@ -221,7 +222,16 @@ export default function ExportMenu({ source }) {
         ref={triggerRef}
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100 border border-gray-300 dark:border-gray-700 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50"
+        // Turquoise only while this control's own dropdown is open — `open` is
+        // set false the moment an export starts or the menu closes, so the
+        // state can never outlive the thing it describes. `aria-expanded` IS
+        // correct here: this trigger owns a real expanding menu.
+        className={actionButtonClass({
+          open,
+          busy: running,
+          disabled,
+          className: "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium",
+        })}
         title={
           unavailable
             ? "There is nothing to export in this view yet"
@@ -254,7 +264,12 @@ export default function ExportMenu({ source }) {
             <button
               key={format.key}
               role="menuitem"
-              className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-gray-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/60"
+              // No text-colour utility: .nw-menu-item inherits the popover's
+              // own colour, and this stylesheet loads after Tailwind's
+              // utilities, so one here would be inert and misleading.
+              className={menuItemClass({
+                className: "w-full text-left px-4 py-2 text-sm",
+              })}
               // Each item names its format AND its source.
               aria-label={exportFormatLabel(view, format.name)}
               onClick={runExport(format)}

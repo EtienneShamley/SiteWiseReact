@@ -679,13 +679,17 @@ export default function BottomBar({
             disabled={isDisabled}
           />
 
-          {/* NEW: converter dropdown (no label, no button) */}
+          {/* Converter dropdown (no label, no button). Same shared field class
+              and same padding/radius/type scale as the two selects beside it,
+              so the three read as one family. The bare `border` utility is
+              dropped: the field class owns the border in every state. */}
           <select
-            className="text-xs rounded border px-2 py-1 bg-white dark:bg-[#1b1b1b] text-black dark:text-white border-gray-300 dark:border-gray-600"
+            className="nw-field px-2 py-1 text-xs rounded"
             value={coordSystem}
             onChange={(e) => setCoordSystem(e.target.value)}
             disabled={isDisabled}
             title="Choose coordinate system for the converted line"
+            aria-label="Coordinate system for the converted line"
           >
             {COORD_SYSTEM_OPTIONS.map(opt => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>

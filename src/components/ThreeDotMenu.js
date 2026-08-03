@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ShareDialog from "./ShareDialog";
 import { useAppState } from "../context/AppStateContext";
+import { menuItemClass } from "../lib/interactionStyles";
 
 export default function ThreeDotMenu({
   anchorRef, // Element OR ref to element
@@ -120,30 +121,21 @@ export default function ThreeDotMenu({
             <button
               key={opt.label || idx}
               type="button"
-              className={`flex items-center gap-2 px-4 py-2 w-full text-left text-sm transition-colors
-                ${
-                  opt?.danger
-                    ? "text-red-500 hover:bg-red-500/10"
-                    : isDark
-                    ? "text-white hover:bg-[#333]"
-                    : "text-gray-900 hover:bg-gray-100"
-                }
-                ${idx === options.length - 1 ? "rounded-b-xl" : ""}`}
+              // Destructive rows keep the danger variant in every state — they
+              // never pick up the turquoise interaction accent on hover, focus
+              // or press. Non-destructive rows inherit the menu's own text
+              // colour and take the shared hover surface.
+              className={menuItemClass({
+                danger: !!opt?.danger,
+                className: `flex items-center gap-2 px-4 py-2 w-full text-left text-sm ${
+                  idx === options.length - 1 ? "rounded-b-xl" : ""
+                }`,
+              })}
               onClick={() => handleOptionClick(opt)}
             >
-              {opt?.icon && (
-                <span
-                  className={
-                    opt.danger
-                      ? "text-red-500"
-                      : isDark
-                      ? "text-white"
-                      : "text-gray-700"
-                  }
-                >
-                  {opt.icon}
-                </span>
-              )}
+              {/* The icon inherits the row's colour, so a destructive row's
+                  icon and label can never disagree. */}
+              {opt?.icon && <span className="text-current">{opt.icon}</span>}
               <span>{opt.label}</span>
             </button>
           );

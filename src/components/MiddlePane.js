@@ -5,6 +5,7 @@ import { FaEllipsisV, FaPen, FaShare, FaTrash } from "react-icons/fa";
 import ThreeDotMenu from "./ThreeDotMenu";
 import ShareDialog from "./ShareDialog";
 import { useTheme } from "../context/ThemeContext";
+import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interactionStyles";
 
 const STORAGE_KEY = "sitewise-notes";
 
@@ -43,9 +44,15 @@ export default function MiddlePane() {
   if (!activeFolderId) return null;
 
   if (hidden) {
+    // The restore counterpart of this pane's Hide control, and deliberately the
+    // same interaction family: an action, not a location. It reopens the pane
+    // rather than expanding a region it owns, so it takes no open, primary or
+    // current state. Position, dimensions, wording and handler are unchanged.
     return (
       <button
-        className="fixed top-4 left-32 bg-gray-200 dark:bg-gray-800 text-black dark:text-white px-2 py-1 rounded z-50"
+        className={actionButtonClass({
+          className: "fixed top-4 left-32 px-2 py-1 rounded z-50",
+        })}
         onClick={() => setHidden(false)}
       >
         Notes
@@ -83,9 +90,13 @@ export default function MiddlePane() {
       className="w-80 bg-white dark:bg-gray-900 text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-800 space-y-3"
     >
       <div className="flex items-center justify-between mb-2">
+        {/* Heading typography and wording unchanged — it is not a control and
+            carries no interaction state. */}
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Notes</h2>
+        {/* Actions, not locations: same hierarchy as the matching Sidebar
+            controls, so the two panes read as one interaction family. */}
         <button
-          className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-2 py-1 rounded-lg text-black dark:text-white text-xs transition-colors"
+          className={actionButtonClass({ className: "px-2 py-1 rounded-lg text-xs" })}
           onClick={() => setHidden(true)}
         >
           Hide
@@ -93,7 +104,7 @@ export default function MiddlePane() {
       </div>
 
       <button
-        className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded-lg text-black dark:text-white text-sm mb-2 transition-colors"
+        className={actionButtonClass({ className: "px-3 py-1 rounded-lg text-sm mb-2" })}
         onClick={onNewNote}
       >
         + New Note
@@ -110,9 +121,15 @@ export default function MiddlePane() {
             return (
               <li
                 key={note.id}
-                className={`nw-nav-item group flex items-center gap-2 rounded-xl px-3 py-3 cursor-pointer ${
-                  isActive ? "nw-nav-item--active" : ""
-                }`}
+                className={navItemClass({
+                  active: isActive,
+                  className:
+                    "group flex items-center gap-2 rounded-xl px-3 py-3 cursor-pointer",
+                })}
+                // The current note is whichever note the editor actually has
+                // open — switching notes moves this in the same render, so no
+                // stale row can keep the current-location treatment.
+                aria-current={isActive ? "true" : undefined}
                 onClick={() => setCurrentNoteId(note.id)}
               >
                 <span className="flex-1 truncate" title={note.title}>
@@ -120,7 +137,7 @@ export default function MiddlePane() {
                 </span>
                 <button
                   ref={el => (noteRefs.current[note.id] = el)}
-                  className="ml-2 p-1.5 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-black dark:hover:text-white transition-colors"
+                  className={iconButtonClass({ className: "ml-2 p-1.5 rounded-full" })}
                   onClick={e => {
                     e.stopPropagation();
                     setMenu({ noteId: note.id });

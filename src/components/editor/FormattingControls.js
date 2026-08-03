@@ -19,6 +19,7 @@ import {
 import { validateEditorImageFile } from "../../lib/editorImages";
 import { insertLocalImageAsset } from "../../lib/editorImageInsert";
 import { isToolbarControlAllowed } from "../../lib/editorToolbarState";
+import { iconButtonClass, menuItemClass } from "../../lib/interactionStyles";
 import useTransientMessage from "../../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../../lib/transientMessage";
 
@@ -276,19 +277,32 @@ export default function FormattingControls({
 
   if (!editor || !s) return null;
 
-  // Shared visual language for every toolbar control: neutral gray hover,
-  // smooth transitions, and a focus-visible ring for keyboard use.
-  const btnBase =
-    "p-2 rounded-md text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50";
-  const btnDisabled =
-    "disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent disabled:hover:text-gray-700 dark:disabled:hover:text-gray-300";
-  const activeBg = "bg-gray-200 dark:bg-gray-700";
+  // Shared interaction FOUNDATION only: inactive grey, hover, focus-visible and
+  // disabled come from the app-wide icon-button variant, so this toolbar behaves
+  // like every other icon control.
+  //
+  // The per-format ACTIVE colours below are deliberately left alone. Bold,
+  // headings, code, task lists and highlight are distinguishable from each
+  // other at a glance precisely because they do not share one colour; folding
+  // them into a single turquoise would remove information from the toolbar.
+  const btnBase = iconButtonClass({ className: "p-2 rounded-md" });
+  const btnDisabled = "disabled:opacity-40 disabled:cursor-not-allowed";
+  // `nw-icon-btn--own-active` opts an active control out of the SHARED hover so
+  // this toolbar's own per-format colours survive being hovered. Without it the
+  // shared hover would repaint an active Bold or Heading in the generic hover
+  // colour and the format cue would disappear under the cursor.
+  const activeBg = "nw-icon-btn--own-active bg-gray-200 dark:bg-gray-700";
+  // Native controls keep their native appearance (see the "Native controls stay
+  // native" rule below) and take only the shared focus indicator, so keyboard
+  // focus reads identically across the whole toolbar.
   const selectCls =
-    "rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50 disabled:opacity-40 disabled:cursor-not-allowed";
+    "nw-focusable rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
   const colorInputCls =
-    "w-7 h-7 rounded-md border border-gray-300 dark:border-gray-700 cursor-pointer transition-colors hover:border-gray-400 dark:hover:border-gray-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50 disabled:opacity-40 disabled:cursor-not-allowed";
-  const menuItemCls =
-    "w-full text-left px-3 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent transition-colors";
+    "nw-focusable w-7 h-7 rounded-md border border-gray-300 dark:border-gray-700 cursor-pointer transition-colors hover:border-gray-400 dark:hover:border-gray-500 disabled:opacity-40 disabled:cursor-not-allowed";
+  const menuItemCls = menuItemClass({
+    className:
+      "w-full text-left px-3 py-1.5 text-sm disabled:opacity-40 disabled:cursor-not-allowed",
+  });
 
   // Every control shares the same "is this surface live" gate, so none of them
   // can act while the editor they would target is hidden or absent — plus the
@@ -542,7 +556,11 @@ export default function FormattingControls({
               <button
                 role="menuitem"
                 onClick={() => runTable(() => editor.chain().focus().deleteTable().run())}
-                className={`${menuItemCls} text-red-600 dark:text-red-400`}
+                // Destructive: red in every state, never the interaction accent.
+                className={menuItemClass({
+                  danger: true,
+                  className: "w-full text-left px-3 py-1.5 text-sm",
+                })}
               >
                 Delete table
               </button>
@@ -577,7 +595,7 @@ export default function FormattingControls({
           aria-label="Highlight color"
           className={colorInputCls}
         />
-        <button onClick={() => editor.chain().focus().toggleHighlight().run()} disabled={offFor("highlight")} aria-pressed={pressed(s.highlight)} className={`${btnBase} ${btnDisabled} ${pressed(s.highlight) ? "bg-yellow-300 dark:bg-yellow-300/80 text-gray-900" : ""}`} title="Highlight" aria-label="Highlight"><FaHighlighter /></button>
+        <button onClick={() => editor.chain().focus().toggleHighlight().run()} disabled={offFor("highlight")} aria-pressed={pressed(s.highlight)} className={`${btnBase} ${btnDisabled} ${pressed(s.highlight) ? "nw-icon-btn--own-active bg-yellow-300 dark:bg-yellow-300/80 text-gray-900" : ""}`} title="Highlight" aria-label="Highlight"><FaHighlighter /></button>
       </div>
 
       {/* Why the controls are inert right now. Present only when there is

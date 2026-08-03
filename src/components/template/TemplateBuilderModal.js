@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from "react";
 import TemplateBuilderDoc from "./TemplateBuilderDoc";
 import TemplateLibrary from "./TemplateLibrary";
+import { actionButtonClass } from "../../lib/interactionStyles";
 
-const btnCls =
-  "px-3 py-1 border rounded text-black dark:text-white bg-white dark:bg-neutral-800 " +
-  "hover:bg-gray-200 dark:hover:bg-neutral-700";
+// Back and Close are text-labelled actions: idle grey, shared hover box,
+// temporary turquoise while held, and no permanent selected state. Neither owns
+// anything that stays open — Back changes which view this modal shows and Close
+// dismisses it — so neither takes the open or primary variant.
+const btnCls = actionButtonClass({ className: "px-3 py-1 rounded" });
 
 // Hosts two views of the reusable-template workspace: the Template Library
 // (default — where company templates are created and managed) and editing one

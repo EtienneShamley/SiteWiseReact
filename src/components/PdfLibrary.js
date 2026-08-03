@@ -9,6 +9,7 @@ import { FaEllipsisV, FaPen, FaTrash, FaFilePdf } from "react-icons/fa";
 import { useAppState } from "../context/AppStateContext";
 import { useTheme } from "../context/ThemeContext";
 import ThreeDotMenu from "./ThreeDotMenu";
+import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interactionStyles";
 
 function metaLine(doc) {
   const when = doc?.updatedAt || doc?.createdAt;
@@ -57,8 +58,15 @@ export default function PdfLibrary() {
           onChange={onUpload}
           className="hidden"
         />
+        {/* A call to action, not a location. It used to borrow the SELECTED-tab
+            class and so rendered permanently turquoise as though it were the
+            current view; the primary action variant carries accent presence
+            without ever claiming to be where the user is. */}
         <button
-          className="nw-seg nw-seg--active px-3 py-1.5 rounded-md text-sm"
+          className={actionButtonClass({
+            primary: true,
+            className: "px-3 py-1.5 rounded-md text-sm",
+          })}
           onClick={() => inputRef.current?.click()}
         >
           + Upload PDF
@@ -77,10 +85,17 @@ export default function PdfLibrary() {
           </div>
         ) : (
           <ul className="space-y-2 text-sm">
+            {/* Rows are deliberately never `active`: opening a PDF replaces this
+                whole list with the editor, so at no point is one of these rows
+                the visible current location. No PDF selection state is invented
+                to style a row the user cannot see. */}
             {pdfs.map((pdf) => (
               <li
                 key={pdf.id}
-                className="nw-nav-item group flex items-center gap-3 rounded-xl px-3 py-3 cursor-pointer"
+                className={navItemClass({
+                  className:
+                    "group flex items-center gap-3 rounded-xl px-3 py-3 cursor-pointer",
+                })}
                 onClick={() => setCurrentPdfId(pdf.id)}
               >
                 <FaFilePdf className="nw-nav-icon shrink-0" />
@@ -94,7 +109,7 @@ export default function PdfLibrary() {
                 </div>
                 <button
                   ref={(el) => (rowRefs.current[pdf.id] = el)}
-                  className="ml-2 p-1.5 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-black dark:hover:text-white transition-colors"
+                  className={iconButtonClass({ className: "ml-2 p-1.5 rounded-full" })}
                   onClick={(e) => {
                     e.stopPropagation();
                     setMenuId(pdf.id);

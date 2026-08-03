@@ -1,57 +1,130 @@
 /*
- * NoteWise navigation design tokens + shared nav classes.
+ * NoteWise interaction design tokens + shared interaction classes.
  *
- * Semantic tokens so navigation colours live in ONE place rather than being
- * hardcoded across every component. The NoteWise interaction accent is a bright
- * cyan-blue; adopting it is recorded in docs/PROJECT_DECISIONS.md. The
- * selected-row behaviour (translucent cyan fill + thin cyan left rail +
- * muted→cyan label) is inspired by the sidebar pattern in the root-level
- * Constrapp_v5.jsx (visual language only — not its colours or mark).
+ * Semantic tokens so interaction colours live in ONE place rather than being
+ * hardcoded across every component. Governed by docs/PROJECT_DECISIONS.md →
+ * "Constrapp-inspired interaction-state system", which extends the earlier
+ * navigation-only system to five variant families: navigation rows, segmented
+ * view controls, action buttons, icon buttons and destructive actions.
+ *
+ * The state formula (muted → raised hover surface → tinted active surface with
+ * an accent border and accent text) is the ONLY thing taken from the root-level
+ * Constrapp_v5.jsx. Its accent, palette, gradients, structure, wording, icons,
+ * spacing, typography and JS mouse-state implementation are not adopted.
  *
  * Colour roles reserved by convention:
- *   cyan-blue -> NoteWise branding, navigation selection + primary interaction
+ *   turquoise -> NoteWise branding, navigation selection + primary interaction
  *   green     -> saved / success / completed states (--nw-success)
  *   purple    -> AI-related features (--nw-ai-accent)
  *   amber/red -> warning / destructive states
  *   muted grey-> inactive navigation + secondary text
  *
- * Bright cyan-blue reads well on dark surfaces; on light surfaces the selected
- * label/rail use the darker cyan (--nw-accent-strong, ~4.7:1 on white) so text
- * stays accessible. Light-mode overlays use their own restrained tints — NOT
- * the dark rgba values.
+ * Two accents exist deliberately and must not be conflated:
+ *   --nw-accent / --nw-accent-strong  the BRAND MARK ("NW"), unchanged
+ *   --nw-accent-bright                INTERACTION states (active/open/focus)
+ *
+ * The interaction accent is brighter and denser than the brand accent, and is
+ * theme-tuned rather than shared: dark mode uses #2AE5F2 (~9.5:1 on the control
+ * bar, ~12.7:1 on the shell); light mode uses the deeper, denser #0B6E78
+ * (~6:1 on white), because a lighter value could not stay accessible there.
+ * Light-mode overlays use their own restrained tints — NOT the dark rgba values.
+ *
+ * GEOMETRY RULE: every variant reserves its border (and, for navigation rows,
+ * its left rail) transparently at rest, so no state change can move an element,
+ * its neighbours, its icon or its padding.
  */
 
 :root {
-  /* Brand accents */
-  --nw-accent: #39DDE9;              /* bright cyan-blue — brand mark (W), dark rail/text */
-  --nw-accent-strong: #1F7F88;       /* darker cyan-blue — mark (N), light-mode text/rail */
+  /* Brand accents — the "NW" mark only. Never used for interaction states. */
+  --nw-accent: #39DDE9;              /* bright cyan-blue — brand mark (W) */
+  --nw-accent-strong: #1F7F88;       /* darker cyan-blue — brand mark (N) */
   --nw-accent-foreground: #ffffff;   /* text on a solid accent fill */
 
-  /* Navigation row states (light theme) */
-  --nw-nav-muted-text: #64748b;      /* slate-500 — unselected label */
-  --nw-nav-active-text: #1F7F88;     /* darker cyan-blue — accessible on white (~4.7:1) */
-  --nw-nav-selected-bg: rgba(57, 221, 233, 0.16);  /* restrained cyan tint */
-  --nw-nav-hover-bg: rgba(57, 221, 233, 0.08);      /* weaker than selected */
-  --nw-nav-rail: #1F7F88;            /* thin left selection rail (contrast on light) */
+  /* Interaction accent (light theme) */
+  --nw-accent-bright: #0B6E78;       /* denser turquoise — ~6:1 on white */
+
+  /* Inactive */
+  --nw-nav-muted-text: #64748b;      /* slate-500 — unselected label + icon */
+
+  /* Hover — dark ink on a restrained dark-tinted surface. White hover text is
+     deliberately NOT used in light mode: it is unreadable on a pale surface. */
+  --nw-state-hover-text: #0f172a;    /* slate-900 */
+  --nw-state-hover-bg: rgba(15, 23, 42, 0.06);
+  --nw-state-hover-border: rgba(15, 23, 42, 0.10);
+
+  /* Active / current / open */
+  --nw-nav-active-text: #0B6E78;
+  --nw-nav-selected-bg: rgba(11, 110, 120, 0.12);
+  --nw-nav-active-border: rgba(11, 110, 120, 0.45);
+  --nw-nav-rail: #0B6E78;            /* thin left selection rail */
+
+  /* Retained alias: superseded by --nw-state-hover-bg, kept so any surface not
+     yet migrated cannot break silently. Do not use in new code. */
+  --nw-nav-hover-bg: var(--nw-state-hover-bg);
+
+  /* Keyboard focus */
+  --nw-focus-ring: rgba(11, 110, 120, 0.90);
+
+  /* Disabled */
+  --nw-state-disabled-text: #94a3b8; /* slate-400 */
+
+  /* Destructive — never inherits the interaction accent */
+  --nw-danger-text: #dc2626;         /* red-600 */
+  --nw-danger-hover-bg: rgba(220, 38, 38, 0.10);
+  --nw-danger-hover-border: rgba(220, 38, 38, 0.30);
+
+  /* Form controls (textarea / select / text input) */
+  --nw-field-bg: #ffffff;
+  --nw-field-text: #0f172a;          /* slate-900 */
+  --nw-field-border: #cbd5e1;        /* slate-300 — readable but quiet */
+  --nw-field-border-hover: #94a3b8;  /* slate-400 — slightly clearer */
+  --nw-field-placeholder: #64748b;   /* slate-500 — readable, still muted */
+  --nw-field-disabled-bg: #f1f5f9;   /* slate-100 */
 
   /* Structural */
   --nw-border: #cbd5e1;              /* slate-300 */
 
-  /* Reserved semantic roles (kept distinct from the cyan accent) */
+  /* Reserved semantic roles (kept distinct from the turquoise accent) */
   --nw-success: #16a34a;             /* green-600 — saved / success */
   --nw-ai-accent: #7c3aed;           /* violet-600 — AI features */
 }
 
 .dark {
-  --nw-accent: #39DDE9;              /* bright cyan-blue */
+  --nw-accent: #39DDE9;
   --nw-accent-strong: #1F7F88;
   --nw-accent-foreground: #ffffff;
 
+  --nw-accent-bright: #2AE5F2;       /* brighter, denser turquoise */
+
   --nw-nav-muted-text: #94a3b8;      /* slate-400 */
-  --nw-nav-active-text: #39DDE9;     /* bright cyan-blue — high contrast on dark (~10:1) */
-  --nw-nav-selected-bg: rgba(57, 221, 233, 0.12);
-  --nw-nav-hover-bg: rgba(57, 221, 233, 0.06);       /* weaker than selected */
-  --nw-nav-rail: #39DDE9;
+
+  --nw-state-hover-text: #ffffff;
+  --nw-state-hover-bg: rgba(255, 255, 255, 0.08);
+  --nw-state-hover-border: rgba(255, 255, 255, 0.14);
+
+  --nw-nav-active-text: #2AE5F2;
+  --nw-nav-selected-bg: rgba(42, 229, 242, 0.16);
+  --nw-nav-active-border: rgba(42, 229, 242, 0.50);
+  --nw-nav-rail: #2AE5F2;
+
+  --nw-nav-hover-bg: var(--nw-state-hover-bg);
+
+  --nw-focus-ring: rgba(42, 229, 242, 0.90);
+
+  --nw-state-disabled-text: #64748b; /* slate-500 */
+
+  --nw-danger-text: #f87171;         /* red-400 */
+  --nw-danger-hover-bg: rgba(248, 113, 113, 0.14);
+  --nw-danger-hover-border: rgba(248, 113, 113, 0.32);
+
+  /* Fields sit on the dark panel surfaces, so they need their own border —
+     the structural --nw-border is too dark to read as a field edge there. */
+  --nw-field-bg: #111827;            /* gray-900 */
+  --nw-field-text: #f1f5f9;          /* slate-100 */
+  --nw-field-border: #334155;        /* slate-700 */
+  --nw-field-border-hover: #64748b;  /* slate-500 */
+  --nw-field-placeholder: #94a3b8;   /* slate-400 */
+  --nw-field-disabled-bg: #0f172a;   /* slate-900 */
 
   --nw-border: #1e293b;              /* slate-800 */
 
@@ -60,58 +133,456 @@
 }
 
 /* -------------------------------------------------------------------------- */
+/* Shared foundation                                                          */
+/*                                                                            */
+/* Every variant transitions ONLY colour, background, border and outline, so a */
+/* state change can never animate a dimension, a position or a font size.      */
+/* -------------------------------------------------------------------------- */
+
+.nw-nav-item,
+.nw-seg,
+.nw-action,
+.nw-icon-btn,
+.nw-menu-item {
+  transition: color 140ms ease, background-color 140ms ease,
+    border-color 140ms ease, outline-color 140ms ease;
+}
+
+/* Focus replaces the browser indicator with a stronger one — it is never
+   merely removed. The offset keeps it visually distinct from the active fill,
+   so keyboard focus can never be mistaken for selection. */
+.nw-nav-item:focus-visible,
+.nw-seg:focus-visible,
+.nw-action:focus-visible,
+.nw-icon-btn:focus-visible,
+.nw-menu-item:focus-visible,
+.nw-focusable:focus-visible {
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: 2px;
+}
+
+/* `.nw-focusable` supplies the shared focus indicator and NOTHING else. It is
+   for native controls that must keep their own appearance — the toolbar's
+   <select> menus and <input type="color"> pickers — so keyboard focus looks the
+   same everywhere without restyling a native widget. */
+
+@media (prefers-reduced-motion: reduce) {
+  .nw-nav-item,
+  .nw-seg,
+  .nw-action,
+  .nw-icon-btn,
+  .nw-menu-item {
+    transition: none;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Navigation row                                                             */
 /*                                                                            */
-/* The 3px left rail is ALWAYS present (transparent when inactive) so the row */
-/* width and text position never shift between normal and selected states.    */
+/* The 3px left rail and the 1px surrounding border are ALWAYS present         */
+/* (transparent when inactive) so the row width, height and text position      */
+/* never shift between normal, hover and selected states.                      */
 /* -------------------------------------------------------------------------- */
 
 .nw-nav-item {
+  border: 1px solid transparent;
   border-left: 3px solid transparent;
   color: var(--nw-nav-muted-text);
   background-color: transparent;
-  transition: background-color 0.12s ease, color 0.12s ease,
-    border-color 0.12s ease;
 }
 
-.nw-nav-item:hover {
-  background-color: var(--nw-nav-hover-bg);
+.nw-nav-item:hover:not(.nw-nav-item--active):not(:disabled):not([aria-disabled="true"]) {
+  color: var(--nw-state-hover-text);
+  background-color: var(--nw-state-hover-bg);
+  border-color: var(--nw-state-hover-border);
+  border-left-color: transparent;
 }
 
-/* Icon inherits the muted label colour unless overridden while active. */
+/* Icon inherits the row's own colour in every state, so text and icon can
+   never disagree about whether the row is inactive, hovered or current. */
 .nw-nav-item .nw-nav-icon {
-  color: var(--nw-nav-muted-text);
+  color: inherit;
 }
 
 .nw-nav-item--active,
 .nw-nav-item--active:hover {
-  border-left-color: var(--nw-nav-rail);
-  background-color: var(--nw-nav-selected-bg);
   color: var(--nw-nav-active-text);
+  background-color: var(--nw-nav-selected-bg);
+  border-color: var(--nw-nav-active-border);
+  border-left-color: var(--nw-nav-rail);
+  /* Full-width rows can carry the extra weight without moving anything. */
   font-weight: 600;
 }
 
-.nw-nav-item--active .nw-nav-icon {
-  color: var(--nw-nav-active-text);
+.nw-nav-item:disabled,
+.nw-nav-item[aria-disabled="true"] {
+  color: var(--nw-state-disabled-text);
+  background-color: transparent;
+  border-color: transparent;
+  font-weight: inherit;
+  cursor: not-allowed;
 }
 
 /* -------------------------------------------------------------------------- */
-/* Segmented control (e.g. the Note / PDF editor tabs)                        */
+/* Segmented view control (Note / PDF, Free-form note / Template form)        */
+/*                                                                            */
+/* Font weight is deliberately NOT changed between states here: these are      */
+/* fixed-width pills sitting in a group, and a weight change would alter their */
+/* measured width and shift the group. The selected signal is carried by the   */
+/* turquoise text, tinted surface, turquoise border and aria-pressed instead.  */
 /* -------------------------------------------------------------------------- */
 
 .nw-seg {
+  border: 1px solid transparent;
   color: var(--nw-nav-muted-text);
   background-color: transparent;
-  transition: background-color 0.12s ease, color 0.12s ease;
 }
 
-.nw-seg:hover:not(.nw-seg--active) {
-  background-color: var(--nw-nav-hover-bg);
-  color: var(--nw-nav-active-text);
+/* Hover must never imply selection — it raises the surface and clarifies the
+   text, and deliberately does not use the turquoise accent. */
+.nw-seg:hover:not(.nw-seg--active):not(:disabled) {
+  color: var(--nw-state-hover-text);
+  background-color: var(--nw-state-hover-bg);
+  border-color: var(--nw-state-hover-border);
 }
 
-.nw-seg--active {
+.nw-seg--active,
+.nw-seg--active:hover {
   color: var(--nw-nav-active-text);
   background-color: var(--nw-nav-selected-bg);
-  font-weight: 600;
+  border-color: var(--nw-nav-active-border);
+}
+
+.nw-seg:disabled {
+  color: var(--nw-state-disabled-text);
+  background-color: transparent;
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Action button (Refine, Revert, Export, Template Library, …)                */
+/*                                                                            */
+/* An action is not a location. It rests grey and returns to grey: the         */
+/* turquoise --open state exists only while the control genuinely owns an open */
+/* menu or dialog, never as a "you pressed this once" memory.                  */
+/* -------------------------------------------------------------------------- */
+
+.nw-action {
+  border: 1px solid transparent;
+  color: var(--nw-nav-muted-text);
+  background-color: transparent;
+}
+
+/* Danger is EXCLUDED, not out-specified: this `:not()` chain outscores any
+   single-class danger rule, so without it Delete and Clear lost their red the
+   moment the pointer was over them. */
+.nw-action:hover:not(.nw-action--open):not(.nw-action--danger):not(:disabled) {
+  color: var(--nw-state-hover-text);
+  background-color: var(--nw-state-hover-bg);
+  border-color: var(--nw-state-hover-border);
+}
+
+.nw-action--open,
+.nw-action--open:hover {
+  color: var(--nw-nav-active-text);
+  background-color: var(--nw-nav-selected-bg);
+  border-color: var(--nw-nav-active-border);
+}
+
+/* Pressed — turquoise only while the pointer or key is genuinely held down.
+   It is `:active`, not a class, so it cannot outlive the press and no control
+   can be left looking selected after the action completes. Destructive
+   controls are excluded so they stay red while being pressed. */
+.nw-action:active:not(:disabled):not([aria-disabled="true"]):not(.nw-action--danger) {
+  color: var(--nw-nav-active-text);
+  background-color: var(--nw-nav-selected-bg);
+  border-color: var(--nw-nav-active-border);
+}
+
+.nw-action:disabled,
+.nw-action[aria-disabled="true"] {
+  color: var(--nw-state-disabled-text);
+  background-color: transparent;
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+/* Primary call to action (Upload PDF, Add PDF to this note). A genuine action,
+   so it is deliberately distinct from the SELECTED-tab treatment it used to
+   borrow — it carries accent presence at rest without ever claiming to be the
+   current location. */
+.nw-action--primary {
+  color: var(--nw-nav-active-text);
+  background-color: var(--nw-nav-selected-bg);
+  border-color: var(--nw-nav-active-border);
+}
+
+.nw-action--primary:hover:not(:disabled) {
+  color: var(--nw-nav-active-text);
+  background-color: var(--nw-nav-selected-bg);
+  border-color: var(--nw-nav-active-text);
+}
+
+.nw-action--primary:disabled,
+.nw-action--primary[aria-disabled="true"] {
+  color: var(--nw-state-disabled-text);
+  background-color: transparent;
+  border-color: transparent;
+}
+
+/* Destructive. Red in every state — idle, hover, focus and press included. It
+   never inherits the turquoise interaction accent, in any combination. Unlike
+   the icon-button danger state above, a destructive ACTION rests as red text
+   on a transparent surface; the red surface appears on interaction. */
+.nw-action.nw-action--danger:not(:disabled),
+.nw-action.nw-action--danger:hover:not(:disabled),
+.nw-action.nw-action--danger:focus:not(:disabled),
+.nw-action.nw-action--danger:focus-visible:not(:disabled),
+.nw-action.nw-action--danger:active:not(:disabled) {
+  color: var(--nw-danger-text);
+}
+
+.nw-action.nw-action--danger:hover:not(:disabled),
+.nw-action.nw-action--danger:active:not(:disabled) {
+  background-color: var(--nw-danger-hover-bg);
+  border-color: var(--nw-danger-hover-border);
+}
+
+.nw-action.nw-action--danger svg {
+  color: inherit;
+  fill: currentColor;
+}
+
+.nw-action--danger:disabled,
+.nw-action--danger[aria-disabled="true"] {
+  color: var(--nw-state-disabled-text);
+  background-color: transparent;
+  border-color: transparent;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Icon button (three-dot triggers, formatting-toolbar foundation)            */
+/*                                                                            */
+/* Icon size never changes between states — only colour, surface and border.   */
+/* -------------------------------------------------------------------------- */
+
+/* The border is reserved for EVERY icon button, including one whose active
+   colours belong to its own feature. */
+.nw-icon-btn {
+  border: 1px solid transparent;
+}
+
+/* The idle colours are withheld from `--own-active`. This file is imported
+   after Tailwind's utilities, so an unconditional `color` here would outrank a
+   utility class on the same element and repaint an active Bold or Heading in
+   the generic muted grey. Excluding the marker leaves those controls to their
+   own classes entirely. */
+.nw-icon-btn:not(.nw-icon-btn--own-active):not(.nw-icon-btn--danger) {
+  color: var(--nw-nav-muted-text);
+  background-color: transparent;
+}
+
+/* Danger is EXCLUDED here rather than out-specified below. A `:not()` chain
+   this long scores higher than any single-class danger rule, so without the
+   exclusion the generic hover repainted a destructive control in the ordinary
+   hover colour the moment the pointer was over it — which is precisely what a
+   recording microphone is, since the pointer is still on the button that
+   started it. */
+.nw-icon-btn:hover:not(.nw-icon-btn--pressed):not(.nw-icon-btn--own-active):not(.nw-icon-btn--danger):not(:disabled) {
+  color: var(--nw-state-hover-text);
+  background-color: var(--nw-state-hover-bg);
+  border-color: var(--nw-state-hover-border);
+}
+
+/* An icon button whose ACTIVE treatment belongs to its own feature — the
+   formatting toolbar's per-format colours (bold, heading, code, task list,
+   highlight). Those colours carry information the shared hover must not
+   overwrite, so this marker opts a currently-active control out of the shared
+   hover entirely. It takes the idle, focus and disabled foundation as normal.
+   It emits no colours of its own: this is an exclusion, not a variant. */
+
+/* Restrained pressed state — used for tool modes, not for "was clicked".
+   Doubled class so it outranks the idle rule's `:not()` above. */
+.nw-icon-btn.nw-icon-btn--pressed,
+.nw-icon-btn.nw-icon-btn--pressed:hover {
+  color: var(--nw-nav-active-text);
+  background-color: var(--nw-nav-selected-bg);
+  border-color: var(--nw-nav-active-border);
+}
+
+.nw-icon-btn:disabled,
+.nw-icon-btn[aria-disabled="true"] {
+  color: var(--nw-state-disabled-text);
+  background-color: transparent;
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+/* Danger on an icon button marks an ACTIVE DESTRUCTIVE STATE, not merely a
+   destructive action — the recording microphone, which is the Stop control
+   while it is live. It therefore carries the restrained red surface and border
+   AT REST, not only on hover, so the state is visible without touching it.
+   (The `--danger-hover-*` tokens are the restrained red surface; they are
+   reused here rather than duplicating the same two values under new names.)
+
+   `:not(:disabled)` on every rule so a genuinely disabled control — the
+   stopping/transcribing/summarising phases — takes the disabled treatment
+   instead of continuing to advertise itself as the live Stop control. */
+.nw-icon-btn.nw-icon-btn--danger:not(:disabled),
+.nw-icon-btn.nw-icon-btn--danger:hover:not(:disabled),
+.nw-icon-btn.nw-icon-btn--danger:focus:not(:disabled),
+.nw-icon-btn.nw-icon-btn--danger:focus-visible:not(:disabled),
+.nw-icon-btn.nw-icon-btn--danger:active:not(:disabled) {
+  color: var(--nw-danger-text);
+  background-color: var(--nw-danger-hover-bg);
+  border-color: var(--nw-danger-hover-border);
+}
+
+/* Interaction strengthens the edge only — never a colour change, so the
+   control cannot stop reading as destructive under the cursor. */
+.nw-icon-btn.nw-icon-btn--danger:hover:not(:disabled),
+.nw-icon-btn.nw-icon-btn--danger:active:not(:disabled) {
+  border-color: var(--nw-danger-text);
+}
+
+/* The glyph is an <svg fill="currentColor">; this makes the inheritance
+   explicit so no child colour can desynchronise the icon from its button. */
+.nw-icon-btn.nw-icon-btn--danger svg {
+  color: inherit;
+  fill: currentColor;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Form controls                                                              */
+/*                                                                            */
+/* One foundation for the textarea, select and text input of a converted      */
+/* feature. A field is not a navigation row and not an action: it never takes */
+/* an accent fill, and the accent appears only to show where the caret is.    */
+/*                                                                            */
+/* The 1px border exists in every state and only its COLOUR changes, so       */
+/* hovering or focusing a field cannot move it or its neighbours. The focus   */
+/* ring is an outline, which is drawn outside the box and costs no layout.    */
+/* -------------------------------------------------------------------------- */
+
+.nw-field {
+  color: var(--nw-field-text);
+  background-color: var(--nw-field-bg);
+  border: 1px solid var(--nw-field-border);
+  transition: color 140ms ease, background-color 140ms ease,
+    border-color 140ms ease, outline-color 140ms ease;
+}
+
+.nw-field::placeholder {
+  color: var(--nw-field-placeholder);
+  opacity: 1; /* Firefox dims placeholders by default; the token owns this. */
+}
+
+.nw-field:hover:not(:disabled):not(:focus) {
+  border-color: var(--nw-field-border-hover);
+}
+
+/* `:focus`, not `:focus-visible`, for the border: a field is focused because
+   the caret is in it, however it got there, and the caret must be findable.
+   The RING stays `:focus-visible` so a mouse click does not draw one. */
+.nw-field:focus {
+  border-color: var(--nw-accent-bright);
+  outline: none;
+}
+
+.nw-field:focus-visible {
+  border-color: var(--nw-accent-bright);
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: 2px;
+}
+
+.nw-field:disabled {
+  color: var(--nw-state-disabled-text);
+  background-color: var(--nw-field-disabled-bg);
+  border-color: var(--nw-field-border);
+  cursor: not-allowed;
+}
+
+/* Error is a border and a colour, never the only signal — the field is always
+   accompanied by a readable message (see .nw-field-help / role="alert"). */
+.nw-field--error,
+.nw-field--error:hover:not(:disabled):not(:focus) {
+  border-color: var(--nw-danger-text);
+}
+
+/* A label is ordinary readable text, deliberately NOT the muted inactive-
+   control colour: it names a field, it is not a control that is switched off. */
+.nw-field-label {
+  color: var(--nw-field-text);
+}
+
+.nw-field-help {
+  color: var(--nw-nav-muted-text);
+}
+
+.nw-field-help--error {
+  color: var(--nw-danger-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nw-field {
+    transition: none;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Status chip                                                                */
+/*                                                                            */
+/* A STATE OF A THING, not a place the user is and not something to press —   */
+/* e.g. which template is the default. It therefore has no hover, focus,      */
+/* pressed or disabled treatment, and must never be used on a control. It     */
+/* reuses the existing accent tokens rather than introducing its own value.   */
+/* -------------------------------------------------------------------------- */
+
+.nw-status-chip {
+  color: var(--nw-nav-active-text);
+  background-color: var(--nw-nav-selected-bg);
+  border: 1px solid var(--nw-nav-active-border);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Menu item (three-dot menus, the Export dropdown)                          */
+/*                                                                            */
+/* A menu row is full width, so it uses the hover surface without a border     */
+/* that would read as a box inside an already-bordered popover.                */
+/* -------------------------------------------------------------------------- */
+
+.nw-menu-item {
+  color: inherit;
+  background-color: transparent;
+}
+
+.nw-menu-item:hover:not(.nw-menu-item--danger):not(:disabled) {
+  color: var(--nw-state-hover-text);
+  background-color: var(--nw-state-hover-bg);
+}
+
+.nw-menu-item:disabled,
+.nw-menu-item[aria-disabled="true"] {
+  color: var(--nw-state-disabled-text);
+  background-color: transparent;
+  cursor: not-allowed;
+}
+
+.nw-menu-item.nw-menu-item--danger:not(:disabled),
+.nw-menu-item.nw-menu-item--danger:hover:not(:disabled),
+.nw-menu-item.nw-menu-item--danger:focus:not(:disabled),
+.nw-menu-item.nw-menu-item--danger:focus-visible:not(:disabled),
+.nw-menu-item.nw-menu-item--danger:active:not(:disabled) {
+  color: var(--nw-danger-text);
+}
+
+.nw-menu-item.nw-menu-item--danger:hover:not(:disabled),
+.nw-menu-item.nw-menu-item--danger:active:not(:disabled) {
+  background-color: var(--nw-danger-hover-bg);
+}
+
+.nw-menu-item.nw-menu-item--danger svg {
+  color: inherit;
+  fill: currentColor;
 }

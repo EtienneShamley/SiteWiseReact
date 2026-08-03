@@ -4,6 +4,7 @@ import { FaEllipsisV, FaPen, FaTrash, FaShare, FaFolder, FaFilePdf } from "react
 import ThreeDotMenu from "./ThreeDotMenu";
 import ShareDialog from "./ShareDialog";
 import { useTheme } from "../context/ThemeContext";
+import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interactionStyles";
 
 export default function Sidebar() {
   const {
@@ -59,11 +60,10 @@ export default function Sidebar() {
   const openMenu = (type, id) => setMenu({ type, id });
   const closeMenu = () => setMenu({ type: null, id: null });
 
-  const dotBase = "ml-2 p-1 rounded transition";
-  const dotColor =
-    theme === "dark"
-      ? "text-white hover:bg-gray-800 active:bg-gray-900"
-      : "text-black hover:bg-gray-200 active:bg-gray-300";
+  // One shared icon-button treatment for every three-dot trigger. It replaces a
+  // JS theme branch: the light/dark values now live in the token layer, so the
+  // trigger cannot drift out of step with the rows it sits in.
+  const dotBtnCls = iconButtonClass({ className: "ml-2 p-1 rounded" });
 
   // ---------- Share / Export helpers ----------
   const STORAGE_KEY = "sitewise-notes";
@@ -154,9 +154,15 @@ export default function Sidebar() {
   // ---------- end share helpers ----------
 
   if (hidden) {
+    // The restore counterpart of the Hide control below, in the same
+    // interaction family. It reopens the pane — it does not expand a region it
+    // owns and it is not a location, so it takes no open, primary, nav or
+    // current state. Position, dimensions, wording and handler are unchanged.
     return (
       <button
-        className="fixed top-2 left-2 bg-gray-200 dark:bg-gray-800 text-black dark:text-white px-2 py-1 rounded z-50"
+        className={actionButtonClass({
+          className: "fixed top-2 left-2 px-2 py-1 rounded z-50",
+        })}
         onClick={() => setHidden(false)}
       >
         Projects
@@ -185,22 +191,28 @@ export default function Sidebar() {
           </span>
         </div>
 
-        {/* Top-level workspace navigation: Projects | PDFs (cyan-blue active) */}
+        {/* Top-level workspace navigation: Projects | PDFs. The active state is
+            the `workspace` value that actually decides which workspace renders
+            — never hover, focus or whichever pane mounted last. */}
         <nav className="space-y-1 mb-3">
           <button
-            className={`nw-nav-item w-full flex items-center gap-2 rounded px-3 py-2 text-sm text-left ${
-              workspace === "projects" ? "nw-nav-item--active" : ""
-            }`}
+            className={navItemClass({
+              active: workspace === "projects",
+              className: "w-full flex items-center gap-2 rounded px-3 py-2 text-sm text-left",
+            })}
             onClick={() => setWorkspace("projects")}
+            aria-current={workspace === "projects" ? "page" : undefined}
           >
             <FaFolder className="nw-nav-icon shrink-0" />
             <span className="flex-1">Projects</span>
           </button>
           <button
-            className={`nw-nav-item w-full flex items-center gap-2 rounded px-3 py-2 text-sm text-left ${
-              workspace === "pdfs" ? "nw-nav-item--active" : ""
-            }`}
+            className={navItemClass({
+              active: workspace === "pdfs",
+              className: "w-full flex items-center gap-2 rounded px-3 py-2 text-sm text-left",
+            })}
             onClick={() => setWorkspace("pdfs")}
+            aria-current={workspace === "pdfs" ? "page" : undefined}
           >
             <FaFilePdf className="nw-nav-icon shrink-0" />
             <span className="flex-1">PDFs</span>
@@ -211,8 +223,14 @@ export default function Sidebar() {
         <>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold">Projects</h2>
+          {/* The left pane's utility controls are ACTIONS, not locations: they
+              rest muted grey, take the shared hover box and focus outline, show
+              the turquoise pressed state only while genuinely held down, and
+              return to idle. None of them owns anything that stays open, so
+              none takes `open`, `primary` or aria-current. Padding, radius,
+              type scale, wording and handlers are unchanged. */}
           <button
-            className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-2 py-1 rounded text-black dark:text-white text-xs"
+            className={actionButtonClass({ className: "px-2 py-1 rounded text-xs" })}
             onClick={() => setHidden(true)}
           >
             Hide
@@ -221,7 +239,7 @@ export default function Sidebar() {
 
         {/* Create Project */}
         <button
-          className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
+          className={actionButtonClass({ className: "px-3 py-1 rounded text-sm" })}
           onClick={createProject}
         >
           + New Project
@@ -229,7 +247,7 @@ export default function Sidebar() {
 
         {/* One button: project folder if a project is active; else ROOT folder */}
         <button
-          className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
+          className={actionButtonClass({ className: "px-3 py-1 rounded text-sm" })}
           onClick={() => {
             if (activeProjectId && !activeFolderId) {
               createFolder(activeProjectId);
@@ -246,7 +264,7 @@ export default function Sidebar() {
 
         {/* Always creates a root note */}
         <button
-          className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 px-3 py-1 rounded text-black dark:text-white text-sm"
+          className={actionButtonClass({ className: "px-3 py-1 rounded text-sm" })}
           onClick={createRootNote}
         >
           + New Note
@@ -256,8 +274,7 @@ export default function Sidebar() {
           rootNotes={rootNotes}
           setCurrentNoteId={setCurrentNoteId}
           clearActiveSelection={clearActiveSelection}
-          dotBase={dotBase}
-          dotColor={dotColor}
+          dotBtnCls={dotBtnCls}
           openMenu={openMenu}
           closeMenu={closeMenu}
           rootNoteRefs={rootNoteRefs}
@@ -276,9 +293,11 @@ export default function Sidebar() {
             return (
               <li
                 key={folder.id}
-                className={`nw-nav-item p-2 rounded flex justify-between items-center ${
-                  isRootFolderActive ? "nw-nav-item--active" : ""
-                }`}
+                className={navItemClass({
+                  active: isRootFolderActive,
+                  className: "p-2 rounded flex justify-between items-center",
+                })}
+                aria-current={isRootFolderActive ? "true" : undefined}
               >
                 <span
                   className="flex-1 cursor-pointer font-semibold"
@@ -288,7 +307,7 @@ export default function Sidebar() {
                 </span>
                 <button
                   ref={(el) => (rootFolderRefs.current[folder.id] = el)}
-                  className={`${dotBase} ${dotColor}`}
+                  className={dotBtnCls}
                   onClick={(e) => {
                     e.stopPropagation();
                     openMenu("root-folder", folder.id);
@@ -352,8 +371,7 @@ export default function Sidebar() {
           menu={menu}
           openMenu={openMenu}
           closeMenu={closeMenu}
-          dotBase={dotBase}
-          dotColor={dotColor}
+          dotBtnCls={dotBtnCls}
           renameProject={renameProject}
           deleteProject={deleteProject}
           renameFolder={renameFolder}
@@ -388,8 +406,7 @@ function RootNotesList({
   rootNotes,
   setCurrentNoteId,
   clearActiveSelection,
-  dotBase,
-  dotColor,
+  dotBtnCls,
   openMenu,
   closeMenu,
   rootNoteRefs,
@@ -407,9 +424,11 @@ function RootNotesList({
         return (
           <li
             key={note.id}
-            className={`nw-nav-item p-2 rounded flex justify-between items-center ${
-              isActive ? "nw-nav-item--active" : ""
-            }`}
+            className={navItemClass({
+              active: isActive,
+              className: "p-2 rounded flex justify-between items-center",
+            })}
+            aria-current={isActive ? "true" : undefined}
             onClick={() => {
               setCurrentNoteId(note.id);
               clearActiveSelection();
@@ -418,7 +437,7 @@ function RootNotesList({
             <span className="flex-1 cursor-pointer">{note.title}</span>
             <button
               ref={(el) => (rootNoteRefs.current[note.id] = el)}
-              className={`${dotBase} ${dotColor}`}
+              className={dotBtnCls}
               onClick={(e) => {
                 e.stopPropagation();
                 openMenu("root-note", note.id);
@@ -486,8 +505,7 @@ function ProjectTree({
   menu,
   openMenu,
   closeMenu,
-  dotBase,
-  dotColor,
+  dotBtnCls,
   renameProject,
   deleteProject,
   renameFolder,
@@ -507,9 +525,14 @@ function ProjectTree({
         return (
           <li
             key={pid}
-            className={`nw-nav-item p-2 rounded ${
-              isProjectActive ? "nw-nav-item--active" : ""
-            }`}
+            className={navItemClass({
+              active: isProjectActive,
+              className: "p-2 rounded",
+            })}
+            // A project is current only while NO folder inside it is selected,
+            // so a parent and its child can never both read as the current
+            // location. Expanded is not the same as current and never styles.
+            aria-current={isProjectActive ? "true" : undefined}
           >
             <div className="flex justify-between items-center rounded">
               <span
@@ -532,7 +555,7 @@ function ProjectTree({
               </span>
               <button
                 ref={(el) => (projRefs.current[pid] = el)}
-                className={`${dotBase} ${dotColor}`}
+                className={dotBtnCls}
                 onClick={(e) => {
                   e.stopPropagation();
                   openMenu("project", pid);
@@ -588,9 +611,11 @@ function ProjectTree({
                   return (
                     <li
                       key={folder.id}
-                      className={`nw-nav-item p-2 rounded ${
-                        isFolderActive ? "nw-nav-item--active" : ""
-                      }`}
+                      className={navItemClass({
+                        active: isFolderActive,
+                        className: "p-2 rounded",
+                      })}
+                      aria-current={isFolderActive ? "true" : undefined}
                     >
                       <div className="flex justify-between items-center rounded">
                         <span
@@ -610,7 +635,7 @@ function ProjectTree({
                         </span>
                         <button
                           ref={(el) => (folderRefs.current[folder.id] = el)}
-                          className={`${dotBase} ${dotColor}`}
+                          className={dotBtnCls}
                           onClick={(e) => {
                             e.stopPropagation();
                             openMenu("project-folder", folder.id);

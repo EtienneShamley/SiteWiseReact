@@ -75,6 +75,7 @@ import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import ListenInPanel from "./ListenInPanel";
 import { NOTE_VIEW, NOTE_VIEW_LABEL } from "../lib/noteViews";
+import { actionButtonClass, tabClass } from "../lib/interactionStyles";
 import useSaveStatus from "../hooks/useSaveStatus";
 import {
   SAVED_LOCALLY_HINT,
@@ -858,18 +859,20 @@ export default function MainArea() {
     clearInsertNotice();
   }, [noteKey, noteLayout, clearInsertNotice]);
 
-  // Shared control-bar visual language: neutral gray chips/segments,
-  // consistent hover/disabled/focus-visible treatment across every control.
-  const chipBtnCls =
-    "px-3 py-1.5 rounded-md text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-900/70 hover:text-gray-900 dark:hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50";
+  // Control-bar actions (Refine, Revert, Unlink PDF, ← Back to PDFs). These are
+  // actions, not locations: they rest muted grey and return to it. None of them
+  // owns anything that stays open, so none passes `open`.
+  const chipBtnCls = (options = {}) =>
+    actionButtonClass({
+      ...options,
+      className: "px-3 py-1.5 rounded-md text-xs font-medium",
+    });
 
-  // Note/PDF tab segments use the shared nav accent tokens (see styles/nav.css)
-  // so the active tab matches the blue navigation system everywhere.
+  // Segmented view controls. `active` is the real view state, and no font-weight
+  // change is emitted — these pills sit side by side and a weight change would
+  // alter their measured width and shift the group between states.
   const segmentBtnCls = (active) =>
-    [
-      "nw-seg px-3 py-1.5 rounded-md text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50",
-      active ? "nw-seg--active" : "",
-    ].join(" ");
+    tabClass({ active, className: "px-3 py-1.5 rounded-md text-sm" });
 
   /* ============================ PDFs workspace ============================= */
   // The global PDF workspace is independent of any project/folder/note. It shows
@@ -888,7 +891,7 @@ export default function MainArea() {
               </p>
             </div>
             <button
-              className={chipBtnCls}
+              className={chipBtnCls()}
               onClick={() => setCurrentPdfId(null)}
               title="Back to the PDF library"
             >
@@ -964,7 +967,10 @@ export default function MainArea() {
                 title={activeSaveFailed ? undefined : SAVED_LOCALLY_HINT}
                 aria-describedby={activeSaveFailed ? undefined : saveStatusHintId}
                 className={[
-                  "text-xs font-medium rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50",
+                  // Focusable (it carries the "saved in this browser" hint), so
+                  // it takes the shared focus indicator rather than a second,
+                  // differently-coloured one beside the converted controls.
+                  "nw-focusable text-xs font-medium rounded",
                   activeSaveFailed
                     ? "text-red-600 dark:text-red-400"
                     : "text-gray-600 dark:text-gray-300",
@@ -987,7 +993,17 @@ export default function MainArea() {
               in the Template form and never acts on the hidden editor. */}
           <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
             <button
-              className={chipBtnCls}
+              // Busy takes the disabled treatment; "Refining…" carries the
+              // status. There is no lingering turquoise once it completes —
+              // Refine owns nothing that stays open.
+              className={chipBtnCls({
+                busy: refineLoading,
+                disabled: !canRefineNow({
+                  freeformEnabled: freeformEditingEnabled,
+                  hasContent: true,
+                  isLoading: refineLoading,
+                }),
+              })}
               onClick={refineNote}
               disabled={
                 !canRefineNow({
@@ -996,6 +1012,7 @@ export default function MainArea() {
                   isLoading: refineLoading,
                 })
               }
+              aria-busy={refineLoading}
               title={
                 noteLayout === "template"
                   ? "AI Refine is available in the Free-form note only"
@@ -1006,7 +1023,15 @@ export default function MainArea() {
               {refineLoading ? "Refining…" : "Refine"}
             </button>
             <button
-              className={chipBtnCls}
+              // Revert restores content — it is not destructive, so it stays in
+              // the neutral action family and is never styled red.
+              className={chipBtnCls({
+                disabled: !canRevertRefine({
+                  freeformEnabled: freeformEditingEnabled,
+                  hasBackup: refineBackupHtml !== null,
+                  isLoading: refineLoading,
+                }),
+              })}
               onClick={revertRefine}
               disabled={
                 !canRevertRefine({
@@ -1100,16 +1125,27 @@ export default function MainArea() {
           <div />
         )}
 
-        <div className="flex items-center rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
+        {/* The note workspace's two surfaces. Toggle buttons in a labelled
+            group, matching the Note view control above — deliberately not an
+            ARIA tablist (see docs/DESIGN_SYSTEM.md → Note view controls). The
+            selected state is `activeTab`, the same value that decides which
+            surface renders. */}
+        <div
+          className="flex items-center rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1"
+          role="group"
+          aria-label="Note workspace"
+        >
           <button
             className={segmentBtnCls(activeTab === "note")}
             onClick={() => setActiveTab("note")}
+            aria-pressed={activeTab === "note"}
           >
             Note
           </button>
           <button
             className={segmentBtnCls(activeTab === "pdf")}
             onClick={() => setActiveTab("pdf")}
+            aria-pressed={activeTab === "pdf"}
           >
             PDF
           </button>
@@ -1183,7 +1219,7 @@ export default function MainArea() {
                       </div>
                     </div>
                     <button
-                      className={chipBtnCls}
+                      className={chipBtnCls()}
                       onClick={() => unlinkNotePdf(noteKey)}
                       title="Remove the PDF link from this note (the PDF itself is kept)"
                     >
@@ -1204,8 +1240,13 @@ export default function MainArea() {
                     onChange={onPickNotePdf}
                     className="hidden"
                   />
+                  {/* A call to action, not a location — it used to borrow the
+                      selected-tab class and read as permanently current. */}
                   <button
-                    className="nw-seg nw-seg--active px-3 py-1.5 rounded-md text-sm"
+                    className={actionButtonClass({
+                      primary: true,
+                      className: "px-3 py-1.5 rounded-md text-sm",
+                    })}
                     onClick={() => notePdfInputRef.current?.click()}
                   >
                     + Add PDF to this note

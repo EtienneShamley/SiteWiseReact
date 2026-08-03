@@ -14,10 +14,26 @@ import {
   defaultRows,
 } from "../../templates/defaultTwoColDoc";
 
-const btnCls =
-  "px-2 py-1 text-sm border rounded border-gray-300 dark:border-gray-700 " +
-  "bg-white dark:bg-neutral-800 text-black dark:text-white " +
-  "hover:bg-gray-200 dark:hover:bg-neutral-700";
+import { actionButtonClass, navItemClass } from "../../lib/interactionStyles";
+
+// Edit / Rename / Duplicate / Set as default are ordinary actions: idle grey,
+// shared hover box, temporary turquoise only while held, no permanent selected
+// state. None of them opens something that stays open from this list — editing
+// replaces this view entirely — so none takes the open variant.
+const btnCls = actionButtonClass({ className: "px-2 py-1 text-sm rounded" });
+
+// The list's main call to action. Accent-present at rest, but a call to action
+// rather than a selected location, so it never uses a navigation class.
+const primaryBtnCls = actionButtonClass({
+  primary: true,
+  className: "px-2 py-1 text-sm rounded",
+});
+
+// Destructive: red through idle, hover, focus and press, never the accent.
+const dangerBtnCls = actionButtonClass({
+  danger: true,
+  className: "px-2 py-1 text-sm rounded",
+});
 
 /**
  * TemplateLibrary
@@ -92,7 +108,7 @@ export default function TemplateLibrary({ onEditTemplate }) {
             Create and manage reusable templates for structured notes and reports.
           </p>
         </div>
-        <button className={btnCls} onClick={handleCreate}>
+        <button className={primaryBtnCls} onClick={handleCreate}>
           Create template
         </button>
       </div>
@@ -103,18 +119,33 @@ export default function TemplateLibrary({ onEditTemplate }) {
         </p>
       ) : (
         <ul className="space-y-2">
-          {templates.map((tpl) => (
+          {templates.map((tpl) => {
+            // Being the default is a CONFIGURATION property of a template, not
+            // the user's current location — so it takes no active-navigation
+            // treatment and no aria-current. No row is ever the current location
+            // while this list is on screen: entering Edit replaces the list
+            // view entirely, so there is nothing for a "selected" row to mean.
+            // The default is identified by its status badge instead, and no
+            // selection state is invented to style a row.
+            const isDefault = tpl.id === defaultId;
+            return (
             <li
               key={tpl.id}
-              className="flex items-center justify-between gap-3 border border-gray-300 dark:border-gray-700 rounded-lg px-3 py-2"
+              className={navItemClass({
+                className: "flex items-center justify-between gap-3 rounded-lg px-3 py-2",
+              })}
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="font-medium truncate">
                     {tpl.name || "Untitled"}
                   </span>
-                  {tpl.id === defaultId && (
-                    <span className="text-xs px-2 py-0.5 rounded-full border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300">
+                  {/* A status chip, not a control and not a location: no hover,
+                      no focus, no press, nothing clickable. It carries the
+                      accent from the shared tokens so the default stays
+                      identifiable now that the row itself does not. */}
+                  {isDefault && (
+                    <span className="nw-status-chip text-xs px-2 py-0.5 rounded-full">
                       Default
                     </span>
                   )}
@@ -148,7 +179,11 @@ export default function TemplateLibrary({ onEditTemplate }) {
                 >
                   Duplicate template
                 </button>
-                {tpl.id !== defaultId && (
+                {/* Unchanged rule: the control is not rendered at all for the
+                    template that is already the default, so a disabled-looking
+                    "selected tab" can never appear. The default's own current
+                    state is carried by the row and the badge. */}
+                {!isDefault && (
                   <button
                     className={btnCls}
                     onClick={() => handleSetDefault(tpl)}
@@ -158,7 +193,7 @@ export default function TemplateLibrary({ onEditTemplate }) {
                   </button>
                 )}
                 <button
-                  className={btnCls}
+                  className={dangerBtnCls}
                   onClick={() => handleDelete(tpl)}
                   aria-label={`Delete template ${tpl.name || "Untitled"}`}
                 >
@@ -166,7 +201,8 @@ export default function TemplateLibrary({ onEditTemplate }) {
                 </button>
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </div>

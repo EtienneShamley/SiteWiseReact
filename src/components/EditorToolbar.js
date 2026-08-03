@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import FormattingControls from "./editor/FormattingControls";
 import ExportMenu from "./editor/ExportMenu";
 import TemplateBuilderModal from "./template/TemplateBuilderModal";
+import { actionButtonClass } from "../lib/interactionStyles";
 
 /**
  * @param editor        the editor this toolbar currently OWNS — the Free-form
@@ -53,11 +54,25 @@ export default function EditorToolbar({
               templates are CREATED and MANAGED — separate from any one note.
               The control inside a note only chooses which template that note
               uses; it never opens this. */}
+          {/* An action that owns a modal dialog. It takes the turquoise open
+              state only while that dialog is actually open, and returns to idle
+              grey the moment it closes.
+
+              `aria-haspopup="dialog"` announces what it opens. `aria-expanded`
+              is deliberately NOT used: it describes a control that expands and
+              collapses a region it owns in the document, which is not what an
+              ordinary dialog trigger does. No `aria-controls` either — the
+              modal has no stable id, and inventing one purely for this
+              attribute would be brittle rather than helpful. */}
           <button
-            className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 dark:focus-visible:ring-blue-500/50"
+            className={actionButtonClass({
+              open: showTemplateBuilder,
+              className: "px-3 py-1.5 rounded-lg text-sm font-medium",
+            })}
             onClick={() => setShowTemplateBuilder(true)}
             title="Create and manage reusable templates for structured notes and reports"
             aria-label="Open Template Library — create and manage reusable templates"
+            aria-haspopup="dialog"
           >
             Template Library
           </button>

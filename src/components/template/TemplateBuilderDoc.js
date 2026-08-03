@@ -16,6 +16,7 @@ import { appendRow, insertRowAt } from "../../lib/templateRowOps";
 import { createLogoAsset, deleteAsset } from "../../lib/assetStorage";
 import { normalizeBranding } from "../../lib/templateBranding";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
+import { actionButtonClass } from "../../lib/interactionStyles";
 
 // Load the template's current version for editing, so opening the builder
 // edits the real saved template instead of always resetting to the default
@@ -246,8 +247,13 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
       />
 
       <div className="mt-6 flex items-center gap-3">
+        {/* The Save control of the Template modal family, and its main call to
+            action. Publishing behaviour is untouched. */}
         <button
-          className="px-3 py-1 border rounded bg-white dark:bg-neutral-800 text-black dark:text-white"
+          className={actionButtonClass({
+            primary: true,
+            className: "px-3 py-1 rounded",
+          })}
           onClick={handleSubmitTemplate}
         >
           Submit template

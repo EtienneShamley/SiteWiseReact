@@ -20,12 +20,17 @@ const LANGS = [
 
 export default function VoiceLanguageSelect({ value, onChange, disabled }) {
   return (
+    // A native <select>, deliberately kept native: every option, value and
+    // keyboard behaviour is the browser's. Only the closed control is styled.
+    // It carries an aria-label as well as the tooltip, because a bare select
+    // with no visible label has no accessible name.
     <select
-      className="px-2 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#1b1b1b] text-gray-800 dark:text-gray-100"
+      className="nw-field px-2 py-1 text-xs rounded"
       value={value}
       onChange={(e) => onChange?.(e.target.value)}
       disabled={disabled}
       title="Transcription language"
+      aria-label="Transcription language"
     >
       {LANGS.map((l) => (
         <option key={l.value} value={l.value}>
