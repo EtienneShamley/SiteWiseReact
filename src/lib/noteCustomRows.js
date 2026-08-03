@@ -18,6 +18,7 @@
 
 import { newId } from "./id";
 import { FIELD_TYPE } from "./templateFields";
+import { isAnswerValue } from "./templateRichText";
 
 // Custom rows are Text-only in this phase: the point is to add a project
 // specific observation quickly, not to expose the field-type designer.
@@ -76,7 +77,15 @@ export function normalizeCustomRow(raw) {
     label: typeof raw.label === "string" ? raw.label : "",
     // Text-only in this phase; any other stored type still renders as Text.
     type: CUSTOM_ROW_TYPE,
-    answer: typeof raw.answer === "string" ? raw.answer : "",
+    // A custom row's answer is a Template Text answer: EITHER a plain string
+    // (legacy and ordinary unformatted text) OR a tagged `richtext/1` value.
+    // Both are recognised through the one existing value boundary
+    // (src/lib/templateRichText.js) — the shape is what decides, never what a
+    // string happens to contain, so a legacy answer reading `<b>x</b>` stays
+    // literal characters. Anything else (a number, a boolean, a malformed
+    // tagged object) is not an answer and reads as empty; it is NEVER coerced
+    // into rich text. Read-time only: nothing here rewrites stored data.
+    answer: isAnswerValue(raw.answer) ? raw.answer : "",
     preferredHeight:
       Number.isFinite(preferred) && preferred > 0
         ? Math.max(CUSTOM_ROW_MIN_HEIGHT_PX, preferred)

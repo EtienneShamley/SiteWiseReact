@@ -114,6 +114,8 @@ export default function MainArea() {
     importPdfForNote,
     unlinkNotePdf,
     setCurrentPdfId,
+    activeNoteView,
+    setActiveNoteView,
   } = useAppState();
   const { refineText } = useRefine();
 
@@ -130,7 +132,13 @@ export default function MainArea() {
   // Which note view is showing. The stored identifiers are unchanged
   // ("natural" | "template"); the USER-FACING names are "Free-form note" and
   // "Template form" (see NOTE_VIEW_LABEL).
-  const [noteLayout, setNoteLayout] = useState("natural"); // default natural
+  //
+  // The state itself lives in AppStateContext (transient, never persisted)
+  // because the ACTIVE VIEW determines what an export exports, and Share /
+  // Export is also launched from the note list. Everything below is unchanged —
+  // this component still owns every transition.
+  const noteLayout = activeNoteView;
+  const setNoteLayout = setActiveNoteView;
 
   // Autosave status, per note id AND per note view. There is no manual save:
   // editing persists continuously through the existing storage paths and this
@@ -286,7 +294,7 @@ export default function MainArea() {
     setNoteLayout("natural");
     setActiveTemplateRowId(null);
     setActiveTab("note");
-  }, [noteKey]);
+  }, [noteKey, setNoteLayout]);
 
   // Leaving the Template form drops the selected row as well: a row id kept
   // across a view change could otherwise receive a BottomBar insertion meant
@@ -606,10 +614,35 @@ export default function MainArea() {
   const toolbarEditor =
     toolbarOwner === TOOLBAR_OWNER.TEMPLATE_ROW ? templateRowEditor : editor;
   const toolbarControls = templateFormVisible ? TEMPLATE_TEXT_CONTROLS : null;
+
   const toolbarHint =
     templateFormVisible && toolbarOwner === TOOLBAR_OWNER.NONE
       ? TEMPLATE_TOOLBAR_HINT
       : null;
+
+  /**
+   * WHICH NOTE VIEW the export control exports — deliberately separate from
+   * `toolbarEditor` above.
+   *
+   * Toolbar ownership answers "where does a formatting command go"; export
+   * ownership answers "what document is this". Deriving the second from the
+   * first is exactly the defect this replaces: in the Template form the toolbar
+   * owns either the hidden Free-form editor (no active Text row) or one Text
+   * row's editor, and neither is the report the user is looking at.
+   *
+   * The Free-form editor is passed only for the Free-form view. The Template
+   * form needs no editor at all — it is built from the note's persisted
+   * instance and its pinned immutable template version.
+   */
+  const exportSource = useMemo(
+    () => ({
+      view: activeView,
+      noteId: noteKey,
+      noteTitle: noteTitle || "",
+      freeformEditor: activeView === NOTE_VIEW.FREEFORM ? editor : null,
+    }),
+    [activeView, noteKey, noteTitle, editor]
+  );
 
   // The status shown to the user: this note, this view, and nothing else.
   const activeSaveStatus = getSaveStatus(saveStatusByNote, noteKey, activeView);
@@ -899,6 +932,7 @@ export default function MainArea() {
           disabled={toolbarOwner === TOOLBAR_OWNER.NONE}
           controls={toolbarControls}
           disabledHint={toolbarHint}
+          exportSource={exportSource}
         />
       )}
 

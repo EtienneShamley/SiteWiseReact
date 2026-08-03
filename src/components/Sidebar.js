@@ -40,6 +40,11 @@ export default function Sidebar() {
     // top-level workspace
     workspace,
     setWorkspace,
+
+    // the open note and the view it is being edited in — they supply only the
+    // DEFAULT export source in the Share / Export dialog.
+    currentNoteId,
+    activeNoteView,
   } = useAppState();
 
   const { theme } = useTheme();
@@ -368,6 +373,8 @@ export default function Sidebar() {
           items={shareCfg.items}
           defaultSelection={shareCfg.defaultSelection}
           getNoteContent={getNoteContent}
+          currentNoteId={currentNoteId}
+          activeNoteView={activeNoteView}
           onClose={() => setShareCfg(null)}
           theme={theme}
         />

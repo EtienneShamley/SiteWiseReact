@@ -85,6 +85,17 @@ export function AppStateProvider({ children }) {
   const [currentNoteId, setCurrentNoteIdRaw] = useState(null);
   const [currentPdfId, setCurrentPdfIdRaw] = useState(null);
 
+  // Which view the open note is being edited in: the stored identifiers are
+  // unchanged ("natural" | "template"); the user-facing names are Free-form
+  // note / Template form (src/lib/noteViews.js).
+  //
+  // It lives here — rather than only inside MainArea — because the ACTIVE VIEW
+  // is what determines an export's SOURCE, and Share / Export is launched from
+  // the note list as well as from the editor. It is transient session UI state
+  // like every other selection above: nothing here is persisted, and there is
+  // deliberately no per-note preferred export source.
+  const [activeNoteView, setActiveNoteView] = useState("natural");
+
   // Top-level workspace mode: "projects" (Project → Folder → Note) or "pdfs"
   // (the global standalone PDF library/editor). PDFs are reachable without any
   // project/folder/note; workspace mode — not note/PDF precedence — decides
@@ -826,6 +837,11 @@ export function AppStateProvider({ children }) {
         expandedProjectId,
         currentNoteId,
         currentPdfId,
+
+        // which view the open note is being edited in ("natural" | "template").
+        // Transient; it is what an export uses to decide its SOURCE.
+        activeNoteView,
+        setActiveNoteView,
 
         // top-level workspace mode ("projects" | "pdfs")
         workspace,

@@ -20,6 +20,7 @@ export default function MiddlePane() {
     deleteNote,
     addNoteToFolder,
     addNoteToRootFolder, // may be undefined; we’ll fallback
+    activeNoteView,
   } = useAppState();
   const { theme } = useTheme();
 
@@ -172,6 +173,10 @@ export default function MiddlePane() {
           defaultSelection={shareCfg.defaultSelection}
           getNoteContent={getNoteContent}
           theme={theme}
+          // Only supplies the DEFAULT export source, and only when the note
+          // being shared is the note currently open in that view.
+          currentNoteId={currentNoteId}
+          activeNoteView={activeNoteView}
           onClose={() => setShareCfg(null)}
         />
       )}

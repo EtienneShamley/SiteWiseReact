@@ -5,6 +5,14 @@ import {
   resolveExportHtml, safeFilename
 } from "../lib/exportUtils";
 import { downloadZip } from "../lib/zipUtils";
+import { NOTE_VIEW, noteViewLabel } from "../lib/noteViews";
+import { captureExportIdentity, exportFailureMessage } from "../lib/exportIdentity";
+import {
+  buildTemplateExportFile,
+  downloadExportFile,
+} from "../lib/templateExport";
+import { resolveTemplateExportSource } from "../lib/templateExportModel";
+import { getNoteTemplateInstance } from "../lib/templateModel";
 
 const FORMAT_OPTS = [
   { label: "PDF (.pdf)", value: "pdf" },
@@ -13,9 +21,22 @@ const FORMAT_OPTS = [
   { label: "Markdown (.md)", value: "md" },
 ];
 
+// The two note views are independent export sources. ONE source governs the
+// whole dialog: mixing them per note, or including both representations, is
+// deliberately not offered (see docs/PROJECT_DECISIONS.md).
+const SOURCE_OPTS = [
+  { value: NOTE_VIEW.FREEFORM, label: "Free-form notes" },
+  { value: NOTE_VIEW.TEMPLATE_FORM, label: "Template forms" },
+];
+
 // items: array of selectable nodes { id, type: 'note'|'folder'|'project', title, children? }
-// getNoteContent: (id) => Promise<{ title, html }>
+// getNoteContent: (id) => Promise<{ title, html }>  — the FREE-FORM document
 // defaultSelection: optional ids preselected
+// currentNoteId / activeNoteView: the open note and the view it is being edited
+//   in, when there is one. They only supply the DEFAULT source, and only when
+//   the dialog is scoped to that same note — a note opened from a list carries
+//   no meaningful current-view context, so it defaults to Free-form and the
+//   selector states the choice explicitly before anything is exported.
 export default function ShareDialog({
   items,
   scopeTitle = "Share / Export",
@@ -23,6 +44,8 @@ export default function ShareDialog({
   getNoteContent,
   defaultSelection = [],
   theme = "light",
+  currentNoteId = null,
+  activeNoteView = null,
 }) {
   const isDark = theme === "dark";
 
@@ -40,6 +63,19 @@ export default function ShareDialog({
   useEffect(() => {
     if (format) localStorage.setItem("share.lastFormat", format);
   }, [format]);
+
+  // The default source: the open note's ACTIVE VIEW when this dialog is that
+  // note, Free-form otherwise. Never a silent substitution — the control below
+  // always names the source that will actually be exported.
+  const defaultSource =
+    currentNoteId &&
+    activeNoteView === "template" &&
+    defaultSelection.length === 1 &&
+    defaultSelection[0] === currentNoteId
+      ? NOTE_VIEW.TEMPLATE_FORM
+      : NOTE_VIEW.FREEFORM;
+  const [source, setSource] = useState(defaultSource);
+  const sourceLabel = noteViewLabel(source);
 
   const flatNotes = useMemo(() => {
     const out = [];
@@ -117,6 +153,47 @@ export default function ShareDialog({
     return { name: safeFilename(title, "docx"), blob: new Blob([doc], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }) };
   };
 
+  // The captured export identity for one note's TEMPLATE form: its assigned
+  // template and its pinned immutable version, read from that note's own
+  // instance. Never the latest version, never another note's.
+  const templateIdentityFor = (noteId) => {
+    const instance = getNoteTemplateInstance(noteId);
+    return captureExportIdentity({
+      noteId,
+      view: NOTE_VIEW.TEMPLATE_FORM,
+      templateId: instance?.templateId ?? null,
+      templateVersionId: instance?.templateVersionId ?? null,
+    });
+  };
+
+  // Restrained, name-based reporting. Internal ids and raw exception text are
+  // never shown.
+  const templateFailureMessage = (titles) => {
+    const base = exportFailureMessage(NOTE_VIEW.TEMPLATE_FORM);
+    if (!titles || titles.length === 0) {
+      return `${base} Nothing was downloaded.`;
+    }
+    const named = titles.slice(0, 3).map((t) => `“${t}”`).join(", ");
+    const more = titles.length > 3 ? ` and ${titles.length - 3} more` : "";
+    return `${base} ${named}${more} ${
+      titles.length === 1 ? "has" : "have"
+    } no completed template to export. Nothing was downloaded.`;
+  };
+
+  /**
+   * Every selected note must have a resolvable Template document BEFORE any
+   * file is produced, so a batch can never download partially and be presented
+   * as complete. A note with no instance, no assigned template, or no pinned
+   * immutable version fails the whole export.
+   */
+  const preflightTemplate = (chosen) => {
+    const missing = [];
+    for (const n of chosen) {
+      if (!resolveTemplateExportSource(n.id).ok) missing.push(n.title || "Untitled");
+    }
+    return missing;
+  };
+
   const onExport = async () => {
     try {
       setBusy(true);
@@ -124,6 +201,53 @@ export default function ShareDialog({
       const chosen = flatNotes.filter(n => selected.has(n.id));
       if (chosen.length === 0) return;
 
+      /* ---------------------- Template form source ---------------------- */
+      if (source === NOTE_VIEW.TEMPLATE_FORM) {
+        const missing = preflightTemplate(chosen);
+        if (missing.length) {
+          // Never falls back to the Free-form note.
+          setExportError(templateFailureMessage(missing));
+          return;
+        }
+
+        const built = [];
+        for (const n of chosen) {
+          const identity = templateIdentityFor(n.id);
+          const result = identity
+            ? await buildTemplateExportFile({
+                identity,
+                noteTitle: n.title,
+                format,
+              })
+            : { ok: false };
+          if (!result.ok) {
+            setExportError(templateFailureMessage([n.title || "Untitled"]));
+            return; // nothing has been downloaded
+          }
+          built.push({ note: n, file: result });
+        }
+
+        if (!compress && built.length === 1) {
+          downloadExportFile(built[0].file.name, built[0].file.blob);
+          onClose?.();
+          return;
+        }
+
+        await downloadZip(
+          built.map(({ note, file }) => {
+            const folderPath = note.path.slice(0, -1).join("/");
+            return {
+              path: (folderPath ? `${folderPath}/` : "") + file.name,
+              blob: file.blob,
+            };
+          }),
+          `notewise-template-export_${new Date().toISOString().replace(/[:.]/g, "-")}.zip`
+        );
+        onClose?.();
+        return;
+      }
+
+      /* ---------------------- Free-form note source --------------------- */
       if (!compress && chosen.length === 1) {
         const { title, html } = await getNoteContent(chosen[0].id);
         await exportOne({ title, html });
@@ -143,11 +267,19 @@ export default function ShareDialog({
       onClose?.();
     } catch (err) {
       // A refused export must say so and leave the dialog open, never close as
-      // though a file had been produced.
-      setExportError(
-        (err && err.message) ||
-          "The export could not be completed. Nothing was downloaded."
-      );
+      // though a file had been produced. A Template failure NEVER falls back to
+      // Free-form content, and the message always names the view that failed.
+      if (source === NOTE_VIEW.TEMPLATE_FORM) {
+        setExportError(templateFailureMessage([]));
+      } else {
+        // The Free-form exporters raise curated, user-facing reasons (e.g. an
+        // image that is no longer in storage); anything else degrades to the
+        // plain statement rather than showing internal text.
+        setExportError(
+          (err && typeof err.message === "string" && err.message) ||
+            `${exportFailureMessage(NOTE_VIEW.FREEFORM)} Nothing was downloaded.`
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -219,6 +351,35 @@ export default function ShareDialog({
             </div>
           </div>
 
+          {/* EXPORT SOURCE — the two note views are independent documents, and
+              one source governs the whole export. It is always named, so a note
+              can never be exported from a view the user did not choose. */}
+          <div className="mb-3">
+            <label className="text-sm flex items-center gap-2">
+              <span className="w-24">Export source</span>
+              <select
+                className={`flex-1 border rounded px-2 py-1 ${
+                  isDark ? "bg-[#2a2a2a] border-[#444] text-white" : "bg-white border-gray-300 text-gray-900"
+                }`}
+                value={source}
+                onChange={(e) => {
+                  setSource(e.target.value);
+                  setExportError("");
+                }}
+                aria-label="Choose which note view to export"
+              >
+                {SOURCE_OPTS.map((s) => (
+                  <option key={s.value} value={s.value}>{s.label}</option>
+                ))}
+              </select>
+            </label>
+            <p className={`mt-1 text-xs ${isDark ? "opacity-70" : "opacity-70"}`}>
+              {source === NOTE_VIEW.TEMPLATE_FORM
+                ? "Every selected note exports its completed Template form. Free-form content is not included."
+                : "Every selected note exports its Free-form note. Template form answers are not included."}
+            </p>
+          </div>
+
           <div className="grid grid-cols-2 gap-3 mb-4">
             <label className="text-sm flex items-center gap-2">
               <span className="w-24">Format</span>
@@ -267,8 +428,12 @@ export default function ShareDialog({
               onClick={onExport}
               disabled={busy || selected.size === 0}
               className="px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-60"
+              // The accessible name states the source, so "Export" can never
+              // mean something different from what the user expects.
+              aria-label={busy ? `Exporting ${sourceLabel}…` : `Export ${sourceLabel}`}
+              aria-busy={busy}
             >
-              {busy ? "Exporting…" : "Export"}
+              {busy ? "Exporting…" : `Export ${sourceLabel}`}
             </button>
           </div>
         </div>

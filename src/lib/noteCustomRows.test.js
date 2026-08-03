@@ -386,3 +386,101 @@ describe("template versions are never involved", () => {
     expect(tRows.some((r) => r.isCustom)).toBe(false);
   });
 });
+
+/* ------------------------------------------------------------------------ */
+/* Rich-text answers (2026-08-03)                                            */
+/* ------------------------------------------------------------------------ */
+//
+// A custom row's answer is a Template Text answer, and since contextual rich
+// text landed it may be EITHER a plain string or a tagged `richtext/1` value.
+// Read-time normalization previously coerced anything that was not a string to
+// "", so a formatted section went blank the moment the user left the row — its
+// stored data was intact but unreachable, and it could never reach an export.
+// The shape is now recognised through the one existing value boundary.
+
+describe("custom-row answers may be plain or rich", () => {
+  const rich = (html) => ({ format: "richtext/1", html });
+
+  test("a legacy plain string is preserved exactly", () => {
+    const row = normalizeCustomRow({ id: "c1", answer: "Gate locked\nSecond line" });
+    expect(row.answer).toBe("Gate locked\nSecond line");
+  });
+
+  test("a plain string that LOOKS like HTML stays a literal string", () => {
+    const row = normalizeCustomRow({ id: "c1", answer: "<b>Not bold</b>" });
+    expect(typeof row.answer).toBe("string");
+    expect(row.answer).toBe("<b>Not bold</b>");
+  });
+
+  test("a valid richtext/1 value survives normalization", () => {
+    const value = rich("<p><strong>Locked</strong> at 17:00</p>");
+    const row = normalizeCustomRow({ id: "c1", answer: value });
+    expect(row.answer).toEqual(value);
+  });
+
+  test("a malformed tagged object is not treated as rich text", () => {
+    expect(normalizeCustomRow({ id: "c1", answer: { format: "richtext/1" } }).answer).toBe("");
+    expect(normalizeCustomRow({ id: "c1", answer: { format: "richtext/1", html: 5 } }).answer).toBe("");
+    expect(normalizeCustomRow({ id: "c1", answer: { html: "<p>x</p>" } }).answer).toBe("");
+  });
+
+  test("an arbitrary value is never converted into rich text", () => {
+    for (const bad of [42, true, null, undefined, ["a"], { any: "thing" }]) {
+      const row = normalizeCustomRow({ id: "c1", answer: bad });
+      expect(row.answer).toBe("");
+    }
+  });
+
+  test("a rich answer survives a round-trip through storage", () => {
+    const value = rich("<p><em>Site</em> access restricted</p>");
+    const { rows: list, row } = insertCustomRow([], { templateId: "tpl-1" });
+    const edited = updateCustomRow(list, row.id, { answer: value });
+    const reloaded = normalizeCustomRows(JSON.parse(JSON.stringify(edited)));
+    expect(reloaded[0].answer).toEqual(value);
+  });
+
+  test("a rich answer survives template scoping and ordering", () => {
+    const value = rich("<ul><li><p>One</p></li></ul>");
+    const { rows: list, row } = insertCustomRow([], {
+      templateId: "tpl-1",
+      anchorFieldId: "f_b",
+      position: "below",
+    });
+    const edited = updateCustomRow(list, row.id, { answer: value });
+
+    const scoped = customRowsForTemplate(edited, "tpl-1");
+    expect(scoped[0].answer).toEqual(value);
+
+    const { rows } = resolveCustomRowOrder(templateRows(), edited);
+    // Placement is unchanged by the answer's representation.
+    expect(rows.map((r) => r.id)).toEqual(["f_a", "f_b", row.id, "f_c"]);
+  });
+
+  test("a rich answer does not affect the render row's shape", () => {
+    const row = normalizeCustomRow({
+      id: "c1",
+      label: "Access notes",
+      answer: rich("<p><u>Note</u></p>"),
+      preferredHeight: 140,
+    });
+    const render = toRenderRow(row);
+    expect(render).toEqual({
+      id: "c1",
+      label: "Access notes",
+      px: 140,
+      minPx: CUSTOM_ROW_MIN_HEIGHT_PX,
+      type: CUSTOM_ROW_TYPE,
+      options: [],
+      isCustom: true,
+    });
+  });
+
+  test("normalization still rewrites nothing in storage", () => {
+    const stored = [
+      { id: "c1", templateId: "tpl-1", answer: rich("<p><strong>x</strong></p>") },
+    ];
+    const snapshot = JSON.parse(JSON.stringify(stored));
+    normalizeCustomRows(stored);
+    expect(stored).toEqual(snapshot);
+  });
+});

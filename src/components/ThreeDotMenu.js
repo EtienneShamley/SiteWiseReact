@@ -1,6 +1,7 @@
 // src/components/ThreeDotMenu.js
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ShareDialog from "./ShareDialog";
+import { useAppState } from "../context/AppStateContext";
 
 export default function ThreeDotMenu({
   anchorRef, // Element OR ref to element
@@ -8,6 +9,11 @@ export default function ThreeDotMenu({
   options = [], // [{ label, icon, onClick, danger } or { type: "share", share:{...} } or { type: "separator" }]
   theme = "light", // "dark" | "light"
 }) {
+  // Only used to DEFAULT the Share / Export dialog's source when the note being
+  // shared is the one currently open. The dialog always names its source.
+  // `|| {}` because this is a generic presentational menu: it must stay usable
+  // even where the app state provider is not above it.
+  const { currentNoteId = null, activeNoteView = null } = useAppState() || {};
   const menuRef = useRef(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [shareCfg, setShareCfg] = useState(null);
@@ -150,6 +156,8 @@ export default function ThreeDotMenu({
           items={shareCfg.items || []}
           defaultSelection={shareCfg.defaultSelection || []}
           getNoteContent={shareCfg.getNoteContent}
+          currentNoteId={currentNoteId}
+          activeNoteView={activeNoteView}
           theme={isDark ? "dark" : "light"} // pass theme explicitly
           onClose={() => {
             setShareOpen(false);

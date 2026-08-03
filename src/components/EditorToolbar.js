@@ -19,12 +19,20 @@ import TemplateBuilderModal from "./template/TemplateBuilderModal";
  *                      TEMPLATE_TEXT_CONTROLS in src/lib/editorToolbarState.js.
  * @param disabledHint  why the controls are disabled, when there is something
  *                      useful to say.
+ * @param exportSource  WHICH NOTE VIEW the export control owns:
+ *                      `{ view, noteId, noteTitle, freeformEditor }`. It is
+ *                      deliberately NOT `editor` — formatting ownership and
+ *                      export ownership are different things, and passing the
+ *                      toolbar's editor here is exactly the defect this
+ *                      separation removes (the Template form would export the
+ *                      hidden Free-form document, or a single Text row).
  */
 export default function EditorToolbar({
   editor,
   disabled = false,
   controls = null,
   disabledHint = null,
+  exportSource = null,
 }) {
   const [showTemplateBuilder, setShowTemplateBuilder] = useState(false);
 
@@ -40,7 +48,7 @@ export default function EditorToolbar({
           disabledHint={disabledHint}
         />
         <div className="flex items-center gap-2">
-          <ExportMenu editor={editor} />
+          <ExportMenu source={exportSource} />
           {/* The top-level reusable-template workspace. This is where company
               templates are CREATED and MANAGED — separate from any one note.
               The control inside a note only chooses which template that note
