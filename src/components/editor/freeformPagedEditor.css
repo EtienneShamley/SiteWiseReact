@@ -1,0 +1,260 @@
+/* src/components/editor/freeformPagedEditor.css
+ *
+ * The Free-form note editor's paged appearance: one continuous editor laid out
+ * on an A4-proportioned paper column that reads as separate sheets.
+ *
+ * Every selector is scoped to a `.nw-ff-paged-shell` / `.nw-ff-page-*` class.
+ * There is no `body`, universal or bare-element selector, and no `@page` block:
+ * this stylesheet must not reach anything outside the Free-form editor.
+ *
+ * These classes are deliberately distinct from the Free-form PDF exporter's
+ * `.nw-ff-doc` / `.nw-ff-page` / `.nw-ff-block` / `.nw-ff-pagenum` (which are
+ * injected into a detached export clone during a capture). Neither set can
+ * match the other's elements.
+ *
+ * ---------------------------------------------------------------------------
+ * The measurement contract
+ * ---------------------------------------------------------------------------
+ * useFreeformPageGuides reads `editor.view.dom.clientWidth` and the rendered
+ * box of each top-level block. `clientWidth` includes that element's own
+ * padding, so a padded editable would inflate the derived sheet height.
+ * `.note-editor` is therefore pinned to `padding: 0` below, and the paper's
+ * margins live on `.nw-ff-page-surface`. That is what makes the geometry
+ * module and this stylesheet agree.
+ *
+ * ---------------------------------------------------------------------------
+ * How the sheets are actually separated
+ * ---------------------------------------------------------------------------
+ * Not by painting. A painted band cannot separate anything, because text keeps
+ * flowing through it — a sentence still lands in the "bottom margin" and the
+ * next sheet still starts mid-paragraph. The separation here is REAL vertical
+ * space: a page spacer, inserted between two top-level blocks as a
+ * non-persistent ProseMirror widget decoration, occupying
+ *
+ *     [ remainder of the ending sheet ][ its bottom margin ]
+ *     [ the workspace gap ]
+ *     [ the next sheet's top margin ]
+ *
+ * Because no content can ever be inside that space, the gap band is safe to
+ * paint in the surrounding WORKSPACE colour across the full paper width — it is
+ * an honest hole in the paper, not a claim about somewhere text is still
+ * flowing.
+ *
+ * ---------------------------------------------------------------------------
+ * Geometry
+ * ---------------------------------------------------------------------------
+ * At a comfortable desktop width the paper is a real A4 column: 210mm wide with
+ * 20mm side margins, so the text column is exactly the 170mm the shared page
+ * geometry defines. Below that the paper narrows with the available width — no
+ * CSS transform scaling, no shrunken text, no horizontal scrolling — and the
+ * sheet height, the paper margins and the workspace gap all follow, because
+ * every one of them is derived from the MEASURED content width rather than from
+ * a fixed number here. The top/bottom paper padding is supplied inline in px
+ * from that same measurement; the value below is only what is shown for the one
+ * frame before the first measurement lands. */
+
+/* ---- Workspace surround ------------------------------------------------- */
+/* A restrained "desk" behind the paper, so the page is visually distinct from
+   its surroundings in the light theme (where the app surface is also white).
+   Matches the treatment the Template form's paged document already uses.
+   `--nw-ff-workspace-bg` is read by the page spacer's gap band below, so the
+   two can never drift out of sync, and `--nw-ff-paper-pad-x` is read by that
+   band to bleed exactly to the paper's edges. */
+.nw-ff-paged-shell {
+  --nw-ff-workspace-bg: #eceef1;
+  --nw-ff-paper-pad-x: 20mm;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 24px;
+  background: var(--nw-ff-workspace-bg);
+  border-radius: 12px;
+}
+
+.dark .nw-ff-paged-shell {
+  --nw-ff-workspace-bg: #0b0f14;
+}
+
+/* ---- Honest caption ------------------------------------------------------ */
+/* Shown ONCE per editor, never per page, never inside the editable content and
+   never announced live (that would be noise on every keystroke). `user-select:
+   none` keeps it out of an accidental click-drag selection — it is chrome, not
+   content, and it can never be copied, stored or exported because it simply
+   is not part of EditorContent or the ProseMirror document. */
+.nw-ff-page-caption {
+  margin: 0 0 10px;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.01em;
+  color: rgba(0, 0, 0, 0.45);
+  user-select: none;
+}
+
+.dark .nw-ff-page-caption {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+/* ---- The paper ---------------------------------------------------------- */
+/* The paper keeps the surface colour the Free-form editor already used in each
+   theme — white on light, the existing dark editing surface on dark — so text
+   readability and the user's own text colours are unaffected. Only the page
+   framing around it is new.
+
+   Side padding is the 20mm report margin, so the text column is exactly the
+   170mm the shared page geometry defines; both gutters comfortably hold the
+   page-number label, so it never sits over a line of text. Top and bottom
+   padding are the first sheet's top margin and the last sheet's bottom margin,
+   overridden inline from the same measurement the spacers use. */
+.nw-ff-page-surface {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 210mm;
+  margin: 0 auto;
+  padding: 20mm var(--nw-ff-paper-pad-x);
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 2px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.dark .nw-ff-page-surface {
+  background: #1f2937;
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+/* ---- The measured content column ---------------------------------------- */
+/* Positioning context for the first sheet's gutter label. Its min-height is
+   supplied inline (px) so the final sheet is always drawn whole; a min-height
+   here never stretches the editable block child, so it cannot affect the next
+   measurement. */
+.nw-ff-page-column {
+  position: relative;
+  box-sizing: border-box;
+}
+
+.nw-ff-page-content {
+  position: relative;
+}
+
+/* The measurement contract (see the header comment): the editable element
+   carries no padding of its own, so `clientWidth` is pure content width and the
+   derived sheet geometry matches what is on screen. */
+.nw-ff-page-content .note-editor {
+  padding: 0;
+}
+
+/* ---- The first sheet's gutter label ------------------------------------- */
+/* Decoration only: never interactive, never focusable, never contenteditable,
+   never part of the document. */
+.nw-ff-page-guide-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* "Page N", sitting in the paper's left margin gutter — outside the text
+   column, so it can never cover, hide or shift a line of text. Shared by the
+   first sheet's label above and by every page spacer's own label below. */
+.nw-ff-page-number,
+.nw-ff-page-spacer__label {
+  position: absolute;
+  right: calc(100% + 14px);
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1.2;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  user-select: none;
+}
+
+.nw-ff-page-number {
+  top: 0;
+}
+
+.dark .nw-ff-page-number,
+.dark .nw-ff-page-spacer__label {
+  color: rgba(255, 255, 255, 0.48);
+}
+
+/* ---- The page spacer ----------------------------------------------------- */
+/* Real, non-persistent vertical space between two sheets. Its height comes
+   entirely from the measured plan (inline px); everything here is inert. It is
+   `contenteditable="false"` and `aria-hidden` in the DOM as well, so a click
+   passes straight through to the editor beneath and the caret lands where the
+   user aimed. */
+.nw-ff-page-spacer {
+  position: relative;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* The visible workspace gap: the ONE place a filled, full-width gap is honest,
+   because no content can ever occupy a spacer. It bleeds through the paper's
+   side padding to the sheet edges, and the two hairlines are the bottom edge of
+   the sheet above and the top edge of the sheet below. No gradient, no glow, no
+   accent colour — a page edge, not an interaction state. */
+.nw-ff-page-spacer__gap {
+  position: absolute;
+  left: calc(-1 * var(--nw-ff-paper-pad-x));
+  right: calc(-1 * var(--nw-ff-paper-pad-x));
+  background: var(--nw-ff-workspace-bg);
+  border-top: 1px solid rgba(0, 0, 0, 0.14);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.14);
+  pointer-events: none;
+}
+
+.dark .nw-ff-page-spacer__gap {
+  border-top-color: rgba(255, 255, 255, 0.12);
+  border-bottom-color: rgba(255, 255, 255, 0.12);
+}
+
+/* The label for the sheet this spacer introduces, at the top of that sheet's
+   usable region — the spacer's own bottom edge. */
+.nw-ff-page-spacer__label {
+  bottom: 0;
+}
+
+/* ---- Narrow screens ----------------------------------------------------- */
+/* The paper becomes a responsive document column: reduced side margins and a
+   lighter frame. Editing is unchanged, text is never shrunk, and nothing is
+   scaled with a transform. The workspace gap narrows too, but it is floored in
+   the geometry module so it never collapses to a hairline. The explanatory
+   caption stays exactly as it is — it is text, not framing, and needs no
+   narrow-screen treatment. */
+@media (max-width: 720px) {
+  .nw-ff-paged-shell {
+    /* Fixed px, so the gutter still fits the page label beside the text column
+       rather than over it. */
+    --nw-ff-paper-pad-x: 40px;
+    padding: 12px;
+    border-radius: 8px;
+  }
+
+  .nw-ff-page-surface {
+    box-shadow: none;
+  }
+
+  .dark .nw-ff-page-surface {
+    box-shadow: none;
+  }
+
+  .nw-ff-page-number,
+  .nw-ff-page-spacer__label {
+    right: calc(100% + 6px);
+    font-size: 9px;
+  }
+}
+
+/* ---- Reduced motion ----------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .nw-ff-page-surface {
+    transition: none;
+  }
+}

@@ -425,6 +425,8 @@ describe("meeting-capture behaviour is unchanged", () => {
   test("no unrelated select elsewhere in NoteWise was converted", () => {
     // BrandingPanel.js joined this list separately (Template Builder window
     // styling pass) — its `nw-field` usage is asserted by its own test file.
+    // DocumentPreviewDialog.js joined it 2026-08-04 for its format selector
+    // (see documentPreviewWiring.test.js) — its own test asserts that usage.
     const converted = allSourceFiles()
       .filter((file) => /nw-field/.test(fs.readFileSync(file, "utf8")))
       .map((file) => path.basename(file))
@@ -432,6 +434,7 @@ describe("meeting-capture behaviour is unchanged", () => {
     expect(converted).toEqual([
       "BottomBar.js",
       "BrandingPanel.js",
+      "DocumentPreviewDialog.js",
       "StylePresetSelect.js",
       "VoiceLanguageSelect.js",
     ]);

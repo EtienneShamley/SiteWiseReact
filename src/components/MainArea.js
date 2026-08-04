@@ -1,7 +1,7 @@
 // src/components/MainArea.js
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
-import { EditorContent, useEditor } from "@tiptap/react";
+import { useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
 import Link from "@tiptap/extension-link";
@@ -34,6 +34,7 @@ import {
 } from "./editor/extensions";
 import { AssetImage } from "./editor/AssetImage";
 import { FileAttachment } from "./editor/FileAttachment";
+import FreeformPagedEditor from "./editor/FreeformPagedEditor";
 import "./editor/editor.css";
 import { useRefine } from "../hooks/useRefine";
 import { refinedTextToParagraphHtml } from "../lib/refineClient";
@@ -1166,7 +1167,13 @@ export default function MainArea() {
                     display: noteLayout === "natural" ? "block" : "none",
                   }}
                 >
-                  <EditorContent editor={editor} />
+                  {/* One continuous editor, one ProseMirror document, one
+                      stored HTML value — wrapped in an A4-proportioned paper
+                      column with VISUAL page guides. The guides are decoration
+                      measured from the rendered editor; the Free-form PDF
+                      planner remains the authoritative pagination system and is
+                      untouched by them. */}
+                  <FreeformPagedEditor editor={editor} />
                 </div>
                 <div
                   style={{

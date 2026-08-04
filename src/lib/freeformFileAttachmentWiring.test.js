@@ -156,8 +156,14 @@ describe("exports", () => {
     // No exporter is left calling the image resolver on its own.
     const direct = exportUtils.match(/resolveExportImageHtml\(/g) || [];
     expect(direct).toHaveLength(1); // only inside resolveExportHtml itself
-    expect(shareDialog).toMatch(/resolveExportHtml/);
+    // ShareDialog no longer calls resolveExportHtml directly at all (2026-08-04
+    // consolidation): its ZIP path now builds through the SAME
+    // buildFreeformHtmlFile/buildFreeformMarkdownFile/buildFreeformDocxFile
+    // producers the single-file exporters and Document Preview use, and those
+    // resolve attachments internally — see "one producer per format" below.
+    expect(shareDialog).not.toMatch(/resolveExportHtml/);
     expect(shareDialog).not.toMatch(/resolveExportImageHtml/);
+    expect(shareDialog).not.toMatch(/resolveExportFileAttachmentHtml/);
   });
 
   test("no attachment binary is bundled into the ZIP export", () => {

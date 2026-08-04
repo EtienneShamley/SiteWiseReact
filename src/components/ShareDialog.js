@@ -2,7 +2,7 @@
 import React, { useMemo, useState, useEffect } from "react";
 import {
   exportHTMLString, exportPDFString, exportDOCXString, exportMDString,
-  resolveExportHtml, safeFilename
+  buildFreeformHtmlFile, buildFreeformMarkdownFile, buildFreeformDocxFile,
 } from "../lib/exportUtils";
 import { downloadZip } from "../lib/zipUtils";
 import { NOTE_VIEW, noteViewLabel } from "../lib/noteViews";
@@ -114,10 +114,11 @@ export default function ShareDialog({
     if (format === "md")   return exportMDString({ title, html });
   };
 
-  // The zip path builds its own documents, so it resolves stored references
-  // through the same helper the single-file exporters use. A note whose image
-  // is missing throws here and fails the whole export rather than adding a file
-  // with a silently missing photo to the archive. Attachment binaries are NOT
+  // The zip path builds its own documents through the SAME producers the
+  // single-file exporters and Document Preview use — there is no second copy
+  // of the HTML/Markdown/DOCX building logic. A note whose image is missing
+  // throws here and fails the whole export rather than adding a file with a
+  // silently missing photo to the archive. Attachment binaries are NOT
   // bundled into the archive: each attachment travels as the same honest
   // metadata reference every other format uses.
   const buildBlobFor = async ({ title, html: storedHtml }) => {
@@ -130,30 +131,9 @@ export default function ShareDialog({
         captureFreeformExportSnapshot({ noteTitle: title, html: storedHtml })
       );
     }
-    const html = await resolveExportHtml(storedHtml);
-    if (format === "html") {
-      const doc = new Blob([`<!doctype html>${html}`], { type: "text/html;charset=utf-8" });
-      return { name: safeFilename(title, "html"), blob: doc };
-    }
-    if (format === "md") {
-      const modTD = await import("turndown");
-      const TurndownService = modTD.default || modTD;
-      const modGFM = await import("turndown-plugin-gfm");
-      const gfm = modGFM.gfm || (modGFM.default && modGFM.default.gfm) || modGFM.default;
-      const td = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
-      if (gfm) td.use(gfm);
-      const md = td.turndown(html);
-      return { name: safeFilename(title, "md"), blob: new Blob([md], { type: "text/markdown;charset=utf-8" }) };
-    }
-    // docx
-    const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
-    const htmlToDocx = mod.default || mod;
-    const doc = await htmlToDocx(`
-      <html><head><meta charset="utf-8"/></head>
-      <body><div class="tiptap-content">${html}</div></body></html>`, null,
-      { table: { row: { cantSplit: true } }, footer: true, pageNumber: true }
-    );
-    return { name: safeFilename(title, "docx"), blob: new Blob([doc], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }) };
+    if (format === "html") return buildFreeformHtmlFile({ title, html: storedHtml });
+    if (format === "md") return buildFreeformMarkdownFile({ title, html: storedHtml });
+    return buildFreeformDocxFile({ title, html: storedHtml });
   };
 
   // The captured export identity for one note's TEMPLATE form: its assigned

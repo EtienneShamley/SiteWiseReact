@@ -26,8 +26,6 @@ let gfmPluginFn = null;
 export const resolveExportHtml = async (html) =>
   resolveExportFileAttachmentHtml(await resolveExportImageHtml(html));
 
-const exportableEditorHTML = (editor) => resolveExportHtml(editor.getHTML());
-
 export const suggestedTitle = (editor) => {
   if (!editor) return "notewise-note";
   const html = editor.getHTML();
@@ -50,84 +48,14 @@ export const safeFilename = (base, ext) => {
   return `${clean || "notewise-note"}_${ts}.${ext}`;
 };
 
-/**
- * The Free-form PDF.
- *
- * Unlike the other three formats this takes a captured SNAPSHOT, not a live
- * editor: the PDF is paginated against measured content, which is asynchronous
- * work, and a live editor must not be read across it. The snapshot is built
- * synchronously by the caller (see freeformExportPdf.captureFreeformExportSnapshot).
- *
- * The runner is loaded lazily, exactly like html2pdf itself — it also keeps
- * this module free of a static cycle, since the runner needs `safeFilename`
- * from here.
- */
-export async function exportPDF(snapshot) {
-  const { exportFreeformPdf } = await import("./freeformExportPdf");
-  return exportFreeformPdf(snapshot);
-}
-
-export async function exportDOCX(editor) {
-  const resolved = await exportableEditorHTML(editor);
-  // Use the ESM build shipped by your package version
-  const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
-  const htmlToDocx = mod.default || mod;
-
-  const html = buildHTMLDoc(resolved);
-  const blob = await htmlToDocx(html, null, {
-    table: { row: { cantSplit: true } },
-    footer: true,
-    pageNumber: true,
-  });
-
-  const file = new Blob([blob], {
-    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  });
-
+// A short-lived object URL that exists only for the click, then is gone — the
+// same shape templateExport.js's own downloadBlob helper uses. Kept local
+// rather than imported, so this module has no dependency on that one.
+function downloadBlob(blob, filename) {
   const a = document.createElement("a");
-  const url = URL.createObjectURL(file);
+  const url = URL.createObjectURL(blob);
   a.href = url;
-  a.download = safeFilename(suggestedTitle(editor), "docx");
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-export async function exportHTML(editor) {
-  const html = buildHTMLDoc(await exportableEditorHTML(editor));
-  const file = new Blob([html], { type: "text/html;charset=utf-8" });
-  const a = document.createElement("a");
-  const url = URL.createObjectURL(file);
-  a.href = url;
-  a.download = safeFilename(suggestedTitle(editor), "html");
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-export async function exportMD(editor) {
-  const raw = await exportableEditorHTML(editor);
-  if (!TurndownServiceMod) {
-    const mod = await import("turndown");
-    TurndownServiceMod = mod.default || mod;
-  }
-  if (!gfmPluginFn) {
-    const mod = await import("turndown-plugin-gfm");
-    gfmPluginFn = mod.gfm || (mod.default && mod.default.gfm) || mod.default;
-  }
-  const td = new TurndownServiceMod({
-    headingStyle: "atx",
-    codeBlockStyle: "fenced",
-  });
-  if (gfmPluginFn) td.use(gfmPluginFn);
-  const md = td.turndown(raw);
-  const file = new Blob([md], { type: "text/markdown;charset=utf-8" });
-  const a = document.createElement("a");
-  const url = URL.createObjectURL(file);
-  a.href = url;
-  a.download = safeFilename(suggestedTitle(editor), "md");
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -165,20 +93,140 @@ const buildHTMLDoc = (html) => `
   <body><div class="tiptap-content">${html}</div></body></html>
 `;
 
+async function turndownService() {
+  if (!TurndownServiceMod) {
+    const mod = await import("turndown");
+    TurndownServiceMod = mod.default || mod;
+  }
+  if (!gfmPluginFn) {
+    const mod = await import("turndown-plugin-gfm");
+    gfmPluginFn = mod.gfm || (mod.default && mod.default.gfm) || mod.default;
+  }
+  const td = new TurndownServiceMod({
+    headingStyle: "atx",
+    codeBlockStyle: "fenced",
+  });
+  if (gfmPluginFn) td.use(gfmPluginFn);
+  return td;
+}
+
+/* ========================================================================
+ * ONE producer per format, returning a Blob WITHOUT downloading it.
+ *
+ * Every caller — the direct export control (below), the ShareDialog single-
+ * file and ZIP paths, and the Document Preview dialog — builds its file
+ * through exactly these four functions (this one plus the PDF sibling in
+ * freeformExportPdf.js). There is no second copy of the HTML/DOCX/Markdown
+ * building logic anywhere in the application.
+ *
+ * All three take the same `{ title, html }` shape the `*String` exporters
+ * below already used — raw, UNRESOLVED note HTML; each resolves image and
+ * file-attachment references itself, exactly like the PDF pipeline's own
+ * snapshot.html contract.
+ * ==================================================================== */
+
+export async function buildFreeformHtmlFile({ title, html }) {
+  const resolved = await resolveExportHtml(html);
+  const text = buildHTMLDoc(resolved);
+  return {
+    name: safeFilename(title, "html"),
+    // The exact string is carried alongside the Blob so a caller that only
+    // needs to DISPLAY the document (Document Preview renders it through an
+    // iframe `srcDoc`) never has to read it back out of the Blob — and, more
+    // importantly, never has to point a SANDBOXED iframe at a `blob:` URL,
+    // which a browser refuses to load into an opaque origin.
+    text,
+    blob: new Blob([text], { type: "text/html;charset=utf-8" }),
+  };
+}
+
+export async function buildFreeformMarkdownFile({ title, html }) {
+  const resolved = await resolveExportHtml(html);
+  const td = await turndownService();
+  const text = td.turndown(resolved);
+  return {
+    name: safeFilename(title, "md"),
+    // The exact string is carried alongside the Blob so a caller that only
+    // needs to DISPLAY the Markdown (Document Preview's Source view) never
+    // has to re-read it back out of the Blob.
+    text,
+    blob: new Blob([text], { type: "text/markdown;charset=utf-8" }),
+  };
+}
+
+export async function buildFreeformDocxFile({ title, html }) {
+  const resolved = await resolveExportHtml(html);
+  // Use the ESM build shipped by the installed package version.
+  const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
+  const htmlToDocx = mod.default || mod;
+  // The EXACT html-to-docx input, returned as a field of its OWN — never as
+  // the file's content, and never interchangeable with `blob`. Document
+  // Preview's "Approximate DOCX layout preview" renders this string rather
+  // than independently recreating one: a browser cannot render .docx natively,
+  // but this is the real, unmodified input the real DOCX was converted from.
+  const previewHtml = buildHTMLDoc(resolved);
+  const converted = await htmlToDocx(previewHtml, null, {
+    table: { row: { cantSplit: true } },
+    footer: true,
+    pageNumber: true,
+  });
+  return {
+    name: safeFilename(title, "docx"),
+    previewHtml,
+    blob: new Blob([converted], {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }),
+  };
+}
+
+/**
+ * The Free-form PDF.
+ *
+ * Unlike the other three formats this takes a captured SNAPSHOT, not a live
+ * editor: the PDF is paginated against measured content, which is asynchronous
+ * work, and a live editor must not be read across it. The snapshot is built
+ * synchronously by the caller (see freeformExportPdf.captureFreeformExportSnapshot).
+ *
+ * The runner is loaded lazily, exactly like html2pdf itself — it also keeps
+ * this module free of a static cycle, since the runner needs `safeFilename`
+ * from here.
+ */
+export async function exportPDF(snapshot) {
+  const { exportFreeformPdf } = await import("./freeformExportPdf");
+  return exportFreeformPdf(snapshot);
+}
+
+export async function exportDOCX(editor) {
+  const file = await buildFreeformDocxFile({
+    title: suggestedTitle(editor),
+    html: editor.getHTML(),
+  });
+  downloadBlob(file.blob, file.name);
+}
+
+export async function exportHTML(editor) {
+  const file = await buildFreeformHtmlFile({
+    title: suggestedTitle(editor),
+    html: editor.getHTML(),
+  });
+  downloadBlob(file.blob, file.name);
+}
+
+export async function exportMD(editor) {
+  const file = await buildFreeformMarkdownFile({
+    title: suggestedTitle(editor),
+    html: editor.getHTML(),
+  });
+  downloadBlob(file.blob, file.name);
+}
+
 // The `*String` variants take note HTML read straight from storage (see
 // ShareDialog), so they resolve image and attachment references through the
-// same helper the editor-based exporters use.
+// same helper the editor-based exporters use. Each is now a thin download
+// wrapper around the same build function the editor-based exporter above uses.
 export const exportHTMLString = async ({ title, html }) => {
-  const resolved = await resolveExportHtml(html);
-  const file = new Blob([buildHTMLDoc(resolved)], { type: "text/html;charset=utf-8" });
-  const a = document.createElement("a");
-  const url = URL.createObjectURL(file);
-  a.href = url;
-  a.download = safeFilename(title, "html");
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  const file = await buildFreeformHtmlFile({ title, html });
+  downloadBlob(file.blob, file.name);
 };
 
 // Stored note HTML goes through the SAME paginated runner the export control
@@ -195,48 +243,11 @@ export const exportPDFString = async ({ title, html }) => {
 };
 
 export const exportDOCXString = async ({ title, html }) => {
-  const resolved = await resolveExportHtml(html);
-  // ESM path (matches your installed package)
-  const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
-  const htmlToDocx = mod.default || mod;
-  const doc = buildHTMLDoc(resolved);
-  const blob = await htmlToDocx(doc, null, {
-    table: { row: { cantSplit: true } },
-    footer: true,
-    pageNumber: true
-  });
-  const file = new Blob([blob], {
-    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  });
-  const a = document.createElement("a");
-  const url = URL.createObjectURL(file);
-  a.href = url;
-  a.download = safeFilename(title, "docx");
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  const file = await buildFreeformDocxFile({ title, html });
+  downloadBlob(file.blob, file.name);
 };
 
 export const exportMDString = async ({ title, html }) => {
-  const resolved = await resolveExportHtml(html);
-  const modTD = await import("turndown");
-  const TurndownService = modTD.default || modTD;
-  const modGFM = await import("turndown-plugin-gfm");
-  const gfm = modGFM.gfm || (modGFM.default && modGFM.default.gfm) || modGFM.default;
-
-  const td = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
-  if (gfm) td.use(gfm);
-  const md = td.turndown(resolved);
-
-  const file = new Blob([md], { type: "text/markdown;charset=utf-8" });
-  const a = document.createElement("a");
-  const url = URL.createObjectURL(file);
-  a.href = url;
-  a.download = safeFilename(title, "md");
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  const file = await buildFreeformMarkdownFile({ title, html });
+  downloadBlob(file.blob, file.name);
 };
-
