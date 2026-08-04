@@ -55,6 +55,7 @@ const darkTokens = themeBlock(".dark");
 
 const sidebar = withoutComments(read("components/Sidebar.js"));
 const middlePane = withoutComments(read("components/MiddlePane.js"));
+const appJs = withoutComments(read("App.js"));
 const pdfLibrary = withoutComments(read("components/PdfLibrary.js"));
 const mainArea = withoutComments(read("components/MainArea.js"));
 const editorToolbar = withoutComments(read("components/EditorToolbar.js"));
@@ -591,9 +592,15 @@ describe("the Notes pane is one implementation, fully converted", () => {
   });
 
   test("+ New Note matches the hierarchy of the Sidebar's own New Note", () => {
-    // Both ordinary actions — neither pane promotes it to a primary CTA.
-    expect(middlePane).not.toMatch(/actionButtonClass\(\{[^}]*primary/);
-    expect(sidebar).not.toMatch(/actionButtonClass\(\{[^}]*primary/);
+    // Both ordinary actions — neither pane promotes its own "+ New Note" to a
+    // primary CTA. (Sidebar does use the primary variant elsewhere now, for
+    // the "Show notes" restore control — asserted in its own describe block.)
+    expect(middlePane).toMatch(
+      /actionButtonClass\(\{ className: "px-3 py-1 rounded-lg text-sm mb-2" \}\)\s*\}\s*onClick=\{onNewNote\}/
+    );
+    expect(sidebar).toMatch(
+      /actionButtonClass\(\{ className: "px-3 py-1 rounded text-sm" \}\)\s*\}\s*onClick=\{createRootNote\}/
+    );
   });
 
   test("note rows follow currentNoteId and nothing else", () => {
@@ -616,7 +623,7 @@ describe("the Notes pane is one implementation, fully converted", () => {
   });
 
   test("the Notes pane handlers are unchanged", () => {
-    expect(middlePane).toContain("onClick={() => setHidden(true)}");
+    expect(middlePane).toContain("onClick={onHideMiddlePane}");
     expect(middlePane).toContain("onClick={onNewNote}");
     expect(middlePane).toContain("onClick={() => setCurrentNoteId(note.id)}");
     expect(middlePane).toContain("renameNote(activeFolderId, note.id)");
@@ -624,21 +631,11 @@ describe("the Notes pane is one implementation, fully converted", () => {
   });
 });
 
-describe("the hidden-pane restore controls match their Hide counterparts", () => {
-  const RESTORE = [
-    ["Sidebar", () => sidebar, 'className: "fixed top-2 left-2 px-2 py-1 rounded z-50"'],
-    ["MiddlePane", () => middlePane, 'className: "fixed top-4 left-32 px-2 py-1 rounded z-50"'],
-  ];
-
-  test.each(RESTORE)("the %s restore control uses the shared action variant", (_n, get, cls) => {
-    const source = get();
-    expect(source).toContain(cls);
-    expect(source).toContain("onClick={() => setHidden(false)}");
-  });
-
-  test.each(RESTORE)("the %s restore control claims no location or open state", (_n, get) => {
-    const source = get();
-    const restore = source.match(/if \(hidden\) \{[\s\S]*?\n  \}/);
+describe("the Sidebar's own hidden-pane restore control", () => {
+  test("uses the shared action variant and claims no location or open state", () => {
+    expect(sidebar).toContain('className: "fixed top-2 left-2 px-2 py-1 rounded z-50"');
+    expect(sidebar).toContain("onClick={() => setHidden(false)}");
+    const restore = sidebar.match(/if \(hidden\) \{[\s\S]*?\n  \}/);
     expect(restore).not.toBeNull();
     expect(restore[0]).not.toContain("nw-nav-item");
     expect(restore[0]).not.toContain("nw-seg");
@@ -647,15 +644,98 @@ describe("the hidden-pane restore controls match their Hide counterparts", () =>
     expect(restore[0]).not.toContain("open:");
   });
 
-  test("neither restore control keeps the old filled-grey utility styling", () => {
-    for (const source of [sidebar, middlePane]) {
-      expect(source).not.toContain("bg-gray-200 dark:bg-gray-800");
-    }
+  test("does not keep the old filled-grey utility styling", () => {
+    expect(sidebar).not.toContain("bg-gray-200 dark:bg-gray-800");
   });
 
-  test("focus and pressed styling reach them through the shared variant", () => {
+  test("focus and pressed styling reach it through the shared variant", () => {
     expect(navCssCode).toMatch(/\.nw-action:focus-visible/);
     expect(navCssCode).toMatch(/\.nw-action:active[^{]*\{/);
+  });
+});
+
+describe("the Notes-pane restore control ('Show notes') lives in the Sidebar header", () => {
+  test("MiddlePane owns no restore control of its own", () => {
+    // The old fixed-position floating button is gone entirely — MiddlePane
+    // renders nothing while collapsed, rather than a button of its own.
+    expect(middlePane).not.toContain("fixed top-4 left-32");
+    expect(middlePane).not.toMatch(/>\s*Notes\s*<\/button>/);
+    expect(middlePane).toContain("if (middlePaneHidden) return null;");
+  });
+
+  test("App.js owns middlePaneHidden and passes it, and the handlers, to both panes", () => {
+    // Sidebar and MiddlePane are siblings with no shared context for this —
+    // App.js is the lowest common owner, and the state is transient only.
+    expect(appJs).toContain(
+      "const [middlePaneHidden, setMiddlePaneHidden] = useState(false);"
+    );
+    expect(appJs).toMatch(/<Sidebar\s+middlePaneHidden=\{middlePaneHidden\}\s+onShowMiddlePane=\{\(\) => setMiddlePaneHidden\(false\)\}/);
+    expect(appJs).toMatch(/<MiddlePane\s+middlePaneHidden=\{middlePaneHidden\}\s+onHideMiddlePane=\{\(\) => setMiddlePaneHidden\(true\)\}/);
+  });
+
+  test("Sidebar receives the state and handler as props, not from AppStateContext", () => {
+    expect(sidebar).toContain(
+      "export default function Sidebar({ middlePaneHidden, onShowMiddlePane }) {"
+    );
+    const destructure = sidebar.match(/const \{([\s\S]*?)\} = useAppState\(\);/);
+    expect(destructure).not.toBeNull();
+    expect(destructure[1]).not.toContain("middlePaneHidden");
+    expect(destructure[1]).not.toContain("onShowMiddlePane");
+  });
+
+  test("MiddlePane receives the state and handler as props, not from AppStateContext", () => {
+    expect(middlePane).toContain(
+      "export default function MiddlePane({ middlePaneHidden, onHideMiddlePane }) {"
+    );
+    const destructure = middlePane.match(/const \{([\s\S]*?)\} = useAppState\(\);/);
+    expect(destructure).not.toBeNull();
+    expect(destructure[1]).not.toContain("middlePaneHidden");
+    expect(destructure[1]).not.toContain("onHideMiddlePane");
+  });
+
+  test("visible label, accessible name and tooltip are exact", () => {
+    expect(sidebar).toMatch(/>\s*Show notes\s*</);
+    expect(sidebar).toContain('aria-label="Open notes pane"');
+    expect(sidebar).toContain('title="Open notes pane"');
+  });
+
+  test("appears only under the exact conditions the Middle Pane itself renders under", () => {
+    expect(sidebar).toContain(
+      'workspace === "projects" && activeFolderId && middlePaneHidden &&'
+    );
+  });
+
+  test("clicking it calls the App-owned restore handler", () => {
+    expect(sidebar).toContain("onClick={onShowMiddlePane}");
+  });
+
+  test("uses the shared turquoise primary/highlighted variant, not a one-off colour", () => {
+    const call = sidebar.match(/actionButtonClass\(\{\s*primary: true,[\s\S]*?\}\)/);
+    expect(call).not.toBeNull();
+    expect(call[0]).toContain("ml-auto");
+    expect(call[0]).toContain("shrink-0");
+  });
+
+  test("layout is owned by flex/margin, not fixed or absolute coordinates", () => {
+    const call = sidebar.match(/actionButtonClass\(\{\s*primary: true,[\s\S]*?\}\)/)[0];
+    expect(call).not.toMatch(/\bfixed\b/);
+    expect(call).not.toMatch(/\babsolute\b/);
+    expect(call).not.toMatch(/\btop-\d/);
+    expect(call).not.toMatch(/\bleft-\d/);
+    expect(call).not.toMatch(/\bright-\d/);
+    expect(call).not.toMatch(/-m[lrtb]?-\d/); // no negative margins
+  });
+
+  test("the Sidebar's own restore control and width are unchanged", () => {
+    expect(sidebar).toContain('className: "fixed top-2 left-2 px-2 py-1 rounded z-50"');
+    expect(sidebar).toContain("Projects\n      </button>");
+    expect(sidebar).toContain('className="w-64');
+  });
+
+  test("focus and pressed styling reach it through the shared variant", () => {
+    expect(navCssCode).toMatch(/\.nw-action:focus-visible/);
+    expect(navCssCode).toMatch(/\.nw-action--primary\s*\{/);
+    expect(navCssCode).toMatch(/\.nw-action--primary:hover:not\(:disabled\)/);
   });
 });
 

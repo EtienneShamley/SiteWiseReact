@@ -26,6 +26,12 @@ function PersistenceErrorBanner() {
 function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  // The Middle Pane's collapsed/restored state is owned here rather than
+  // inside MiddlePane itself, because restoring it is now triggered from the
+  // Sidebar header — Sidebar and MiddlePane are siblings with no shared
+  // context for this, and it is purely transient UI state (never persisted).
+  const [middlePaneHidden, setMiddlePaneHidden] = useState(false);
+
   useEffect(() => {
     runTemplateMigration();
   }, []);
@@ -34,8 +40,14 @@ function App() {
     <ThemeProvider>
       <div className="flex min-h-screen bg-white dark:bg-gray-950 text-black dark:text-white relative">
         <PersistenceErrorBanner />
-        <Sidebar />
-        <MiddlePane />
+        <Sidebar
+          middlePaneHidden={middlePaneHidden}
+          onShowMiddlePane={() => setMiddlePaneHidden(false)}
+        />
+        <MiddlePane
+          middlePaneHidden={middlePaneHidden}
+          onHideMiddlePane={() => setMiddlePaneHidden(true)}
+        />
         <MainArea />
 
         {/* Settings Button in Left Bottom Corner (theme-aware) */}

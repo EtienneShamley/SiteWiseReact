@@ -9,7 +9,7 @@ import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interac
 
 const STORAGE_KEY = "sitewise-notes";
 
-export default function MiddlePane() {
+export default function MiddlePane({ middlePaneHidden, onHideMiddlePane }) {
   const {
     workspace,
     state,
@@ -25,7 +25,6 @@ export default function MiddlePane() {
   } = useAppState();
   const { theme } = useTheme();
 
-  const [hidden, setHidden] = useState(false);
   const [menu, setMenu] = useState({ noteId: null });
   const [shareCfg, setShareCfg] = useState(null);
   const noteRefs = useRef({});
@@ -43,22 +42,10 @@ export default function MiddlePane() {
   if (workspace === "pdfs") return null;
   if (!activeFolderId) return null;
 
-  if (hidden) {
-    // The restore counterpart of this pane's Hide control, and deliberately the
-    // same interaction family: an action, not a location. It reopens the pane
-    // rather than expanding a region it owns, so it takes no open, primary or
-    // current state. Position, dimensions, wording and handler are unchanged.
-    return (
-      <button
-        className={actionButtonClass({
-          className: "fixed top-4 left-32 px-2 py-1 rounded z-50",
-        })}
-        onClick={() => setHidden(false)}
-      >
-        Notes
-      </button>
-    );
-  }
+  // The restore control now lives in the Sidebar header ("Show notes"), owned
+  // by App.js alongside this pane's own hidden state — so while collapsed,
+  // this pane renders nothing at all rather than a floating button of its own.
+  if (middlePaneHidden) return null;
 
   const onNewNote = () => {
     if (activeProjectId) {
@@ -97,7 +84,7 @@ export default function MiddlePane() {
             controls, so the two panes read as one interaction family. */}
         <button
           className={actionButtonClass({ className: "px-2 py-1 rounded-lg text-xs" })}
-          onClick={() => setHidden(true)}
+          onClick={onHideMiddlePane}
         >
           Hide
         </button>

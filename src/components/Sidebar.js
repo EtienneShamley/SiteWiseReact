@@ -6,7 +6,7 @@ import ShareDialog from "./ShareDialog";
 import { useTheme } from "../context/ThemeContext";
 import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interactionStyles";
 
-export default function Sidebar() {
+export default function Sidebar({ middlePaneHidden, onShowMiddlePane }) {
   const {
     // root notes
     rootNotes,
@@ -177,18 +177,40 @@ export default function Sidebar() {
         id="leftPane"
       >
         <div className="pb-3 mb-3 border-b border-gray-200 dark:border-gray-800 flex items-center gap-2">
-          {/* Compact two-tone "NW" brand mark: dimmer N + bright turquoise W.
-              Turquoise reserved for branding/interaction; wordmark stays neutral. */}
-          <span
-            className="inline-flex items-baseline text-lg font-extrabold tracking-tight leading-none select-none"
-            aria-hidden="true"
-          >
-            <span style={{ color: "var(--nw-accent-strong)" }}>N</span>
-            <span style={{ color: "var(--nw-accent)" }}>W</span>
-          </span>
-          <span className="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">
-            NoteWise
-          </span>
+          {/* min-w-0 lets this group shrink instead of forcing the row wider,
+              so the restore button below can never be pushed off or overlapped. */}
+          <div className="flex items-center gap-2 min-w-0">
+            {/* Compact two-tone "NW" brand mark: dimmer N + bright turquoise W.
+                Turquoise reserved for branding/interaction; wordmark stays neutral. */}
+            <span
+              className="inline-flex items-baseline text-lg font-extrabold tracking-tight leading-none select-none shrink-0"
+              aria-hidden="true"
+            >
+              <span style={{ color: "var(--nw-accent-strong)" }}>N</span>
+              <span style={{ color: "var(--nw-accent)" }}>W</span>
+            </span>
+            <span className="text-lg font-semibold tracking-tight text-gray-900 dark:text-white truncate">
+              NoteWise
+            </span>
+          </div>
+          {/* Restore control for the collapsed Middle Pane: an action, not a
+              location, so it takes the shared turquoise primary/CTA variant
+              rather than the selected-navigation classes. Owned by App.js —
+              see middlePaneHidden/onShowMiddlePane — and visible only under
+              the exact conditions the Middle Pane itself would render under. */}
+          {workspace === "projects" && activeFolderId && middlePaneHidden && (
+            <button
+              className={actionButtonClass({
+                primary: true,
+                className: "ml-auto shrink-0 px-2 py-1 rounded text-xs",
+              })}
+              onClick={onShowMiddlePane}
+              aria-label="Open notes pane"
+              title="Open notes pane"
+            >
+              Show notes
+            </button>
+          )}
         </div>
 
         {/* Top-level workspace navigation: Projects | PDFs. The active state is
