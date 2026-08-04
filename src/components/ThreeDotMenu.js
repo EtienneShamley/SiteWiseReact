@@ -19,11 +19,38 @@ export default function ThreeDotMenu({
   const [shareOpen, setShareOpen] = useState(false);
   const [shareCfg, setShareCfg] = useState(null);
 
-  // Fallback detection in case theme prop isn't passed correctly
+  // An explicit theme prop is an OVERRIDE, not a hint: callers that render on
+  // the document's white paper (Template Builder row actions, the row-level
+  // AI refine trigger) pass theme="light" specifically so this popover stays
+  // light-locked even while the rest of the app is in dark theme — see
+  // pagedDocument.css's "paper stays white even in dark mode" rule. Only a
+  // caller that passes no theme at all falls back to auto-detecting the real
+  // app theme, which is every other call site.
   const isDark =
-    theme === "dark" ||
-    (typeof document !== "undefined" &&
-      document.documentElement.classList.contains("dark"));
+    theme === "dark"
+      ? true
+      : theme === "light"
+      ? false
+      : typeof document !== "undefined" &&
+        document.documentElement.classList.contains("dark");
+
+  // `.nw-menu-item` (nav.css) reads its hover/disabled/danger colours from
+  // CSS custom properties that cascade from the app's real `.dark` class on
+  // <html> — the `isDark` boolean above only controls this component's own
+  // inline Tailwind classes, not that cascade. Forcing light therefore also
+  // needs these specific properties shadowed on the popover's own root, so
+  // its rows render light-locked too, not just its background/border.
+  const lightLockVars =
+    theme === "light"
+      ? {
+          "--nw-state-hover-text": "#0f172a",
+          "--nw-state-hover-bg": "rgba(15, 23, 42, 0.06)",
+          "--nw-state-disabled-text": "#94a3b8",
+          "--nw-danger-text": "#dc2626",
+          "--nw-danger-hover-bg": "rgba(220, 38, 38, 0.10)",
+          "--nw-focus-ring": "rgba(11, 110, 120, 0.90)",
+        }
+      : undefined;
 
   // Normalize anchor (supports DOM node or ref.current)
   const anchorEl = useMemo(() => {
@@ -99,6 +126,7 @@ export default function ThreeDotMenu({
       <div
         ref={menuRef}
         role="menu"
+        style={lightLockVars}
         className={`min-w-[180px] py-1 shadow-lg rounded-xl border absolute
           ${
             isDark

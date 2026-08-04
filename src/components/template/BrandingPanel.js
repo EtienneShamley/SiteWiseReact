@@ -35,17 +35,22 @@ import {
   normalizeHexColor,
 } from "../../lib/templateBranding";
 import { ALLOWED_LOGO_MIME_TYPES } from "../../lib/assetStorage";
+import { actionButtonClass } from "../../lib/interactionStyles";
 
 const LOGO_ACCEPT = ALLOWED_LOGO_MIME_TYPES.join(",");
 
-const inputCls =
-  "px-2 py-1 text-sm border rounded border-gray-300 dark:border-gray-700 " +
-  "bg-white dark:bg-neutral-800 text-black dark:text-white";
+const inputCls = "nw-field px-2 py-1 text-sm rounded";
 
-const btnCls =
-  "px-2 py-1 text-xs border rounded border-gray-300 dark:border-gray-700 " +
-  "bg-white dark:bg-neutral-800 text-black dark:text-white " +
-  "hover:bg-gray-100 dark:hover:bg-neutral-700 disabled:opacity-50";
+// Ordinary actions (Restore default, Upload/Replace logo): idle grey, shared
+// hover box, temporary turquoise while held, no permanent selected state.
+const btnCls = actionButtonClass({ className: "px-2 py-1 text-xs rounded" });
+
+// Removing the logo is destructive — red through idle, hover, focus and
+// press, never the turquoise accent.
+const dangerBtnCls = actionButtonClass({
+  danger: true,
+  className: "px-2 py-1 text-xs rounded",
+});
 
 const fieldRowCls = "flex flex-wrap items-center gap-2";
 const labelCls = "text-xs text-black dark:text-white opacity-80 min-w-[9.5rem]";
@@ -89,7 +94,7 @@ function ColorField({ id, label, value, defaultValue, onChange }) {
         <input
           id={id}
           type="color"
-          className="h-7 w-10 rounded border border-gray-300 dark:border-gray-700 bg-white"
+          className="nw-focusable h-7 w-10 rounded border border-gray-300 dark:border-gray-700 bg-white"
           value={value}
           onChange={(e) => onChange(normalizeHexColor(e.target.value, value))}
         />
@@ -177,7 +182,7 @@ function CheckboxField({ id, label, checked, onChange }) {
       <input
         id={id}
         type="checkbox"
-        className="w-4 h-4"
+        className="nw-focusable w-4 h-4"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
       />
@@ -221,7 +226,10 @@ export default function BrandingPanel({
       <h2>
         <button
           type="button"
-          className="w-full flex items-center justify-between px-3 py-2 text-left text-sm font-medium text-black dark:text-white"
+          className={actionButtonClass({
+            open,
+            className: "w-full flex items-center justify-between px-3 py-2 text-left text-sm font-medium rounded-t-lg",
+          })}
           aria-expanded={open}
           aria-controls="branding-panel-body"
           onClick={() => setOpen((v) => !v)}
@@ -296,7 +304,7 @@ export default function BrandingPanel({
               </label>
               <button
                 type="button"
-                className={btnCls}
+                className={dangerBtnCls}
                 disabled={!hasLogo}
                 aria-label="Remove the company logo from this template"
                 onClick={onLogoRemove}

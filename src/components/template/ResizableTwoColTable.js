@@ -39,6 +39,7 @@ import ThreeDotMenu from "../ThreeDotMenu";
 import { BrandedHeaderBlock, BrandedTitleBlock } from "./BrandedDocumentHeader";
 import { brandingStyles, normalizeBranding } from "../../lib/templateBranding";
 import { mmToPx } from "../../lib/pageGeometry";
+import { actionButtonClass } from "../../lib/interactionStyles";
 
 /**
  * Two-column template table, rendered as a page-aware A4 document.
@@ -544,7 +545,7 @@ export default function ResizableTwoColTable({
         <label className="text-xs text-black opacity-80">
           Field type
           <select
-            className="ml-2 px-2 py-1 text-sm border rounded border-gray-300 bg-white text-black"
+            className="twocol-field ml-2 px-2 py-1 text-sm rounded"
             value={type}
             onChange={(e) => handleTypeChange(row.id, e.target.value)}
           >
@@ -565,15 +566,16 @@ export default function ResizableTwoColTable({
               <div key={o.id} className="flex items-center gap-2">
                 <input
                   type="text"
-                  className="flex-grow px-2 py-1 text-sm border rounded border-gray-300 bg-white text-black"
+                  className="twocol-field flex-grow px-2 py-1 text-sm rounded"
                   placeholder="Option value"
                   value={o.value}
                   onChange={(e) => handleOptionRename(row, o.id, e.target.value)}
                 />
                 <button
                   type="button"
-                  className="w-6 h-6 rounded-full bg-black/70 text-white text-xs flex items-center justify-center shrink-0"
+                  className="twocol-icon-btn twocol-icon-btn--danger w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs"
                   title="Delete option"
+                  aria-label="Delete option"
                   onClick={() => handleOptionDelete(row, o.id)}
                 >
                   ×
@@ -582,7 +584,7 @@ export default function ResizableTwoColTable({
             ))}
             <button
               type="button"
-              className="self-start px-2 py-1 text-xs border rounded border-gray-300 bg-white text-black"
+              className="twocol-action self-start px-2 py-1 text-xs rounded"
               onClick={() => handleOptionAdd(row)}
             >
               Add option
@@ -607,10 +609,16 @@ export default function ResizableTwoColTable({
             (see the specificity note in template.css). */}
         {editable ? (
           <textarea
-            className="
-              twocol-label-text w-full h-full bg-transparent text-sm font-medium
-              outline-none resize-none overflow-hidden leading-tight text-black
-            "
+            className={`twocol-label-text w-full h-full text-sm font-medium resize-none overflow-hidden leading-tight text-black ${
+              // Builder-only: gives the row label the same light-locked field
+              // box as the field-type editor. Gated by enableFieldTypeEditor
+              // (Builder mode only) rather than by mode-agnostic markup, so a
+              // note's own custom-row label editing (rowActionsMode="note")
+              // keeps its existing borderless, inline-text appearance.
+              enableFieldTypeEditor
+                ? "twocol-field px-2 py-1 rounded"
+                : "bg-transparent outline-none"
+            }`}
             value={row.label}
             aria-label={
               row.isCustom ? "Section label" : `Label for ${row.label || "this field"}`
@@ -676,7 +684,9 @@ export default function ResizableTwoColTable({
           <>
             <button
               type="button"
-              className="twocol-row-actions-btn"
+              className={`twocol-row-actions-btn twocol-icon-btn ${
+                menuRowId === row.id ? "twocol-icon-btn--open" : ""
+              }`}
               aria-haspopup="menu"
               aria-expanded={menuRowId === row.id}
               aria-label={`Row actions for ${name}`}
@@ -1168,7 +1178,7 @@ export default function ResizableTwoColTable({
           {onAddRow && (
             <button
               type="button"
-              className="px-3 py-1 border rounded bg-white dark:bg-neutral-800 text-black dark:text-white"
+              className={actionButtonClass({ className: "px-3 py-1 rounded" })}
               onClick={onAddRow}
             >
               {addRowLabel}

@@ -53,6 +53,169 @@
    dark value, so they stay legible against any cell colour a company picks.
    They are form controls, not printed cell text — deliberately not rebranded. */
 
+/* Light-locked field treatment for Builder-only controls that live inside a
+   document row (the row label textarea, the field-type select and its
+   dropdown-option inputs — see ResizableTwoColTable.js renderLabelCell and
+   renderFieldTypeEditor). Same visual language as `.nw-field` in nav.css —
+   idle border, hover, focus ring — but the colours are hardcoded to the
+   light-theme tokens rather than read from the `--nw-field-*` custom
+   properties, because those flip with the app's dark theme and this sits on
+   paper that never does (see the file header above and pagedDocument.css).
+   Never used on printed report content, and gated to Builder mode at the
+   call site where the same control is shared with a completed note (see the
+   `enableFieldTypeEditor` check around the row label textarea). */
+.twocol-field {
+  color: #0f172a;
+  background-color: #ffffff;
+  border: 1px solid #cbd5e1;
+  transition: border-color 140ms ease, outline-color 140ms ease;
+}
+
+.twocol-field::placeholder {
+  color: #64748b;
+  opacity: 1;
+}
+
+.twocol-field:hover:not(:disabled):not(:focus) {
+  border-color: #94a3b8;
+}
+
+.twocol-field:focus {
+  border-color: #0b6e78;
+  outline: none;
+}
+
+.twocol-field:focus-visible {
+  border-color: #0b6e78;
+  outline: 2px solid rgba(11, 110, 120, 0.9);
+  outline-offset: 2px;
+}
+
+.twocol-field:disabled {
+  color: #94a3b8;
+  background-color: #f1f5f9;
+  border-color: #cbd5e1;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .twocol-field {
+    transition: none;
+  }
+}
+
+/* Light-locked action / icon-button treatment for on-paper Builder controls
+   (the row-actions "..." trigger, delete-option, Add option — see
+   ResizableTwoColTable.js). Same visual language and the SAME approved
+   interaction-token VALUES as `.nw-action` / `.nw-icon-btn` in nav.css — idle
+   muted grey, shared hover surface, temporary turquoise press, turquoise
+   ONLY while a trigger's own menu is genuinely open, red destructive in
+   every state — but hardcoded to the light theme's own literals (copied
+   from nav.css's `:root` block, not invented) rather than read from the
+   `--nw-*` custom properties, for the same paper-stays-light reason as
+   `.twocol-field` above. */
+.twocol-action,
+.twocol-icon-btn {
+  border: 1px solid transparent;
+  transition: color 140ms ease, background-color 140ms ease,
+    border-color 140ms ease, outline-color 140ms ease;
+}
+
+.twocol-action {
+  color: #64748b;
+  background-color: transparent;
+}
+
+.twocol-action:hover:not(.twocol-action--danger):not(:disabled) {
+  color: #0f172a;
+  background-color: rgba(15, 23, 42, 0.06);
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+.twocol-action:active:not(:disabled):not(.twocol-action--danger) {
+  color: #0b6e78;
+  background-color: rgba(11, 110, 120, 0.12);
+  border-color: rgba(11, 110, 120, 0.45);
+}
+
+.twocol-action:disabled {
+  color: #94a3b8;
+  background-color: transparent;
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+.twocol-action.twocol-action--danger:not(:disabled) {
+  color: #dc2626;
+}
+
+.twocol-action.twocol-action--danger:hover:not(:disabled),
+.twocol-action.twocol-action--danger:active:not(:disabled) {
+  background-color: rgba(220, 38, 38, 0.1);
+  border-color: rgba(220, 38, 38, 0.3);
+}
+
+.twocol-icon-btn:not(.twocol-icon-btn--open):not(.twocol-icon-btn--danger) {
+  color: #64748b;
+  background-color: transparent;
+}
+
+.twocol-icon-btn:hover:not(.twocol-icon-btn--open):not(.twocol-icon-btn--danger):not(:disabled) {
+  color: #0f172a;
+  background-color: rgba(15, 23, 42, 0.06);
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+.twocol-icon-btn:active:not(:disabled):not(.twocol-icon-btn--danger) {
+  color: #0b6e78;
+  background-color: rgba(11, 110, 120, 0.12);
+  border-color: rgba(11, 110, 120, 0.45);
+}
+
+/* Turquoise ONLY while this trigger's own menu is genuinely open — the class
+   is driven by the component's real `menuRowId` state (aria-expanded), never
+   a click memory, and returns to idle the instant the menu closes. */
+.twocol-icon-btn.twocol-icon-btn--open,
+.twocol-icon-btn.twocol-icon-btn--open:hover {
+  color: #0b6e78;
+  background-color: rgba(11, 110, 120, 0.12);
+  border-color: rgba(11, 110, 120, 0.45);
+}
+
+.twocol-icon-btn:disabled {
+  color: #94a3b8;
+  background-color: transparent;
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+/* Destructive marks an active destructive control: red surface AT REST, not
+   only on hover, so it reads as dangerous without needing the pointer over
+   it — and never turns turquoise in any state, including press and open. */
+.twocol-icon-btn.twocol-icon-btn--danger:not(:disabled) {
+  color: #dc2626;
+  background-color: rgba(220, 38, 38, 0.1);
+  border-color: rgba(220, 38, 38, 0.3);
+}
+
+.twocol-icon-btn.twocol-icon-btn--danger:hover:not(:disabled),
+.twocol-icon-btn.twocol-icon-btn--danger:active:not(:disabled) {
+  border-color: #dc2626;
+}
+
+.twocol-action:focus-visible,
+.twocol-icon-btn:focus-visible {
+  outline: 2px solid rgba(11, 110, 120, 0.9);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .twocol-action,
+  .twocol-icon-btn {
+    transition: none;
+  }
+}
+
 /* Unified Text field: grows with content, never shows an inner scrollbar. */
 .twocol-text {
   overflow: hidden;
@@ -192,6 +355,10 @@
   gap: 4px;
 }
 
+/* Position/reveal mechanics only — colour comes entirely from `.twocol-icon-btn`
+   (combined in the component's className), so idle/hover/pressed/open/danger
+   stay in the one light-locked palette below instead of a second hardcoded
+   set living here. */
 .twocol-row-actions-btn {
   position: relative;
   display: flex;
@@ -199,10 +366,7 @@
   justify-content: center;
   width: 26px;
   height: 26px;
-  border: 1px solid transparent;
   border-radius: 6px;
-  background: transparent;
-  color: rgba(0, 0, 0, 0.55);
   font-size: 15px;
   line-height: 1;
   opacity: 0;
@@ -225,18 +389,6 @@
 .twocol-row-actions-btn[aria-expanded="true"] {
   opacity: 1;
   pointer-events: auto;
-  border-color: #d1d5db;
-  background: rgba(255, 255, 255, 0.95);
-  color: #111111;
-}
-
-.twocol-row-actions-btn:hover {
-  background: rgba(57, 221, 233, 0.12);
-}
-
-.twocol-row-actions-btn:focus-visible {
-  outline: 2px solid #39dde9;
-  outline-offset: 1px;
 }
 
 /* Row-level "Refine with AI" trigger. It shares the row-actions container, and
@@ -303,8 +455,6 @@
     pointer-events: auto;
     width: 32px;
     height: 32px;
-    border-color: #d1d5db;
-    background: rgba(255, 255, 255, 0.95);
   }
 
   .twocol-row-ai-btn {
