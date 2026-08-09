@@ -1,6 +1,14 @@
 // src/components/BottomBar.js
 import React, { useRef, useState, useMemo, useEffect } from "react";
-import { FaPlus, FaCamera, FaArrowUp, FaStar, FaUndo, FaTrash } from "react-icons/fa"; // NEW: FaTrash
+import {
+  FaPlus,
+  FaCamera,
+  FaArrowUp,
+  FaStar,
+  FaUndo,
+  FaTrash,
+  FaPaperclip,
+} from "react-icons/fa"; // NEW: FaTrash
 import VoiceButton from "./VoiceButton";
 import VoiceLanguageSelect from "./VoiceLanguageSelect";
 import StylePresetSelect from "./StylePresetSelect";
@@ -8,6 +16,7 @@ import { useRefine } from "../hooks/useRefine";
 import { useTranscription } from "../hooks/useTranscription";
 import { useAppState } from "../context/AppStateContext";
 import {
+  QUICK_ADD_KIND,
   canClearQuickAddTarget,
   canQuickAddText,
   quickAddChipDescription,
@@ -15,6 +24,16 @@ import {
   quickAddInputLabel,
   quickAddPlaceholder,
 } from "../lib/quickAddTarget";
+import {
+  QUICK_ADD_SEND_ROUTE,
+  STAGED_KIND,
+  applyQuickAddSendResult,
+  canSendQuickAddComposer,
+  createQuickAddDraftStore,
+  resolveQuickAddSendRoute,
+  stagedAttachmentDisplayName,
+  stagedAttachmentRemoveLabel,
+} from "../lib/quickAddDraft";
 import {
   ALLOWED_EDITOR_IMAGE_MIME_TYPES,
   validateEditorImageFile,
@@ -25,6 +44,7 @@ import {
   ALLOWED_FILE_MIME_TYPES,
   FILE_INSERT_MESSAGE,
   bottomBarRouteFor,
+  validateEditorFileAttachment,
 } from "../lib/editorFileAttachments";
 import exifr from "exifr";
 
@@ -121,6 +141,12 @@ export default function BottomBar({
   targetToken = null,    // comparable identity, for stale async captures
   onClearTarget,         // () => void — Template destinations only
   onCaptureInsertPoint,  // () => snapshot — the Free-form caret, at action start
+  // FREE-FORM ONLY. Delivers one whole composition — the staged attachments and
+  // the typed text together — as a single operation, resolving the destination
+  // once at Send:
+  //   ({ text, attachments }) => Promise<{ ok, deliveredIds, textDelivered, stale }>
+  // The composer clears only what `deliveredIds` says actually landed.
+  onSendComposer,
 }) {
   const { currentNoteId } = useAppState();
 
@@ -133,6 +159,31 @@ export default function BottomBar({
   const [busy, setBusy] = useState(false);
   const [transcribeStatus, setTranscribeStatus] = useState("idle");
   const [transcribeError, setTranscribeError] = useState("");
+  // A composer Send in flight. Separate from `busy` (AI refine) so a delivery
+  // cannot be started twice and cannot be confused with a refinement.
+  const [sending, setSending] = useState(false);
+
+  /* --------------------- Staged attachments (Free-form) -------------------- */
+  //
+  // Choosing an image or a file STAGES it here; it reaches the note only on
+  // Send, together with whatever text the user typed to accompany it. Nothing
+  // in this queue is persisted anywhere — see src/lib/quickAddDraft.js.
+  //
+  // Template mode is deliberately untouched: its rows accept evidence by field
+  // type through their own confirmed path, and a capture there still inserts
+  // immediately, exactly as before.
+  const draftStoreRef = useRef(null);
+  if (draftStoreRef.current === null) {
+    draftStoreRef.current = createQuickAddDraftStore();
+  }
+  // A render mirror of the store, which is deliberately not React state: the
+  // object-URL lifecycle has to be exact, and that belongs in one testable unit
+  // rather than spread across effects.
+  const [stagedAttachments, setStagedAttachments] = useState([]);
+  const syncStaged = () => setStagedAttachments(draftStoreRef.current.list());
+  const clearStaged = () => {
+    if (draftStoreRef.current.clear() > 0) syncStaged();
+  };
 
   // Voice language (per note memory)
   const [transcribeLang, setTranscribeLang] = useState("auto");
@@ -162,7 +213,8 @@ export default function BottomBar({
   // Derived
   const currentText = refinedDraft ?? input;
   const hasText = useMemo(() => currentText.trim().length > 0, [currentText]);
-  const isDisabled = disabled || busy || transcribeStatus === "transcribing";
+  const isDisabled =
+    disabled || busy || sending || transcribeStatus === "transcribing";
 
   /* ------------------------------ Quick Add ------------------------------- */
 
@@ -178,6 +230,21 @@ export default function BottomBar({
   // A Template form with no row selected may not send: a guessed destination
   // would write into an arbitrary field of somebody's report.
   const canSend = canQuickAddText(target);
+
+  // Attachment DRAFTS are a Free-form capability only. A Template row accepts
+  // evidence by field type through its own confirmed attachment path, and that
+  // behaviour is unchanged here — see the schema note in quickAddTarget.js.
+  const stagingEnabled =
+    target?.kind === QUICK_ADD_KIND.FREEFORM && typeof onSendComposer === "function";
+
+  // An attachment on its own is a complete capture, so Send does not require
+  // text once something is staged.
+  const canSubmit = canSendQuickAddComposer({
+    hasText,
+    attachmentCount: stagedAttachments.length,
+    canSendText: canSend,
+  });
+  const hasComposition = hasText || stagedAttachments.length > 0;
 
   const canCaptureImage = !!capture?.image;
   const canCaptureFile = !!capture?.file;
@@ -220,6 +287,30 @@ export default function BottomBar({
       navigator.mediaDevices &&
       typeof navigator.mediaDevices.getUserMedia === "function"
     );
+  }, []);
+
+  // An unsent attachment belongs to the composition it was staged for. Opening
+  // another note must not carry it along — it would then be sent into a note it
+  // was never meant for — so the queue is dropped and every preview URL revoked.
+  // This complements, and does not replace, MainArea's own target reset.
+  useEffect(() => {
+    clearStaged();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentNoteId]);
+
+  // Same rule for leaving the Free-form view. Template evidence is a different
+  // model with different rules, so a Free-form draft may not survive into it.
+  useEffect(() => {
+    if (stagingEnabled) return;
+    clearStaged();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stagingEnabled]);
+
+  // Unmount: the store owns every live preview URL, so this is the one place
+  // that can guarantee none outlive the component.
+  useEffect(() => {
+    const store = draftStoreRef.current;
+    return () => store.clear();
   }, []);
 
   // Load per-note memory when note changes
@@ -522,29 +613,139 @@ export default function BottomBar({
   }
   // ----------------------------------------------------------
 
-  const handleSend = () => {
-    const text = (refinedDraft ?? input).trim();
-    if (!text || !onInsertText || !editor) return;
-    // No destination, no send. The placeholder already asks for a row, so this
-    // is the second half of the same rule rather than a surprise.
-    if (!canSend) return;
-    // The draft is cleared ONLY on a confirmed insertion. A refused send — no
-    // row selected, a row that no longer exists — must leave the user's typed
-    // or dictated text exactly where it is.
-    const delivered = onInsertText(text);
-    if (delivered === false) return;
+  // Clears the TEXT half of the composition. Staged attachments are separate:
+  // a partially delivered Send removes only what actually landed.
+  const clearTextDraft = () => {
     setInput("");
     setRefinedDraft(null);
     setOriginalBeforeRefine(null);
     setTranscribeError("");
   };
 
-  // NEW: clear the current textarea draft (post-transcription, pre-send)
+  const handleSend = async () => {
+    if (sending) return;
+    const text = (refinedDraft ?? input).trim();
+
+    // Read the queue from the STORE, not from render state, so a staging that
+    // has not yet re-rendered cannot be missed.
+    const staged = draftStoreRef.current.list();
+
+    // One decision, in one place: any staged attachment ALWAYS goes through the
+    // composer, whether or not there is text. Text is never delivered
+    // separately from the attachments it was written to describe.
+    const route = resolveQuickAddSendRoute({
+      attachmentCount: staged.length,
+      hasText: !!text,
+      // No destination, no send. The placeholder already asks for a row, so
+      // this is the second half of the same rule rather than a surprise.
+      canSendText: canSend,
+      hasComposerHandler: typeof onSendComposer === "function",
+    });
+
+    if (route === QUICK_ADD_SEND_ROUTE.NONE) return;
+
+    // Text-only — the original path, unchanged. Nothing about it moved into the
+    // composer pipeline, so cursor targeting, the end-of-note fallback and the
+    // refine/voice draft semantics behave exactly as they always have.
+    if (route === QUICK_ADD_SEND_ROUTE.TEXT_ONLY) {
+      if (!onInsertText || !editor) return;
+      // The draft is cleared ONLY on a confirmed insertion. A refused send — no
+      // row selected, a row that no longer exists — must leave the user's typed
+      // or dictated text exactly where it is.
+      const delivered = onInsertText(text);
+      if (delivered === false) return;
+      clearTextDraft();
+      return;
+    }
+
+    setSending(true);
+    let result;
+    try {
+      // The DESTINATION IS RESOLVED HERE, not when the files were chosen. The
+      // user may have staged a photo, kept working and moved the caret since;
+      // whatever the Free-form insertion-point system says now is authoritative.
+      result = await onSendComposer({ text, attachments: staged });
+    } catch {
+      result = null;
+    } finally {
+      setSending(false);
+    }
+
+    // Drop exactly what the delivery reports — never more. An item that failed,
+    // or that was never reached, stays staged so it can be retried, and one
+    // that already landed cannot be delivered twice.
+    const { deliveredIds, clearText } = applyQuickAddSendResult(result, {
+      hasText: !!text,
+    });
+    if (deliveredIds.length > 0) {
+      draftStoreRef.current.removeMany(deliveredIds);
+      syncStaged();
+    }
+    if (clearText) clearTextDraft();
+  };
+
+  // The trash clears the whole UNSENT composition: typed draft, refine state,
+  // staged attachments and their preview URLs. It never touches anything that
+  // has already been inserted into the note.
   const clearDraft = () => {
-    setRefinedDraft(null);
-    setInput("");
-    setOriginalBeforeRefine(null);
-    setTranscribeError("");
+    clearTextDraft();
+    clearStaged();
+  };
+
+  /* ------------------------- Staging (Free-form) --------------------------- */
+
+  // A photo chosen or captured in the Free-form note. The EXISTING stamping
+  // pipeline runs unchanged and in full — validation, EXIF/GPS, reverse
+  // geocode, map thumbnail, re-encode — and its FINAL processed Blob is what
+  // gets staged, so Send does no image work at all and there is no second
+  // photo-processing path.
+  async function stageStampedPhoto(file) {
+    const check = validateEditorImageFile(file);
+    if (!check.ok) {
+      onImageError?.(check.error);
+      return;
+    }
+    let stamped = null;
+    try {
+      stamped = await buildStampedImageBLOB(file, check.mimeType);
+    } catch {
+      onImageError?.(IMAGE_DECODE_MESSAGE);
+      return;
+    }
+    draftStoreRef.current.add({
+      kind: STAGED_KIND.IMAGE,
+      // A failed stamp falls back to the original photo rather than losing it.
+      payload: stamped || file,
+      name: file.name,
+      // The type validated from the file the user actually picked, carried
+      // forward so Send never re-measures our own derived output against the
+      // source-input size limit.
+      mimeType: check.mimeType,
+    });
+    syncStaged();
+  }
+
+  // A document chosen in the Free-form note. Validated HERE, before staging, so
+  // an unsupported or oversized file is refused while the user is still
+  // composing rather than at Send. The shared write sequence validates it again
+  // on delivery — this is an early check, not a replacement for that one.
+  function stageAttachedFile(file) {
+    const check = validateEditorFileAttachment(file);
+    if (!check.ok) {
+      onFileError?.(check.error);
+      return;
+    }
+    draftStoreRef.current.add({
+      kind: STAGED_KIND.FILE,
+      payload: file,
+      name: file.name,
+      mimeType: check.mimeType,
+    });
+    syncStaged();
+  }
+
+  const removeStagedAttachment = (id) => {
+    if (draftStoreRef.current.remove(id)) syncStaged();
   };
 
   // The ONE non-image insertion path for this bar. It hands the picked file to
@@ -567,12 +768,26 @@ export default function BottomBar({
     // Reset the input up front: the loop below awaits, and a picker that still
     // holds the previous selection will not re-fire for the same file.
     e.target.value = "";
-    // The destination is snapshotted ONCE, when the action begins — not per
-    // file, and not after the first await, so a multi-file selection all lands
-    // relative to where the user actually was.
+    // A cancelled picker yields no files: nothing happens and nothing is said.
+
+    // FREE-FORM: selection STAGES. Nothing reaches the note until Send, which
+    // is what makes "photo, then the sentence describing it" composable at all.
+    // No insertion point is snapshotted here — staging is not delivery, and the
+    // destination is resolved at Send from wherever the user is by then.
+    if (stagingEnabled) {
+      for (const f of files) {
+        if (bottomBarRouteFor(f) === "image") {
+          await stageStampedPhoto(f);
+          continue;
+        }
+        stageAttachedFile(f);
+      }
+      return;
+    }
+
+    // TEMPLATE (and any other destination): unchanged immediate insertion into
+    // the selected row's evidence through its own confirmed path.
     const insertPoint = snapshotInsertPoint();
-    // A cancelled picker yields no files: nothing is inserted and nothing is
-    // said.
     for (const f of files) {
       if (bottomBarRouteFor(f) === "image") {
         await insertStampedPhoto(f, insertPoint);
@@ -586,6 +801,20 @@ export default function BottomBar({
     const f = e.target.files?.[0];
     e.target.value = "";
     if (!f) return;
+
+    // The camera stages exactly like the picker in Free-form: same stamping
+    // pipeline, same queue, delivery deferred to Send.
+    if (stagingEnabled) {
+      if (bottomBarRouteFor(f) !== "image") {
+        // A device that hands back something that is not an image must not lose
+        // the file; it is staged as a document instead.
+        stageAttachedFile(f);
+        return;
+      }
+      await stageStampedPhoto(f);
+      return;
+    }
+
     const insertPoint = snapshotInsertPoint();
     if (bottomBarRouteFor(f) !== "image") {
       // The camera is an image path, but a device that hands back something
@@ -776,6 +1005,51 @@ export default function BottomBar({
           </div>
         )}
 
+        {/* STAGED ATTACHMENTS — held by the composer, not yet in the note.
+            They wrap rather than overflowing, stay visually subordinate to the
+            document, and each one carries its own named remove control. */}
+        {stagedAttachments.length > 0 && (
+          <ul
+            className="nw-quickadd-staged"
+            aria-label={`Attachments waiting to be sent (${stagedAttachments.length})`}
+          >
+            {stagedAttachments.map((item) => {
+              const displayName = stagedAttachmentDisplayName(item);
+              return (
+                <li key={item.id} className="nw-quickadd-staged-item">
+                  {item.kind === STAGED_KIND.IMAGE && item.previewUrl ? (
+                    <img
+                      className="nw-quickadd-staged-thumb"
+                      src={item.previewUrl}
+                      // Decorative: the filename beside it already carries the
+                      // accessible information, so announcing it twice would
+                      // only make the list harder to read.
+                      alt=""
+                    />
+                  ) : (
+                    <span className="nw-quickadd-staged-icon" aria-hidden="true">
+                      {item.kind === STAGED_KIND.IMAGE ? <FaCamera /> : <FaPaperclip />}
+                    </span>
+                  )}
+                  <span className="nw-quickadd-staged-name" title={displayName}>
+                    {displayName}
+                  </span>
+                  <button
+                    type="button"
+                    className="nw-quickadd-staged-remove"
+                    onClick={() => removeStagedAttachment(item.id)}
+                    disabled={sending}
+                    aria-label={stagedAttachmentRemoveLabel(item)}
+                    title={stagedAttachmentRemoveLabel(item)}
+                  >
+                    <span aria-hidden="true">×</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
         <textarea
           className="w-full resize-none bg-transparent outline-none text-sm text-black dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
           placeholder={transcribeStatus === "transcribing" ? "Transcribing…" : placeholder}
@@ -940,11 +1214,13 @@ export default function BottomBar({
             </button>
           )}
 
-          {/* NEW: trash to clear current draft (pre-send) */}
+          {/* NEW: trash to clear current draft (pre-send). It now clears the
+              whole unsent composition — text, refine state and any staged
+              attachments — and nothing that is already in the note. */}
           <button
             type="button"
             onClick={clearDraft}
-            disabled={!hasText || isDisabled}
+            disabled={!hasComposition || isDisabled}
             title="Clear current message"
             className="w-9 h-9 flex items-center justify-center rounded-full bg-white dark:bg-[#1b1b1b] text-red-700 dark:text-red-200 border border-gray-300 dark:border-gray-600 disabled:opacity-60"
           >
@@ -954,7 +1230,9 @@ export default function BottomBar({
           <button
             type="button"
             onClick={handleSend}
-            disabled={!hasText || isDisabled || !canSend}
+            // Enabled by text OR by at least one staged attachment: a photo on
+            // its own is a complete capture and must not require a sentence.
+            disabled={!canSubmit || isDisabled}
             title={
               canSend
                 ? chipLabel

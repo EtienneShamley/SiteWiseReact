@@ -71,6 +71,11 @@ import {
 } from "../lib/templateRowRefine";
 import { insertLocalImageAsset } from "../lib/editorImageInsert";
 import { insertFreeformFileAttachment } from "../lib/editorFileInsert";
+import {
+  QUICK_ADD_DELIVERY_MESSAGE,
+  deliverQuickAddComposer,
+} from "../lib/quickAddDelivery";
+import { STAGED_KIND } from "../lib/quickAddDraft";
 import useTransientMessage from "../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
@@ -737,13 +742,23 @@ export default function MainArea() {
     }
   }
 
+  // The literal text insertion itself, at wherever the caret ALREADY is. Split
+  // out so a composer Send can reuse the exact same insertion — and therefore
+  // the exact same multi-line behaviour — without re-restoring a captured point
+  // that its own preceding attachment inserts have already invalidated.
+  function insertFreeformTextAtCaret(text) {
+    if (!editor || !text) return false;
+    editor.chain().focus().insertContent(text).run();
+    return true;
+  }
+
   // Typed Quick Add into the Free-form note. Synchronous, so the live captured
   // point is resolved immediately — there is no window in which the document
   // could have changed between deciding and inserting.
   function handleInsertTextAtCursor(text) {
     if (!editor || !text) return;
     restoreFreeformInsertPoint(freeformInsertPointRef.current);
-    editor.chain().focus().insertContent(text).run();
+    insertFreeformTextAtCaret(text);
   }
 
   // Importing a PDF from within a note creates a canonical folder-level PDF in
@@ -889,6 +904,122 @@ export default function MainArea() {
     } finally {
       setInsertBusy(null);
     }
+  }
+
+  /**
+   * Deliver ONE Free-form Quick Add composition — the staged attachments and
+   * the typed text — as a single local operation.
+   *
+   * The destination is resolved HERE, at Send, from the live captured insertion
+   * point: staging an attachment is not delivery, so the user may stage a
+   * photo, keep working, move the caret and only then send. Everything the
+   * existing insertion-point system decides still applies unchanged, including
+   * the end-of-note fallback for a genuinely stale point.
+   *
+   * The caret is then placed exactly ONCE and the batch continues from the
+   * editor's live selection: no `beforeInsert` is passed to the shared write
+   * sequences, so neither of them re-restores the original captured point. It
+   * has to work that way — inserting the first attachment bumps the Free-form
+   * revision, which is exactly what marks a captured point stale, so
+   * re-resolving it per item would fling every attachment after the first to
+   * the end of the note. Our own mutations inside one Send are part of the same
+   * delivery, not evidence that the user moved.
+   *
+   * Persistence is entirely the existing paths' business — same validators,
+   * same IndexedDB asset store, same write ordering, same cleanup of an
+   * unreferenced asset. Nothing here stores anything.
+   */
+  async function handleQuickAddComposerSend({ text, attachments } = {}) {
+    const refused = { ok: false, deliveredIds: [], textDelivered: false };
+    if (!editor) return refused;
+
+    // Attachment drafts are Free-form only; the Template form keeps its own
+    // per-field evidence path, unchanged.
+    if (noteLayoutRef.current === "template") return refused;
+    if (!freeformEditingEnabled) {
+      showInsertNoticeError(
+        "Switch to the Free-form note to add an image or a file there. Template form evidence uses the Photo and File fields."
+      );
+      return refused;
+    }
+
+    const originNoteId = noteKeyRef.current;
+    if (!originNoteId) return refused;
+    const originEditor = editor;
+    const isCurrentTarget = () =>
+      noteKeyRef.current === originNoteId &&
+      noteLayoutRef.current === "natural" &&
+      editorRef.current === originEditor;
+
+    clearInsertNotice();
+
+    const result = await deliverQuickAddComposer({
+      text,
+      attachments,
+      // Resolved once, from the point as it stands right now.
+      placeCaret: () =>
+        restoreFreeformInsertPoint(freeformInsertPointRef.current),
+      insertAttachment: async (item) => {
+        const isImage = item.kind === STAGED_KIND.IMAGE;
+        setInsertBusy(isImage ? "image" : "file");
+        try {
+          if (isImage) {
+            return await insertLocalImageAsset({
+              // The staged payload is the FINAL stamped Blob. It is both the
+              // source and the bytes here because the file the user picked was
+              // already validated at staging time; `validate` below carries
+              // that decision forward so our own derived output is never
+              // re-measured against the source-input size limit.
+              sourceFile: item.payload,
+              blob: item.payload,
+              editor: originEditor,
+              name: item.name,
+            }, {
+              validate: () => ({ ok: true, mimeType: item.mimeType }),
+            });
+          }
+          return await insertFreeformFileAttachment({
+            file: item.payload,
+            editor: originEditor,
+            isCurrentTarget,
+          });
+        } finally {
+          setInsertBusy(null);
+        }
+      },
+      // Open a fresh paragraph immediately AFTER the attachment just inserted.
+      //
+      // This is the fix for a photo vanishing when a description was sent with
+      // it. A newly inserted image or file card is left as a NODE SELECTION
+      // covering itself, and the editor's insert command replaces the current
+      // selection range — so the next insertion, whether the next attachment or
+      // the description, overwrote the attachment before it. Inserting at an
+      // EXPLICIT position rather than at the selection is what breaks that:
+      // `selection.to` is the position just past the node, and an empty
+      // paragraph there leaves the caret inside it, which the next insertion
+      // then fills (the editor replaces an empty text block when a block node
+      // is inserted into it, so an image does not leave a blank line behind).
+      //
+      // A node spec, never a markup string.
+      openBlockAfterAttachment: () => {
+        const pos = originEditor.state.selection.to;
+        originEditor
+          .chain()
+          .focus()
+          .insertContentAt(pos, { type: "paragraph" })
+          .run();
+      },
+      // The SAME literal-text insertion a text-only Quick Add uses, so newline
+      // handling is identical whether or not an attachment came first.
+      insertText: (value) => insertFreeformTextAtCaret(value),
+    });
+
+    // A stale delivery reports nothing: it belongs to a note that is no longer
+    // on screen, and its asset has already been removed.
+    if (!result.ok && !result.stale) {
+      showInsertNoticeError(result.error || QUICK_ADD_DELIVERY_MESSAGE);
+    }
+    return result;
   }
 
   // The BottomBar's own rejection before it hands anything over (an unsupported
@@ -1675,6 +1806,10 @@ export default function MainArea() {
               // an asynchronous stamp/store cannot be steered by a caret the
               // user moved in the meantime.
               onCaptureInsertPoint={() => freeformInsertPointRef.current}
+              // Free-form attachment drafts: staged in the composer, delivered
+              // together with the typed text when the user presses Send. The
+              // destination is resolved inside this handler, at Send time.
+              onSendComposer={handleQuickAddComposerSend}
             />
           </div>
         </div>
