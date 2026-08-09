@@ -74,10 +74,29 @@ import { insertFreeformFileAttachment } from "../lib/editorFileInsert";
 import useTransientMessage from "../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
+import { ATTACHMENT_KIND } from "../lib/noteAttachments";
 import ListenInPanel from "./ListenInPanel";
 import { NOTE_VIEW, NOTE_VIEW_LABEL } from "../lib/noteViews";
 import { actionButtonClass, tabClass } from "../lib/interactionStyles";
 import useSaveStatus from "../hooks/useSaveStatus";
+import {
+  QUICK_ADD_KIND,
+  quickAddCapture,
+  quickAddRowLabel,
+  quickAddTargetToken,
+  resolveQuickAddTarget,
+} from "../lib/quickAddTarget";
+import {
+  FREEFORM_INSERT_MODE,
+  captureFreeformInsertPoint,
+  hasUsableInsertPoint,
+  resolveFreeformInsertPoint,
+} from "../lib/quickAddInsertPoint";
+import {
+  hasSeenQuickAddHint,
+  markQuickAddHintSeen,
+  quickAddHintMessage,
+} from "../lib/quickAddHint";
 import {
   SAVED_LOCALLY_HINT,
   SAVE_FAILED_DETAIL,
@@ -196,9 +215,52 @@ export default function MainArea() {
 
   const notePdfInputRef = useRef(null);
 
+  /**
+   * The last place the user genuinely had the caret in the Free-form editor,
+   * plus everything needed to prove it is still that place.
+   *
+   * Focusing the Quick Add textarea BLURS the editor, so by the time the user
+   * presses Send there is no live focus to read — but the destination they
+   * meant is the one they left. ProseMirror keeps its selection across a blur;
+   * what it cannot tell us is which note, which view and which version of the
+   * document that selection belonged to, which is exactly what makes a stored
+   * position dangerous. See src/lib/quickAddInsertPoint.js.
+   *
+   * Session-only, never persisted, cleared on every note and view change.
+   */
+  const freeformInsertPointRef = useRef(null);
+
+  /**
+   * A counter bumped on EVERY Free-form document change.
+   *
+   * `to <= docSize` proves a number is in range, not that it still points where
+   * the user was: deleting a paragraph above the caret leaves every later
+   * position in range while moving all of them. A captured point carries the
+   * revision it was taken at, and a mismatch means the numbers describe a
+   * document that no longer exists — so the insertion goes to the end instead.
+   *
+   * This is deliberately NOT transaction mapping; see the module header.
+   */
+  const freeformRevisionRef = useRef(0);
+
   // Template integration
   const templateInsertRef = useRef(null); // (rowId, text) => void
+  // The Template form's own confirmed attachment write path, registered by
+  // NoteTemplateDoc. Quick Add's image/file capture calls THIS rather than
+  // implementing its own — there is one attachment architecture, not two.
+  const templateAttachmentsRef = useRef(null); // (fieldId, kind, files) => Promise
   const [activeTemplateRowId, setActiveTemplateRowId] = useState(null);
+  // Display + capability metadata for the selected row: its label, its field
+  // type under the note's pinned version, and whether it is a custom row. The
+  // SELECTION is activeTemplateRowId above; this only describes it, so the
+  // capture bar can name the destination and gate image/file capture without
+  // reaching into the template model itself.
+  const [activeTemplateRowMeta, setActiveTemplateRowMeta] = useState(null);
+
+  const handleSelectTemplateRow = useCallback((rowId, meta) => {
+    setActiveTemplateRowId(rowId || null);
+    setActiveTemplateRowMeta(rowId ? meta || null : null);
+  }, []);
   // The single active Template Text-row editor, registered by NoteTemplateDoc.
   // It is what the shared formatting toolbar targets while the Template form is
   // showing — never the hidden Free-form editor.
@@ -295,7 +357,13 @@ export default function MainArea() {
   useEffect(() => {
     setNoteLayout("natural");
     setActiveTemplateRowId(null);
+    setActiveTemplateRowMeta(null);
     setActiveTab("note");
+    // The captured Free-form caret belongs to the note it was taken in. The
+    // editor is recreated per note, so a surviving point would describe a
+    // document that no longer exists.
+    freeformInsertPointRef.current = null;
+    freeformRevisionRef.current = 0;
   }, [noteKey, setNoteLayout]);
 
   // Leaving the Template form drops the selected row as well: a row id kept
@@ -303,7 +371,16 @@ export default function MainArea() {
   // for somewhere else. The Template row editor gives up toolbar ownership
   // through its own unmount (see NoteTemplateDoc's `viewActive`).
   useEffect(() => {
-    if (noteLayout !== "template") setActiveTemplateRowId(null);
+    if (noteLayout === "template") return;
+    setActiveTemplateRowId(null);
+    setActiveTemplateRowMeta(null);
+  }, [noteLayout]);
+
+  // Switching view invalidates the captured Free-form caret in the other
+  // direction too: coming back to the Free-form note must not reuse a position
+  // captured before the user spent time in the Template form.
+  useEffect(() => {
+    freeformInsertPointRef.current = null;
   }, [noteLayout]);
 
   const editor = useEditor(
@@ -365,11 +442,37 @@ export default function MainArea() {
       },
       onUpdate: ({ editor }) => {
         if (!noteKey) return;
+        // The document changed, so every previously captured Quick Add position
+        // now describes a document that no longer exists. TipTap emits `update`
+        // only for a real document change, which is exactly the granularity a
+        // revision needs.
+        freeformRevisionRef.current += 1;
         // Ordinary typing, formatting and image-reference insertion: a real
         // change, so the status becomes "Saving…" and the write below settles
         // it. Unchanged persistence behaviour — the same immediate write.
         markFreeformDirty(noteKey);
         setDocState((prev) => ({ ...prev, [noteKey]: editor.getHTML() }));
+      },
+      // Where a Quick Add would land. Captured from the editor's OWN events, so
+      // the stored point is always somewhere the user actually put the caret —
+      // never inferred from a click on the capture bar, and never guessed.
+      onFocus: ({ editor }) => {
+        freeformInsertPointRef.current = captureFreeformInsertPoint({
+          noteId: noteKey,
+          view: NOTE_VIEW.FREEFORM,
+          from: editor.state.selection.from,
+          to: editor.state.selection.to,
+          revision: freeformRevisionRef.current,
+        });
+      },
+      onSelectionUpdate: ({ editor }) => {
+        freeformInsertPointRef.current = captureFreeformInsertPoint({
+          noteId: noteKey,
+          view: NOTE_VIEW.FREEFORM,
+          from: editor.state.selection.from,
+          to: editor.state.selection.to,
+          revision: freeformRevisionRef.current,
+        });
       },
     },
     [noteKey]
@@ -404,6 +507,62 @@ export default function MainArea() {
   const noteLayoutRef = useRef(noteLayout);
   noteLayoutRef.current = noteLayout;
 
+  /* ------------------- Quick Add: Free-form insertion point ---------------- */
+
+  // The live state a captured point must be validated against, read at
+  // INSERTION time — never at capture time, and never from render scope, so an
+  // asynchronous capture that resolves after the user moved on is checked
+  // against where they are now.
+  const freeformInsertContext = useCallback(
+    () => ({
+      noteId: noteKeyRef.current,
+      view:
+        noteLayoutRef.current === "template"
+          ? NOTE_VIEW.TEMPLATE_FORM
+          : NOTE_VIEW.FREEFORM,
+      revision: freeformRevisionRef.current,
+      docSize: editorRef.current?.state?.doc?.content?.size ?? null,
+    }),
+    []
+  );
+
+  /**
+   * Put the caret where this insertion should land, then let the EXISTING
+   * insert paths run unchanged.
+   *
+   * Both editorCommands.insertImageAsset and insertFileAttachment begin with
+   * `.chain().focus()`, which restores the editor's stored selection — so
+   * setting the selection here is enough to steer them, and none of the
+   * carefully ordered persistence sequences in editorImageInsert.js /
+   * editorFileInsert.js need to know that Quick Add exists.
+   *
+   * Every rejection path lands at the end of the note, which is always valid
+   * and never silently wrong. Returns the mode actually used.
+   */
+  const restoreFreeformInsertPoint = useCallback(
+    (snapshot) => {
+      const editor = editorRef.current;
+      if (!editor) return FREEFORM_INSERT_MODE.END;
+      const resolved = resolveFreeformInsertPoint(snapshot, freeformInsertContext());
+      if (resolved.mode === FREEFORM_INSERT_MODE.POSITION) {
+        try {
+          editor
+            .chain()
+            .focus()
+            .setTextSelection({ from: resolved.from, to: resolved.to })
+            .run();
+          return FREEFORM_INSERT_MODE.POSITION;
+        } catch {
+          // An in-bounds range the schema still refuses as a text position
+          // degrades to the same safe end-of-note behaviour as everything else.
+        }
+      }
+      editor.commands.focus("end");
+      return FREEFORM_INSERT_MODE.END;
+    },
+    [freeformInsertContext]
+  );
+
   /**
    * The ONE way Free-form note content is replaced programmatically.
    *
@@ -430,14 +589,161 @@ export default function MainArea() {
       setDocState((prev) => ({ ...prev, [targetNoteId]: html }));
       if (editorRef.current && noteKeyRef.current === targetNoteId) {
         editorRef.current.commands.setContent(html, { emitUpdate: false });
+        // `emitUpdate: false` deliberately suppresses onUpdate, so the revision
+        // has to be bumped here: the whole document was just replaced, and any
+        // Quick Add position captured against the previous one is meaningless.
+        freeformRevisionRef.current += 1;
+        freeformInsertPointRef.current = null;
       }
       return true;
     },
     [markFreeformDirty]
   );
 
+  /* ============================== Quick Add =============================== */
+
+  /**
+   * The current Quick Add destination.
+   *
+   * Quick Add is the bottom capture bar: typed text, voice, images and files.
+   * It is NOT the primary editor — clicking into a Template row or the
+   * Free-form document and typing directly is, and stays, the main path. This
+   * only says where a CAPTURE would land, so the bar can name its destination
+   * instead of being an unlabelled box.
+   *
+   * Note the Template branch reads `activeTemplateRowId` — the same state the
+   * formatting toolbar and BottomBar insertion have always used. No second
+   * selection concept was introduced.
+   */
+  const quickAddTarget = useMemo(
+    () =>
+      resolveQuickAddTarget({
+        hasNote: !!noteTitle,
+        view:
+          noteLayout === "template" ? NOTE_VIEW.TEMPLATE_FORM : NOTE_VIEW.FREEFORM,
+        rowId: activeTemplateRowId,
+        rowLabel: activeTemplateRowMeta?.label,
+        rowFieldType: activeTemplateRowMeta?.fieldType,
+        rowIsCustom: activeTemplateRowMeta?.isCustom,
+        // Whether the captured caret is still usable decides "At cursor" vs
+        // "Note" — the chip never claims a cursor position it would not use.
+        hasInsertPoint: hasUsableInsertPoint(freeformInsertPointRef.current, {
+          noteId: noteKey,
+          view:
+            noteLayout === "template"
+              ? NOTE_VIEW.TEMPLATE_FORM
+              : NOTE_VIEW.FREEFORM,
+          revision: freeformRevisionRef.current,
+          docSize: editor?.state?.doc?.content?.size ?? null,
+        }),
+      }),
+    // docState is a dependency on purpose: it changes on every persisted edit,
+    // which is the cheapest correct signal that the captured point may have
+    // been invalidated and the chip needs to stop saying "At cursor".
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      noteTitle,
+      noteLayout,
+      noteKey,
+      activeTemplateRowId,
+      activeTemplateRowMeta,
+      editor,
+      docState,
+    ]
+  );
+
+  const quickAddCaptureAbility = useMemo(
+    () => quickAddCapture(quickAddTarget),
+    [quickAddTarget]
+  );
+
+  /**
+   * The first-use hint: shown ONCE, ever, the first time a Template row becomes
+   * a Quick Add destination.
+   *
+   * It teaches the one thing the UI cannot show by itself — that the row is now
+   * a destination AND that typing directly in it still works. Deliberately:
+   *   - never rendered inside the document (it lives beside the capture bar)
+   *   - never focused, and never focusable, so it cannot interrupt typing
+   *   - auto-dismissing on the existing transient-message timer, and dismissible
+   *   - shown once per browser profile (see src/lib/quickAddHint.js), so it
+   *     cannot reappear on every row click
+   *
+   * It reuses the transient-message hook rather than introducing a toast or an
+   * onboarding framework, because neither exists in this codebase.
+   */
+  const quickAddHint = useTransientMessage();
+  const { showInfo: showQuickAddHint, clear: clearQuickAddHint } = quickAddHint;
+  // The previous target row, so the hint fires on a real transition into a row
+  // rather than on every render while one is selected.
+  const previousTargetRowRef = useRef(null);
+
+  useEffect(() => {
+    const previous = previousTargetRowRef.current;
+    previousTargetRowRef.current = activeTemplateRowId;
+    if (!activeTemplateRowId || previous === activeTemplateRowId) return;
+    if (quickAddTarget.kind !== QUICK_ADD_KIND.TEMPLATE_ROW) return;
+    if (hasSeenQuickAddHint()) return;
+    // Recorded as seen at the moment it is SHOWN, so a second row click in the
+    // same session cannot produce a second hint.
+    markQuickAddHintSeen();
+    showQuickAddHint(quickAddHintMessage(quickAddRowLabel(quickAddTarget)));
+  }, [activeTemplateRowId, quickAddTarget, showQuickAddHint]);
+
+  /**
+   * An image or a document captured while the Template form is showing.
+   *
+   * It goes to the SELECTED row's evidence through NoteTemplateDoc's existing
+   * confirmed attachment path — the same one that row's own upload control
+   * uses (validate → normalize → persist the Blob to IndexedDB → persist the
+   * reference through the throwing instance save → delete the asset again if
+   * the reference write fails). Quick Add adds no storage, no second write
+   * ordering and no second asset kind.
+   *
+   * The row's FIELD TYPE decides what it may accept, and it is re-checked here
+   * rather than trusted from whichever control was pressed.
+   */
+  async function handleTemplateAttachmentCapture(kind, files) {
+    if (!files || !files.length) return;
+
+    const target = quickAddTarget;
+    if (target.kind !== QUICK_ADD_KIND.TEMPLATE_ROW) {
+      showInsertNoticeError(
+        "Select a Photo or File row in this template first, then add the image or file."
+      );
+      return;
+    }
+
+    const ability = quickAddCapture(target);
+    const allowed = kind === ATTACHMENT_KIND.PHOTO ? ability.image : ability.file;
+    if (!allowed) {
+      // The row cannot hold this evidence under the note's pinned version. The
+      // refusal names the row and says what would work, and nothing is written.
+      showInsertNoticeError(ability.reason || "That row cannot hold this file.");
+      return;
+    }
+
+    const add = templateAttachmentsRef.current;
+    if (!add) return;
+
+    clearInsertNotice();
+    setInsertBusy(kind === ATTACHMENT_KIND.PHOTO ? "image" : "file");
+    try {
+      // Per-file failures surface as that field's own inline error, which is
+      // where every other attachment failure in the Template form appears.
+      await add(target.rowId, kind, files);
+    } finally {
+      setInsertBusy(null);
+    }
+  }
+
+  // Typed Quick Add into the Free-form note. Synchronous, so the live captured
+  // point is resolved immediately — there is no window in which the document
+  // could have changed between deciding and inserting.
   function handleInsertTextAtCursor(text) {
-    if (editor && text) editor.chain().focus().insertContent(text).run();
+    if (!editor || !text) return;
+    restoreFreeformInsertPoint(freeformInsertPointRef.current);
+    editor.chain().focus().insertContent(text).run();
   }
 
   // Importing a PDF from within a note creates a canonical folder-level PDF in
@@ -472,6 +778,13 @@ export default function MainArea() {
   async function handleInsertImageAtCursor(sourceFile, options = {}) {
     if (!editor || !sourceFile) return;
 
+    // Template form: the image belongs to the SELECTED Photo row's evidence, not
+    // to the hidden Free-form document behind this view.
+    if (noteLayoutRef.current === "template") {
+      await handleTemplateAttachmentCapture(ATTACHMENT_KIND.PHOTO, [sourceFile]);
+      return;
+    }
+
     // The Free-form editor is only hidden behind the Template form, so an
     // insert from the Template form would land in a document the user cannot
     // see. Say so instead.
@@ -485,6 +798,15 @@ export default function MainArea() {
     // A new attempt supersedes whatever the last one said.
     clearInsertNotice();
 
+    // Snapshotted when the capture BEGINS, then validated again after the
+    // asynchronous stamp + IndexedDB write below. `options.insertPoint` is the
+    // point the capture bar captured at the moment the user chose the file; it
+    // falls back to the live point for callers that pass none.
+    const snapshot =
+      options.insertPoint !== undefined
+        ? options.insertPoint
+        : freeformInsertPointRef.current;
+
     setInsertBusy("image");
     try {
       const result = await insertLocalImageAsset({
@@ -492,6 +814,10 @@ export default function MainArea() {
         blob: options.blob || sourceFile,
         editor,
         name: options.name || sourceFile.name,
+        // Steer the caret only once the bytes are stored and we are about to
+        // insert — a document edited during the write invalidates the snapshot
+        // by revision, and the reference lands at the end of the note instead.
+        beforeInsert: () => restoreFreeformInsertPoint(snapshot),
       });
       if (!result.ok) showInsertNoticeError(result.error);
       else clearInsertNotice();
@@ -514,8 +840,14 @@ export default function MainArea() {
    * that happens the new, still-unreferenced asset is deleted and nothing is
    * said — the message would describe a note the user is no longer looking at.
    */
-  async function handleInsertFileAtCursor(file) {
+  async function handleInsertFileAtCursor(file, options = {}) {
     if (!editor || !file) return;
+
+    // Template form: the document belongs to the SELECTED File row's evidence.
+    if (noteLayoutRef.current === "template") {
+      await handleTemplateAttachmentCapture(ATTACHMENT_KIND.FILE, [file]);
+      return;
+    }
 
     if (!freeformEditingEnabled) {
       showInsertNoticeError(
@@ -530,6 +862,11 @@ export default function MainArea() {
 
     clearInsertNotice();
 
+    const snapshot =
+      options.insertPoint !== undefined
+        ? options.insertPoint
+        : freeformInsertPointRef.current;
+
     setInsertBusy("file");
     try {
       const result = await insertFreeformFileAttachment({
@@ -539,6 +876,7 @@ export default function MainArea() {
           noteKeyRef.current === originNoteId &&
           noteLayoutRef.current === "natural" &&
           editorRef.current === originEditor,
+        beforeInsert: () => restoreFreeformInsertPoint(snapshot),
       });
       if (result.ok) {
         clearInsertNotice();
@@ -559,23 +897,32 @@ export default function MainArea() {
     if (message) showInsertNoticeError(message);
   }
 
-  // BottomBar text routing:
-  // - natural layout -> tiptap
-  // - template layout -> selected template row
+  // Quick Add text routing:
+  // - Free-form  -> the captured caret, or the end of the note
+  // - Template   -> the SELECTED row, never a guessed one
+  //
+  // Returns true only when the text was actually delivered, so the capture bar
+  // clears its draft on success and KEEPS it on refusal — a failed send must
+  // never silently discard what the user typed or dictated.
   function handleBottomBarInsert(text) {
-    if (!text || !noteTitle) return;
+    if (!text || !noteTitle) return false;
 
     if (noteLayout === "template") {
       if (!activeTemplateRowId || !templateInsertRef.current) {
-        alert("Select a template field first (right-hand column).");
-        return;
+        // Deliberately not a guessed destination, and no longer a blocking
+        // alert(): this reports through the same restrained inline channel as
+        // every other insertion outcome in this view.
+        showInsertNoticeError(
+          "Select a template row first, then Quick Add will put this text in it."
+        );
+        return false;
       }
       templateInsertRef.current(activeTemplateRowId, text);
-      return;
+      return true;
     }
 
-    // natural
     handleInsertTextAtCursor(text);
+    return true;
   }
 
   /* ============================ Autosave status =========================== */
@@ -858,7 +1205,9 @@ export default function MainArea() {
   useEffect(() => {
     setRefineState((prev) => clearRefineMessage(prev));
     clearInsertNotice();
-  }, [noteKey, noteLayout, clearInsertNotice]);
+    // The hint names a row in a note/view that is no longer on screen.
+    clearQuickAddHint();
+  }, [noteKey, noteLayout, clearInsertNotice, clearQuickAddHint]);
 
   // Control-bar actions (Refine, Revert, Unlink PDF, ← Back to PDFs). These are
   // actions, not locations: they rest muted grey and return to it. None of them
@@ -1188,7 +1537,11 @@ export default function MainArea() {
                     onRegisterTemplateInsert={(fn) => {
                       templateInsertRef.current = fn;
                     }}
-                    onSelectRow={(rowId) => setActiveTemplateRowId(rowId)}
+                    onRegisterTemplateAttachments={(fn) => {
+                      templateAttachmentsRef.current = fn;
+                    }}
+                    onSelectRow={handleSelectTemplateRow}
+                    quickAddTargetRowId={activeTemplateRowId}
                     onSaveBegin={beginTemplateSave}
                     onSaveSettle={settleTemplateSave}
                     onSaveLoaded={markTemplateLoaded}
@@ -1274,6 +1627,27 @@ export default function MainArea() {
           style={{ display: activeTab === "note" ? "block" : "none" }}
         >
           <div className="px-4 py-3 flex flex-col gap-2">
+            {/* First-use Quick Add hint. Beside the capture bar, never inside
+                the document; it takes no focus, blocks nothing, and disappears
+                on its own or when dismissed. */}
+            {!!quickAddHint.message && (
+              <div className="flex items-start gap-2 text-xs text-gray-600 dark:text-gray-300">
+                <span role="status" aria-live="polite">
+                  {quickAddHint.message}
+                </span>
+                <button
+                  type="button"
+                  onClick={clearQuickAddHint}
+                  className={actionButtonClass({
+                    className: "px-1.5 py-0.5 rounded text-xs shrink-0",
+                  })}
+                  aria-label="Dismiss this Quick Add tip"
+                  title="Dismiss"
+                >
+                  Got it
+                </button>
+              </div>
+            )}
             {noteTitle && <ListenInPanel onInsert={handleBottomBarInsert} />}
             {/* No PDF prop: a PDF chosen through the BottomBar attachment
                 picker becomes a Free-form attachment card. Importing a PDF into
@@ -1287,6 +1661,20 @@ export default function MainArea() {
               onInsertFile={handleInsertFileAtCursor}
               onFileError={handleInsertError}
               disabled={!noteTitle || !editor}
+              // Quick Add destination. The bar names it, gates capture on it,
+              // and stamps asynchronous captures with it — it never decides it.
+              target={quickAddTarget}
+              capture={quickAddCaptureAbility}
+              targetToken={quickAddTargetToken({
+                noteId: noteKey,
+                view: activeView,
+                target: quickAddTarget,
+              })}
+              onClearTarget={() => handleSelectTemplateRow(null, null)}
+              // Snapshot the Free-form caret at the moment a capture begins, so
+              // an asynchronous stamp/store cannot be steered by a caret the
+              // user moved in the meantime.
+              onCaptureInsertPoint={() => freeformInsertPointRef.current}
             />
           </div>
         </div>

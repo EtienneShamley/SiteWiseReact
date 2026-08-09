@@ -48,6 +48,13 @@ function defaultRewrapBlob(file, mimeType) {
  * @param isCurrentTarget () => boolean — true while the ORIGINATING note and the
  *                        Free-form view are still what an insertion would land
  *                        in. Checked after the asset write, never assumed.
+ * @param beforeInsert    optional () => void, run immediately before step 5 so a
+ *                        caller can place the caret — after the bytes are stored
+ *                        AND after the identity re-check, so Quick Add validates
+ *                        its captured insertion point against the document as it
+ *                        is at insertion time. A throw is swallowed: failing to
+ *                        move the caret must not fail an insertion whose bytes
+ *                        are already persisted.
  * @returns {Promise<{ok: true, assetId, mimeType, size, name}
  *                 | {ok: false, error?: string, stale?: true}>}
  *
@@ -57,7 +64,7 @@ function defaultRewrapBlob(file, mimeType) {
  * note the user is no longer looking at.
  */
 export async function insertFreeformFileAttachment(
-  { file, editor, isCurrentTarget },
+  { file, editor, isCurrentTarget, beforeInsert },
   deps = {}
 ) {
   const {
@@ -122,7 +129,15 @@ export async function insertFreeformFileAttachment(
     return { ok: false, stale: true };
   }
 
-  // 5. Insert the reference.
+  // 5. Insert the reference, at wherever the caller wants the caret.
+  if (typeof beforeInsert === "function") {
+    try {
+      beforeInsert();
+    } catch {
+      // The bytes are stored and the identity check passed; the insertion below
+      // is still correct and simply lands at the editor's current selection.
+    }
+  }
   let inserted;
   try {
     inserted = insertNode(editor, {

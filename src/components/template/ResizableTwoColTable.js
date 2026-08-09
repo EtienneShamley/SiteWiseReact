@@ -230,6 +230,11 @@ export default function ResizableTwoColTable({
   lockTemplateLabels = false, // note mode: master labels are read-only
   enableColumnDivider = false, // builder only (leftPct is a template value)
   addRowLabel = "Add Row",
+  // The row the bottom capture bar (Quick Add) would insert into, if any. This
+  // is PRESENTATION ONLY — the selection is owned by MainArea and mirrored down
+  // through NoteTemplateDoc. It never changes what a row does, only how it
+  // looks, and the Template Builder never passes it.
+  targetRowId = null,
 }) {
   const [rowDrag, setRowDrag] = useState(null);
   const [colDrag, setColDrag] = useState(null);
@@ -852,9 +857,16 @@ export default function ResizableTwoColTable({
     const effectiveMin = legacyItems.length ? Math.max(baseMin, 170) : baseMin;
     const imgMaxH = Math.max(80, effectiveMin * 0.6);
 
+    const isTarget = !!targetRowId && row.id === targetRowId;
+
     return (
       <div
-        className={`twocol-row grid ${row.isCustom ? "twocol-row--custom" : ""}`}
+        className={`twocol-row grid ${row.isCustom ? "twocol-row--custom" : ""} ${
+          isTarget ? "twocol-row--target" : ""
+        }`}
+        // The target state is carried semantically as well as visually, so it
+        // does not depend on the turquoise border alone.
+        aria-current={isTarget ? "true" : undefined}
         style={{
           gridTemplateColumns: `${leftWidth} 1fr`,
           minHeight: `${effectiveMin}px`,
@@ -946,9 +958,11 @@ export default function ResizableTwoColTable({
     // dragging keeps working on attachment fields (floor of 56 fits the
     // upload control).
     const headMin = Math.max(56, row.px || 56);
+    const isTarget = !!targetRowId && row.id === targetRowId;
     return (
       <div
-        className="twocol-row grid"
+        className={`twocol-row grid ${isTarget ? "twocol-row--target" : ""}`}
+        aria-current={isTarget ? "true" : undefined}
         style={{
           gridTemplateColumns: `${leftWidth} 1fr`,
           minHeight: `${headMin}px`,

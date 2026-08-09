@@ -15,7 +15,12 @@ import {
   collectKnownOptionIds,
   isAttachmentAssetReferenced,
 } from "../../lib/templateModel";
-import { isTextInsertable, normalizeRows } from "../../lib/templateFields";
+import {
+  FIELD_TYPE,
+  isTextInsertable,
+  normalizeRows,
+  normalizeType,
+} from "../../lib/templateFields";
 import {
   CUSTOM_ROW_MIN_HEIGHT_PX,
   customRowsForTemplate,
@@ -140,7 +145,20 @@ import {
 export default function NoteTemplateDoc({
   noteId,
   onRegisterTemplateInsert, // (fn | null) => void
-  onSelectRow, // (rowId) => void
+  // Quick Add's image/file destination: the SAME confirmed attachment write
+  // path a Photo/File field's own upload control uses, handed up so the capture
+  // bar cannot grow a second attachment implementation.
+  //   (fn: (fieldId, kind, files) => Promise<void> | null) => void
+  onRegisterTemplateAttachments,
+  // (rowId, meta | null) => void — meta carries the row's label, its field type
+  // in THIS note's pinned version, and whether it is a note-specific custom
+  // row, so the capture bar can describe and gate the destination. Targeting
+  // itself is always by the stable rowId; the label is display only.
+  onSelectRow,
+  // The row Quick Add is currently aimed at, so the document can show a
+  // restrained target treatment. This is a MIRROR of MainArea's
+  // activeTemplateRowId — the selection is owned there, never duplicated here.
+  quickAddTargetRowId = null,
   // True while the Template form is the view the user is actually looking at.
   // Leaving the view clears the active Text row, so no editor is left owning
   // the shared toolbar behind a view nobody can see.
@@ -485,6 +503,40 @@ export default function NoteTemplateDoc({
 
   /* ---------------------- contextual rich-text editing -------------------- */
 
+  /**
+   * What the capture bar needs to know about a row to DESCRIBE and GATE it:
+   * its label, its field type under THIS note's pinned version, and whether it
+   * is a note-specific custom row.
+   *
+   * This is display and capability metadata only. Every write still addresses
+   * the row by its stable id, so two rows sharing a label — or a custom row
+   * named after a master field — can never redirect an insertion. Returns null
+   * for a row that is not part of what this note is pinned to right now.
+   */
+  const rowMetaFor = useCallback(
+    (rowId) => {
+      if (!rowId) return null;
+      if (customRowIds.has(rowId)) {
+        const row = templateCustomRows.find((r) => r && r.id === rowId);
+        // A note-specific custom row is Text by definition — the field-type
+        // designer stays a Builder capability (see noteCustomRows.js).
+        return {
+          label: row?.label ?? "",
+          fieldType: FIELD_TYPE.TEXT,
+          isCustom: true,
+        };
+      }
+      const row = (rowsRef.current || []).find((r) => r && r.id === rowId);
+      if (!row) return null;
+      return {
+        label: row.label ?? "",
+        fieldType: normalizeType(row.type),
+        isCustom: false,
+      };
+    },
+    [customRowIds, templateCustomRows]
+  );
+
   // True for a row whose answer is the unified Text field. Note-specific custom
   // rows are Text by definition; a master row must be Text in THIS note's
   // pinned version. Anything else — number, date, time, checkbox, yes/no,
@@ -533,7 +585,12 @@ export default function NoteTemplateDoc({
   // intent can be stamped with it.
   const handleAnswerFocus = useCallback(
     (rowId) => {
-      if (onSelectRow) onSelectRow(rowId);
+      // Selecting the Quick Add destination. Focus is NOT moved anywhere by
+      // this: the caret stays exactly where the user clicked (the caret hint in
+      // TemplateTextCell restores the click point once the editor mounts), so
+      // direct typing remains the primary path and the capture bar merely
+      // learns where a Quick Add would land.
+      if (onSelectRow) onSelectRow(rowId, rowMetaFor(rowId));
       const next = nextActiveTextRow({
         target: TEMPLATE_FOCUS.ANSWER,
         rowId,
@@ -542,17 +599,20 @@ export default function NoteTemplateDoc({
       setActiveTextRowId(next);
       return next ? rowIdentityFor(next) : null;
     },
-    [onSelectRow, isTextAnswerRow, rowIdentityFor]
+    [onSelectRow, isTextAnswerRow, rowIdentityFor, rowMetaFor]
   );
 
   const handleStructuredFocus = useCallback(
     (rowId) => {
-      if (onSelectRow) onSelectRow(rowId);
+      // A structured control (number/date/dropdown/Photo/File upload) is still
+      // a Quick Add destination — a Photo or File field is in fact the ONLY
+      // destination that can accept an image or a document.
+      if (onSelectRow) onSelectRow(rowId, rowMetaFor(rowId));
       setActiveTextRowId(
         nextActiveTextRow({ target: TEMPLATE_FOCUS.STRUCTURED, rowId, isTextRow: false })
       );
     },
-    [onSelectRow]
+    [onSelectRow, rowMetaFor]
   );
 
   // A row label is plain text and is never a rich-text target. It deliberately
@@ -1392,6 +1452,46 @@ export default function NoteTemplateDoc({
     }
   }, [onRegisterTemplateInsert, insertIntoRow]);
 
+  // Register the EXISTING attachment write path (validate → normalize → persist
+  // the Blob → persist the reference through the throwing instance save →
+  // delete the asset again if the reference write fails) so Quick Add reuses it
+  // verbatim. There is deliberately no second attachment implementation and no
+  // second asset store.
+  useEffect(() => {
+    if (!onRegisterTemplateAttachments) return;
+    onRegisterTemplateAttachments(handleAddAttachments);
+    return () => onRegisterTemplateAttachments(null);
+  }, [onRegisterTemplateAttachments, handleAddAttachments]);
+
+  /* ------------------------ Quick Add target lifecycle -------------------- */
+
+  // Held in a ref so the effect below reacts to the TARGET changing, not to the
+  // parent handing down a new callback identity on every render.
+  const onSelectRowRef = useRef(onSelectRow);
+  onSelectRowRef.current = onSelectRow;
+
+  /**
+   * A Quick Add target that no longer exists must stop being a target.
+   *
+   * The row can disappear underneath the selection in ways the user never
+   * connects to the capture bar: deleting a note-specific custom row, or
+   * re-pinning the note to a template or version that does not contain that
+   * field. `insertIntoRow` already REFUSES an unknown row id, so nothing could
+   * be written to it — but the bar would go on naming a row that is not on
+   * screen, which is its own kind of wrong.
+   *
+   * The row-editor equivalent of this already exists (activeRowIdentity above);
+   * it does not cover structured, Photo or File targets, which never own an
+   * editor.
+   */
+  useEffect(() => {
+    if (!quickAddTargetRowId) return;
+    const stillExists =
+      customRowIds.has(quickAddTargetRowId) ||
+      (rows || []).some((r) => r && r.id === quickAddTargetRowId);
+    if (!stillExists) onSelectRowRef.current?.(null, null);
+  }, [quickAddTargetRowId, customRowIds, rows]);
+
   return (
     <div className="p-2 text-black dark:text-white">
       {/* Per-note template selection. This control ONLY chooses which template
@@ -1489,6 +1589,9 @@ export default function NoteTemplateDoc({
         // insertion and CLEAR rich-text ownership.
         onRightFocus={handleStructuredFocus}
         onRowLabelFocus={handleLabelFocus}
+        // Restrained selected-target treatment on the row Quick Add is aimed
+        // at. Presentation only — the selection lives in MainArea.
+        targetRowId={quickAddTargetRowId}
         // Contextual rich text for Text answers. One editor, on the active row.
         richText={{
           // The editor mounts only for a row with a resolved identity, so a row

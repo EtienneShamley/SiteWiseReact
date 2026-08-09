@@ -38,11 +38,18 @@ import { EDITOR_IMAGE_INSERT_MESSAGE } from "./editorImageAssets";
  *                    re-measured against the input size limit.
  * @param editor      the TipTap editor the node goes into
  * @param name        display/alt name (defaults to the source filename)
+ * @param beforeInsert optional () => void, run immediately before step 4 so a
+ *                    caller can place the caret. It runs AFTER the bytes are
+ *                    stored, which is what lets Quick Add validate its captured
+ *                    insertion point against the document as it is at insertion
+ *                    time rather than as it was when the user picked the file.
+ *                    A throw is swallowed: failing to move the caret must not
+ *                    fail an insertion whose bytes are already persisted.
  * @returns {Promise<{ok: true, assetId, width, height, mimeType}
  *                  | {ok: false, error: string}>}
  */
 export async function insertLocalImageAsset(
-  { sourceFile, blob, editor, name },
+  { sourceFile, blob, editor, name, beforeInsert },
   deps = {}
 ) {
   const {
@@ -96,7 +103,15 @@ export async function insertLocalImageAsset(
   }
   if (!assetId) return { ok: false, error: IMAGE_STORAGE_MESSAGE };
 
-  // 4. Insert the reference.
+  // 4. Insert the reference, at wherever the caller wants the caret.
+  if (typeof beforeInsert === "function") {
+    try {
+      beforeInsert();
+    } catch {
+      // The bytes are already stored and the insertion below is still correct;
+      // it simply lands at the editor's current selection.
+    }
+  }
   let inserted;
   try {
     inserted = insertNode(editor, {

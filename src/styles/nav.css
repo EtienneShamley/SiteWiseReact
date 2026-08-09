@@ -586,3 +586,64 @@
   color: inherit;
   fill: currentColor;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Quick Add destination chip                                                 */
+/*                                                                            */
+/* The bottom capture bar names where a capture would land: a Template row,    */
+/* the Free-form caret ("At cursor") or the whole note ("Note").              */
+/*                                                                            */
+/* It is a STATUS, not a control — it reports the destination rather than      */
+/* offering to change it — so it takes the tinted selected surface and the     */
+/* accent border of the shared active state, and deliberately has no hover     */
+/* treatment. Only the × inside it is interactive.                            */
+/*                                                                            */
+/* Truncation lives here rather than in JS so the full label always survives   */
+/* for the title and the accessible name: a long row label shortens on screen  */
+/* and is still readable on hover and to a screen reader.                      */
+/* -------------------------------------------------------------------------- */
+
+.nw-quickadd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 16rem;
+  min-width: 0;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--nw-nav-active-border);
+  border-radius: 0.375rem;
+  background-color: var(--nw-nav-selected-bg);
+  color: var(--nw-nav-active-text);
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+  font-weight: 500;
+}
+
+.nw-quickadd-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.nw-quickadd-chip-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 9999px;
+  flex: none;
+  color: inherit;
+  line-height: 1;
+}
+
+.nw-quickadd-chip-clear:hover {
+  background-color: var(--nw-state-hover-bg);
+  color: var(--nw-state-hover-text);
+}
+
+.nw-quickadd-chip-clear:focus-visible {
+  outline: 2px solid var(--nw-accent-bright);
+  outline-offset: 1px;
+}

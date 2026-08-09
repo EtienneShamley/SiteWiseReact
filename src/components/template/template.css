@@ -514,6 +514,37 @@
   /* no visual difference by design */
 }
 
+/* QUICK ADD TARGET — the row the bottom capture bar would insert into.
+ *
+ * Restrained on purpose. This is a printed report the user is completing, not a
+ * form designer: the border ALREADY exists on every row and only changes
+ * colour, so nothing moves, nothing grows and pagination cannot shift when a
+ * row becomes the target. Deliberately no glow, no thicker border, no fill, no
+ * absolutely-positioned label over the content.
+ *
+ * The shared light-theme interaction turquoise is reused (--nw-accent-bright,
+ * ~6:1 on white). It is read from the token rather than hardcoded, and the
+ * light value is the fallback because the paper is always white in BOTH app
+ * themes (see the file header) — a dark-theme accent would fail on it.
+ *
+ * Colour is not the only cue: the label carries extra weight, and the row also
+ * exposes aria-current="true". */
+.twocol-row--target {
+  border-color: var(--nw-accent-bright, #0b6e78);
+  /* Outranks the neighbouring row's collapsed border so the target reads as one
+     complete outline rather than three sides. */
+  position: relative;
+  z-index: 1;
+}
+
+.twocol-row--target .twocol-cell-left {
+  border-right-color: var(--nw-accent-bright, #0b6e78);
+}
+
+.twocol-row--target .twocol-label-text {
+  font-weight: 700;
+}
+
 /* Print/export foundation: editing affordances never appear on paper, and
  * branded cell colours are printed rather than dropped as decoration. */
 @media print {
@@ -531,6 +562,21 @@
   .twocol-cell-right {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
+  }
+
+  /* The Quick Add target is an editing affordance, not report content: a
+     printed row must look identical whether or not the capture bar was aimed
+     at it. Falls back to the branded border, exactly like every other row. */
+  .twocol-row--target {
+    border-color: var(--nw-tpl-border-color, #d1d5db);
+  }
+
+  .twocol-row--target .twocol-cell-left {
+    border-right-color: var(--nw-tpl-border-color, #d1d5db);
+  }
+
+  .twocol-row--target .twocol-label-text {
+    font-weight: 500;
   }
 
   /* A row that happened to be open when the note was printed must print

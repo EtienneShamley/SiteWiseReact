@@ -7,7 +7,18 @@ import StylePresetSelect from "./StylePresetSelect";
 import { useRefine } from "../hooks/useRefine";
 import { useTranscription } from "../hooks/useTranscription";
 import { useAppState } from "../context/AppStateContext";
-import { validateEditorImageFile } from "../lib/editorImages";
+import {
+  canClearQuickAddTarget,
+  canQuickAddText,
+  quickAddChipDescription,
+  quickAddChipLabel,
+  quickAddInputLabel,
+  quickAddPlaceholder,
+} from "../lib/quickAddTarget";
+import {
+  ALLOWED_EDITOR_IMAGE_MIME_TYPES,
+  validateEditorImageFile,
+} from "../lib/editorImages";
 import { IMAGE_DECODE_MESSAGE } from "../lib/imageProcessing";
 import {
   ALLOWED_FILE_EXTENSIONS,
@@ -101,6 +112,15 @@ export default function BottomBar({
   onInsertFile,
   onFileError,      // (message) => void — same one message channel
   disabled = false,
+  // ---------------------------- Quick Add ---------------------------------
+  // WHERE this bar's captures go, resolved by MainArea (see
+  // src/lib/quickAddTarget.js). This bar describes and gates the destination;
+  // it never chooses one, and clicking a Template row never moves focus here.
+  target = null,
+  capture = null,        // { image, file, reason } — schema capability of the target
+  targetToken = null,    // comparable identity, for stale async captures
+  onClearTarget,         // () => void — Template destinations only
+  onCaptureInsertPoint,  // () => snapshot — the Free-form caret, at action start
 }) {
   const { currentNoteId } = useAppState();
 
@@ -128,6 +148,12 @@ export default function BottomBar({
   const cameraInputRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const chunksRef = useRef([]);
+  // The LIVE destination, readable from a transcription that started before the
+  // user moved. Kept in a ref because the async handler closed over the value
+  // that was current when recording began — which is exactly the value it must
+  // compare against, not silently reuse.
+  const targetTokenRef = useRef(targetToken);
+  targetTokenRef.current = targetToken;
 
   // Hooks
   const { refineText } = useRefine();
@@ -137,6 +163,56 @@ export default function BottomBar({
   const currentText = refinedDraft ?? input;
   const hasText = useMemo(() => currentText.trim().length > 0, [currentText]);
   const isDisabled = disabled || busy || transcribeStatus === "transcribing";
+
+  /* ------------------------------ Quick Add ------------------------------- */
+
+  // Everything the bar says about its destination comes from one pure model, so
+  // the chip, the placeholder, the accessible name and the Send gate can never
+  // disagree about where a capture would land.
+  const chipLabel = quickAddChipLabel(target);
+  const chipDescription = quickAddChipDescription(target);
+  const placeholder = quickAddPlaceholder(target);
+  const inputLabel = quickAddInputLabel(target);
+  const showClearTarget = canClearQuickAddTarget(target) && !!onClearTarget;
+
+  // A Template form with no row selected may not send: a guessed destination
+  // would write into an arbitrary field of somebody's report.
+  const canSend = canQuickAddText(target);
+
+  const canCaptureImage = !!capture?.image;
+  const canCaptureFile = !!capture?.file;
+  const canCaptureAnything = canCaptureImage || canCaptureFile;
+  // Why capture is unavailable, when it is — used as the control's tooltip so
+  // a disabled button explains itself rather than just being dead.
+  const captureReason = capture?.reason || null;
+
+  // The picker HINT only. It is user-controlled and any file can be dropped
+  // past it, so it decides nothing — validation always happens against the file
+  // itself, and the destination's own field type is re-checked on arrival.
+  const captureAccept = useMemo(() => {
+    const parts = [];
+    // The explicit image list rather than a wildcard: it is what the image path
+    // actually accepts (JPEG/PNG/WebP — SVG is excluded as a scriptable
+    // document), so the picker stops offering files that would only be rejected.
+    if (canCaptureImage) parts.push(...ALLOWED_EDITOR_IMAGE_MIME_TYPES);
+    if (canCaptureFile) {
+      parts.push(...ALLOWED_FILE_MIME_TYPES, ...ALLOWED_FILE_EXTENSIONS);
+    }
+    return parts.join(",");
+  }, [canCaptureImage, canCaptureFile]);
+
+  const captureLabel = canCaptureImage
+    ? canCaptureFile
+      ? "Add an image or a file"
+      : `Add image${chipLabel ? ` to ${chipLabel}` : ""}`
+    : canCaptureFile
+    ? `Add file${chipLabel ? ` to ${chipLabel}` : ""}`
+    : "Add image or file";
+
+  // Snapshot of where a capture that BEGINS now should land. Read once, at the
+  // start of the action, and carried through the asynchronous work.
+  const snapshotInsertPoint = () =>
+    typeof onCaptureInsertPoint === "function" ? onCaptureInsertPoint() : undefined;
 
   const hasMediaDevices = useMemo(() => {
     return (
@@ -416,7 +492,7 @@ export default function BottomBar({
   // and the camera. It never touches the editor itself: the stamped Blob goes
   // to MainArea, which stores it in IndexedDB and inserts a reference only once
   // that write is confirmed. Nothing here writes a blob: URL into the note.
-  async function insertStampedPhoto(file) {
+  async function insertStampedPhoto(file, insertPoint) {
     // The 20 MB source limit is applied to the picked file FIRST, before the
     // expensive decode/stamp work — and to the file the user actually chose,
     // never to our own derived canvas output.
@@ -439,6 +515,9 @@ export default function BottomBar({
       // A failed stamp falls back to the original photo rather than losing it.
       blob: stamped || file,
       name: file.name,
+      // Where this capture was aimed when the user picked the file. Validated
+      // again on arrival — a document edited during the stamp invalidates it.
+      insertPoint,
     });
   }
   // ----------------------------------------------------------
@@ -446,7 +525,14 @@ export default function BottomBar({
   const handleSend = () => {
     const text = (refinedDraft ?? input).trim();
     if (!text || !onInsertText || !editor) return;
-    onInsertText(text);
+    // No destination, no send. The placeholder already asks for a row, so this
+    // is the second half of the same rule rather than a surprise.
+    if (!canSend) return;
+    // The draft is cleared ONLY on a confirmed insertion. A refused send — no
+    // row selected, a row that no longer exists — must leave the user's typed
+    // or dictated text exactly where it is.
+    const delivered = onInsertText(text);
+    if (delivered === false) return;
     setInput("");
     setRefinedDraft(null);
     setOriginalBeforeRefine(null);
@@ -468,12 +554,12 @@ export default function BottomBar({
   // A PDF selected through THIS picker becomes a Free-form attachment card. It
   // is deliberately NOT imported into the global PDF workspace: that is the
   // dedicated Note → PDF workflow's job, and it is unchanged.
-  async function insertAttachedFile(file) {
+  async function insertAttachedFile(file, insertPoint) {
     if (!onInsertFile) {
       onFileError?.(FILE_INSERT_MESSAGE);
       return;
     }
-    await onInsertFile(file);
+    await onInsertFile(file, { insertPoint });
   }
 
   const handleFilesSelected = async (e) => {
@@ -481,14 +567,18 @@ export default function BottomBar({
     // Reset the input up front: the loop below awaits, and a picker that still
     // holds the previous selection will not re-fire for the same file.
     e.target.value = "";
+    // The destination is snapshotted ONCE, when the action begins — not per
+    // file, and not after the first await, so a multi-file selection all lands
+    // relative to where the user actually was.
+    const insertPoint = snapshotInsertPoint();
     // A cancelled picker yields no files: nothing is inserted and nothing is
     // said.
     for (const f of files) {
       if (bottomBarRouteFor(f) === "image") {
-        await insertStampedPhoto(f);
+        await insertStampedPhoto(f, insertPoint);
         continue;
       }
-      await insertAttachedFile(f);
+      await insertAttachedFile(f, insertPoint);
     }
   };
 
@@ -496,15 +586,16 @@ export default function BottomBar({
     const f = e.target.files?.[0];
     e.target.value = "";
     if (!f) return;
+    const insertPoint = snapshotInsertPoint();
     if (bottomBarRouteFor(f) !== "image") {
       // The camera is an image path, but a device that hands back something
       // else must not lose the file to a temporary link. It goes through the
       // same persistent attachment path, which accepts it or says why not.
-      await insertAttachedFile(f);
+      await insertAttachedFile(f, insertPoint);
       return;
     }
     // Real capture takes exactly the same persistent path as a picked photo.
-    await insertStampedPhoto(f);
+    await insertStampedPhoto(f, insertPoint);
   };
 
   // ---------------- Recording (plus cancel) ----------------
@@ -584,15 +675,29 @@ export default function BottomBar({
         `<p><audio controls src="${url}" preload="metadata"></audio></p>`
       ).run();
       setTranscribeStatus("transcribing");
+      // The destination is captured WHEN THE VOICE ACTION BEGINS, exactly like
+      // the Free-form insertion point. Transcription is asynchronous and the
+      // user is free to select another row, switch view or open another note
+      // while it runs.
+      const capturedTarget = targetToken;
       try {
         const text = await transcribeBlob(blob, transcribeLang);
         setTranscribeStatus("idle");
-        if (text) {
-          if (refinedDraft != null) setRefinedDraft((p) => (p ? `${p} ${text}` : text));
-          else setInput((p) => (p ? `${p} ${text}` : text));
-        } else {
+        if (!text) {
           setTranscribeError("Empty transcription");
+          return;
         }
+        // A result whose destination has moved is REJECTED, not redirected.
+        // Silently retargeting would put dictated words into a row the user
+        // never dictated them for — the one outcome worse than losing them.
+        if (capturedTarget !== targetTokenRef.current) {
+          setTranscribeError(
+            "The Quick Add destination changed while this was transcribing, so it was discarded."
+          );
+          return;
+        }
+        if (refinedDraft != null) setRefinedDraft((p) => (p ? `${p} ${text}` : text));
+        else setInput((p) => (p ? `${p} ${text}` : text));
       } catch (e) {
         setTranscribeStatus("idle");
         setTranscribeError(e?.message || "Transcription failed");
@@ -642,9 +747,39 @@ export default function BottomBar({
           "px-3 pt-3 pb-12",
         ].join(" ")}
       >
+        {/* DESTINATION CHIP — what Quick Add would add to. Restrained, wraps
+            rather than overflowing, truncates a long row name in CSS while the
+            title and the accessible description keep the full text. */}
+        {!!chipLabel && (
+          <div className="flex items-center gap-1 flex-wrap mb-2">
+            <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">
+              Quick Add to
+            </span>
+            <span
+              className="nw-quickadd-chip"
+              title={chipDescription}
+              aria-label={chipDescription}
+            >
+              <span className="nw-quickadd-chip-label">{chipLabel}</span>
+              {showClearTarget && (
+                <button
+                  type="button"
+                  className="nw-quickadd-chip-clear"
+                  onClick={onClearTarget}
+                  aria-label="Clear Quick Add target"
+                  title="Clear Quick Add target"
+                >
+                  <span aria-hidden="true">×</span>
+                </button>
+              )}
+            </span>
+          </div>
+        )}
+
         <textarea
           className="w-full resize-none bg-transparent outline-none text-sm text-black dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-          placeholder={transcribeStatus === "transcribing" ? "Transcribing…" : "Type, dictate, or refine with AI…"}
+          placeholder={transcribeStatus === "transcribing" ? "Transcribing…" : placeholder}
+          aria-label={inputLabel}
           rows={5}
           disabled={disabled}
           value={currentText}
@@ -710,29 +845,32 @@ export default function BottomBar({
 
         {/* Controls (right) */}
         <div className="absolute right-2 bottom-2 flex items-center gap-3">
+          {/* One capture control, adapted to the destination. In the Free-form
+              note it accepts images and documents exactly as before. In the
+              Template form it accepts only what the SELECTED row's field type
+              can actually hold — a Photo row takes images, a File row takes
+              documents, and a Text row or no selection can take neither, so the
+              control is genuinely disabled and its tooltip says why. */}
           <input
             type="file"
             multiple
             ref={fileInputRef}
             onChange={handleFilesSelected}
             style={{ display: "none" }}
-            aria-label="Attach photos or documents to this note"
+            aria-label={captureLabel}
             // A picker HINT only. It is user-controlled and any file can be
             // dropped past it, so it decides nothing — validation happens
-            // against the file itself (see editorImages / editorFileAttachments).
-            accept={[
-              "image/*",
-              ...ALLOWED_FILE_MIME_TYPES,
-              ...ALLOWED_FILE_EXTENSIONS,
-            ].join(",")}
+            // against the file itself (see editorImages / editorFileAttachments)
+            // and the destination's field type is re-checked on arrival.
+            accept={captureAccept}
           />
           <button
             type="button"
-            title="Attach photos or documents"
-            aria-label="Attach photos or documents to this note"
+            title={canCaptureAnything ? captureLabel : captureReason || captureLabel}
+            aria-label={captureLabel}
             onClick={() => fileInputRef.current?.click()}
             className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
-            disabled={isDisabled}
+            disabled={isDisabled || !canCaptureAnything}
           >
             <FaPlus />
           </button>
@@ -748,11 +886,15 @@ export default function BottomBar({
           />
           <button
             type="button"
-            title="Take photo"
+            title={
+              canCaptureImage
+                ? "Take photo"
+                : captureReason || "Take photo"
+            }
             aria-label="Take a photo with the camera"
             onClick={() => cameraInputRef.current?.click()}
             className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
-            disabled={isDisabled}
+            disabled={isDisabled || !canCaptureImage}
           >
             <FaCamera />
           </button>
@@ -812,8 +954,17 @@ export default function BottomBar({
           <button
             type="button"
             onClick={handleSend}
-            disabled={!hasText || isDisabled}
-            title="Send"
+            disabled={!hasText || isDisabled || !canSend}
+            title={
+              canSend
+                ? chipLabel
+                  ? `Quick add to ${chipLabel}`
+                  : "Quick add"
+                : "Select a template row to Quick Add"
+            }
+            aria-label={
+              canSend ? inputLabel.replace(/^Quick Add/, "Send Quick Add") : "Send Quick Add — select a template row first"
+            }
             className="w-9 h-9 flex items-center justify-center rounded-full bg-white dark:bg-[#f0f0f0] text-gray-700 border border-gray-300 disabled:opacity-60"
           >
             <FaArrowUp />

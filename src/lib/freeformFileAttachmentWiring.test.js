@@ -141,8 +141,12 @@ describe("one shared insertion status channel", () => {
   });
 
   test("changing note or view clears the message", () => {
+    // The effect may clear more than this one channel (Quick Add's first-use
+    // hint is cleared by the same note/view change), so the assertion pins what
+    // matters — this message is cleared, and noteKey and noteLayout are what
+    // trigger it — rather than the exact contents of the dependency array.
     expect(withoutComments(mainArea)).toMatch(
-      /clearInsertNotice\(\);\s*\}, \[noteKey, noteLayout, clearInsertNotice\]\)/
+      /clearInsertNotice\(\);[\s\S]{0,200}?\}, \[noteKey, noteLayout[^\]]*\]\)/
     );
   });
 });
