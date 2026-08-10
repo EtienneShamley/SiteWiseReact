@@ -183,6 +183,29 @@ export function attachmentsForField(attachmentsMap, fieldId) {
   return normalizeAttachments(attachmentsMap[fieldId]);
 }
 
+// Read-time normalization for the note instance's `evidence` map — supporting
+// image/file evidence attached to an ordinary data row, stored SEPARATELY from
+// a Photo/File field's primary `attachments` and keyed by the same stable row
+// id. The item shape is identical to a Photo/File attachment reference, so the
+// per-entry rules are REUSED (normalizeAttachments) rather than duplicated:
+//   - a missing / non-object / array container normalizes to {}
+//   - a malformed per-row collection normalizes to [] and is then dropped
+//   - valid references keep their stored order
+//   - an empty row (no usable entries) is omitted, so the map stays clean
+// This is display/read only — nothing here rewrites stored data, and there is
+// no migration and no schema/version bump (the field is additive and optional,
+// exactly like `customRows`).
+export function normalizeEvidenceMap(map) {
+  if (!map || typeof map !== "object" || Array.isArray(map)) return {};
+  const out = {};
+  for (const rowId of Object.keys(map)) {
+    if (!rowId) continue;
+    const list = normalizeAttachments(map[rowId]);
+    if (list.length) out[rowId] = list;
+  }
+  return out;
+}
+
 // Human-readable size ("312 KB", "1.4 MB").
 export function formatFileSize(bytes) {
   const n = Number(bytes);

@@ -80,6 +80,7 @@ import useTransientMessage from "../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import { ATTACHMENT_KIND } from "../lib/noteAttachments";
+import { FIELD_TYPE } from "../lib/templateFields";
 import ListenInPanel from "./ListenInPanel";
 import { NOTE_VIEW, NOTE_VIEW_LABEL } from "../lib/noteViews";
 import { actionButtonClass, tabClass } from "../lib/interactionStyles";
@@ -254,6 +255,19 @@ export default function MainArea() {
   // NoteTemplateDoc. Quick Add's image/file capture calls THIS rather than
   // implementing its own — there is one attachment architecture, not two.
   const templateAttachmentsRef = useRef(null); // (fieldId, kind, files) => Promise
+  // The evidence sibling of the above: a capture on an ordinary data row goes
+  // here instead, landing in the note's separate `evidence` collection through
+  // the SAME confirmed write sequence. One attachment architecture, two
+  // destinations — primary Photo/File value vs. supporting evidence.
+  const templateEvidenceRef = useRef(null); // (rowId, kind, files) => Promise
+  // The Template form's SECTION composer, registered by NoteTemplateDoc:
+  //   { appendAttachment(rowId, { kind, file }) => Promise<{ok, error?}>,
+  //     appendText(rowId, value)                => {ok, error?} }
+  // This is where a Quick Add composition lands — appended to the SELECTED
+  // row's ordered section content, through NoteTemplateDoc's own confirmed
+  // write sequence and the shared section primitives. Nothing about attachment
+  // persistence is re-implemented here.
+  const templateComposeRef = useRef(null);
   const [activeTemplateRowId, setActiveTemplateRowId] = useState(null);
   // Display + capability metadata for the selected row: its label, its field
   // type under the note's pinned version, and whether it is a custom row. The
@@ -663,6 +677,26 @@ export default function MainArea() {
   );
 
   /**
+   * The comparable identity of the destination AS IT IS RIGHT NOW — note, view,
+   * kind and Template row.
+   *
+   * Computed once per render and mirrored into a ref so an asynchronous
+   * delivery can capture the token it started against and compare it to the LIVE
+   * one afterwards. A composition whose destination has moved is refused, never
+   * redirected: sending somebody's photo into a section they never chose is the
+   * one outcome worse than making them send it again.
+   *
+   * The same token is what the capture bar stamps a voice transcription with.
+   */
+  const quickAddToken = quickAddTargetToken({
+    noteId: noteKey,
+    view: noteLayout === "template" ? NOTE_VIEW.TEMPLATE_FORM : NOTE_VIEW.FREEFORM,
+    target: quickAddTarget,
+  });
+  const quickAddTokenRef = useRef(null);
+  quickAddTokenRef.current = quickAddToken;
+
+  /**
    * The first-use hint: shown ONCE, ever, the first time a Template row becomes
    * a Quick Add destination.
    *
@@ -728,7 +762,18 @@ export default function MainArea() {
       return;
     }
 
-    const add = templateAttachmentsRef.current;
+    // Route by the SELECTED row's field type, re-read from the resolved target
+    // rather than trusted from the pressed control: a Photo/File row's capture
+    // is its PRIMARY value (`attachments`); every other data row's capture is
+    // supporting EVIDENCE (`evidence`). The two paths share the same confirmed
+    // write sequence in NoteTemplateDoc — only the destination collection
+    // differs — so there is no second attachment implementation here.
+    const isPrimaryAttachmentRow =
+      target.fieldType === FIELD_TYPE.PHOTO ||
+      target.fieldType === FIELD_TYPE.FILE;
+    const add = isPrimaryAttachmentRow
+      ? templateAttachmentsRef.current
+      : templateEvidenceRef.current;
     if (!add) return;
 
     clearInsertNotice();
@@ -907,6 +952,147 @@ export default function MainArea() {
   }
 
   /**
+   * The bytes a staged draft is persisted as, in a shape the shared attachment
+   * writer can read a name and a type off.
+   *
+   * A picked image and a picked document are already the user's own File and are
+   * handed straight through. A CAMERA capture is not: its payload is the stamped
+   * canvas output, a bare Blob with no filename, so it is wrapped — carrying the
+   * name and the MIME type recorded when it was staged. The STAMPED bytes are
+   * what gets wrapped and therefore what gets stored; the unstamped original is
+   * never persisted anywhere.
+   */
+  function stagedDraftAsFile(item) {
+    const payload = item?.payload;
+    if (!payload) return null;
+    const name = (typeof item.name === "string" && item.name.trim()) || "";
+    if (typeof File === "function") {
+      if (payload instanceof File && payload.name) return payload;
+      try {
+        return new File([payload], name || "attachment", {
+          type: item.mimeType || payload.type || "",
+        });
+      } catch {
+        // No File constructor for this payload: the Blob itself still carries
+        // the bytes and the type, which is everything the write sequence needs.
+      }
+    }
+    return payload;
+  }
+
+  /**
+   * Deliver ONE Template Quick Add composition — the staged attachments and then
+   * the typed/dictated text — into the SELECTED row's ordered section content.
+   *
+   * The SAME composer contract as the Free-form path, deliberately: the same
+   * ordering (attachments in staged order, then the text as one item), the same
+   * `deliveredIds` partial-success semantics, and the same rule that text is
+   * sent only once every attachment has landed, so a section never gets a
+   * description for evidence that is not there. There is one composition
+   * semantic in this application, not two.
+   *
+   * What differs is the destination model. A section has no caret: Quick Add v1
+   * appends the completed composition to the END of the row's content, so no
+   * position is placed and no block is opened between items.
+   *
+   * THE DESTINATION IS CAPTURED ONCE, HERE. `activeTemplateRowId` (via the
+   * resolved target) remains the only authority for which row that is — there is
+   * no item-level Quick Add target. The token captured at Send is re-checked
+   * before every single item, and a destination that has moved REFUSES the rest
+   * of the composition rather than redirecting it into whatever is selected by
+   * then.
+   *
+   * Persistence is entirely NoteTemplateDoc's business through the registered
+   * composer: the existing validators, the existing IndexedDB asset store, the
+   * shared section primitives and the one confirmed instance save. Nothing here
+   * stores anything, and nothing here re-implements the attachment sequence.
+   */
+  async function handleTemplateComposerSend({ text, attachments } = {}) {
+    const refused = { ok: false, deliveredIds: [], textDelivered: false };
+
+    // Resolved ONCE, at Send — not when the files were chosen.
+    const target = quickAddTarget;
+    if (target.kind !== QUICK_ADD_KIND.TEMPLATE_ROW) {
+      showInsertNoticeError(
+        "Select a template row first, then Quick Add will add this to it."
+      );
+      return refused;
+    }
+    const compose = templateComposeRef.current;
+    const originNoteId = noteKeyRef.current;
+    if (!compose || !originNoteId) return refused;
+
+    const rowId = target.rowId;
+    const capturedToken = quickAddTokenRef.current;
+
+    // Still the destination this composition was aimed at? The note, the view,
+    // a still-registered composer (the Template form unregisters on unmount) and
+    // the token — which carries the SELECTED ROW — must all still hold.
+    const isCurrentTarget = () =>
+      noteKeyRef.current === originNoteId &&
+      noteLayoutRef.current === "template" &&
+      !!templateComposeRef.current &&
+      quickAddTokenRef.current === capturedToken;
+
+    if (!isCurrentTarget()) return refused;
+
+    clearInsertNotice();
+    let staleReported = false;
+    let lastError = null;
+
+    const result = await deliverQuickAddComposer({
+      text,
+      attachments,
+      insertAttachment: async (item) => {
+        if (!isCurrentTarget()) {
+          staleReported = true;
+          return { ok: false, stale: true };
+        }
+        const file = stagedDraftAsFile(item);
+        if (!file) return { ok: false, error: QUICK_ADD_DELIVERY_MESSAGE };
+        const isImage = item.kind === STAGED_KIND.IMAGE;
+        setInsertBusy(isImage ? "image" : "file");
+        try {
+          const outcome = await compose.appendAttachment(rowId, {
+            kind: isImage ? ATTACHMENT_KIND.PHOTO : ATTACHMENT_KIND.FILE,
+            file,
+          });
+          if (!outcome || outcome.ok !== true) lastError = outcome?.error || null;
+          return outcome || { ok: false };
+        } finally {
+          setInsertBusy(null);
+        }
+      },
+      // Appended as its own section text item. It is never written into
+      // answers[rowId] — see src/lib/templateSectionText.js.
+      insertText: (value) => {
+        if (!isCurrentTarget()) {
+          staleReported = true;
+          return false;
+        }
+        const outcome = compose.appendText(rowId, value);
+        if (!outcome || outcome.ok !== true) {
+          lastError = outcome?.error || null;
+          return false;
+        }
+        return true;
+      },
+    });
+
+    if (staleReported) {
+      // Everything already delivered stays delivered and is reported as such;
+      // the rest stays staged. Nothing was redirected.
+      showInsertNoticeError(
+        "The Quick Add destination changed while this was being added, so the rest was not sent."
+      );
+    } else if (!result.ok) {
+      showInsertNoticeError(result.error || lastError || QUICK_ADD_DELIVERY_MESSAGE);
+    }
+
+    return { ...result, stale: result.stale || staleReported };
+  }
+
+  /**
    * Deliver ONE Free-form Quick Add composition — the staged attachments and
    * the typed text — as a single local operation.
    *
@@ -931,11 +1117,15 @@ export default function MainArea() {
    */
   async function handleQuickAddComposerSend({ text, attachments } = {}) {
     const refused = { ok: false, deliveredIds: [], textDelivered: false };
-    if (!editor) return refused;
 
-    // Attachment drafts are Free-form only; the Template form keeps its own
-    // per-field evidence path, unchanged.
-    if (noteLayoutRef.current === "template") return refused;
+    // The Template form composes into the SELECTED row's ordered section
+    // content. Same composer, same partial-success contract, different
+    // destination — see below.
+    if (noteLayoutRef.current === "template") {
+      return handleTemplateComposerSend({ text, attachments });
+    }
+
+    if (!editor) return refused;
     if (!freeformEditingEnabled) {
       showInsertNoticeError(
         "Switch to the Free-form note to add an image or a file there. Template form evidence uses the Photo and File fields."
@@ -1671,6 +1861,12 @@ export default function MainArea() {
                     onRegisterTemplateAttachments={(fn) => {
                       templateAttachmentsRef.current = fn;
                     }}
+                    onRegisterTemplateEvidence={(fn) => {
+                      templateEvidenceRef.current = fn;
+                    }}
+                    onRegisterTemplateCompose={(api) => {
+                      templateComposeRef.current = api;
+                    }}
                     onSelectRow={handleSelectTemplateRow}
                     quickAddTargetRowId={activeTemplateRowId}
                     onSaveBegin={beginTemplateSave}
@@ -1796,19 +1992,16 @@ export default function MainArea() {
               // and stamps asynchronous captures with it — it never decides it.
               target={quickAddTarget}
               capture={quickAddCaptureAbility}
-              targetToken={quickAddTargetToken({
-                noteId: noteKey,
-                view: activeView,
-                target: quickAddTarget,
-              })}
+              targetToken={quickAddToken}
               onClearTarget={() => handleSelectTemplateRow(null, null)}
               // Snapshot the Free-form caret at the moment a capture begins, so
               // an asynchronous stamp/store cannot be steered by a caret the
               // user moved in the meantime.
               onCaptureInsertPoint={() => freeformInsertPointRef.current}
-              // Free-form attachment drafts: staged in the composer, delivered
-              // together with the typed text when the user presses Send. The
-              // destination is resolved inside this handler, at Send time.
+              // Quick Add drafts — Free-form AND Template: staged in the
+              // composer, delivered together with the typed text when the user
+              // presses Send. The destination is resolved inside this handler,
+              // at Send time, and re-checked before every item.
               onSendComposer={handleQuickAddComposerSend}
             />
           </div>

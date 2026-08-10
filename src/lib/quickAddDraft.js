@@ -29,6 +29,7 @@
 // DOM.
 
 import { newId } from "./id";
+import { QUICK_ADD_KIND } from "./quickAddTarget";
 
 export const STAGED_KIND = Object.freeze({
   IMAGE: "image",
@@ -174,6 +175,31 @@ export function canSendQuickAddComposer({
   return !!hasText || attachmentCount > 0;
 }
 
+/**
+ * May this destination hold staged attachment drafts at all?
+ *
+ * Both real destinations now stage: the Free-form note and a SELECTED Template
+ * row. Nothing reaches either one before Send, which is what makes "photo, then
+ * the sentence describing it" composable in both views.
+ *
+ * A Template form with NO row selected does not stage — there would be nowhere
+ * to send the draft, and a queue that outlives the decision to make one is how a
+ * capture ends up in a row it was never meant for.
+ *
+ * Without a composer handler there is no way to deliver a draft, so staging one
+ * would silently strand it.
+ *
+ * Kept here rather than inline in the capture bar so the staging gate and the
+ * Send route below cannot disagree about which destinations compose.
+ */
+export function quickAddStagingEnabled({ target, hasComposerHandler = false } = {}) {
+  if (!hasComposerHandler || !target) return false;
+  return (
+    target.kind === QUICK_ADD_KIND.FREEFORM ||
+    target.kind === QUICK_ADD_KIND.TEMPLATE_ROW
+  );
+}
+
 export const QUICK_ADD_SEND_ROUTE = Object.freeze({
   /** The whole composition — attachments and text — through onSendComposer. */
   COMPOSER: "composer",
@@ -190,18 +216,26 @@ export const QUICK_ADD_SEND_ROUTE = Object.freeze({
  * without a DOM:
  *
  *   any staged attachment  -> ALWAYS the composer, whether or not text exists
- *   text alone             -> the original text-only path
+ *   text alone             -> the original text-only path,
+ *                             UNLESS the destination composes its text too
  *   neither                -> nothing
  *
  * Text must never be delivered separately from the attachments it was written
  * to describe: two paths would mean two insertions, two destinations and a
  * composer that could clear one half while the other failed.
+ *
+ * `textUsesComposer` is the Template destination. A Template row's Quick Add
+ * text is appended to that row's ordered section content as its own text item —
+ * the same delivery the attachments take — rather than being inserted at the
+ * caret of whatever row editor happens to be open. Routing it through the
+ * composer is what keeps ONE composition semantic across both views.
  */
 export function resolveQuickAddSendRoute({
   attachmentCount = 0,
   hasText = false,
   canSendText = true,
   hasComposerHandler = true,
+  textUsesComposer = false,
 } = {}) {
   // The destination gate comes first: a Template form with no row selected may
   // send nothing at all.
@@ -213,7 +247,15 @@ export function resolveQuickAddSendRoute({
       ? QUICK_ADD_SEND_ROUTE.COMPOSER
       : QUICK_ADD_SEND_ROUTE.NONE;
   }
-  return hasText ? QUICK_ADD_SEND_ROUTE.TEXT_ONLY : QUICK_ADD_SEND_ROUTE.NONE;
+  if (!hasText) return QUICK_ADD_SEND_ROUTE.NONE;
+  if (textUsesComposer) {
+    // No composer handler leaves the ORIGINAL text path as the fallback rather
+    // than refusing to send at all — the text still has a destination.
+    return hasComposerHandler
+      ? QUICK_ADD_SEND_ROUTE.COMPOSER
+      : QUICK_ADD_SEND_ROUTE.TEXT_ONLY;
+  }
+  return QUICK_ADD_SEND_ROUTE.TEXT_ONLY;
 }
 
 /**

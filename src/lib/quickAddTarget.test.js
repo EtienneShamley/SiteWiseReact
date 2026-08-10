@@ -164,9 +164,42 @@ describe("destination wording", () => {
 describe("canQuickAddText", () => {
   const { resolveQuickAddTarget } = require("./quickAddTarget");
 
-  test("a selected row and Free-form both accept text", () => {
-    expect(canQuickAddText(resolveQuickAddTarget(templateRow()))).toBe(true);
+  test("a Text row and Free-form both accept typed text", () => {
+    expect(
+      canQuickAddText(resolveQuickAddTarget(templateRow({ rowFieldType: FIELD_TYPE.TEXT })))
+    ).toBe(true);
     expect(canQuickAddText(resolveQuickAddTarget(freeform()))).toBe(true);
+  });
+
+  test("a note-specific custom row is Text, so it accepts typed text", () => {
+    expect(
+      canQuickAddText(
+        resolveQuickAddTarget(
+          templateRow({ rowIsCustom: true, rowFieldType: FIELD_TYPE.TEXT })
+        )
+      )
+    ).toBe(true);
+  });
+
+  // Quick Add text is SUPPLEMENTARY section content — its own text item in the
+  // row's ordered `sectionContent` — never a write into the row's structured
+  // answer. So a Number row keeps its typed value and gains a paragraph beneath
+  // it, and a legacy Photo/File field keeps its primary attachments and gains
+  // one likewise. Choosing a field type is not how the user controls what kind
+  // of supplementary content a section may hold.
+  test.each([
+    FIELD_TYPE.NUMBER,
+    FIELD_TYPE.DATE,
+    FIELD_TYPE.TIME,
+    FIELD_TYPE.CHECKBOX,
+    FIELD_TYPE.YESNO,
+    FIELD_TYPE.SELECT,
+    FIELD_TYPE.PHOTO,
+    FIELD_TYPE.FILE,
+  ])("a %s row accepts SUPPLEMENTARY typed text", (type) => {
+    expect(
+      canQuickAddText(resolveQuickAddTarget(templateRow({ rowFieldType: type })))
+    ).toBe(true);
   });
 
   test("the Template form with no row selected does NOT", () => {
@@ -205,63 +238,42 @@ describe("quickAddCapture", () => {
     expect(c).toEqual({ image: true, file: true, reason: null });
   });
 
-  test("a Photo row accepts an image and NOT a file", () => {
-    const c = quickAddCapture(
-      resolveQuickAddTarget(templateRow({ rowFieldType: FIELD_TYPE.PHOTO }))
-    );
-    expect(c.image).toBe(true);
-    expect(c.file).toBe(false);
-  });
-
-  test("a File row accepts a file and NOT an image", () => {
-    const c = quickAddCapture(
-      resolveQuickAddTarget(templateRow({ rowFieldType: FIELD_TYPE.FILE }))
-    );
-    expect(c.image).toBe(false);
-    expect(c.file).toBe(true);
-  });
-
-  test("a TEXT row accepts NEITHER, and says why", () => {
-    // This is the structural limit, not a policy choice: a Text answer is a
-    // plain string or a richtext/1 value whose whitelist has no img node and no
-    // file card, so there is nowhere for an asset reference to live.
-    const c = quickAddCapture(
-      resolveQuickAddTarget(templateRow({ rowFieldType: FIELD_TYPE.TEXT }))
-    );
-    expect(c.image).toBe(false);
-    expect(c.file).toBe(false);
-    expect(c.reason).toContain("Site Conditions");
-    expect(c.reason).toMatch(/Photo or File/);
-  });
-
+  // A Quick Add capture is SUPPLEMENTARY section content: an asset reference
+  // appended to the row's ordered `sectionContent`, never markup inside an
+  // answer and never a change to the row's primary control. A legacy Photo
+  // field's primary `attachments` and a structured row's typed value are both
+  // untouched by it — so no field type restricts what may be captured beneath
+  // it any more.
   test.each([
+    FIELD_TYPE.TEXT,
     FIELD_TYPE.NUMBER,
     FIELD_TYPE.DATE,
     FIELD_TYPE.TIME,
     FIELD_TYPE.CHECKBOX,
     FIELD_TYPE.YESNO,
     FIELD_TYPE.SELECT,
-  ])("a %s row accepts neither", (type) => {
+    FIELD_TYPE.PHOTO,
+    FIELD_TYPE.FILE,
+  ])("a %s row accepts a supplementary image AND file", (type) => {
     const c = quickAddCapture(resolveQuickAddTarget(templateRow({ rowFieldType: type })));
-    expect(c.image).toBe(false);
-    expect(c.file).toBe(false);
+    expect(c).toEqual({ image: true, file: true, reason: null });
   });
 
-  test("a note-specific custom row is Text, so it accepts neither", () => {
+  test("a note-specific custom row accepts a supplementary image and file", () => {
     const c = quickAddCapture(
       resolveQuickAddTarget(
         templateRow({ rowIsCustom: true, rowFieldType: FIELD_TYPE.TEXT })
       )
     );
-    expect(c.image).toBe(false);
-    expect(c.file).toBe(false);
+    expect(c.image).toBe(true);
+    expect(c.file).toBe(true);
   });
 
-  test("no selected row explains that a Photo or File row is needed", () => {
+  test("no selected row is denied and explains a row must be chosen", () => {
     const c = quickAddCapture(resolveQuickAddTarget(templateRow({ rowId: null })));
     expect(c.image).toBe(false);
     expect(c.file).toBe(false);
-    expect(c.reason).toMatch(/Photo or File/);
+    expect(c.reason).toMatch(/template row/i);
   });
 });
 

@@ -552,6 +552,21 @@
   .twocol-row-ai-status,
   .twocol-col-handle,
   .twocol-resize-handle,
+  /* Attachment actions are editing affordances, not report content. The photo
+     toolbar is already hover/focus-gated, but a focused photo would otherwise
+     print its controls; the file actions were printing unconditionally. Both
+     Open/Preview and Download are as meaningless on paper as Remove is. */
+  .photo-att-toolbar,
+  .photo-att-handle,
+  /* Resizing is an editing affordance; the size it produces is document
+     content and prints exactly as laid out. */
+  .photo-att-corner,
+  .photo-att-missing-remove,
+  .file-att-actions,
+  /* Placing an image is an editing affordance. The ORDER it produces is
+     document content and prints; the transient drop indicator is not, and never
+     appears on paper. */
+  .twocol-item-dropline,
   /* An empty field's prompt is editing guidance, not report content. */
   .twocol-rich-placeholder {
     display: none !important;
@@ -621,6 +636,99 @@
   border-top: none;
 }
 
+/* ---------- One row is ONE visible section ----------
+ * A row that holds ordered content produces one document block per item, so
+ * that each item can paginate and (later) be reordered independently. Those
+ * blocks are an internal layout concern: on screen they must read as a SINGLE
+ * section that grew downward, not as a stack of unlabelled rows.
+ *
+ * This class is applied to every block of a row that is followed, ON THE SAME
+ * PAGE, by another block of the same row (`groupContinuesBelow`, derived per
+ * render in src/lib/paginateBlocks.js — never stored). Suppressing the bottom
+ * edge is all it takes: the label column, the branded cell colours and the
+ * selected-row outline already continue downward, so the section closes only
+ * once, at its last block on the page.
+ *
+ * Across a page boundary the section genuinely does stop and resume, which is
+ * what `.twocol-seg--resume` and the "Label — continued" context are for. */
+.twocol-row--composing {
+  border-bottom: none;
+}
+
+/* ---------- Optional extra working space on a flexible section ----------
+ * A real box with a real height at the END of a section's body, sized only by
+ * what the user dragged (its height is supplied inline; with no drag the
+ * element is not rendered at all). It sits BELOW the content, never around or
+ * over it, so it cannot clip or overlap text, an image or a file — and because
+ * it is genuine layout, PagedDocument measures it like any other content and
+ * paginates the section correctly.
+ *
+ * It prints: the space is part of the document the user laid out, not an
+ * editing affordance. The handle that creates it does not — `.twocol-resize-handle`
+ * is already hidden in the print block below. */
+.twocol-section-extra {
+  flex-shrink: 0;
+  width: 100%;
+  pointer-events: none;
+}
+
+/* ---------- Word-like image placement within a section ----------
+ * A section reads as a document body, so an image is moved the way a picture is
+ * moved in a word processor: by dragging the IMAGE ITSELF. There is deliberately
+ * no grip, no Move up / Move down pair and no affordance of any kind on a text
+ * item — those made a section read as a stack of blocks rather than as prose.
+ *
+ * `cursor: grab` on the image is the whole affordance: it appears only where a
+ * move is actually possible (the class is applied only when a move handler was
+ * supplied), it adds no chrome to the paper and it costs no measured height.
+ * The image's CORNERS are excluded from the gesture in JS
+ * (src/lib/templateSectionImageMove.js) and stay reserved for proportional
+ * corner resizing. */
+.photo-att-img--movable {
+  cursor: grab;
+}
+
+.twocol-row--itemdrag .photo-att-img--movable {
+  cursor: grabbing;
+}
+
+/* The item being moved fades slightly, so the insertion line reads as "this goes
+   there" rather than as an unexplained rule between two items. Applied only once
+   the gesture has ARMED — a press that is still just a press changes nothing. */
+.twocol-row--itemdrag .twocol-cell-right {
+  opacity: 0.55;
+}
+
+/* The insertion line: where the dragged image would land, on the item currently
+ * under the pointer and inside the SAME section only. Absolutely positioned, so
+ * moving it reflows nothing and costs no measured height — and it is transient
+ * visual state that never touches storage.
+ *
+ * `--caret` is the Word-like case: the image will land INSIDE this text, at the
+ * resolved caret's own line, so the line is drawn at that line's top (supplied
+ * inline) rather than at an edge of the block. */
+.twocol-item-dropline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--nw-accent-bright, #0b6e78);
+  z-index: 4;
+  pointer-events: none;
+}
+
+.twocol-item-dropline--before {
+  top: -1px;
+}
+
+.twocol-item-dropline--after {
+  bottom: -1px;
+}
+
+.twocol-item-dropline--caret {
+  top: 0;
+}
+
 .twocol-seg--resume {
   border-top: var(--nw-tpl-border-width, 1px) solid var(--nw-tpl-border-color, #d1d5db);
   margin-top: 0; /* don't pull up over the page gap */
@@ -628,6 +736,38 @@
 
 .twocol-seg-left {
   overflow: hidden;
+}
+
+/* ---------- Supporting evidence segments ----------
+ * A row's supporting evidence uses the SAME atomic segment shell as a Photo/File
+ * field's primary attachments (so it inherits the merged-cell look, the branded
+ * colours, page continuation and print behaviour). It needs no decoration of its
+ * own: evidence is supporting material inside the answer cell, not another
+ * panel. Only the tightened top spacing distinguishes it, so a photo or file
+ * reads as belonging to the answer directly above it. */
+.twocol-seg--evidence .twocol-cell-right {
+  padding-top: 0;
+}
+
+/* ---------- Ordered section-content segments ----------
+ * The items after a section's first one use the same atomic segment shell, so
+ * they inherit the merged-cell look, the branded colours, page continuation and
+ * print behaviour. They carry NO decoration and NO label of their own: these
+ * are ordinary contents of the section, in the order the user built them, not
+ * supporting material attached to an answer. Only the top spacing is tightened,
+ * so consecutive items read as one continuous body. */
+.twocol-seg--section .twocol-cell-right {
+  padding-top: 0;
+}
+
+/* The one disambiguation, shown only when a Photo/File field renders BOTH its
+   primary attachments and historical evidence. Restrained and muted — it is a
+   quiet context marker, never a section heading. */
+.twocol-evidence-note {
+  font-size: 11px;
+  color: var(--nw-tpl-content-text, #111111);
+  opacity: 0.55;
+  margin-bottom: 4px;
 }
 
 /* "Label — continued" context. Derived from the label text colour (with reduced
@@ -871,6 +1011,102 @@
 
   .photo-att-handle::after {
     inset: -14px;
+  }
+}
+
+/* ---------- Proportional corner resize (ordered section images) ----------
+ * Four handles, one per corner, occupying exactly the zone the move gesture
+ * declines (src/lib/templateSectionImageMove.js — the size and the small-image
+ * ratio are supplied inline from those shared constants, so the two gestures
+ * cannot disagree about where a corner is).
+ *
+ * They are layered ON TOP of the image, so a press on one never reaches the move
+ * surface beneath it. Absolutely positioned, so they add no measured height and
+ * pagination is untouched; a marker is drawn inside the hit area rather than the
+ * hit area being drawn, so the grabbable region is comfortable without a chunky
+ * square sitting on the photo.
+ *
+ * Visible on hover / keyboard focus only, like every other control on the paper.
+ * The keyboard equivalent is Alt/Option + Left/Right on the focused frame. */
+.photo-att-corner {
+  position: absolute;
+  z-index: 2;
+  touch-action: none;
+}
+
+.photo-att-corner::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #39dde9;
+  border-radius: 2px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.photo-att-frame:hover .photo-att-corner::after,
+.photo-att-frame:focus-within .photo-att-corner::after,
+.photo-att-frame:focus .photo-att-corner::after,
+.photo-att-frame--resizing .photo-att-corner::after {
+  opacity: 1;
+}
+
+.photo-att-corner--top-left {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+.photo-att-corner--top-left::after {
+  top: -3px;
+  left: -3px;
+}
+
+.photo-att-corner--top-right {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+.photo-att-corner--top-right::after {
+  top: -3px;
+  right: -3px;
+}
+
+.photo-att-corner--bottom-left {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+.photo-att-corner--bottom-left::after {
+  bottom: -3px;
+  left: -3px;
+}
+
+.photo-att-corner--bottom-right {
+  bottom: 0;
+  right: 0;
+  cursor: nwse-resize;
+}
+.photo-att-corner--bottom-right::after {
+  bottom: -3px;
+  right: -3px;
+}
+
+/* Coarse pointers (touch): no hover to reveal anything, and fingers need a
+ * larger marker. The hit area itself is already the reserved corner zone. */
+@media (pointer: coarse) {
+  .photo-att-corner::after {
+    width: 14px;
+    height: 14px;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-att-corner::after {
+    transition: none;
   }
 }
 

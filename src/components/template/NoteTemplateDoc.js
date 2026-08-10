@@ -45,6 +45,37 @@ import {
   makeAttachment,
   normalizeDisplay,
 } from "../../lib/noteAttachments";
+import {
+  SECTION_ITEM_KIND,
+  sectionItemsForRow,
+} from "../../lib/templateSectionContent";
+import {
+  materializeRowSectionItems,
+  removeRowSectionContent,
+  rowHasSectionContent,
+  sectionContentAssetIds,
+  setRowSectionItems,
+  updateTextSectionItemValue,
+} from "../../lib/templateSectionEditing";
+import {
+  SECTION_ATTACHMENT_OUTCOME,
+  appendSectionAttachment,
+  removeSectionAttachment,
+  setSectionPhotoDisplay,
+} from "../../lib/templateSectionAttachments";
+import { appendSectionText } from "../../lib/templateSectionText";
+import {
+  SECTION_REORDER_OUTCOME,
+  reorderSectionItem,
+} from "../../lib/templateSectionReorder";
+import {
+  SECTION_TEXT_DROP_OUTCOME,
+  moveSectionItemIntoText,
+} from "../../lib/templateSectionTextSplit";
+import {
+  removeSectionExtraHeight,
+  setSectionExtraHeight,
+} from "../../lib/templateSectionHeight";
 import { newId } from "../../lib/id";
 import { normalizeBranding } from "../../lib/templateBranding";
 import {
@@ -142,6 +173,26 @@ import {
  * deleted only when no instance references it any more.
  */
 
+/**
+ * The validator the SECTION composer uses for a photo.
+ *
+ * The bytes it receives are the capture bar's own output, derived from a file
+ * that bar already validated against the same MIME allowlist and the same 20 MB
+ * source limit. Measuring our derived output against that source limit again
+ * would refuse a stamped capture for being larger than the photo it was made
+ * from — the same reason the Free-form composer carries its source decision
+ * forward instead of re-validating.
+ *
+ * The CONTENT check is not skipped and does not live here: `normalizeImageFile`
+ * decodes these bytes (which is what rejects anything that is not really an
+ * image) and re-encodes them into an allowlisted type before any asset is
+ * written. A row's own upload control, which receives the user's raw file, still
+ * uses `validatePhotoFile` in full.
+ */
+function validateComposedPhoto() {
+  return { ok: true };
+}
+
 export default function NoteTemplateDoc({
   noteId,
   onRegisterTemplateInsert, // (fn | null) => void
@@ -150,6 +201,20 @@ export default function NoteTemplateDoc({
   // bar cannot grow a second attachment implementation.
   //   (fn: (fieldId, kind, files) => Promise<void> | null) => void
   onRegisterTemplateAttachments,
+  // Quick Add's image/file destination for an ORDINARY data row (Text/Number/
+  // Date/…/custom): the same confirmed write sequence as onRegisterTemplateAttachments,
+  // but the reference lands in the note's separate `evidence` collection instead
+  // of a Photo/File field's primary `attachments`. MainArea routes a capture to
+  // one or the other by the selected row's field type.
+  //   (fn: (rowId, kind, files) => Promise<void> | null) => void
+  onRegisterTemplateEvidence,
+  // Quick Add's SECTION composer. A whole composition — the staged attachments
+  // and then the typed/dictated text — is appended to the SELECTED row's
+  // ordered `sectionContent`, through the shared section primitives and this
+  // component's one confirmed instance save:
+  //   (api: { appendAttachment(rowId, { kind, file }) => Promise<result>,
+  //           appendText(rowId, value) => result } | null) => void
+  onRegisterTemplateCompose,
   // (rowId, meta | null) => void — meta carries the row's label, its field type
   // in THIS note's pinned version, and whether it is a note-specific custom
   // row, so the capture bar can describe and gate the destination. Targeting
@@ -219,6 +284,45 @@ export default function NoteTemplateDoc({
   // structured references) so entry indexes always match persisted storage.
   const [rowAttachments, setRowAttachments] = useState(() => instance?.attachments || {});
   const [rowText, setRowText] = useState(() => instance?.answers || {});
+  // Supporting evidence for ordinary data rows, kept SEPARATE from a Photo/File
+  // field's primary `attachments`. Like `rowAttachments`, this holds the RAW
+  // stored map (keyed by stable row id) so an entry index always matches
+  // persisted storage; a malformed container falls back to {} (per-entry
+  // normalization is read-time, via normalizeEvidenceMap, for the render phase).
+  const [rowEvidence, setRowEvidence] = useState(() => {
+    const raw = instance?.evidence;
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  });
+
+  // ORDERED SECTION CONTENT — derived from the instance rather than mirrored in
+  // its own React state. Unlike `answers` / `attachments` / `evidence`, every
+  // write to it goes through the confirmed instance save FIRST (see
+  // persistSectionContent), so the instance is always the authority and a second
+  // copy could only ever drift from it. When a row has valid items here they are
+  // its body, in stored order (src/lib/templateSectionContent.js). A malformed
+  // container falls back to {}; per-item normalization is read-time.
+  //
+  // Every other confirmed save spreads the whole instance, so the collection
+  // survives them untouched.
+  const sectionContent = useMemo(() => {
+    const raw = instance?.sectionContent;
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  }, [instance?.sectionContent]);
+
+  // The OPTIONAL extra working space the user has dragged onto the bottom of a
+  // flexible section, keyed by row id. Derived from the instance for the same
+  // reason `sectionContent` is: every write goes through the confirmed save
+  // first, so the instance is the only authority.
+  //
+  // It is emphatically NOT `row.px`. That value belongs to the pinned
+  // TemplateVersion (or to a custom row's own `preferredHeight`) and sizes a row
+  // whose body is its own answer control; reinterpreting it here would recreate
+  // the blank-gap defect for every existing note at once. See
+  // src/lib/templateSectionHeight.js.
+  const storedSectionExtraHeight = useMemo(() => {
+    const raw = instance?.sectionExtraHeight;
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  }, [instance?.sectionExtraHeight]);
 
   // Per-field inline error/busy state for attachment and custom-row operations.
   const [fieldErrors, setFieldErrors] = useState({});
@@ -228,6 +332,10 @@ export default function NoteTemplateDoc({
   // preferred height is written once on release (see handleRowHeightCommit),
   // not on every pointer move.
   const [pendingHeights, setPendingHeights] = useState({});
+
+  // The same rule for a flexible section's extra working space: shown live
+  // while the handle is being dragged, written once on release.
+  const [pendingSectionExtra, setPendingSectionExtra] = useState({});
 
   // Per-row AI Refine lifecycle: { [rowId]: { status, message, requestId } }.
   // Row-scoped, so a request on one row neither blocks nor reports on another.
@@ -242,6 +350,29 @@ export default function NoteTemplateDoc({
   const [rowEditorToken, setRowEditorToken] = useState(0);
   const activeTextRowIdRef = useRef(null);
   activeTextRowIdRef.current = activeTextRowId;
+
+  // The ordered section TEXT ITEM the one editor is on, or null when it is on
+  // the row's own legacy answer. This is EDITOR/CARET identity only: the Quick
+  // Add destination stays `activeTemplateRowId` in MainArea, mirrored here as
+  // `quickAddTargetRowId`, and it is always a ROW. Clicking between two text
+  // items of one section moves the caret; it does not create a second selection
+  // concept and does not change the target chip.
+  const [activeSectionItemId, setActiveSectionItemId] = useState(null);
+  const activeSectionItemIdRef = useRef(null);
+  activeSectionItemIdRef.current = activeSectionItemId;
+
+  // The row this editing session MATERIALISED, as `{ identity, rowId, itemId }`.
+  //
+  // A legacy row's editor is opened against the row (its identity names no
+  // item, because no item exists yet). The first real change creates one — and
+  // the user is mid-keystroke, so the editor must not be torn down and rebuilt
+  // around a new identity. It keeps the row identity it was created with, and
+  // this record is how the keystrokes that follow still reach the item it just
+  // created. It is cleared the moment the editor moves anywhere else, and the
+  // next activation of that item addresses it by id in the ordinary way.
+  const [materializedSection, setMaterializedSection] = useState(null);
+  const materializedSectionRef = useRef(null);
+  materializedSectionRef.current = materializedSection;
   // The one registered editor, held as { identity, editor } so a cleanup
   // belonging to a replaced editor cannot unregister its replacement.
   const rowEditorRegistrationRef = useRef(null);
@@ -254,6 +385,8 @@ export default function NoteTemplateDoc({
   rowTextRef.current = rowText;
   const rowAttachmentsRef = useRef(rowAttachments);
   rowAttachmentsRef.current = rowAttachments;
+  const rowEvidenceRef = useRef(rowEvidence);
+  rowEvidenceRef.current = rowEvidence;
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
 
@@ -391,6 +524,7 @@ export default function NoteTemplateDoc({
           ...instance,
           answers: rowText,
           attachments: rowAttachments,
+          evidence: rowEvidence,
         });
       } catch {
         // Reported as "Save failed" by the wrapper. The form stays usable and
@@ -404,11 +538,12 @@ export default function NoteTemplateDoc({
         ...instance,
         answers: rowText,
         attachments: rowAttachments,
+        evidence: rowEvidence,
       });
     } catch {
       // Same: the status is the surface for this failure.
     }
-  }, [noteId, instance, rowText, rowAttachments, saveInstanceConfirmed, onSaveLoaded]);
+  }, [noteId, instance, rowText, rowAttachments, rowEvidence, saveInstanceConfirmed, onSaveLoaded]);
 
   /* ------------------------- note-specific custom rows ------------------- */
 
@@ -447,6 +582,16 @@ export default function NoteTemplateDoc({
         pendingHeights[r.id] != null ? { ...r, px: pendingHeights[r.id] } : r
       ),
     [orderedRows, pendingHeights]
+  );
+
+  // What a flexible section's extra space looks like RIGHT NOW: the stored map,
+  // with any in-flight drag showing on top of it.
+  const displaySectionExtraHeight = useMemo(
+    () =>
+      Object.keys(pendingSectionExtra).length === 0
+        ? storedSectionExtraHeight
+        : { ...storedSectionExtraHeight, ...pendingSectionExtra },
+    [storedSectionExtraHeight, pendingSectionExtra]
   );
 
   // Custom-row answers live on the row itself (never in `answers`), so they
@@ -578,28 +723,105 @@ export default function NoteTemplateDoc({
     [noteId, customRowIds, isTextAnswerRow]
   );
 
+  // Is this row part of what the note is pinned to right now, whatever its type?
+  // An ordered section TEXT item may sit on a row of ANY type — a structured row
+  // keeps its typed control and holds supplementary items beneath it, a legacy
+  // Photo/File field keeps its primary attachments — so the Text-only test above
+  // is the wrong question for one.
+  const rowIsPresent = useCallback(
+    (rowId) => {
+      if (!rowId) return false;
+      if (customRowIds.has(rowId)) return true;
+      return (rowsRef.current || []).some((r) => r && r.id === rowId);
+    },
+    [customRowIds]
+  );
+
+  // Does this row still hold an ordered section TEXT item with this id? Read
+  // from the LIVE instance, so an item that has gone leaves its editor with no
+  // identity at all — which is what makes a late callback aimed at it refuse
+  // rather than land on whichever text item happens to sit nearby.
+  const sectionTextItemExists = useCallback((rowId, itemId) => {
+    if (!rowId || !itemId) return false;
+    return sectionItemsForRow(instanceRef.current?.sectionContent, rowId).some(
+      (item) => item.kind === SECTION_ITEM_KIND.TEXT && item.id === itemId
+    );
+  }, []);
+
+  /**
+   * The COMPLETE identity of the editor for ONE ordered section text item: the
+   * row identity above plus the item. Two text items in the same section are
+   * therefore different editors with their own history — which is exactly what
+   * makes "editing text B" incapable of writing text A.
+   */
+  const sectionItemIdentityFor = useCallback(
+    (rowId, itemId) => {
+      if (!rowId || !itemId) return null;
+      return resolveActiveRowIdentity({
+        noteId,
+        templateId: instanceRef.current?.templateId ?? null,
+        templateVersionId: instanceRef.current?.templateVersionId ?? null,
+        rowId,
+        isCustomRow: customRowIds.has(rowId),
+        itemId,
+        rowExists: rowIsPresent(rowId) && sectionTextItemExists(rowId, itemId),
+      });
+    },
+    [noteId, customRowIds, rowIsPresent, sectionTextItemExists]
+  );
+
   // Focusing a Text answer makes it the toolbar's owner; focusing anything else
   // — a structured control, or a row's own label — clears ownership, so a
   // formatting command can never reach the answer of a row the caret has left.
   // Returns the identity that was activated (or null), so the caller's caret
   // intent can be stamped with it.
+  // Ends any materialising session. The next keystroke will address its item by
+  // id like any other, so this is only ever a change of route, never of data.
+  const clearMaterializedSection = useCallback(() => {
+    if (!materializedSectionRef.current) return;
+    materializedSectionRef.current = null;
+    setMaterializedSection(null);
+  }, []);
+
   const handleAnswerFocus = useCallback(
-    (rowId) => {
-      // Selecting the Quick Add destination. Focus is NOT moved anywhere by
-      // this: the caret stays exactly where the user clicked (the caret hint in
-      // TemplateTextCell restores the click point once the editor mounts), so
-      // direct typing remains the primary path and the capture bar merely
-      // learns where a Quick Add would land.
+    (rowId, itemId = null) => {
+      // Selecting the Quick Add destination — always the ROW, even when the
+      // caret lands in one of its ordered section text items. Focus is NOT
+      // moved anywhere by this: the caret stays exactly where the user clicked
+      // (the caret hint in TemplateTextCell restores the click point once the
+      // editor mounts), so direct typing remains the primary path and the
+      // capture bar merely learns where a Quick Add would land.
       if (onSelectRow) onSelectRow(rowId, rowMetaFor(rowId));
+      clearMaterializedSection();
+
+      if (itemId) {
+        // An ordered section TEXT item is a text target whatever its row's
+        // field type is — a Number row's supplementary paragraph is still
+        // prose, and its typed control is untouched by editing it.
+        activeSectionItemIdRef.current = itemId;
+        setActiveSectionItemId(itemId);
+        setActiveTextRowId(rowId);
+        return sectionItemIdentityFor(rowId, itemId);
+      }
+
       const next = nextActiveTextRow({
         target: TEMPLATE_FOCUS.ANSWER,
         rowId,
         isTextRow: isTextAnswerRow(rowId),
       });
+      activeSectionItemIdRef.current = null;
+      setActiveSectionItemId(null);
       setActiveTextRowId(next);
       return next ? rowIdentityFor(next) : null;
     },
-    [onSelectRow, isTextAnswerRow, rowIdentityFor, rowMetaFor]
+    [
+      onSelectRow,
+      isTextAnswerRow,
+      rowIdentityFor,
+      sectionItemIdentityFor,
+      rowMetaFor,
+      clearMaterializedSection,
+    ]
   );
 
   const handleStructuredFocus = useCallback(
@@ -608,21 +830,27 @@ export default function NoteTemplateDoc({
       // a Quick Add destination — a Photo or File field is in fact the ONLY
       // destination that can accept an image or a document.
       if (onSelectRow) onSelectRow(rowId, rowMetaFor(rowId));
+      activeSectionItemIdRef.current = null;
+      setActiveSectionItemId(null);
+      clearMaterializedSection();
       setActiveTextRowId(
         nextActiveTextRow({ target: TEMPLATE_FOCUS.STRUCTURED, rowId, isTextRow: false })
       );
     },
-    [onSelectRow, rowMetaFor]
+    [onSelectRow, rowMetaFor, clearMaterializedSection]
   );
 
   // A row label is plain text and is never a rich-text target. It deliberately
   // does not change the BottomBar's selected row either — only which editor,
   // if any, the toolbar owns.
   const handleLabelFocus = useCallback(() => {
+    activeSectionItemIdRef.current = null;
+    setActiveSectionItemId(null);
+    clearMaterializedSection();
     setActiveTextRowId(
       nextActiveTextRow({ target: TEMPLATE_FOCUS.LABEL, rowId: null, isTextRow: false })
     );
-  }, []);
+  }, [clearMaterializedSection]);
 
   /**
    * The identity of the editor that should exist right now — recomputed from
@@ -637,6 +865,32 @@ export default function NoteTemplateDoc({
   const activeRowIdentity = useMemo(() => {
     if (!activeTextRowId) return null;
     const isCustom = customRowIds.has(activeTextRowId);
+
+    // The editor is on an ordered section TEXT item. It exists while its row is
+    // still part of what the note is pinned to AND the item is still in that
+    // row's stored list — an item that has gone has no editor, so nothing can
+    // be written to it after the fact.
+    if (activeSectionItemId) {
+      const rowPresent =
+        isCustom || (rows || []).some((r) => r && r.id === activeTextRowId);
+      const itemPresent =
+        rowPresent &&
+        sectionItemsForRow(sectionContent, activeTextRowId).some(
+          (item) =>
+            item.kind === SECTION_ITEM_KIND.TEXT &&
+            item.id === activeSectionItemId
+        );
+      return resolveActiveRowIdentity({
+        noteId,
+        templateId: instance?.templateId ?? null,
+        templateVersionId: instance?.templateVersionId ?? null,
+        rowId: activeTextRowId,
+        isCustomRow: isCustom,
+        itemId: activeSectionItemId,
+        rowExists: itemPresent,
+      });
+    }
+
     const exists =
       isCustom ||
       (() => {
@@ -654,6 +908,8 @@ export default function NoteTemplateDoc({
   }, [
     noteId,
     activeTextRowId,
+    activeSectionItemId,
+    sectionContent,
     customRowIds,
     rows,
     instance?.templateId,
@@ -663,17 +919,562 @@ export default function NoteTemplateDoc({
   const activeRowIdentityRef = useRef(null);
   activeRowIdentityRef.current = activeRowIdentity;
 
-  // The row the user was editing is not part of the newly assigned template or
-  // version: drop the selection so nothing — the toolbar, BottomBar insertion,
-  // or a later insertion — still addresses it.
-  useEffect(() => {
-    if (activeTextRowId && !activeRowIdentity) setActiveTextRowId(null);
-  }, [activeTextRowId, activeRowIdentity]);
+  /**
+   * Which ordered section text item the one editor is on, FOR RENDERING.
+   *
+   * Usually just the activated item. The exception is the single keystroke that
+   * materialises a legacy row: the editor deliberately keeps the ROW identity
+   * it was created with (so it is not torn down and rebuilt while the user is
+   * typing), but the row now renders as a section — so the head item it just
+   * created is the cell that must show that editor.
+   */
+  const activeSectionItemKey =
+    activeSectionItemId ||
+    (materializedSection && materializedSection.rowId === activeTextRowId
+      ? materializedSection.itemId
+      : null);
 
-  // The editor's own change handler. It routes through the SAME confirmed write
-  // path the plain textarea used — master answers via `answers`, custom rows via
-  // their own row — so there is exactly one persistence route per edit and the
-  // autosave status is unchanged.
+  // The row (or item) the user was editing is not part of the newly assigned
+  // template or version: drop the selection so nothing — the toolbar, BottomBar
+  // insertion, or a later insertion — still addresses it.
+  useEffect(() => {
+    if (activeTextRowId && !activeRowIdentity) {
+      setActiveTextRowId(null);
+      activeSectionItemIdRef.current = null;
+      setActiveSectionItemId(null);
+      clearMaterializedSection();
+    }
+  }, [activeTextRowId, activeRowIdentity, clearMaterializedSection]);
+
+  /* ------------------------- per-field error surface ---------------------- */
+
+  // Declared here because both the section-content writer below and the
+  // attachment/custom-row handlers further down report through them.
+  const setFieldError = useCallback((fieldId, message) => {
+    setFieldErrors((prev) => ({ ...prev, [fieldId]: message }));
+  }, []);
+
+  const clearFieldError = useCallback((fieldId) => {
+    setFieldErrors((prev) => {
+      if (!(fieldId in prev)) return prev;
+      const next = { ...prev };
+      delete next[fieldId];
+      return next;
+    });
+  }, []);
+
+  /**
+   * Persist ONE row's ordered section content through the confirmed instance
+   * save. The whole list is written at once — there is deliberately no path
+   * that writes a partial section — and every other collection is carried
+   * through from its ref so a concurrent edit is not clobbered, exactly as
+   * persistAttachments and persistEvidence do.
+   *
+   * `answers` is carried through UNCHANGED, which is what freezes the legacy
+   * copy: materialisation adds a collection, it never rewrites or clears the
+   * one the row used to be stored in.
+   */
+  const persistSectionContent = useCallback(
+    (rowId, items) => {
+      const nextInstance = {
+        ...instanceRef.current,
+        answers: rowTextRef.current,
+        attachments: rowAttachmentsRef.current,
+        evidence: rowEvidenceRef.current,
+        sectionContent: setRowSectionItems(
+          instanceRef.current?.sectionContent,
+          rowId,
+          items
+        ),
+      };
+      saveInstanceConfirmed(nextInstance);
+      instanceRef.current = nextInstance;
+      setInstance(nextInstance);
+    },
+    [saveInstanceConfirmed]
+  );
+
+  // The raw stored list for a row, straight from the live instance — the shape
+  // a write must be applied to (the render model normalizes a COPY, so writing
+  // against it would silently drop whatever it could not use).
+  const rawSectionItems = useCallback((rowId) => {
+    const map = instanceRef.current?.sectionContent;
+    const list = map && typeof map === "object" && !Array.isArray(map) ? map[rowId] : null;
+    return Array.isArray(list) ? list : [];
+  }, []);
+
+  /* ------------------- Quick Add composition into a section ---------------- */
+
+  /**
+   * A STRUCTURAL change to one row's ordered content, reported by the section
+   * write primitives. It is a REQUIRED dependency of every one of them, and this
+   * is the real handler — never a no-op.
+   *
+   * Two jobs, and the first is the important one.
+   *
+   * ADOPTION. A legacy Text row may have a LIVE editor open on its own answer
+   * when Quick Add materialises it. The moment that write lands the row renders
+   * as a section, so route 2 of `handleRowEditorChange` no longer fires and the
+   * next keystroke would fall through to route 3 and write `answers[rowId]` —
+   * the frozen legacy copy the row no longer shows. That is a silently lost
+   * edit. This is exactly why the primitives return `materialisedTextItemId`:
+   * the editor ADOPTS it here, through the same `materializedSection` mechanism
+   * the mid-keystroke transition already uses, so the editor is not torn down
+   * and rebuilt (it keeps its focus, caret and undo history) and its later
+   * keystrokes reach the item that write created.
+   *
+   * INVALIDATION. If the item a materialising session is writing to is removed,
+   * the record names nothing and is dropped. It is never re-pointed at a
+   * neighbour: items are addressed by stable id everywhere, appending renumbers
+   * nothing, and `updateTextSectionItemValue` refuses outright when its item has
+   * gone — so a late editor callback is LOST, never redirected onto a different
+   * item.
+   *
+   * A plain append to a row that ALREADY had section content changes no id and
+   * moves nothing, so an in-progress materialising session stays valid and is
+   * deliberately left alone.
+   */
+  const handleSectionStructuralChange = useCallback(
+    ({ rowId, materialisedTextItemId = null, removedItemId = null } = {}) => {
+      if (!rowId) return;
+
+      if (materialisedTextItemId) {
+        // Only the editor that is actually on THIS row's own answer adopts it.
+        // An editor on another row, or already on an item, is not affected by
+        // this row becoming a section.
+        if (activeTextRowIdRef.current === rowId && !activeSectionItemIdRef.current) {
+          const record = {
+            identity: activeRowIdentityRef.current,
+            rowId,
+            itemId: materialisedTextItemId,
+          };
+          materializedSectionRef.current = record;
+          setMaterializedSection(record);
+        }
+        return;
+      }
+
+      const current = materializedSectionRef.current;
+      if (
+        removedItemId &&
+        current &&
+        current.rowId === rowId &&
+        current.itemId === removedItemId
+      ) {
+        clearMaterializedSection();
+      }
+    },
+    [clearMaterializedSection]
+  );
+
+  /**
+   * What a row would carry into its ordered body if this write materialises it:
+   * its current legacy answer and its raw `evidence[rowId]`, READ and never
+   * written. Both stay frozen exactly where they are — materialisation adds a
+   * collection, it never clears one.
+   *
+   * Null for every row that is NEVER materialised: a structured row (its typed
+   * value stays in `answers[rowId]`, under its own control) and a legacy
+   * Photo/File field (its primary `attachments[rowId]` are neither read nor
+   * migrated nor duplicated). Both simply gain supplementary items beneath their
+   * own control.
+   */
+  const sectionMaterialisationFor = useCallback(
+    (rowId) => {
+      if (!isTextAnswerRow(rowId)) return null;
+      const isCustom = customRowIds.has(rowId);
+      const answer = isCustom
+        ? (instanceRef.current?.customRows || []).find((r) => r && r.id === rowId)
+            ?.answer
+        : rowTextRef.current?.[rowId];
+      return { answer, evidence: rowEvidenceRef.current?.[rowId] };
+    },
+    [isTextAnswerRow, customRowIds]
+  );
+
+  /**
+   * Append ONE staged Quick Add photo/file to a row's ordered section content.
+   *
+   * Everything persistent is the EXISTING architecture, injected: the same
+   * validators, the same image normalization, the same IndexedDB asset store,
+   * the same confirmed instance save and the same global asset-deletion gate.
+   * The ordering guarantees (Blob before reference, confirmed save before any
+   * deletion decision, freshest list read after the async Blob write) live in
+   * src/lib/templateSectionAttachments.js and are not restated here.
+   *
+   * PHOTO VALIDATION. A composed photo's bytes are the capture bar's OWN output:
+   * the file the user picked was validated there (the same MIME allowlist and
+   * the same 20 MB source limit), and a camera capture's bytes are our stamped
+   * re-encode of an already-validated source. Re-measuring our own derived
+   * output against the source-input limit would reject a capture for being
+   * larger than the photo it came from, so the source decision is carried
+   * forward — exactly as the Free-form composer already does. The content check
+   * is not skipped: `normalizeImageFile` DECODES the bytes (which is what
+   * rejects anything that is not really an image) and re-encodes them into an
+   * allowlisted type before any asset is written.
+   *
+   * A DOCUMENT is not derived from anything, so it is validated in full here,
+   * against the note-file policy of the collection it is actually going into —
+   * the destination's rules, not the capture bar's early check.
+   */
+  const appendComposedAttachment = useCallback(
+    async (rowId, { kind, file } = {}) => {
+      if (!rowId || !rowIsPresent(rowId)) {
+        return {
+          ok: false,
+          error: "That row is no longer part of this note's template.",
+        };
+      }
+      const isPhoto = kind === ATTACHMENT_KIND.PHOTO;
+      clearFieldError(rowId);
+      setFieldBusy((prev) => ({ ...prev, [rowId]: true }));
+      try {
+        const result = await appendSectionAttachment({
+          rowId,
+          kind,
+          file,
+          materialisation: sectionMaterialisationFor(rowId),
+          deps: {
+            validateFile: isPhoto ? validateComposedPhoto : validateNoteFile,
+            prepareBlob: isPhoto ? (source) => normalizeImageFile(source) : undefined,
+            createAsset: isPhoto
+              ? (blob, source) => createPhotoAsset(blob, undefined, source?.name)
+              : (blob, source) => createNoteFileAsset(source),
+            readSectionList: rawSectionItems,
+            persist: persistSectionContent,
+            canDeleteAsset: canDeleteAttachmentAsset,
+            deleteAsset,
+            onStructuralChange: handleSectionStructuralChange,
+          },
+        });
+        if (!result.ok) {
+          setFieldError(
+            rowId,
+            result.error || "That could not be added to this section."
+          );
+        }
+        return result;
+      } finally {
+        setFieldBusy((prev) => {
+          const next = { ...prev };
+          delete next[rowId];
+          return next;
+        });
+      }
+    },
+    [
+      rowIsPresent,
+      sectionMaterialisationFor,
+      rawSectionItems,
+      persistSectionContent,
+      canDeleteAttachmentAsset,
+      handleSectionStructuralChange,
+      clearFieldError,
+      setFieldError,
+    ]
+  );
+
+  /**
+   * Append ONE Quick Add text item to a row's ordered section content.
+   *
+   * Synchronous, because it writes a reference-free value through the same
+   * confirmed instance save and nothing else. It is appended at the END of the
+   * section — Quick Add v1 never inserts at a caret — and it NEVER touches
+   * `answers[rowId]` or `customRows[].answer`, whatever the row's field type is.
+   * A structured row's typed value is untouched by construction: this writer has
+   * no access to it.
+   */
+  const appendComposedText = useCallback(
+    (rowId, value) => {
+      if (!rowId || !rowIsPresent(rowId)) {
+        return {
+          ok: false,
+          error: "That row is no longer part of this note's template.",
+        };
+      }
+      clearFieldError(rowId);
+      const result = appendSectionText({
+        rowId,
+        value,
+        materialisation: sectionMaterialisationFor(rowId),
+        deps: {
+          readSectionList: rawSectionItems,
+          persist: persistSectionContent,
+          onStructuralChange: handleSectionStructuralChange,
+        },
+      });
+      if (!result.ok) {
+        setFieldError(
+          rowId,
+          result.error || "That text could not be added to this section."
+        );
+      }
+      return result;
+    },
+    [
+      rowIsPresent,
+      sectionMaterialisationFor,
+      rawSectionItems,
+      persistSectionContent,
+      handleSectionStructuralChange,
+      clearFieldError,
+      setFieldError,
+    ]
+  );
+
+  const templateComposeApi = useMemo(
+    () => ({
+      appendAttachment: appendComposedAttachment,
+      appendText: appendComposedText,
+    }),
+    [appendComposedAttachment, appendComposedText]
+  );
+
+  /**
+   * Remove ONE photo/file item from a row's ordered section content.
+   *
+   * The whole sequence is the Phase 3 primitive's, unchanged and not restated:
+   * the list is rebuilt without that exact item (found by its stable id), the
+   * instance save is CONFIRMED, and only then is the Blob considered — and
+   * deleted only when the global gate proves nothing else references it.
+   *
+   * That last part matters during the transition: a materialised row's frozen
+   * `evidence[rowId]` copy commonly names the SAME asset, so the item
+   * disappears while the Blob legitimately stays. Nothing here clears frozen
+   * evidence to make a deletion possible.
+   *
+   * A stale id, a text item and an unusable entry are all refused outright —
+   * no neighbouring item is ever removed in place of the one that was asked
+   * for, and the ROW itself is never deleted (that is a separate, explicit
+   * action on a custom row).
+   */
+  const removeComposedAttachment = useCallback(
+    async (rowId, itemId) => {
+      if (!rowId || !itemId) return { ok: false };
+      clearFieldError(rowId);
+      const result = await removeSectionAttachment({
+        rowId,
+        itemId,
+        deps: {
+          readSectionList: rawSectionItems,
+          persist: persistSectionContent,
+          canDeleteAsset: canDeleteAttachmentAsset,
+          deleteAsset,
+          onStructuralChange: handleSectionStructuralChange,
+        },
+      });
+      if (!result.ok) {
+        // The item is still on screen and still stored — say so rather than
+        // letting a failed write look like a successful removal.
+        setFieldError(
+          rowId,
+          result.error || "That item could not be removed from this section."
+        );
+      } else if (result.cleanupError) {
+        setFieldError(
+          rowId,
+          `The item was removed, but its stored file could not be cleaned up (${result.cleanupError}).`
+        );
+      }
+      return result;
+    },
+    [
+      rawSectionItems,
+      persistSectionContent,
+      canDeleteAttachmentAsset,
+      handleSectionStructuralChange,
+      clearFieldError,
+      setFieldError,
+    ]
+  );
+
+  /**
+   * Resize ONE section photo — the only thing a corner drag (or Alt + Left/Right
+   * on the focused image) produces.
+   *
+   * The whole write is the Phase 3 primitive's and is not restated here: the
+   * freshest stored list is read, the photo is found by its stable item id, its
+   * `display` goes through the existing `normalizeDisplay` clamp, and every
+   * other item — and every other property of this one — is preserved by
+   * reference. It is deliberately NOT a structural change: no item is added,
+   * removed, renamed or moved, so no editor transition state is invalidated and
+   * no asset decision is involved.
+   *
+   * ONLY `widthPct` moves. No pixel width and no height is ever persisted, so
+   * the aspect ratio cannot be distorted and nothing can be cropped — the height
+   * follows the image's intrinsic ratio through ordinary layout, and the section
+   * simply grows around it.
+   *
+   * `sectionExtraHeight[rowId]` is not touched. The section's natural content
+   * height and the optional trailing working space stay independent: growing an
+   * image grows the content, and any extra space the user dragged still follows
+   * that content, unchanged in size.
+   *
+   * A failed save is reported through the existing per-field error surface, and
+   * the stored width remains authoritative — the image is drawn from the
+   * instance, so a width that was never persisted cannot stay on screen.
+   */
+  const resizeSectionPhoto = useCallback(
+    (rowId, itemId, widthPct) => {
+      if (!rowId || !itemId) return { ok: false };
+      const result = setSectionPhotoDisplay({
+        rowId,
+        itemId,
+        patch: { widthPct },
+        deps: {
+          readSectionList: rawSectionItems,
+          persist: persistSectionContent,
+        },
+      });
+      if (result.outcome === SECTION_ATTACHMENT_OUTCOME.REFERENCE_FAILED) {
+        setFieldError(
+          rowId,
+          result.error
+            ? `That image could not be resized (${result.error}).`
+            : "That image could not be resized."
+        );
+      } else if (result.ok) {
+        clearFieldError(rowId);
+      }
+      return result;
+    },
+    [rawSectionItems, persistSectionContent, setFieldError, clearFieldError]
+  );
+
+  /**
+   * Move ONE item WITHIN a row's ordered section content.
+   *
+   * The whole sequence is the Phase 5 primitive's and is not restated here: the
+   * freshest stored list is read, the next list is calculated purely (existing
+   * entries repositioned by reference, entries too malformed to render left at
+   * their exact stored indices), an unchanged order writes nothing, and there is
+   * exactly ONE confirmed instance save. Nothing is written while a drag is in
+   * progress — the drag is visual state in the renderer, and this runs once, on
+   * the completed move.
+   *
+   * `sectionExtraHeight[rowId]` is deliberately not touched. It belongs to the
+   * LOGICAL SECTION, not to an item, and which block carries it is derived from
+   * array order by the planner — so moving the old tail away automatically hands
+   * the extra space and the section-height handle to the NEW last item without
+   * anything being stored about which item that is.
+   *
+   * A REFUSED or UNCHANGED result is silent: a stale drag and a drop that would
+   * change nothing are both ordinary outcomes, not errors to put in front of the
+   * user. A failed SAVE is reported, because the old order is still the stored
+   * one and the move the user asked for did not happen.
+   */
+  const reorderSectionContentItem = useCallback(
+    (rowId, sourceItemId, targetItemId, placement) => {
+      if (!rowId) return { ok: false };
+      const result = reorderSectionItem({
+        rowId,
+        sourceItemId,
+        targetItemId,
+        placement,
+        deps: {
+          readSectionList: rawSectionItems,
+          persist: persistSectionContent,
+        },
+      });
+      if (result.outcome === SECTION_REORDER_OUTCOME.SAVE_FAILED) {
+        setFieldError(
+          rowId,
+          result.error
+            ? `That item could not be moved (${result.error}).`
+            : "That item could not be moved."
+        );
+      } else if (result.ok) {
+        clearFieldError(rowId);
+      }
+      return result;
+    },
+    [rawSectionItems, persistSectionContent, setFieldError, clearFieldError]
+  );
+
+  /**
+   * Drop ONE item INSIDE a text item of the same section — the Word-like
+   * placement.
+   *
+   * The whole sequence is the primitive's (src/lib/templateSectionTextSplit.js)
+   * and is not restated here: the freshest stored list is read, the target text
+   * item's value is split IN THE MODEL around the resolved point, the moving
+   * item is carried across by reference with its id, asset reference, display
+   * metadata and intrinsic dimensions untouched, and the whole result is written
+   * in exactly ONE confirmed instance save. Nothing is written while the drag is
+   * in progress.
+   *
+   * `sectionExtraHeight[rowId]` is deliberately not touched, for the same reason
+   * a reorder does not touch it: it belongs to the LOGICAL SECTION, and which
+   * block carries it is derived from array order by the planner.
+   *
+   * THE EDITOR RELOAD is the one thing this does beyond the primitive. A split
+   * rewrites the stored value of a text item that may currently have a live
+   * editor open on it — the editor still holds the WHOLE pre-split text, and its
+   * next keystroke would serialize that back over the half this just wrote. The
+   * editor is therefore rebuilt from the new stored value through the existing
+   * programmatic-replacement mechanism (`rowEditorToken`), exactly as an AI
+   * refinement landing in the open row does. Providing content at creation means
+   * the rebuild emits no update, creates no Undo entry and reports no save.
+   */
+  const dropSectionItemIntoText = useCallback(
+    (rowId, sourceItemId, targetItemId, point) => {
+      if (!rowId) return { ok: false };
+      const result = moveSectionItemIntoText({
+        rowId,
+        sourceItemId,
+        targetItemId,
+        point,
+        deps: {
+          readSectionList: rawSectionItems,
+          persist: persistSectionContent,
+          newId,
+          onStructuralChange: handleSectionStructuralChange,
+        },
+      });
+      if (result.outcome === SECTION_TEXT_DROP_OUTCOME.SAVE_FAILED) {
+        setFieldError(
+          rowId,
+          result.error
+            ? `That image could not be placed (${result.error}).`
+            : "That image could not be placed."
+        );
+      } else if (result.ok) {
+        clearFieldError(rowId);
+        setRowEditorToken((t) => t + 1);
+      }
+      return result;
+    },
+    [
+      rawSectionItems,
+      persistSectionContent,
+      handleSectionStructuralChange,
+      setFieldError,
+      clearFieldError,
+    ]
+  );
+
+  /**
+   * The editor's own change handler, and the ONE place that decides WHICH
+   * stored slot a committed change lands in.
+   *
+   * Three routes, in order:
+   *
+   *   1. the editor is on an ordered section TEXT ITEM — replace that item's
+   *      value, addressed by its stable id, leaving every other item's
+   *      position, id and attachment reference untouched;
+   *   2. the editor is on a legacy row's own answer and this is the FIRST real
+   *      change — MATERIALISE the row: one confirmed save writes the complete
+   *      ordered body (the new text, then the row's carryable evidence in
+   *      order). `answers[rowId]` / `customRows[].answer` keep their pre-edit
+   *      value as a frozen compatibility copy;
+   *   3. otherwise — the unchanged legacy route, master answers via `answers`,
+   *      custom rows via their own row.
+   *
+   * Nothing here runs on focus. A row is materialised by a real change in the
+   * MEANING of its text and by nothing else, so clicking into a section — or
+   * selecting text in it, or running a command that altered nothing — still
+   * produces no write at all.
+   */
   const handleRowEditorChange = useCallback(
     (identity, rowId, html) => {
       // A callback from an editor that has already been replaced may not write
@@ -683,7 +1484,37 @@ export default function NoteTemplateDoc({
       if (!canCommitRowEdit(activeRowIdentityRef.current, identity)) return;
 
       const next = serializeAnswerFromHtml(html);
-      const current = customRowIds.has(rowId)
+      const isCustom = customRowIds.has(rowId);
+
+      // Which slot does the editor that produced this change own? Either the
+      // item it was activated on, or — for the keystroke that materialised this
+      // row — the item that keystroke created. The editor deliberately kept its
+      // row identity through that transition, so this record is the only thing
+      // that knows the difference.
+      const materialized = materializedSectionRef.current;
+      const itemId =
+        activeSectionItemIdRef.current ||
+        (materialized && materialized.rowId === rowId ? materialized.itemId : null);
+
+      /* 1 — an existing ordered section text item. */
+      if (itemId) {
+        // Refuses on an unchanged value, and refuses outright when the item has
+        // gone: a late callback is never redirected to another text item.
+        const updated = updateTextSectionItemValue(rawSectionItems(rowId), itemId, next);
+        if (!updated) return;
+        try {
+          persistSectionContent(rowId, updated);
+          clearFieldError(rowId);
+        } catch (err) {
+          setFieldError(
+            rowId,
+            `This section's text could not be saved (${err?.message || err}). The last change was not kept.`
+          );
+        }
+        return;
+      }
+
+      const current = isCustom
         ? (instanceRef.current?.customRows || []).find((r) => r && r.id === rowId)?.answer
         : rowTextRef.current?.[rowId];
 
@@ -691,12 +1522,54 @@ export default function NoteTemplateDoc({
       // save. Only a real difference in the answer's meaning is written.
       if (answersEqual(current, next)) return;
 
+      /* 2 — first real change to a legacy Text or custom row: materialise. */
+      if (
+        isTextAnswerRow(rowId) &&
+        !rowHasSectionContent(instanceRef.current?.sectionContent, rowId)
+      ) {
+        const newItemId = newId();
+        const items = materializeRowSectionItems({
+          textItemId: newItemId,
+          value: next,
+          evidence: rowEvidenceRef.current?.[rowId],
+        });
+        // A body that could not be built is written NOWHERE rather than
+        // half-written — the row keeps its existing legacy shape.
+        if (items) {
+          try {
+            persistSectionContent(rowId, items);
+          } catch (err) {
+            setFieldError(
+              rowId,
+              `This section's text could not be saved (${err?.message || err}). The last change was not kept.`
+            );
+            return;
+          }
+          clearFieldError(rowId);
+          // The keystrokes that follow belong to the item just created. The
+          // editor keeps the row identity it was created with, so it is not
+          // torn down mid-typing.
+          const record = { identity, rowId, itemId: newItemId };
+          materializedSectionRef.current = record;
+          setMaterializedSection(record);
+          return;
+        }
+      }
+
+      /* 3 — unchanged legacy route. */
       handleRightChange(rowId, next);
     },
     // handleRightChange is a stable route (master vs custom) recreated each
     // render; the identity of this callback does not drive editor creation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [customRowIds]
+    [
+      customRowIds,
+      isTextAnswerRow,
+      rawSectionItems,
+      persistSectionContent,
+      clearFieldError,
+      setFieldError,
+    ]
   );
 
   // Registration is by identity: registering takes ownership, and unregistering
@@ -730,21 +1603,6 @@ export default function NoteTemplateDoc({
     };
   }, [onRegisterRowEditor]);
 
-  /* --------------------- attachment evidence handlers --------------------- */
-
-  const setFieldError = useCallback((fieldId, message) => {
-    setFieldErrors((prev) => ({ ...prev, [fieldId]: message }));
-  }, []);
-
-  const clearFieldError = useCallback((fieldId) => {
-    setFieldErrors((prev) => {
-      if (!(fieldId in prev)) return prev;
-      const next = { ...prev };
-      delete next[fieldId];
-      return next;
-    });
-  }, []);
-
   /* ------------------ note-specific custom-row persistence ---------------- */
 
   // Every custom-row write goes through the THROWING instance save: the record
@@ -757,6 +1615,7 @@ export default function NoteTemplateDoc({
         ...instanceRef.current,
         answers: rowTextRef.current,
         attachments: rowAttachmentsRef.current,
+        evidence: rowEvidenceRef.current,
         customRows: nextCustomRows,
       };
       saveInstanceConfirmed(nextInstance);
@@ -812,7 +1671,7 @@ export default function NoteTemplateDoc({
   );
 
   const handleDeleteRow = useCallback(
-    (rowId) => {
+    async (rowId) => {
       const raw = Array.isArray(instanceRef.current?.customRows)
         ? instanceRef.current.customRows
         : [];
@@ -823,21 +1682,102 @@ export default function NoteTemplateDoc({
         `Delete the section "${label || "Untitled"}" from this note? Its text will be removed.`
       );
       if (!confirmed) return;
-      const deleted = commitCustomRows(
-        deleteCustomRow(raw, rowId),
-        rowId,
-        "The section could not be deleted"
+
+      // The row is explicitly removed from this note, so ITS evidence goes with
+      // it — but only that row's, keyed by its own id. Every other row's
+      // evidence (and every other note's) is untouched. Captured before the
+      // save so the now-orphaned assets can be cleaned once the write confirms.
+      const prevEvidence = rowEvidenceRef.current || {};
+      const removedEvidence = Array.isArray(prevEvidence[rowId])
+        ? prevEvidence[rowId]
+        : [];
+      const nextEvidence = { ...prevEvidence };
+      delete nextEvidence[rowId];
+
+      // Its ordered section content goes with it too — the row is gone, so a
+      // list keyed by its id could never be rendered or reached again. Captured
+      // before the save for the same reason the evidence is: those assets
+      // become deletion CANDIDATES, still gated on being referenced nowhere.
+      const removedSectionAssetIds = sectionContentAssetIds(
+        instanceRef.current?.sectionContent,
+        rowId
       );
+      const nextSectionContent = removeRowSectionContent(
+        instanceRef.current?.sectionContent,
+        rowId
+      );
+
+      // One confirmed save removes the custom row AND prunes its evidence and
+      // its ordered content together, so the instance is never left
+      // half-updated. deleteCustomRow re-anchors any row anchored to this one,
+      // preserving their placement.
+      const nextCustomRows = deleteCustomRow(raw, rowId);
+      const nextInstance = {
+        ...instanceRef.current,
+        answers: rowTextRef.current,
+        attachments: rowAttachmentsRef.current,
+        evidence: nextEvidence,
+        sectionContent: nextSectionContent,
+        // …and any extra working space that was dragged onto it. The row is
+        // gone, so a height keyed by its id could never be reached again.
+        sectionExtraHeight: removeSectionExtraHeight(
+          instanceRef.current?.sectionExtraHeight,
+          rowId
+        ),
+        customRows: nextCustomRows,
+      };
+      try {
+        saveInstanceConfirmed(nextInstance);
+      } catch (err) {
+        setFieldError(
+          rowId,
+          `The section could not be deleted (${err?.message || err}). The last change was not kept.`
+        );
+        return;
+      }
+      instanceRef.current = nextInstance;
+      setInstance(nextInstance);
+      rowEvidenceRef.current = nextEvidence;
+      setRowEvidence(nextEvidence);
+      clearFieldError(rowId);
+
       // The row is gone, so its session AI backup and its row-level AI feedback
       // can never be acted on again — drop both rather than leaving them to be
       // pruned only when the note is deleted. A response still in flight for
       // this row is separately refused because the row no longer exists.
-      if (deleted) {
-        if (onClearRowRefineBackup) onClearRowRefineBackup(noteId, rowId);
-        setRowRefineStatus((prev) => clearRowRefineStatus(prev, rowId));
+      if (onClearRowRefineBackup) onClearRowRefineBackup(noteId, rowId);
+      setRowRefineStatus((prev) => clearRowRefineStatus(prev, rowId));
+
+      // Clean the removed assets only AFTER the save is confirmed, and only
+      // when each is provably referenced nowhere (this note's evidence AND
+      // ordered content for the row are already gone from storage, so a shared
+      // asset survives). A materialised row names the same asset from both
+      // collections, so the candidates are de-duplicated before the gate — one
+      // Blob is one deletion decision.
+      const removedAssetIds = new Set(removedSectionAssetIds);
+      for (const entry of removedEvidence) {
+        const assetId =
+          entry && typeof entry === "object" ? entry.assetId : null;
+        if (typeof assetId === "string" && assetId) removedAssetIds.add(assetId);
+      }
+      for (const assetId of removedAssetIds) {
+        if (!canDeleteAttachmentAsset(assetId)) continue;
+        try {
+          await deleteAsset(assetId);
+        } catch {
+          // A leftover unreferenced asset is a harmless orphan, not a failure
+          // the user needs to see — the row is already gone from the note.
+        }
       }
     },
-    [commitCustomRows, noteId, onClearRowRefineBackup]
+    [
+      saveInstanceConfirmed,
+      setFieldError,
+      clearFieldError,
+      canDeleteAttachmentAsset,
+      noteId,
+      onClearRowRefineBackup,
+    ]
   );
 
   // Row height: a custom row's dragged height is shown live and persisted once
@@ -852,6 +1792,67 @@ export default function NoteTemplateDoc({
       setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, px } : r)));
     },
     [customRowIds]
+  );
+
+  /**
+   * A flexible section's extra working space, live while the handle is dragged.
+   * Nothing is persisted here — the pending value simply wins over the stored
+   * one until release, exactly as a custom row's height drag already works.
+   */
+  const handleSectionExtraHeightChange = useCallback((rowId, px) => {
+    setPendingSectionExtra((prev) => ({ ...prev, [rowId]: px }));
+  }, []);
+
+  /**
+   * …and the ONE confirmed write for it, on release.
+   *
+   * It goes through the same instance save as everything else, carrying every
+   * other collection through from its ref so a concurrent edit is not
+   * clobbered. `answers`, `attachments`, `evidence`, `sectionContent`,
+   * `customRows` and the pinned TemplateVersion are all untouched: this changes
+   * one number on the note.
+   *
+   * Dragging back to the content stores 0, which `setSectionExtraHeight` treats
+   * as REMOVING the entry — so a section returned to its natural height is
+   * indistinguishable from one that was never dragged.
+   */
+  const handleSectionExtraHeightCommit = useCallback(
+    (rowId, px) => {
+      const nextMap = setSectionExtraHeight(
+        instanceRef.current?.sectionExtraHeight,
+        rowId,
+        px
+      );
+      const nextInstance = {
+        ...instanceRef.current,
+        answers: rowTextRef.current,
+        attachments: rowAttachmentsRef.current,
+        evidence: rowEvidenceRef.current,
+        sectionExtraHeight: nextMap,
+      };
+      try {
+        saveInstanceConfirmed(nextInstance);
+        instanceRef.current = nextInstance;
+        setInstance(nextInstance);
+        clearFieldError(rowId);
+      } catch (err) {
+        setFieldError(
+          rowId,
+          `This section's height could not be saved (${err?.message || err}). The last change was not kept.`
+        );
+      } finally {
+        // The pending value is dropped either way: on success the stored map is
+        // now authoritative, and on failure the section must show what is
+        // actually saved rather than a size that was not kept.
+        setPendingSectionExtra((prev) => {
+          if (!(rowId in prev)) return prev;
+          const next = { ...prev };
+          delete next[rowId];
+          return next;
+        });
+      }
+    },
+    [saveInstanceConfirmed, clearFieldError, setFieldError]
   );
 
   const handleRowHeightCommit = useCallback(
@@ -898,6 +1899,7 @@ export default function NoteTemplateDoc({
         ...instanceRef.current,
         answers: rowTextRef.current,
         attachments: nextMap,
+        evidence: rowEvidenceRef.current,
       });
       rowAttachmentsRef.current = nextMap;
       setRowAttachments(nextMap);
@@ -905,8 +1907,34 @@ export default function NoteTemplateDoc({
     [saveInstanceConfirmed]
   );
 
-  const handleAddAttachments = useCallback(
-    async (fieldId, kind, files) => {
+  // The evidence sibling of persistAttachments: the same confirmed write, but
+  // the row's supporting evidence map is what changes. Answers and primary
+  // attachments are carried through from their refs so a concurrent edit is not
+  // clobbered, exactly as persistAttachments carries answers through.
+  const persistEvidence = useCallback(
+    (nextMap) => {
+      saveInstanceConfirmed({
+        ...instanceRef.current,
+        answers: rowTextRef.current,
+        attachments: rowAttachmentsRef.current,
+        evidence: nextMap,
+      });
+      rowEvidenceRef.current = nextMap;
+      setRowEvidence(nextMap);
+    },
+    [saveInstanceConfirmed]
+  );
+
+  // The ONE confirmed attachment write sequence, parameterized by which
+  // collection it targets so a Photo/File field's PRIMARY `attachments` and an
+  // ordinary row's supporting `evidence` share exactly the same semantics (the
+  // same validators, the same normalize/decode, the same Blob-first ordering,
+  // the same throwing reference save, and the same unreferenced-asset cleanup on
+  // a reference-write failure). There is deliberately no second implementation
+  // and no second asset store — only the target map and its persist function
+  // differ.
+  const addAttachmentsInto = useCallback(
+    async ({ fieldId, kind, files, collectionRef, persist }) => {
       if (!files || !files.length) return;
       clearFieldError(fieldId);
       setFieldBusy((prev) => ({ ...prev, [fieldId]: true }));
@@ -967,13 +1995,13 @@ export default function NoteTemplateDoc({
           intrinsicWidth: dims?.width,
           intrinsicHeight: dims?.height,
         });
-        const prevMap = rowAttachmentsRef.current;
+        const prevMap = collectionRef.current;
         const nextMap = {
           ...prevMap,
           [fieldId]: [...(prevMap[fieldId] || []), attachment],
         };
         try {
-          persistAttachments(nextMap);
+          persist(nextMap);
         } catch (err) {
           // 5. Reference write failed — remove the now-unreferenced asset so
           //    it can't be orphaned, and report. Earlier successful files stay.
@@ -995,12 +2023,46 @@ export default function NoteTemplateDoc({
       });
       if (failures.length) setFieldError(fieldId, failures.join(" "));
     },
-    [clearFieldError, persistAttachments, setFieldError, canDeleteAttachmentAsset]
+    [clearFieldError, setFieldError, canDeleteAttachmentAsset]
   );
 
-  const handleRemoveAttachment = useCallback(
-    async (fieldId, index) => {
-      const prevMap = rowAttachmentsRef.current;
+  // A Photo/File field's PRIMARY attachment upload (the field's own control and
+  // Quick Add to a Photo/File row both use this).
+  const handleAddAttachments = useCallback(
+    (fieldId, kind, files) =>
+      addAttachmentsInto({
+        fieldId,
+        kind,
+        files,
+        collectionRef: rowAttachmentsRef,
+        persist: persistAttachments,
+      }),
+    [addAttachmentsInto, persistAttachments]
+  );
+
+  // Supporting EVIDENCE on an ordinary data row (Quick Add only, in this phase).
+  const handleAddEvidence = useCallback(
+    (rowId, kind, files) =>
+      addAttachmentsInto({
+        fieldId: rowId,
+        kind,
+        files,
+        collectionRef: rowEvidenceRef,
+        persist: persistEvidence,
+      }),
+    [addAttachmentsInto, persistEvidence]
+  );
+
+  // The ONE confirmed removal sequence, parameterized by target collection.
+  // Ordering is the contract: the reference is removed and the instance save is
+  // CONFIRMED first, and only then is the underlying Blob considered for
+  // deletion — and deleted only when `isAttachmentAssetReferenced` (which scans
+  // BOTH attachments and evidence across every note) proves it is referenced
+  // nowhere. The asset is never deleted before the save succeeds, and a shared
+  // asset is never destroyed.
+  const removeAttachmentFrom = useCallback(
+    async ({ fieldId, index, collectionRef, persist }) => {
+      const prevMap = collectionRef.current;
       const list = prevMap[fieldId] || [];
       const entry = list[index];
       if (entry === undefined) return;
@@ -1010,7 +2072,7 @@ export default function NoteTemplateDoc({
       const nextList = list.filter((_, i) => i !== index);
       const nextMap = { ...prevMap, [fieldId]: nextList };
       try {
-        persistAttachments(nextMap);
+        persist(nextMap);
       } catch (err) {
         setFieldError(
           fieldId,
@@ -1035,12 +2097,38 @@ export default function NoteTemplateDoc({
         }
       }
     },
-    [clearFieldError, persistAttachments, setFieldError, canDeleteAttachmentAsset]
+    [clearFieldError, setFieldError, canDeleteAttachmentAsset]
   );
 
-  const handleUpdateAttachmentDisplay = useCallback(
-    (fieldId, index, patch) => {
-      const prevMap = rowAttachmentsRef.current;
+  const handleRemoveAttachment = useCallback(
+    (fieldId, index) =>
+      removeAttachmentFrom({
+        fieldId,
+        index,
+        collectionRef: rowAttachmentsRef,
+        persist: persistAttachments,
+      }),
+    [removeAttachmentFrom, persistAttachments]
+  );
+
+  const handleRemoveEvidence = useCallback(
+    (rowId, index) =>
+      removeAttachmentFrom({
+        fieldId: rowId,
+        index,
+        collectionRef: rowEvidenceRef,
+        persist: persistEvidence,
+      }),
+    [removeAttachmentFrom, persistEvidence]
+  );
+
+  // The ONE photo display-metadata write, parameterized by target collection.
+  // The index addresses the RAW stored array, so a primary attachment and a
+  // supporting evidence item at the same index in different collections can
+  // never be confused: the collection is chosen by the caller, not inferred.
+  const updateDisplayIn = useCallback(
+    ({ fieldId, index, patch, collectionRef, persist }) => {
+      const prevMap = collectionRef.current;
       const list = prevMap[fieldId] || [];
       const entry = list[index];
       if (!entry || typeof entry !== "object") return;
@@ -1050,7 +2138,7 @@ export default function NoteTemplateDoc({
       };
       const nextList = list.map((e, i) => (i === index ? nextEntry : e));
       try {
-        persistAttachments({ ...prevMap, [fieldId]: nextList });
+        persist({ ...prevMap, [fieldId]: nextList });
       } catch (err) {
         setFieldError(
           fieldId,
@@ -1058,7 +2146,33 @@ export default function NoteTemplateDoc({
         );
       }
     },
-    [persistAttachments, setFieldError]
+    [setFieldError]
+  );
+
+  const handleUpdateAttachmentDisplay = useCallback(
+    (fieldId, index, patch) =>
+      updateDisplayIn({
+        fieldId,
+        index,
+        patch,
+        collectionRef: rowAttachmentsRef,
+        persist: persistAttachments,
+      }),
+    [updateDisplayIn, persistAttachments]
+  );
+
+  // Size/alignment of an EVIDENCE photo. Writes evidence only: the note's
+  // primary attachments and the immutable TemplateVersion are untouched.
+  const handleUpdateEvidenceDisplay = useCallback(
+    (rowId, index, patch) =>
+      updateDisplayIn({
+        fieldId: rowId,
+        index,
+        patch,
+        collectionRef: rowEvidenceRef,
+        persist: persistEvidence,
+      }),
+    [updateDisplayIn, persistEvidence]
   );
 
   /* --------------------------- BottomBar insert --------------------------- */
@@ -1164,6 +2278,7 @@ export default function NoteTemplateDoc({
         ...instanceRef.current,
         answers: rowTextRef.current,
         attachments: rowAttachmentsRef.current,
+        evidence: rowEvidenceRef.current,
       };
     }
     return getNoteTemplateInstance(targetNoteId);
@@ -1463,6 +2578,24 @@ export default function NoteTemplateDoc({
     return () => onRegisterTemplateAttachments(null);
   }, [onRegisterTemplateAttachments, handleAddAttachments]);
 
+  // Register the evidence write path (same confirmed sequence, targeting the
+  // separate `evidence` collection) so MainArea can route a capture on an
+  // ordinary data row here instead of into a Photo/File field's attachments.
+  useEffect(() => {
+    if (!onRegisterTemplateEvidence) return;
+    onRegisterTemplateEvidence(handleAddEvidence);
+    return () => onRegisterTemplateEvidence(null);
+  }, [onRegisterTemplateEvidence, handleAddEvidence]);
+
+  // Register the SECTION composer — where a whole Quick Add composition lands.
+  // Unregistering on unmount is what makes a delivery that outlives this note's
+  // form refuse rather than write into a form that is no longer on screen.
+  useEffect(() => {
+    if (!onRegisterTemplateCompose) return;
+    onRegisterTemplateCompose(templateComposeApi);
+    return () => onRegisterTemplateCompose(null);
+  }, [onRegisterTemplateCompose, templateComposeApi]);
+
   /* ------------------------ Quick Add target lifecycle -------------------- */
 
   // Held in a ref so the effect below reacts to the TARGET changing, not to the
@@ -1598,6 +2731,11 @@ export default function NoteTemplateDoc({
           // that no longer exists under the newly assigned template or version
           // never gets one.
           activeRowId: activeRowIdentity ? activeTextRowId : null,
+          // WHICH text target inside that row carries the editor: one ordered
+          // section text item, or — when null — the row's own legacy answer.
+          // Clicking between two text items of one section moves only this;
+          // the Quick Add destination stays the ROW.
+          activeItemId: activeRowIdentity ? activeSectionItemKey : null,
           activeIdentity: activeRowIdentity,
           reloadToken: rowEditorToken,
           onActivate: handleAnswerFocus,
@@ -1610,6 +2748,28 @@ export default function NoteTemplateDoc({
         onAddAttachments={handleAddAttachments}
         onRemoveAttachment={handleRemoveAttachment}
         onUpdateAttachmentDisplay={handleUpdateAttachmentDisplay}
+        // Supporting evidence — a separate collection from `attachments`, with
+        // its own removal and display-update paths so a change to one can never
+        // reach the other. Renders because a row HAS evidence, independently of
+        // its current field type.
+        evidence={rowEvidence}
+        onRemoveEvidence={handleRemoveEvidence}
+        onUpdateEvidenceDisplay={handleUpdateEvidenceDisplay}
+        // Ordered section content — authoritative for a row that has it. Text
+        // items are edited directly; photo/file items may be removed one at a
+        // time; an IMAGE may be dragged to any position within its own section,
+        // including inside a paragraph, which splits that paragraph around it;
+        // and an image may be resized proportionally by its corners. The only
+        // display property that can change is `widthPct` — no alignment control
+        // and no size presets are offered, and no height is ever stored.
+        sectionContent={sectionContent}
+        onRemoveSectionItem={removeComposedAttachment}
+        onReorderSectionItem={reorderSectionContentItem}
+        onDropSectionItemIntoText={dropSectionItemIntoText}
+        onResizeSectionPhoto={resizeSectionPhoto}
+        sectionExtraHeight={displaySectionExtraHeight}
+        onSectionExtraHeightChange={handleSectionExtraHeightChange}
+        onSectionExtraHeightCommit={handleSectionExtraHeightCommit}
         fieldErrors={fieldErrors}
         fieldBusy={fieldBusy}
         onDismissFieldError={clearFieldError}

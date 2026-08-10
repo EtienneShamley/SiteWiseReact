@@ -73,7 +73,11 @@ describe("BottomBar routing", () => {
   });
 
   test("images still take the existing persistent editor-image path", () => {
-    expect(bottomBar).toMatch(/insertStampedPhoto/);
+    // `insertStampedPhoto` became `insertPhoto(file, insertPoint, { stamp })`
+    // when the camera was split from the ordinary picker; it is the same one
+    // insertion path, and it still hands the bytes to MainArea rather than
+    // writing anything itself.
+    expect(bottomBar).toMatch(/async function insertPhoto\(file, insertPoint, \{ stamp \}\)/);
     expect(bottomBar).toMatch(/onInsertImage/);
     expect(mainArea).toMatch(/insertLocalImageAsset/);
   });

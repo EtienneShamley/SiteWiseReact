@@ -19,7 +19,7 @@
 //
 // Pure: no React, no storage, no DOM.
 
-import { FIELD_TYPE, normalizeType } from "./templateFields";
+import { normalizeType } from "./templateFields";
 import { NOTE_VIEW } from "./noteViews";
 
 export const QUICK_ADD_KIND = {
@@ -163,13 +163,28 @@ export function quickAddInputLabel(target) {
   }
 }
 
-/** May typed text be sent right now? A Template form with no row may not. */
+/**
+ * May typed text be sent right now?
+ *
+ * Free-form always accepts text. EVERY selected Template row accepts it too:
+ * a Quick Add composition is appended to that row's ordered SECTION CONTENT as
+ * its own text item, never written into the row's structured answer. A Number
+ * row keeps its typed value and gains a supplementary paragraph beneath it; a
+ * legacy Photo/File field keeps its primary attachments and gains one likewise.
+ *
+ * This is the approved principle that choosing a field type must not be how the
+ * user controls WHAT KIND of supplementary content a section may hold — see
+ * docs/PROJECT_DECISIONS.md. The field type still decides the row's own primary
+ * control, and Quick Add never touches that control.
+ *
+ * A Template form with no row selected may still send nothing at all: guessing
+ * a destination is worse than doing nothing.
+ */
 export function canQuickAddText(target) {
   if (!target) return false;
-  return (
-    target.kind === QUICK_ADD_KIND.TEMPLATE_ROW ||
-    target.kind === QUICK_ADD_KIND.FREEFORM
-  );
+  if (target.kind === QUICK_ADD_KIND.FREEFORM) return true;
+  if (target.kind === QUICK_ADD_KIND.TEMPLATE_ROW) return true;
+  return false;
 }
 
 /** Only the Template chip is clearable — Free-form has no manual destination. */
@@ -180,16 +195,22 @@ export function canClearQuickAddTarget(target) {
 /**
  * May an image / a file be captured into this destination, and if not, why?
  *
- * This is the schema boundary, not a policy choice. A Template Text answer is
- * stored as a plain string or a `richtext/1` value whose whitelist is
- * `p, br, strong, em, u, s, ul, ol, li, span, mark, a` — it has no image node
- * and no file-card node, and evidence is stored as attachment REFERENCES keyed
- * by field id under a Photo/File-typed field (see src/lib/noteAttachments.js).
- * So an image can only go to a Photo row and a file only to a File row; forcing
- * either into a Text row would mean writing raw markup into a value that is
- * never parsed as HTML, i.e. visible angle brackets and a lost asset.
+ * EVERY selected Template row accepts both, because a Quick Add capture is
+ * SUPPLEMENTARY section content: a lightweight asset reference appended to that
+ * row's ordered `sectionContent` list (never bytes in the answer JSON — see
+ * src/lib/noteAttachments.js and src/lib/templateSectionContent.js). A row's
+ * primary control is untouched by it — a structured row keeps its typed value in
+ * `answers`, and a legacy Photo/File field keeps its primary `attachments` — so
+ * the field type no longer restricts what may be captured beneath it.
+ *
+ * That is the deliberate product rule: choosing a field type must not be how the
+ * user controls what kind of content a section may hold. Any section already
+ * accepts text, images and files; a structured type is only ever a choice to get
+ * a specialised typed control (docs/PROJECT_DECISIONS.md).
  *
  * The Free-form note has real image and file-attachment nodes, so both apply.
+ * The Template form with no row selected, and any non-capture destination, are
+ * denied with a reason.
  */
 export function quickAddCapture(target) {
   const denied = (reason) => ({ image: false, file: false, reason });
@@ -200,20 +221,10 @@ export function quickAddCapture(target) {
       return { image: true, file: true, reason: null };
     case QUICK_ADD_KIND.TEMPLATE_UNSET:
       return denied(
-        "Select a Photo or File row in this template to add an image or a file."
+        "Select a template row to add an image or a file to it."
       );
-    case QUICK_ADD_KIND.TEMPLATE_ROW: {
-      if (target.fieldType === FIELD_TYPE.PHOTO) {
-        return { image: true, file: false, reason: null };
-      }
-      if (target.fieldType === FIELD_TYPE.FILE) {
-        return { image: false, file: true, reason: null };
-      }
-      return denied(
-        `${quickAddRowLabel(target)} cannot hold an image or a file. ` +
-          "Select a Photo or File row in this template instead."
-      );
-    }
+    case QUICK_ADD_KIND.TEMPLATE_ROW:
+      return { image: true, file: true, reason: null };
     default:
       return denied(null);
   }

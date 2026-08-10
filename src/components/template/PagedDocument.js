@@ -43,8 +43,12 @@
 //     the renderer can show a restrained "Field — continued" context label.
 //   - `keepWithNext` keeps this block on the same page as the next one (a field
 //     header is never orphaned at a page bottom) — see paginateBlocks.
-//   - `render(ctx)` receives { continuedFromPrevPage }; existing renderers that
-//     ignore the argument are unaffected.
+//   - `render(ctx)` receives { continuedFromPrevPage, groupContinuesBelow };
+//     existing renderers that ignore the argument are unaffected.
+//     `groupContinuesBelow` says the next block ON THE SAME PAGE belongs to the
+//     same group, so a renderer can compose the blocks of one compound field
+//     into a single continuous section instead of drawing an edge between every
+//     one of them.
 
 import React, {
   useCallback,
@@ -237,6 +241,11 @@ export default function PagedDocument({ blocks = [], className = "" }) {
         >
           {block.render({
             continuedFromPrevPage: !!placed.continuedFromPrevPage,
+            // The next block on THIS page belongs to the same compound field,
+            // so this one must not close itself off — see
+            // annotateGroupContinuations. Renderers that ignore it are
+            // unaffected.
+            groupContinuesBelow: !!placed.groupContinuesBelow,
           })}
         </div>
       );

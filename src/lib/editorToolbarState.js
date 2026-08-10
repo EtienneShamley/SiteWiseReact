@@ -185,6 +185,19 @@ export function canCommitRowEdit(activeIdentity, identity) {
  * row (a custom row's answer lives on the row, a master row's in `answers`, so
  * an id shared between the two would otherwise be ambiguous).
  *
+ * `itemId` — OPTIONAL and ADDITIVE — names one ordered SECTION TEXT ITEM inside
+ * that row (src/lib/templateSectionContent.js). A row is no longer necessarily
+ * one editable answer: a section may hold text A, a photo, text B, and clicking
+ * text B must open an editor that can only ever write text B. Because items are
+ * addressed by their stable id and never by position, a token stays pointed at
+ * the same block of prose even after the list is reordered.
+ *
+ * When no item is named the token is byte-identical to the one this function
+ * produced before section content existed, so a legacy row editor — and
+ * everything built on its identity — is completely unchanged. This is EDITOR
+ * and CARET identity only: `activeTemplateRowId` remains the sole Quick Add /
+ * row destination authority, and an item is never a destination.
+ *
  * Returns a comparable token, or null when there is no addressable editor.
  */
 export function templateRowEditorIdentity({
@@ -193,15 +206,20 @@ export function templateRowEditorIdentity({
   templateVersionId = null,
   rowId,
   isCustomRow = false,
+  itemId = null,
 } = {}) {
   if (!noteId || !rowId) return null;
-  return JSON.stringify([
+  const parts = [
     noteId,
     templateId ?? null,
     templateVersionId ?? null,
     rowId,
     !!isCustomRow,
-  ]);
+  ];
+  // Appended only when an item is genuinely addressed, so the legacy token
+  // keeps its exact previous shape and value.
+  if (typeof itemId === "string" && itemId) parts.push(itemId);
+  return JSON.stringify(parts);
 }
 
 /**
@@ -212,6 +230,11 @@ export function templateRowEditorIdentity({
  * this note's custom rows for the assigned template. Re-pinning a note to
  * another template or version can remove the row the user was editing; when it
  * does, there is no active editor, no toolbar owner, and the toolbar says so.
+ *
+ * When an `itemId` is passed through, the same flag is also the caller's answer
+ * to "does that ordered section text item still exist": an item that has gone
+ * has no editor either, which is what makes a late callback aimed at it refuse
+ * rather than land somewhere else.
  */
 export function resolveActiveRowIdentity({ rowExists, ...parts } = {}) {
   if (!rowExists) return null;

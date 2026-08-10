@@ -9,6 +9,7 @@ import {
 } from "../templates/defaultTwoColDoc";
 import { newId } from "./id";
 import { normalizeBranding } from "./templateBranding";
+import { sectionContentReferencesAsset } from "./templateSectionContent";
 
 export const TEMPLATES_KEY = "sitewise-templates-v1";
 export const TEMPLATE_VERSIONS_KEY = "sitewise-template-versions-v1";
@@ -60,7 +61,24 @@ export const saveTemplates = (map) => saveMap(TEMPLATES_KEY, map);
 export const getTemplateVersions = () => loadMap(TEMPLATE_VERSIONS_KEY);
 export const saveTemplateVersions = (map) => saveMap(TEMPLATE_VERSIONS_KEY, map);
 
-// NoteTemplateInstances: { [noteId]: { noteId, templateId, templateVersionId, answers, attachments, customRows, createdAt } }
+// NoteTemplateInstances: { [noteId]: { noteId, templateId, templateVersionId, answers, attachments, evidence, sectionContent, sectionExtraHeight, customRows, createdAt } }
+// `sectionContent` holds the ORDERED content of a flexible section — text,
+// photos and files interleaved in the order the user built them — keyed by the
+// same stable row id (see src/lib/templateSectionContent.js). It is additive and
+// optional, so an instance saved before it existed reads as no section content;
+// no migration and no schema/version bump are required. It exists ALONGSIDE
+// `answers` / `attachments` / `evidence`, which keep their current meaning and
+// are not rewritten. Ordering and attachment metadata must NEVER be stored
+// inside `answers[rowId]` — the answer model is shape-discriminated and
+// normalization discards extra properties (the full reasoning is in
+// templateSectionContent.js).
+// `evidence` holds optional supporting image/file evidence for an ordinary data
+// row (Text/Number/Date/… and note-specific custom rows), keyed by the same
+// stable row id and stored SEPARATELY from a Photo/File field's primary
+// `attachments`. Each entry is the same lightweight asset reference as an
+// attachment (see src/lib/noteAttachments.js). It is additive and optional — an
+// instance saved before it existed reads as no evidence — so no migration and
+// no schema/version bump are required.
 // `customRows` holds note-specific rows added while COMPLETING the note (see
 // src/lib/noteCustomRows.js). They belong to this note and to the template that
 // was pinned when they were created (each row carries its own `templateId`);
@@ -288,25 +306,45 @@ export function isLogoAssetReferenced(assetId) {
   return false;
 }
 
-// True if ANY note instance references this asset id from its attachments
-// (mixed arrays: legacy base64 strings are skipped). Attachment removal and
-// upload-failure cleanup delete an asset only when this is false, so an asset
-// shared by multiple references — possible in future — is never destroyed.
+// True if a map of `{ [rowId]: array-of-references }` references this asset id.
+// Mixed arrays are tolerated: legacy base64 strings (and any non-object entry)
+// are skipped, exactly as they were before evidence existed.
+function mapReferencesAsset(map, assetId) {
+  if (!map || typeof map !== "object") return false;
+  for (const key of Object.keys(map)) {
+    const list = map[key];
+    if (!Array.isArray(list)) continue;
+    for (const entry of list) {
+      if (entry && typeof entry === "object" && entry.assetId === assetId) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// True if ANY note instance references this asset id from ANY of the three
+// collections that can hold one: a Photo/File field's primary `attachments`, a
+// row's supporting `evidence`, or a flexible section's ordered `sectionContent`.
+// All three must be scanned: they share ONE asset store (kinds note-photo /
+// note-file), so an asset referenced through only one of them must still count
+// as referenced or removal cleanup would destroy a live asset. Attachment,
+// evidence and section-item removal — and upload-failure cleanup — delete an
+// asset only when this is false, so an asset shared by multiple references is
+// never destroyed.
+//
+// `sectionContent` is scanned through its own helper rather than the generic
+// `mapReferencesAsset` walk above, because a section item's KIND decides whether
+// it is an asset reference at all: a TEXT item has no Blob and must never keep
+// one alive.
 export function isAttachmentAssetReferenced(assetId) {
   if (!assetId) return false;
   const instances = getNoteTemplateInstances();
   for (const noteId of Object.keys(instances)) {
-    const attachments = instances[noteId]?.attachments;
-    if (!attachments || typeof attachments !== "object") continue;
-    for (const fieldId of Object.keys(attachments)) {
-      const list = attachments[fieldId];
-      if (!Array.isArray(list)) continue;
-      for (const entry of list) {
-        if (entry && typeof entry === "object" && entry.assetId === assetId) {
-          return true;
-        }
-      }
-    }
+    const instance = instances[noteId];
+    if (mapReferencesAsset(instance?.attachments, assetId)) return true;
+    if (mapReferencesAsset(instance?.evidence, assetId)) return true;
+    if (sectionContentReferencesAsset(instance?.sectionContent, assetId)) return true;
   }
   return false;
 }
@@ -356,6 +394,19 @@ export function getOrCreateInstanceForNote(noteId) {
     templateVersionId: tpl?.currentVersionId ?? null,
     answers: {},
     attachments: {},
+    evidence: {},
+    // Seeded empty alongside `evidence`, which keeps working unchanged while the
+    // section architecture is built out. Nothing is materialized into it here:
+    // an existing note's answers and evidence stay exactly where they are.
+    sectionContent: {},
+    // The OPTIONAL extra working space a user has dragged onto the bottom of a
+    // flexible section, keyed by the same stable row id. Additive and optional
+    // exactly like `sectionContent`: an instance saved before it existed reads
+    // as "no section was ever resized", which is the correct default. It is
+    // deliberately NOT seeded from any row's `px` — that is the legacy whole-row
+    // height and reinterpreting it here would reserve blank space in every
+    // existing section at once (see src/lib/templateSectionHeight.js).
+    sectionExtraHeight: {},
     customRows: [],
     createdAt: Date.now(),
   };

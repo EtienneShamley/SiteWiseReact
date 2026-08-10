@@ -19,6 +19,7 @@ import {
   normalizeAttachment,
   normalizeAttachments,
   attachmentsForField,
+  normalizeEvidenceMap,
   formatFileSize,
   fileKindLabel,
 } from "./noteAttachments";
@@ -203,5 +204,68 @@ describe("display helpers", () => {
     expect(fileKindLabel("text/plain", "notes.txt")).toBe("Text");
     expect(fileKindLabel("image/png", "x.png")).toBe("Image");
     expect(fileKindLabel("application/octet-stream", "x.bin")).toBe("File");
+  });
+});
+
+describe("normalizeEvidenceMap (row evidence container)", () => {
+  const ref = (id, assetId, over = {}) => ({
+    id,
+    assetId,
+    kind: ATTACHMENT_KIND.PHOTO,
+    name: "p.png",
+    mimeType: "image/png",
+    size: 10,
+    createdAt: 1,
+    intrinsicWidth: 100,
+    intrinsicHeight: 50,
+    display: { widthPct: 60, alignment: "left" },
+    ...over,
+  });
+
+  test("missing / non-object / array containers normalize to {}", () => {
+    expect(normalizeEvidenceMap(undefined)).toEqual({});
+    expect(normalizeEvidenceMap(null)).toEqual({});
+    expect(normalizeEvidenceMap("nope")).toEqual({});
+    expect(normalizeEvidenceMap(42)).toEqual({});
+    expect(normalizeEvidenceMap([ref("r1", "a1")])).toEqual({});
+  });
+
+  test("valid references keep their stored order, keyed by row id", () => {
+    const out = normalizeEvidenceMap({
+      "row-a": [ref("r1", "a1"), ref("r2", "a2")],
+      "row-b": [
+        { id: "r3", assetId: "a3", kind: "file", name: "d.pdf", mimeType: "application/pdf", size: 5, createdAt: 2 },
+      ],
+    });
+    expect(out["row-a"].map((e) => e.id)).toEqual(["r1", "r2"]);
+    expect(out["row-b"][0].assetId).toBe("a3");
+    expect(out["row-b"][0].kind).toBe("file");
+  });
+
+  test("a malformed per-row collection fails safe: the row is dropped, others survive", () => {
+    const out = normalizeEvidenceMap({
+      "row-good": [ref("r1", "a1")],
+      "row-bad": "not-an-array",
+      "row-empty": [],
+      "row-junk": [null, 7, { nope: true }],
+    });
+    expect(Object.keys(out)).toEqual(["row-good"]);
+    expect(out["row-good"]).toHaveLength(1);
+  });
+
+  test("a blank row id is ignored", () => {
+    const out = normalizeEvidenceMap({ "": [ref("r1", "a1")], "row-a": [ref("r2", "a2")] });
+    expect(Object.keys(out)).toEqual(["row-a"]);
+  });
+
+  test("per-entry normalization is reused (display clamped, no duplicated logic)", () => {
+    const out = normalizeEvidenceMap({
+      "row-a": [ref("r1", "a1", { display: { widthPct: 9999, alignment: "sideways" } })],
+    });
+    // 9999 clamps to the 100% maximum; an unknown alignment falls back.
+    expect(out["row-a"][0].display).toEqual({
+      widthPct: 100,
+      alignment: DEFAULT_PHOTO_ALIGNMENT,
+    });
   });
 });

@@ -300,3 +300,110 @@ describe("annotateGroupContinuations", () => {
     expect(res.pages[1][0].continuedFromPrevPage).toBeUndefined();
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* groupContinuesBelow — composing one group into ONE visible section          */
+/* -------------------------------------------------------------------------- */
+
+describe("groupContinuesBelow (same-page composition)", () => {
+  test("every block of a group except the last on the page is marked", () => {
+    // A section holding text, a photo and more text is ONE section of the
+    // document. Only its last block on the page closes it; the ones before it
+    // flow straight into the next, so no divider is drawn between two items
+    // that belong together.
+    const res = paginateBlocks(
+      [
+        B("head", 100, { group: "r1", keepWithNext: true }),
+        B("photo", 100, { group: "r1" }),
+        B("text", 100, { group: "r1" }),
+      ],
+      USABLE
+    );
+    annotateGroupContinuations(res.pages);
+    expect(countPages(res)).toBe(1);
+    expect(res.pages[0][0].groupContinuesBelow).toBe(true);
+    expect(res.pages[0][1].groupContinuesBelow).toBe(true);
+    // The last block of the section closes it.
+    expect(res.pages[0][2].groupContinuesBelow).toBeUndefined();
+  });
+
+  test("the next block belonging to a DIFFERENT row is not composed", () => {
+    // The following Template section must keep its own separating edge.
+    const res = paginateBlocks(
+      [
+        B("r1-head", 100, { group: "r1" }),
+        B("r1-photo", 100, { group: "r1" }),
+        B("r2-head", 100, { group: "r2" }),
+        B("r2-photo", 100, { group: "r2" }),
+      ],
+      USABLE
+    );
+    annotateGroupContinuations(res.pages);
+    expect(res.pages[0][0].groupContinuesBelow).toBe(true);
+    // Last block of row 1: the next block is another row.
+    expect(res.pages[0][1].groupContinuesBelow).toBeUndefined();
+    expect(res.pages[0][2].groupContinuesBelow).toBe(true);
+    expect(res.pages[0][3].groupContinuesBelow).toBeUndefined();
+  });
+
+  test("ungrouped blocks are never composed with their neighbours", () => {
+    // An ordinary single-block row keeps its complete outline.
+    const res = paginateBlocks([B("a", 100), B("b", 100)], USABLE);
+    annotateGroupContinuations(res.pages);
+    expect(res.pages[0][0].groupContinuesBelow).toBeUndefined();
+    expect(res.pages[0][1].groupContinuesBelow).toBeUndefined();
+  });
+
+  test("composition is SAME-PAGE only; a page boundary uses continuation instead", () => {
+    // Across a page the section genuinely stops and resumes, which is exactly
+    // what the "Label — continued" context is for.
+    const res = paginateBlocks(
+      [
+        B("head", 400, { group: "r1" }),
+        B("photo", 400, { group: "r1" }),
+        B("text", 400, { group: "r1" }),
+      ],
+      USABLE
+    );
+    annotateGroupContinuations(res.pages);
+    expect(countPages(res)).toBe(2);
+    // Page 1 holds head + photo: they compose into one section…
+    expect(res.pages[0]).toHaveLength(2);
+    expect(res.pages[0][0].groupContinuesBelow).toBe(true);
+    // …and the last block on the page closes it, because the section does not
+    // continue BELOW here — it continues on the next PAGE.
+    expect(res.pages[0][1].groupContinuesBelow).toBeUndefined();
+    expect(res.pages[1][0].continuedFromPrevPage).toBe(true);
+    expect(res.pages[1][0].groupContinuesBelow).toBeUndefined();
+  });
+
+  test("a block is never both composed below and a continuation of nothing", () => {
+    // The two flags describe different relationships and must not be confused:
+    // one looks down the same page, the other looks back a page.
+    const res = paginateBlocks(
+      [
+        B("head", 100, { group: "r1" }),
+        B("mid", 100, { group: "r1" }),
+        B("tail", 100, { group: "r1" }),
+      ],
+      USABLE
+    );
+    annotateGroupContinuations(res.pages);
+    for (const block of res.pages[0]) {
+      expect(block.continuedFromPrevPage).toBeUndefined();
+    }
+  });
+
+  test("it is derived per call and nothing is persisted", () => {
+    const blocks = [
+      B("head", 100, { group: "r1" }),
+      B("photo", 100, { group: "r1" }),
+    ];
+    const res = paginateBlocks(blocks, USABLE);
+    annotateGroupContinuations(res.pages);
+    expect(res.pages[0][0].groupContinuesBelow).toBe(true);
+    // The INPUT blocks are untouched — page relationships live on the placed
+    // descriptors only.
+    expect(blocks[0].groupContinuesBelow).toBeUndefined();
+  });
+});

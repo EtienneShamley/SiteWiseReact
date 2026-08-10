@@ -181,20 +181,49 @@ function normalizePlaced(block, height) {
   };
 }
 
-// Marks, in place, every placed block that RESUMES its group at the top of a
-// new page: the first block of a page whose group matches the group of the
-// LAST block on the previous page gets `continuedFromPrevPage: true` (the same
-// flag a split tail carries — identical semantics for renderers, which show a
-// restrained "Field — continued" context label). Pure: derived from the page
-// distribution only, nothing persisted. Returns the same `pages` array.
+// Marks, in place, the two group relationships a renderer needs. Both are
+// DERIVED from the page distribution on every render and nothing is persisted.
+// Returns the same `pages` array.
+//
+// `continuedFromPrevPage` — this block RESUMES its group at the top of a new
+//   page: it is the first block of a page whose group matches the group of the
+//   LAST block on the previous page (the same flag a split tail carries —
+//   identical semantics for renderers, which show a restrained "Field —
+//   continued" context label). This is the ONLY situation in which continuation
+//   treatment is appropriate.
+//
+// `groupContinuesBelow` — the very next block ON THE SAME PAGE belongs to the
+//   same group. The blocks of one group are one logical section of the
+//   document, so a renderer uses this to COMPOSE them visually: only the last
+//   block of a group on a page draws that section's bottom edge, and the ones
+//   before it flow straight into the next. Without it every block of a group
+//   closes itself off and a section holding text, a photo and more text reads
+//   as three separate sections rather than one that grew.
+//
+//   It is deliberately same-page only. Across a page boundary the section
+//   genuinely does stop and resume, which is exactly what
+//   `continuedFromPrevPage` is for.
 export function annotateGroupContinuations(pages) {
   if (!Array.isArray(pages)) return pages;
-  for (let p = 1; p < pages.length; p++) {
-    const first = pages[p]?.[0];
-    const prevPage = pages[p - 1];
-    const prevLast = prevPage?.[prevPage.length - 1];
-    if (first && prevLast && first.group != null && first.group === prevLast.group) {
-      first.continuedFromPrevPage = true;
+  for (let p = 0; p < pages.length; p++) {
+    const page = pages[p];
+    if (!Array.isArray(page)) continue;
+
+    if (p > 0) {
+      const first = page[0];
+      const prevPage = pages[p - 1];
+      const prevLast = prevPage?.[prevPage.length - 1];
+      if (first && prevLast && first.group != null && first.group === prevLast.group) {
+        first.continuedFromPrevPage = true;
+      }
+    }
+
+    for (let i = 0; i < page.length - 1; i++) {
+      const block = page[i];
+      const next = page[i + 1];
+      if (block && next && block.group != null && block.group === next.group) {
+        block.groupContinuesBelow = true;
+      }
     }
   }
   return pages;

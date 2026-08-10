@@ -30,6 +30,7 @@ import {
   applyQuickAddSendResult,
   canSendQuickAddComposer,
   createQuickAddDraftStore,
+  quickAddStagingEnabled,
   resolveQuickAddSendRoute,
   stagedAttachmentDisplayName,
   stagedAttachmentRemoveLabel,
@@ -163,15 +164,17 @@ export default function BottomBar({
   // cannot be started twice and cannot be confused with a refinement.
   const [sending, setSending] = useState(false);
 
-  /* --------------------- Staged attachments (Free-form) -------------------- */
+  /* ------------------------- Staged attachments ---------------------------- */
   //
   // Choosing an image or a file STAGES it here; it reaches the note only on
   // Send, together with whatever text the user typed to accompany it. Nothing
-  // in this queue is persisted anywhere — see src/lib/quickAddDraft.js.
+  // in this queue is persisted anywhere — no note write, no attachment
+  // reference, no IndexedDB asset — see src/lib/quickAddDraft.js.
   //
-  // Template mode is deliberately untouched: its rows accept evidence by field
-  // type through their own confirmed path, and a capture there still inserts
-  // immediately, exactly as before.
+  // BOTH destinations compose this way: the Free-form note and a SELECTED
+  // Template row. A Template row's composition is appended to that row's
+  // ordered section content at Send; nothing is written to it while the user is
+  // still assembling one.
   const draftStoreRef = useRef(null);
   if (draftStoreRef.current === null) {
     draftStoreRef.current = createQuickAddDraftStore();
@@ -231,11 +234,19 @@ export default function BottomBar({
   // would write into an arbitrary field of somebody's report.
   const canSend = canQuickAddText(target);
 
-  // Attachment DRAFTS are a Free-form capability only. A Template row accepts
-  // evidence by field type through its own confirmed attachment path, and that
-  // behaviour is unchanged here — see the schema note in quickAddTarget.js.
-  const stagingEnabled =
-    target?.kind === QUICK_ADD_KIND.FREEFORM && typeof onSendComposer === "function";
+  // Which destinations compose (stage now, deliver at Send) — the Free-form
+  // note and a SELECTED Template row. Decided in one place so this gate and the
+  // Send route below cannot disagree; see src/lib/quickAddDraft.js.
+  const stagingEnabled = quickAddStagingEnabled({
+    target,
+    hasComposerHandler: typeof onSendComposer === "function",
+  });
+
+  // A Template row's typed/dictated text is part of the same composition as its
+  // attachments: it becomes a text item appended to that row's ordered section
+  // content, not an insertion at the caret of whatever row editor is open. So it
+  // takes the composer route even when nothing is staged.
+  const textUsesComposer = target?.kind === QUICK_ADD_KIND.TEMPLATE_ROW;
 
   // An attachment on its own is a complete capture, so Send does not require
   // text once something is staged.
@@ -298,13 +309,19 @@ export default function BottomBar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentNoteId]);
 
-  // Same rule for leaving the Free-form view. Template evidence is a different
-  // model with different rules, so a Free-form draft may not survive into it.
+  // The same rule for the DESTINATION itself. `targetToken` is the comparable
+  // identity of where a capture would land — note, view, kind and Template row —
+  // so this one effect covers leaving the Free-form view, selecting a different
+  // Template row, clearing the target, and losing it altogether.
+  //
+  // Drafts intended for one section must never silently land in another, and the
+  // safe resolution is to drop them rather than to retarget them: the user
+  // staged a photo FOR a particular section, and re-aiming it somewhere else is
+  // the one outcome worse than making them pick it again.
   useEffect(() => {
-    if (stagingEnabled) return;
     clearStaged();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stagingEnabled]);
+  }, [targetToken]);
 
   // Unmount: the store owns every live preview URL, so this is the one place
   // that can guarantee none outlive the component.
@@ -579,32 +596,71 @@ export default function BottomBar({
     return stampedBlob;
   }
 
-  // The ONE image insertion path for this bar — used by both the file picker
-  // and the camera. It never touches the editor itself: the stamped Blob goes
-  // to MainArea, which stores it in IndexedDB and inserts a reference only once
-  // that write is confirmed. Nothing here writes a blob: URL into the note.
-  async function insertStampedPhoto(file, insertPoint) {
-    // The 20 MB source limit is applied to the picked file FIRST, before the
+  /* ------------------ CAMERA vs ORDINARY UPLOAD — the split ---------------- */
+  //
+  // The ONE place this bar decides what an image's bytes are, and the ONE place
+  // the stamping pipeline is reached from.
+  //
+  //   CAMERA CAPTURE  -> stamped. The photo the user just TOOK is documentary
+  //                      evidence, and the existing burnt-in info box (time,
+  //                      address, coordinates, altitude, index) plus the map
+  //                      thumbnail is exactly what makes it usable as such. That
+  //                      behaviour is unchanged, layout included.
+  //   `+` PICKER      -> NOT stamped. An image the user CHOSE off their device
+  //                      is an ordinary picture: a diagram, a screenshot, a
+  //                      manufacturer's photo. Stamping it would burn today's
+  //                      location into a file that has nothing to do with here,
+  //                      and — because the stamp asks for geolocation — would
+  //                      also make choosing a picture prompt for location
+  //                      permission. Both routed through the stamping path
+  //                      before this phase; that was the bug.
+  //
+  // Ordinary uploads therefore never call buildStampedImageBLOB, and since every
+  // geolocation / reverse-geocode / map request lives inside it, they never ask
+  // for location either. No structured GPS/address metadata is produced by
+  // either route: the camera stamp is, and stays, visible pixels in the Blob.
+  //
+  // `stamp` is passed explicitly by each call site rather than inferred from the
+  // file, because a file cannot say how it was obtained — only the control the
+  // user pressed knows that.
+  async function preparePhotoBytes(file, { stamp }) {
+    // The 20 MB source limit is applied to the picked file FIRST, before any
     // expensive decode/stamp work — and to the file the user actually chose,
     // never to our own derived canvas output.
     const check = validateEditorImageFile(file);
     if (!check.ok) {
       onImageError?.(check.error);
-      return;
+      return null;
     }
-    if (!onInsertImage) return;
-
+    if (!stamp) {
+      // The picked file, untouched. No location, no map, no labels.
+      return { blob: file, mimeType: check.mimeType };
+    }
     let stamped = null;
     try {
       stamped = await buildStampedImageBLOB(file, check.mimeType);
     } catch {
       onImageError?.(IMAGE_DECODE_MESSAGE);
-      return;
+      return null;
     }
+    // A failed stamp — geolocation denied, the map thumbnail unavailable, a
+    // canvas that produced nothing — falls back to the original photo rather
+    // than losing the capture. buildStampedImageBLOB already treats a missing
+    // position and an unreachable map tile as omissions rather than errors, so
+    // a camera capture stays usable in all three cases.
+    return { blob: stamped || file, mimeType: check.mimeType };
+  }
 
+  // The ONE image insertion path for this bar. It never touches the editor
+  // itself: the Blob goes to MainArea, which stores it in IndexedDB and inserts
+  // a reference only once that write is confirmed. Nothing here writes a blob:
+  // URL into the note.
+  async function insertPhoto(file, insertPoint, { stamp }) {
+    if (!onInsertImage) return;
+    const prepared = await preparePhotoBytes(file, { stamp });
+    if (!prepared) return;
     await onInsertImage(file, {
-      // A failed stamp falls back to the original photo rather than losing it.
-      blob: stamped || file,
+      blob: prepared.blob,
       name: file.name,
       // Where this capture was aimed when the user picked the file. Validated
       // again on arrival — a document edited during the stamp invalidates it.
@@ -640,6 +696,9 @@ export default function BottomBar({
       // this is the second half of the same rule rather than a surprise.
       canSendText: canSend,
       hasComposerHandler: typeof onSendComposer === "function",
+      // A Template row composes its text too — it becomes a section text item
+      // appended at the end, not an insertion at a row editor's caret.
+      textUsesComposer,
     });
 
     if (route === QUICK_ADD_SEND_ROUTE.NONE) return;
@@ -692,43 +751,37 @@ export default function BottomBar({
     clearStaged();
   };
 
-  /* ------------------------- Staging (Free-form) --------------------------- */
+  /* ------------------------------- Staging --------------------------------- */
 
-  // A photo chosen or captured in the Free-form note. The EXISTING stamping
-  // pipeline runs unchanged and in full — validation, EXIF/GPS, reverse
-  // geocode, map thumbnail, re-encode — and its FINAL processed Blob is what
-  // gets staged, so Send does no image work at all and there is no second
-  // photo-processing path.
-  async function stageStampedPhoto(file) {
-    const check = validateEditorImageFile(file);
-    if (!check.ok) {
-      onImageError?.(check.error);
-      return;
-    }
-    let stamped = null;
-    try {
-      stamped = await buildStampedImageBLOB(file, check.mimeType);
-    } catch {
-      onImageError?.(IMAGE_DECODE_MESSAGE);
-      return;
-    }
+  // A photo chosen or captured for the current composition. All of the image
+  // work — validation and, for the camera only, the whole existing stamping
+  // pipeline (EXIF/GPS, reverse geocode, map thumbnail, re-encode) — happens
+  // HERE, and its FINAL Blob is what gets staged. So Send does no image work at
+  // all, there is no second photo-processing path, and the preview the user sees
+  // in the composer is the image that will actually be stored.
+  //
+  // Nothing is persisted: the payload lives in memory and the preview is an
+  // object URL the draft store owns and revokes.
+  async function stagePhoto(file, { stamp }) {
+    const prepared = await preparePhotoBytes(file, { stamp });
+    if (!prepared) return;
     draftStoreRef.current.add({
       kind: STAGED_KIND.IMAGE,
-      // A failed stamp falls back to the original photo rather than losing it.
-      payload: stamped || file,
+      payload: prepared.blob,
       name: file.name,
       // The type validated from the file the user actually picked, carried
       // forward so Send never re-measures our own derived output against the
       // source-input size limit.
-      mimeType: check.mimeType,
+      mimeType: prepared.mimeType,
     });
     syncStaged();
   }
 
-  // A document chosen in the Free-form note. Validated HERE, before staging, so
-  // an unsupported or oversized file is refused while the user is still
-  // composing rather than at Send. The shared write sequence validates it again
-  // on delivery — this is an early check, not a replacement for that one.
+  // A document chosen for the current composition. Validated HERE, before
+  // staging, so an unsupported or oversized file is refused while the user is
+  // still composing rather than at Send. The destination's own write sequence
+  // validates it again on delivery against ITS policy — this is an early check,
+  // not a replacement for that one.
   function stageAttachedFile(file) {
     const check = validateEditorFileAttachment(file);
     if (!check.ok) {
@@ -770,14 +823,18 @@ export default function BottomBar({
     e.target.value = "";
     // A cancelled picker yields no files: nothing happens and nothing is said.
 
-    // FREE-FORM: selection STAGES. Nothing reaches the note until Send, which
-    // is what makes "photo, then the sentence describing it" composable at all.
-    // No insertion point is snapshotted here — staging is not delivery, and the
-    // destination is resolved at Send from wherever the user is by then.
+    // Selection STAGES. Nothing reaches the note until Send, which is what makes
+    // "photo, then the sentence describing it" composable at all. No insertion
+    // point is snapshotted here — staging is not delivery, and the destination
+    // is resolved at Send from wherever the user is by then.
+    //
+    // `stamp: false` — this is the ORDINARY upload picker. A picture chosen off
+    // the device stays a normal picture: no location is requested, no map is
+    // drawn and no camera labels are burnt into it.
     if (stagingEnabled) {
       for (const f of files) {
         if (bottomBarRouteFor(f) === "image") {
-          await stageStampedPhoto(f);
+          await stagePhoto(f, { stamp: false });
           continue;
         }
         stageAttachedFile(f);
@@ -785,12 +842,13 @@ export default function BottomBar({
       return;
     }
 
-    // TEMPLATE (and any other destination): unchanged immediate insertion into
-    // the selected row's evidence through its own confirmed path.
+    // No composing destination (no note, or a Template form with no row
+    // selected — where both capture controls are disabled anyway): the original
+    // immediate insertion, and still unstamped for a picked image.
     const insertPoint = snapshotInsertPoint();
     for (const f of files) {
       if (bottomBarRouteFor(f) === "image") {
-        await insertStampedPhoto(f, insertPoint);
+        await insertPhoto(f, insertPoint, { stamp: false });
         continue;
       }
       await insertAttachedFile(f, insertPoint);
@@ -802,16 +860,19 @@ export default function BottomBar({
     e.target.value = "";
     if (!f) return;
 
-    // The camera stages exactly like the picker in Free-form: same stamping
-    // pipeline, same queue, delivery deferred to Send.
+    // The camera stages into the same queue as the picker, but with `stamp:
+    // true` — a real capture keeps the existing burnt-in info box and map
+    // thumbnail. The STAMPED Blob is what is staged, previewed and, at Send,
+    // persisted; the unstamped original is never stored.
     if (stagingEnabled) {
       if (bottomBarRouteFor(f) !== "image") {
         // A device that hands back something that is not an image must not lose
-        // the file; it is staged as a document instead.
+        // the file; it is staged as a document instead — and a document is
+        // never stamped.
         stageAttachedFile(f);
         return;
       }
-      await stageStampedPhoto(f);
+      await stagePhoto(f, { stamp: true });
       return;
     }
 
@@ -823,8 +884,7 @@ export default function BottomBar({
       await insertAttachedFile(f, insertPoint);
       return;
     }
-    // Real capture takes exactly the same persistent path as a picked photo.
-    await insertStampedPhoto(f, insertPoint);
+    await insertPhoto(f, insertPoint, { stamp: true });
   };
 
   // ---------------- Recording (plus cancel) ----------------

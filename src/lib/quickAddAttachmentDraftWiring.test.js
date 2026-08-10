@@ -27,31 +27,29 @@ function withoutComments(source) {
 const bottomBar = withoutComments(read("components/BottomBar.js"));
 const mainArea = withoutComments(read("components/MainArea.js"));
 
-describe("choosing a Free-form attachment stages it instead of inserting it", () => {
+describe("choosing an attachment stages it instead of inserting it", () => {
   test("the picker routes to the staging functions when staging is enabled", () => {
-    expect(bottomBar).toMatch(/if \(stagingEnabled\) \{[\s\S]{0,400}?stageStampedPhoto/);
+    expect(bottomBar).toMatch(/if \(stagingEnabled\) \{[\s\S]{0,400}?stagePhoto\(f, \{ stamp: false \}\)/);
     expect(bottomBar).toMatch(/stageAttachedFile\(f\)/);
   });
 
   test("the camera routes to the same staging functions", () => {
     const camera = bottomBar.slice(bottomBar.indexOf("const handleCameraSelected"));
     expect(camera).toMatch(/stagingEnabled/);
-    expect(camera).toMatch(/stageStampedPhoto\(f\)/);
+    expect(camera).toMatch(/stagePhoto\(f, \{ stamp: true \}\)/);
     expect(camera).toMatch(/stageAttachedFile\(f\)/);
   });
 
-  test("staging is Free-form only and requires the composer send handler", () => {
-    expect(bottomBar).toMatch(
-      /stagingEnabled\s*=\s*\n?\s*target\?\.kind === QUICK_ADD_KIND\.FREEFORM/
-    );
-    expect(bottomBar).toMatch(/typeof onSendComposer === "function"/);
+  test("staging is decided by the shared destination rule, with a send handler", () => {
+    expect(bottomBar).toMatch(/stagingEnabled = quickAddStagingEnabled\(\{/);
+    expect(bottomBar).toMatch(/hasComposerHandler: typeof onSendComposer === "function"/);
   });
 
   test("staging captures NO insertion point — staging is not delivery", () => {
     // The destination must be resolved at Send, so the user may stage a photo,
     // keep working, move the caret and only then send.
     const staging = bottomBar.slice(
-      bottomBar.indexOf("async function stageStampedPhoto"),
+      bottomBar.indexOf("async function stagePhoto"),
       bottomBar.indexOf("const removeStagedAttachment")
     );
     expect(staging).not.toMatch(/snapshotInsertPoint/);
@@ -60,7 +58,7 @@ describe("choosing a Free-form attachment stages it instead of inserting it", ()
 
   test("staging inserts nothing into the note", () => {
     const staging = bottomBar.slice(
-      bottomBar.indexOf("async function stageStampedPhoto"),
+      bottomBar.indexOf("async function stagePhoto"),
       bottomBar.indexOf("const removeStagedAttachment")
     );
     expect(staging).not.toMatch(/onInsertImage/);
@@ -70,16 +68,17 @@ describe("choosing a Free-form attachment stages it instead of inserting it", ()
 });
 
 describe("the existing photo pipeline is reused, not duplicated", () => {
-  test("staging runs the one stamping function and stores its output", () => {
+  test("one stamping function, reached from exactly one place", () => {
     expect(bottomBar).toMatch(/stamped = await buildStampedImageBLOB\(file, check\.mimeType\)/);
-    // Exactly two callers: the staging path and the unchanged Template path.
+    // 1 definition + 1 call site: `preparePhotoBytes` is now the only caller,
+    // and it only calls it when the caller asked for a stamp.
     const stampCalls = bottomBar.match(/buildStampedImageBLOB\(/g) || [];
-    expect(stampCalls).toHaveLength(3); // 1 definition + 2 call sites
+    expect(stampCalls).toHaveLength(2);
   });
 
   test("the source file is validated before any stamping work", () => {
     expect(bottomBar).toMatch(
-      /function stageStampedPhoto[\s\S]{0,300}?validateEditorImageFile\(file\)/
+      /function preparePhotoBytes[\s\S]{0,300}?validateEditorImageFile\(file\)/
     );
   });
 
@@ -90,21 +89,21 @@ describe("the existing photo pipeline is reused, not duplicated", () => {
   });
 });
 
-describe("Template attachment behaviour is unchanged", () => {
-  test("the immediate insertion path still exists for non-Free-form destinations", () => {
-    expect(bottomBar).toMatch(/insertStampedPhoto\(f, insertPoint\)/);
+describe("the immediate insertion fallback still exists", () => {
+  test("a destination that does not compose still inserts, and still unstamped", () => {
+    expect(bottomBar).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: false \}\)/);
     expect(bottomBar).toMatch(/insertAttachedFile\(f, insertPoint\)/);
     expect(bottomBar).toMatch(/const insertPoint = snapshotInsertPoint\(\)/);
   });
 
-  test("the Template form still routes captures to its own confirmed path", () => {
+  test("the Template form still has its own confirmed attachment path", () => {
     expect(mainArea).toMatch(/handleTemplateAttachmentCapture/);
     expect(mainArea).toMatch(/templateAttachmentsRef/);
   });
 
-  test("the composer send handler refuses to act on the Template form", () => {
+  test("the composer send handler routes the Template form to its own delivery", () => {
     expect(mainArea).toMatch(
-      /handleQuickAddComposerSend[\s\S]{0,900}?noteLayoutRef\.current === "template"[\s\S]{0,40}?return refused/
+      /handleQuickAddComposerSend[\s\S]{0,900}?noteLayoutRef\.current === "template"[\s\S]{0,120}?handleTemplateComposerSend/
     );
   });
 });
@@ -281,9 +280,11 @@ describe("staged drafts do not follow the user", () => {
     expect(bottomBar).toMatch(/clearStaged\(\);[\s\S]{0,120}?\}, \[currentNoteId\]\)/);
   });
 
-  test("leaving Free-form clears the queue", () => {
+  test("any change of DESTINATION clears the queue", () => {
+    // The token carries note, view, kind and Template row, so this one effect
+    // covers leaving Free-form, selecting another row and clearing the target.
     expect(bottomBar).toMatch(
-      /if \(stagingEnabled\) return;[\s\S]{0,120}?clearStaged\(\);[\s\S]{0,120}?\}, \[stagingEnabled\]\)/
+      /clearStaged\(\);[\s\S]{0,120}?\}, \[targetToken\]\)/
     );
   });
 

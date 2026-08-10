@@ -51,7 +51,14 @@ import TextPreviewDialog from "./TextPreviewDialog";
 
 export default function FileAttachmentRow({
   attachment,
-  onRemove, // () => void
+  // () => void. Remove is offered ONLY when a handler is supplied: a caller
+  // that can delete this file passes one, a caller that cannot passes none.
+  // Deciding it by the handler rather than by a display mode is what stops a
+  // Remove button appearing that would do nothing, or — worse — be wired to a
+  // different collection than the one on screen. Open/Preview and Download are
+  // always available: both are inherently read-only and change nothing
+  // persisted.
+  onRemove,
   onError, // (message) => void
 }) {
   // available: null = still checking, true/false once resolved.
@@ -228,14 +235,16 @@ export default function FileAttachmentRow({
         >
           Download
         </button>
-        <button
-          type="button"
-          className="file-att-btn file-att-btn--danger"
-          aria-label={`Remove file ${name}`}
-          onClick={onRemove}
-        >
-          Remove
-        </button>
+        {onRemove && (
+          <button
+            type="button"
+            className="file-att-btn file-att-btn--danger"
+            aria-label={`Remove file ${name}`}
+            onClick={onRemove}
+          >
+            Remove
+          </button>
+        )}
       </span>
 
       {preview?.kind === "image" && (

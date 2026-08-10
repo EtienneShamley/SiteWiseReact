@@ -1,13 +1,20 @@
 // src/components/template/TemplateTextCell.js
 //
-// One Template Text answer, in one of two states:
+// One Template TEXT target, in one of two states:
 //
-//   inactive — a read-only React rendering of the stored answer
+//   inactive — a read-only React rendering of the stored value
 //   active   — the single Template rich-text editor (see TemplateRowEditor)
 //
-// Only the row the user is working in carries an editor. The two states share
-// the same typography, padding and box model (`.twocol-rich`), so activating a
-// row does not visibly resize it and cannot make pagination jump.
+// The target is either a row's legacy Text answer or ONE ordered section text
+// item inside a row (src/lib/templateSectionContent.js). Both are the same kind
+// of thing — an answer value the user types into — so both use this one cell
+// rather than a second rich-text implementation. Which stored slot a committed
+// change lands in is decided by the parent from the editor identity it handed
+// down, never by this component.
+//
+// Only the target the user is working in carries an editor. The two states
+// share the same typography, padding and box model (`.twocol-rich`), so
+// activating one does not visibly resize it and cannot make pagination jump.
 
 import React, { useRef } from "react";
 import TemplateRichTextView from "./TemplateRichTextView";
@@ -15,14 +22,21 @@ import TemplateRowEditor from "./TemplateRowEditor";
 import { answerToModel, isEmptyAnswerValue } from "../../lib/templateRichText";
 
 export default function TemplateTextCell({
-  // The complete editor identity for THIS row under the note's currently
-  // assigned template and pinned version (null when this row is not the active
-  // one). See templateRowEditorIdentity.
+  // The complete editor identity for THIS target under the note's currently
+  // assigned template and pinned version (null when it is not the active one).
+  // See templateRowEditorIdentity.
   identity,
   rowId,
+  // The ordered section text item this cell edits, when it edits one. Null for
+  // a row's legacy Text answer. It is passed back on activation so the parent
+  // can address the item; it is NEVER a Quick Add destination — the row is.
+  itemId = null,
   label,
   value,
   placeholder,
+  // Overrides the label-derived accessible name. A section holding several text
+  // items needs each one named distinctly, or they all read as "Label — answer".
+  ariaLabel,
   active,
   reloadToken,
   onActivate,
@@ -34,7 +48,8 @@ export default function TemplateTextCell({
   // swap because this component instance does.
   const caretHintRef = useRef(null);
 
-  const answerLabel = `${(label || "").trim() || "Answer"} — answer`;
+  const answerLabel =
+    (ariaLabel || "").trim() || `${(label || "").trim() || "Answer"} — answer`;
 
   if (active && identity) {
     return (
@@ -63,12 +78,12 @@ export default function TemplateTextCell({
       mode: "point",
       left: event.clientX,
       top: event.clientY,
-      identity: onActivate(rowId) || null,
+      identity: onActivate(rowId, itemId) || null,
     };
   };
 
   const handleFocus = () => {
-    const activated = onActivate(rowId) || null;
+    const activated = onActivate(rowId, itemId) || null;
     if (!caretHintRef.current) {
       caretHintRef.current = { mode: "end", identity: activated };
     }

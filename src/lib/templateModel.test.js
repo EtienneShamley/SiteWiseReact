@@ -522,6 +522,307 @@ describe("attachment references on instances (Photo/File fields)", () => {
   });
 });
 
+/* --------------------- row evidence on instances -------------------------- */
+// Supporting image/file evidence on an ordinary data row lives in a SEPARATE
+// `evidence` map on the same instance, keyed by stable row id, sharing the one
+// asset store with primary Photo/File attachments. These tests pin the model
+// guarantees Phases 0–2 depend on: a seeded empty map, legacy instances loading
+// unchanged, and asset-reference safety across BOTH collections.
+
+describe("row evidence on instances", () => {
+  const evidenceRef = (id, assetId, kind = "photo") => ({
+    id,
+    assetId,
+    kind,
+    name: kind === "file" ? "d.pdf" : "p.png",
+    mimeType: kind === "file" ? "application/pdf" : "image/png",
+    size: 10,
+    createdAt: 1,
+    ...(kind === "photo"
+      ? { intrinsicWidth: 100, intrinsicHeight: 50, display: { widthPct: 60, alignment: "left" } }
+      : {}),
+  });
+
+  test("a new instance is seeded with an empty evidence map", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    expect(getOrCreateInstanceForNote("note-ev-1").evidence).toEqual({});
+  });
+
+  test("an instance saved before evidence existed still reads safely", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-ev-legacy");
+    const { evidence, ...withoutEvidence } = inst;
+    saveNoteTemplateInstance(withoutEvidence);
+
+    const back = getNoteTemplateInstance("note-ev-legacy");
+    expect(back.evidence).toBeUndefined();
+    // isAttachmentAssetReferenced tolerates the absent map (no crash, no match).
+    expect(isAttachmentAssetReferenced("anything")).toBe(false);
+  });
+
+  test("evidence references survive a save/load round-trip, keyed by row id, order preserved", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-ev-2");
+    saveNoteTemplateInstance({
+      ...inst,
+      evidence: {
+        f_text: [evidenceRef("r1", "a1"), evidenceRef("r2", "a2", "file")],
+      },
+    });
+    const back = getNoteTemplateInstance("note-ev-2");
+    expect(back.evidence.f_text.map((e) => e.id)).toEqual(["r1", "r2"]);
+    expect(back.evidence.f_text[1].kind).toBe("file");
+    // Lightweight records only — no binary content in the persisted map.
+    expect(localStorage.getItem("sitewise-note-template-instances-v1")).not.toMatch(
+      /data:image|blob:/
+    );
+  });
+
+  describe("isAttachmentAssetReferenced scans BOTH attachments and evidence", () => {
+    test("referenced through attachments only", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-ev-a");
+      saveNoteTemplateInstance({ ...inst, attachments: { f_photo: [evidenceRef("r1", "asset-att")] } });
+      expect(isAttachmentAssetReferenced("asset-att")).toBe(true);
+    });
+
+    test("referenced through evidence only", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-ev-b");
+      saveNoteTemplateInstance({ ...inst, evidence: { f_text: [evidenceRef("r1", "asset-ev")] } });
+      expect(isAttachmentAssetReferenced("asset-ev")).toBe(true);
+    });
+
+    test("referenced through both", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-ev-c");
+      saveNoteTemplateInstance({
+        ...inst,
+        attachments: { f_photo: [evidenceRef("r1", "asset-shared")] },
+        evidence: { f_text: [evidenceRef("r2", "asset-shared")] },
+      });
+      expect(isAttachmentAssetReferenced("asset-shared")).toBe(true);
+    });
+
+    test("referenced through neither", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-ev-d");
+      saveNoteTemplateInstance({
+        ...inst,
+        attachments: { f_photo: [evidenceRef("r1", "asset-x")] },
+        evidence: { f_text: [evidenceRef("r2", "asset-y")] },
+      });
+      expect(isAttachmentAssetReferenced("asset-unused")).toBe(false);
+      expect(isAttachmentAssetReferenced(null)).toBe(false);
+    });
+
+    test("a shared asset stays referenced while EITHER collection still points at it", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-ev-e");
+      // Two notes reference one asset: one via evidence, one via attachments.
+      saveNoteTemplateInstance({ ...inst, evidence: { f_text: [evidenceRef("r1", "asset-dup")] } });
+      const inst2 = getOrCreateInstanceForNote("note-ev-f");
+      saveNoteTemplateInstance({ ...inst2, attachments: { f_photo: [evidenceRef("r2", "asset-dup")] } });
+
+      // Remove the evidence reference; the attachment reference still holds it.
+      saveNoteTemplateInstance({ ...getNoteTemplateInstance("note-ev-e"), evidence: {} });
+      expect(isAttachmentAssetReferenced("asset-dup")).toBe(true);
+    });
+  });
+});
+
+/* ------------- flexible-section ordered content on instances -------------- */
+// A flexible section's ordered content lives in a THIRD collection on the same
+// instance — `sectionContent`, keyed by the same stable row id — alongside
+// `answers`, `attachments` and `evidence`, which are unchanged. Phase 0 adds the
+// model foundation and the asset-reference safety only: nothing writes section
+// content yet, and nothing is materialized into it, so an existing note behaves
+// exactly as it did before.
+
+describe("flexible-section content on instances", () => {
+  const sectionPhoto = (id, assetId) => ({
+    id,
+    kind: "photo",
+    assetId,
+    name: "p.png",
+    mimeType: "image/png",
+    size: 10,
+    createdAt: 1,
+    intrinsicWidth: 100,
+    intrinsicHeight: 50,
+    display: { widthPct: 60, alignment: "left" },
+  });
+
+  const sectionFile = (id, assetId) => ({
+    id,
+    kind: "file",
+    assetId,
+    name: "d.pdf",
+    mimeType: "application/pdf",
+    size: 20,
+    createdAt: 2,
+  });
+
+  const sectionText = (id, value) => ({ id, kind: "text", value });
+
+  test("a new instance is seeded with an empty sectionContent map", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    expect(getOrCreateInstanceForNote("note-sc-1").sectionContent).toEqual({});
+  });
+
+  test("a new instance still carries the transitional evidence map too", () => {
+    // Phase 0 is ADDITIVE: evidence keeps working exactly as it does now and is
+    // only removed in Phase 10, once sections have fully replaced it.
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-sc-2");
+    expect(inst.evidence).toEqual({});
+    expect(inst.sectionContent).toEqual({});
+  });
+
+  test("an instance saved before sectionContent existed still reads safely", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-sc-legacy");
+    const { sectionContent, ...withoutSectionContent } = inst;
+    saveNoteTemplateInstance(withoutSectionContent);
+
+    const back = getNoteTemplateInstance("note-sc-legacy");
+    expect(back.sectionContent).toBeUndefined();
+    expect(back.answers).toEqual({});
+    // The absent map is tolerated by the deletion gate: no crash, no match.
+    expect(isAttachmentAssetReferenced("anything")).toBe(false);
+  });
+
+  test("section content survives a save/load round-trip with order intact", () => {
+    createTemplate("A", { leftPct: 18, rows: rows() });
+    const inst = getOrCreateInstanceForNote("note-sc-3");
+    saveNoteTemplateInstance({
+      ...inst,
+      sectionContent: {
+        f_text: [
+          sectionText("t1", "Intro"),
+          sectionPhoto("p1", "a1"),
+          sectionText("t2", "Middle"),
+          sectionFile("f1", "a2"),
+        ],
+      },
+    });
+
+    const back = getNoteTemplateInstance("note-sc-3");
+    expect(back.sectionContent.f_text.map((i) => [i.id, i.kind])).toEqual([
+      ["t1", "text"],
+      ["p1", "photo"],
+      ["t2", "text"],
+      ["f1", "file"],
+    ]);
+    // Lightweight references only — no binary content in the persisted map.
+    expect(localStorage.getItem("sitewise-note-template-instances-v1")).not.toMatch(
+      /data:image|blob:/
+    );
+  });
+
+  describe("isAttachmentAssetReferenced also scans sectionContent", () => {
+    test("referenced through a sectionContent PHOTO item only", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-sc-a");
+      saveNoteTemplateInstance({
+        ...inst,
+        sectionContent: { f_text: [sectionPhoto("p1", "asset-sec-photo")] },
+      });
+      expect(isAttachmentAssetReferenced("asset-sec-photo")).toBe(true);
+    });
+
+    test("referenced through a sectionContent FILE item only", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-sc-b");
+      saveNoteTemplateInstance({
+        ...inst,
+        sectionContent: { f_text: [sectionFile("f1", "asset-sec-file")] },
+      });
+      expect(isAttachmentAssetReferenced("asset-sec-file")).toBe(true);
+    });
+
+    test("a TEXT item never makes an asset referenced", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-sc-c");
+      saveNoteTemplateInstance({
+        ...inst,
+        sectionContent: {
+          f_text: [{ id: "t1", kind: "text", value: "x", assetId: "asset-text" }],
+        },
+      });
+      expect(isAttachmentAssetReferenced("asset-text")).toBe(false);
+    });
+
+    test("attachments-only, evidence-only and sectionContent-only are each protected", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sc-d1"),
+        attachments: { f_photo: [sectionPhoto("p1", "asset-only-att")] },
+      });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sc-d2"),
+        evidence: { f_text: [sectionPhoto("p2", "asset-only-ev")] },
+      });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sc-d3"),
+        sectionContent: { f_text: [sectionPhoto("p3", "asset-only-sec")] },
+      });
+
+      expect(isAttachmentAssetReferenced("asset-only-att")).toBe(true);
+      expect(isAttachmentAssetReferenced("asset-only-ev")).toBe(true);
+      expect(isAttachmentAssetReferenced("asset-only-sec")).toBe(true);
+      expect(isAttachmentAssetReferenced("asset-nowhere")).toBe(false);
+    });
+
+    test("one asset shared across all three collections stays protected until the LAST goes", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sc-e1"),
+        attachments: { f_photo: [sectionPhoto("p1", "asset-tri")] },
+      });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sc-e2"),
+        evidence: { f_text: [sectionPhoto("p2", "asset-tri")] },
+      });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sc-e3"),
+        sectionContent: { f_text: [sectionPhoto("p3", "asset-tri")] },
+      });
+      expect(isAttachmentAssetReferenced("asset-tri")).toBe(true);
+
+      // Drop them one at a time; the asset stays protected while ANY remains.
+      saveNoteTemplateInstance({
+        ...getNoteTemplateInstance("note-sc-e1"),
+        attachments: {},
+      });
+      expect(isAttachmentAssetReferenced("asset-tri")).toBe(true);
+
+      saveNoteTemplateInstance({
+        ...getNoteTemplateInstance("note-sc-e2"),
+        evidence: {},
+      });
+      expect(isAttachmentAssetReferenced("asset-tri")).toBe(true);
+
+      saveNoteTemplateInstance({
+        ...getNoteTemplateInstance("note-sc-e3"),
+        sectionContent: {},
+      });
+      expect(isAttachmentAssetReferenced("asset-tri")).toBe(false);
+    });
+
+    test("a malformed sectionContent map cannot break the scan", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sc-f"),
+        sectionContent: "not-a-map",
+        attachments: { f_photo: [sectionPhoto("p1", "asset-still-found")] },
+      });
+      expect(isAttachmentAssetReferenced("asset-still-found")).toBe(true);
+      expect(isAttachmentAssetReferenced("asset-absent")).toBe(false);
+    });
+  });
+});
+
 /* ---------------- note-specific custom rows on the instance --------------- */
 // The lifecycle guarantees the completed-note workflow depends on, exercised
 // against real localStorage: reload restoration, note switching, template

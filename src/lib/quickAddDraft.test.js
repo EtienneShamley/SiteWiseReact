@@ -13,10 +13,12 @@ import {
   applyQuickAddSendResult,
   canSendQuickAddComposer,
   createQuickAddDraftStore,
+  quickAddStagingEnabled,
   resolveQuickAddSendRoute,
   stagedAttachmentDisplayName,
   stagedAttachmentRemoveLabel,
 } from "./quickAddDraft";
+import { QUICK_ADD_KIND } from "./quickAddTarget";
 
 function makeStore() {
   const created = [];
@@ -280,6 +282,76 @@ describe("Send routing", () => {
         );
       }
     }
+  });
+
+  // A Template row composes its text too: it becomes a section text item
+  // appended at the end, delivered by the same composer as the attachments.
+  test("a composing destination sends text alone through the composer", () => {
+    expect(route({ attachmentCount: 0, hasText: true, textUsesComposer: true })).toBe(
+      QUICK_ADD_SEND_ROUTE.COMPOSER
+    );
+  });
+
+  test("text that composes still needs text to exist", () => {
+    expect(route({ attachmentCount: 0, hasText: false, textUsesComposer: true })).toBe(
+      QUICK_ADD_SEND_ROUTE.NONE
+    );
+  });
+
+  test("no destination refuses composing text as well", () => {
+    expect(
+      route({ attachmentCount: 0, hasText: true, textUsesComposer: true, canSendText: false })
+    ).toBe(QUICK_ADD_SEND_ROUTE.NONE);
+  });
+
+  test("without a composer handler composing text falls back to the text path", () => {
+    // Unlike an attachment, text HAS a working destination without the
+    // composer, so refusing to send it would lose it for no reason.
+    expect(
+      route({
+        attachmentCount: 0,
+        hasText: true,
+        textUsesComposer: true,
+        hasComposerHandler: false,
+      })
+    ).toBe(QUICK_ADD_SEND_ROUTE.TEXT_ONLY);
+  });
+});
+
+describe("which destinations compose", () => {
+  const staging = (over) =>
+    quickAddStagingEnabled({ hasComposerHandler: true, ...over });
+
+  test("the Free-form note and a SELECTED Template row both stage", () => {
+    expect(staging({ target: { kind: QUICK_ADD_KIND.FREEFORM } })).toBe(true);
+    expect(staging({ target: { kind: QUICK_ADD_KIND.TEMPLATE_ROW } })).toBe(true);
+  });
+
+  test("a Template form with no row selected does NOT stage", () => {
+    // There would be nowhere to send the draft, and a queue that outlives the
+    // decision to make one is how a capture lands in a row it was never for.
+    expect(staging({ target: { kind: QUICK_ADD_KIND.TEMPLATE_UNSET } })).toBe(false);
+  });
+
+  test("no destination, and no note at all, do not stage", () => {
+    expect(staging({ target: { kind: QUICK_ADD_KIND.NONE } })).toBe(false);
+    expect(staging({ target: null })).toBe(false);
+    expect(quickAddStagingEnabled()).toBe(false);
+  });
+
+  test("without a composer handler nothing stages — a draft would be stranded", () => {
+    expect(
+      quickAddStagingEnabled({
+        target: { kind: QUICK_ADD_KIND.FREEFORM },
+        hasComposerHandler: false,
+      })
+    ).toBe(false);
+    expect(
+      quickAddStagingEnabled({
+        target: { kind: QUICK_ADD_KIND.TEMPLATE_ROW },
+        hasComposerHandler: false,
+      })
+    ).toBe(false);
   });
 });
 
