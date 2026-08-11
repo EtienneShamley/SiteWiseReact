@@ -355,6 +355,23 @@
   gap: 4px;
 }
 
+/* The same overlay, on ONE ordered section item's own block, for the item-level
+   "Refine with AI" trigger. A flexible section reads as continuous document
+   text, so an item boundary must never be drawn: no border, no grip, no
+   permanent button. This is position only — the trigger inside it is the same
+   `.twocol-row-ai-btn`, so it inherits the identical hover/focus reveal (keyed
+   on `.twocol-row`, which every segment shell carries), the identical
+   invisible-means-inert rule and the identical print hiding. */
+.twocol-item-actions {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* Position/reveal mechanics only — colour comes entirely from `.twocol-icon-btn`
    (combined in the component's className), so idle/hover/pressed/open/danger
    stay in the one light-locked palette below instead of a second hardcoded
@@ -549,6 +566,7 @@
  * branded cell colours are printed rather than dropped as decoration. */
 @media print {
   .twocol-row-actions,
+  .twocol-item-actions,
   .twocol-row-ai-status,
   .twocol-col-handle,
   .twocol-resize-handle,

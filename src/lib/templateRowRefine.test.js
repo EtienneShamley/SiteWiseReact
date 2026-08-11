@@ -194,6 +194,10 @@ describe("request identity", () => {
       templateId: TPL,
       templateVersionId: VER,
       rowId: MASTER_ROW,
+      // A legacy ROW request names no section item, and its target key is the
+      // bare row id — the key this map has always used.
+      itemId: null,
+      targetKey: MASTER_ROW,
       isCustomRow: false,
       style: PRESET,
       // The complete answer representation the gate compares against, and the

@@ -4,12 +4,19 @@ import ThreeDotMenu from "../ThreeDotMenu";
 import { userFacingRefinePresets } from "../../lib/refineContract";
 
 /**
- * The row-level "Refine with AI" trigger for an eligible Template form Text row.
+ * The "Refine with AI" trigger for one eligible Template TEXT TARGET: a legacy
+ * Text row's own answer, or ONE ordered section text item.
  *
- * It lives inside the row's EXISTING action area (`.twocol-row-actions`, next to
- * the ⋯ menu), which is absolutely positioned and revealed on hover/focus only —
- * so it consumes no measured height, cannot disturb pagination, and is hidden in
- * print, exactly like the row-actions trigger it sits beside.
+ * It lives inside an absolutely positioned action area revealed on hover/focus
+ * only — the row's EXISTING `.twocol-row-actions` next to the ⋯ menu, or the
+ * matching `.twocol-item-actions` on a section item's own block — so it consumes
+ * no measured height, cannot disturb pagination, and is hidden in print,
+ * exactly like the row-actions trigger it sits beside.
+ *
+ * `itemId` is passed straight back through `onRefine`, so a section paragraph is
+ * refined by its own stable id rather than by its row. It is deliberately opaque
+ * here: this component decides nothing about WHICH text is refined, it only
+ * reports the target it was rendered for.
  *
  * Choosing the style is the same act as running it: the trigger opens a menu of
  * the approved presets and picking one starts the refinement. There is no
@@ -26,18 +33,21 @@ const PRESETS = userFacingRefinePresets();
 
 export default function RowRefineAction({
   rowId,
+  itemId = null,
   rowLabel,
   loading = false,
   disabled = false,
-  onRefine, // (rowId, styleValue) => void
+  onRefine, // (rowId, styleValue, itemId) => void
 }) {
   const [open, setOpen] = useState(false);
   const anchorRef = useRef(null);
 
   if (!onRefine) return null;
 
-  // The row's own label is what makes the action identifiable in a form of
-  // otherwise identical controls.
+  // The target's own label is what makes the action identifiable in a form of
+  // otherwise identical controls. For a section holding several paragraphs the
+  // caller passes a label that names WHICH paragraph, so the accessible name is
+  // never ambiguous about what is about to be rewritten.
   const name = (rowLabel || "").trim() || "this field";
   const accessibleName = loading
     ? `Refining ${name} with AI`
@@ -45,7 +55,7 @@ export default function RowRefineAction({
 
   const options = PRESETS.map((preset) => ({
     label: preset.label,
-    onClick: () => onRefine(rowId, preset.value),
+    onClick: () => onRefine(rowId, preset.value, itemId),
   }));
 
   return (

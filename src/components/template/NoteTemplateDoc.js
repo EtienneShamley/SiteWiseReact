@@ -105,6 +105,7 @@ import {
   ROW_REFINE_STATUS,
   ROW_REFINE_SUCCESS_MESSAGE,
   applyRowAnswerToInstance,
+  applySectionTextItemToInstance,
   beginRowRefine,
   canApplyRowRefineResponse,
   clearRowRefineStatus,
@@ -115,8 +116,10 @@ import {
   isRowRefineCurrent,
   makeRowRefineRequest,
   readRowAnswer,
+  readSectionTextItemValue,
   rowIdsWithBackup,
   rowRefineMessageFor,
+  rowRefineTargetKey,
   setRowRefineMessage,
   settleRowRefine,
 } from "../../lib/templateRowRefine";
@@ -148,15 +151,17 @@ import {
  *   and is hidden (not destroyed) while the note is on a different template.
  *   Its label, answer and preferred height are written through the THROWING
  *   instance save, so a failed write is reported instead of being lost.
- * - Supports ROW-LEVEL AI refinement of a single Text answer (master row or
- *   custom row). It refines ONE row of ONE note: the Free-form note, every other
- *   row, the attachments, custom-row order/labels/heights and the reusable
- *   TemplateVersion are all untouched, and the global formatting toolbar stays
- *   disabled in this view and never targets a row. The rules live in
- *   src/lib/templateRowRefine.js; the provider contract is the shared one
+ * - Supports AI refinement of a single TEXT TARGET: a legacy row's own answer
+ *   (master row or custom row), or ONE ordered section TEXT item addressed by
+ *   its stable id. It refines ONE target of ONE note: the Free-form note, every
+ *   other row, every other item in the same section — text, photos and files
+ *   alike — their order, the attachments, custom-row order/labels/heights and
+ *   the reusable TemplateVersion are all untouched, and the global formatting
+ *   toolbar stays disabled in this view and never targets a row. The rules live
+ *   in src/lib/templateRowRefine.js; the provider contract is the shared one
  *   (src/lib/refineContract.js + refineClient.js), reused rather than repeated.
  *   A response is applied only when it still belongs where it came from AND the
- *   answer has not been edited since — see handleRefineRow.
+ *   target's own value has not been edited since — see handleRefineRow.
  *
  * Attachment write sequence (per selected file — a failed file never blocks or
  * rolls back the others):
@@ -337,8 +342,11 @@ export default function NoteTemplateDoc({
   // while the handle is being dragged, written once on release.
   const [pendingSectionExtra, setPendingSectionExtra] = useState({});
 
-  // Per-row AI Refine lifecycle: { [rowId]: { status, message, requestId } }.
-  // Row-scoped, so a request on one row neither blocks nor reports on another.
+  // Per-TARGET AI Refine lifecycle: { [targetKey]: { status, message, requestId } }.
+  // The key is a bare row id for a legacy row and `rowId::item::itemId` for an
+  // ordered section text item (rowRefineTargetKey), so a request on one row
+  // neither blocks nor reports on another — and neither does a request on one
+  // paragraph of a section against another paragraph of the same section.
   const [rowRefineStatus, setRowRefineStatus] = useState(createRowRefineState);
 
   // The ONE Text answer currently being edited with rich text, and the token
@@ -402,9 +410,9 @@ export default function NoteTemplateDoc({
     };
   }, []);
 
-  // Monotonic request ids, and a synchronous per-row in-flight set. The disabled
-  // button covers the rendered case; this set covers two clicks inside a single
-  // tick, before React has re-rendered the button as disabled.
+  // Monotonic request ids, and a synchronous per-TARGET in-flight set. The
+  // disabled button covers the rendered case; this set covers two clicks inside
+  // a single tick, before React has re-rendered the button as disabled.
   const rowRefineRequestRef = useRef(0);
   const rowRefineInFlightRef = useRef(new Set());
 
@@ -2291,44 +2299,66 @@ export default function NoteTemplateDoc({
     return raw.find((r) => r && r.id === rowId) || null;
   }, []);
 
-  const showRowRefineMessage = useCallback((rowId, status, message) => {
-    setRowRefineStatus((prev) => setRowRefineMessage(prev, rowId, status, message));
+  const showRowRefineMessage = useCallback((targetKey, status, message) => {
+    setRowRefineStatus((prev) => setRowRefineMessage(prev, targetKey, status, message));
   }, []);
 
   /**
-   * Refine ONE Text row's answer with AI.
+   * Refine ONE text target with AI: either a legacy row's answer, or ONE ordered
+   * section TEXT item named by its stable id.
    *
    * Exactly one provider request per user action, no automatic retry, and the
-   * result is written only if it still belongs where it started AND the answer
-   * has not been edited since it was sent. Everything else — other rows, other
-   * notes, the Free-form note, attachments, custom-row order/labels/heights and
-   * the immutable TemplateVersion — is untouched in every path, including every
-   * failure path.
+   * result is written only if it still belongs where it started AND the target's
+   * own value has not been edited since it was sent. Everything else — other
+   * rows, other notes, the Free-form note, attachments, custom-row
+   * order/labels/heights and the immutable TemplateVersion — is untouched in
+   * every path, including every failure path. Within a section that also means
+   * every other item: the text around it, the photos, the files, their order,
+   * their ids, their assets and their display metadata.
+   *
+   * `itemId` decides which of the two targets this is, and the choice is made
+   * ONCE here. A row that has not materialised into authoritative section
+   * content is never forced to materialise merely because the user clicked
+   * Refine: it takes the unchanged legacy route.
    */
   const handleRefineRow = useCallback(
-    async (rowId, style) => {
+    async (rowId, style, itemId = null) => {
       const current = instanceRef.current;
       if (!rowId || !current?.noteId) return;
+      const targetKey = rowRefineTargetKey({ rowId, itemId });
+      if (!targetKey) return;
       // Synchronous duplicate guard: two clicks in one tick, before React has
-      // re-rendered this row's trigger as disabled.
-      if (rowRefineInFlightRef.current.has(rowId)) return;
+      // re-rendered this target's trigger as disabled. Keyed by TARGET, so
+      // refining text A does not block text C in the same section.
+      if (rowRefineInFlightRef.current.has(targetKey)) return;
 
-      // Eligibility is re-checked here, not trusted from the click: a custom row
-      // is Text by definition; a master row must be a Text row of this note's
-      // pinned version.
+      // Eligibility is re-checked here, not trusted from the click.
       const isCustomRow = !!findCustomRow(rowId);
-      if (!isCustomRow) {
+      if (itemId) {
+        // A section TEXT item is prose whatever its row's field type is — a
+        // Date row's supplementary paragraph is refinable, its typed value is
+        // not — so the row only has to still exist, and the item has to still
+        // be a text item of that row right now.
+        if (!rowIsPresent(rowId) || !sectionTextItemExists(rowId, itemId)) return;
+      } else if (!isCustomRow) {
+        // A custom row is Text by definition; a master row must be a Text row
+        // of this note's pinned version.
         const row = (rowsRef.current || []).find((r) => r && r.id === rowId);
         if (!isRefinableRow(row)) return;
       }
 
       const live = readLiveInstance(current.noteId);
-      const answer = readRowAnswer(live, rowId, isCustomRow);
+      // The source is the TARGET's own value and nothing else: one TextItem's
+      // rich-text value, or one row's answer. No neighbouring item, no image or
+      // file name, no attachment metadata and no section label is read into it.
+      const answer = itemId
+        ? readSectionTextItemValue(live, rowId, itemId)
+        : readRowAnswer(live, rowId, isCustomRow);
       if (answer === null) return;
 
-      // An empty or whitespace-only field never spends a request.
+      // An empty or whitespace-only target never spends a request.
       if (!hasRefinableText(answer)) {
-        showRowRefineMessage(rowId, ROW_REFINE_STATUS.IDLE, ROW_REFINE_EMPTY_MESSAGE);
+        showRowRefineMessage(targetKey, ROW_REFINE_STATUS.IDLE, ROW_REFINE_EMPTY_MESSAGE);
         return;
       }
 
@@ -2340,6 +2370,7 @@ export default function NoteTemplateDoc({
         templateId: current.templateId,
         templateVersionId: current.templateVersionId,
         rowId,
+        itemId,
         isCustomRow,
         style,
         // The COMPLETE answer representation. The provider receives its
@@ -2353,7 +2384,7 @@ export default function NoteTemplateDoc({
         // An unusable request (e.g. an off-allowlist style) is refused here
         // rather than sent — the frontend may select a preset, never author one.
         showRowRefineMessage(
-          rowId,
+          targetKey,
           ROW_REFINE_STATUS.FAILURE,
           rowRefineMessageFor(REFINE_OUTCOME.FAILURE)
         );
@@ -2363,23 +2394,23 @@ export default function NoteTemplateDoc({
       const settle = (status, message) => {
         if (!mountedRef.current) return;
         setRowRefineStatus((prev) =>
-          settleRowRefine(prev, rowId, { requestId, status, message })
+          settleRowRefine(prev, targetKey, { requestId, status, message })
         );
       };
       // Leave loading with nothing to say — used when the result is discarded
-      // for a row/note/template the user has already moved away from. Guarded on
-      // request identity so it cannot clear a NEWER request's loading state.
+      // for a target/note/template the user has already moved away from. Guarded
+      // on request identity so it cannot clear a NEWER request's loading state.
       const dismiss = () => {
         if (!mountedRef.current) return;
         setRowRefineStatus((prev) =>
-          isRowRefineCurrent(prev, rowId, requestId)
-            ? clearRowRefineStatus(prev, rowId)
+          isRowRefineCurrent(prev, targetKey, requestId)
+            ? clearRowRefineStatus(prev, targetKey)
             : prev
         );
       };
 
-      rowRefineInFlightRef.current.add(rowId);
-      setRowRefineStatus((prev) => beginRowRefine(prev, rowId, requestId));
+      rowRefineInFlightRef.current.add(targetKey);
+      setRowRefineStatus((prev) => beginRowRefine(prev, targetKey, requestId));
 
       let result = null;
       try {
@@ -2387,7 +2418,7 @@ export default function NoteTemplateDoc({
       } catch {
         result = null;
       } finally {
-        rowRefineInFlightRef.current.delete(rowId);
+        rowRefineInFlightRef.current.delete(targetKey);
       }
 
       // Failure, unavailable, malformed or empty output: the answer is left
@@ -2411,7 +2442,11 @@ export default function NoteTemplateDoc({
       }
 
       // The apply gate: same note, same template, same (immutable) version, the
-      // row still exists, and the answer is still the text that was sent.
+      // row (and, for an item request, the TEXT ITEM with that exact id) still
+      // exists, and its value is still the text that was sent. The item is
+      // looked up in the FRESHEST stored content, so an image moved or an item
+      // appended while the request ran cannot re-address it, while an edit or a
+      // split — both of which change the value — stops it.
       const target = readLiveInstance(request.noteId);
       const check = canApplyRowRefineResponse(request, target);
       if (!check.ok) {
@@ -2419,14 +2454,18 @@ export default function NoteTemplateDoc({
           // The user kept typing. Their newer text wins and stays untouched.
           settle(ROW_REFINE_STATUS.FAILURE, ROW_REFINE_CHANGED_MESSAGE);
         } else {
-          // Deleted row, re-pinned template/version, or a note that no longer
-          // has template data: discard silently. Nothing is recreated.
+          // Deleted row, deleted text item, re-pinned template/version, or a
+          // note that no longer has template data: discard silently. Nothing is
+          // recreated, nothing is redirected to a neighbouring item, and an item
+          // request never falls back to answers[rowId].
           dismiss();
         }
         return;
       }
 
-      const next = applyRowAnswerToInstance(target, { rowId, isCustomRow }, result.refined);
+      const next = itemId
+        ? applySectionTextItemToInstance(target, { rowId, itemId }, result.refined)
+        : applyRowAnswerToInstance(target, { rowId, isCustomRow }, result.refined);
       if (!next) {
         dismiss();
         return;
@@ -2445,7 +2484,7 @@ export default function NoteTemplateDoc({
       // been written. It is owned by MainArea, so it is recorded for the
       // originating note even when this component has since unmounted.
       if (onSetRowRefineBackup) {
-        onSetRowRefineBackup(request.noteId, rowId, check.previousAnswer);
+        onSetRowRefineBackup(request.noteId, targetKey, check.previousAnswer);
       }
 
       // Sync the on-screen state only while this note is still the one mounted.
@@ -2455,21 +2494,32 @@ export default function NoteTemplateDoc({
         setInstance(next);
         setRowText(next.answers);
         // If the editor open right now is the one this result was written for —
-        // same note, template, pinned version, row and row kind — its document
-        // is the pre-refinement one: rebuild it from the value just written.
-        // An editor for a different template or version is left alone.
+        // same note, template, pinned version, row, row kind and (for an item
+        // request) the same section item — its document is the pre-refinement
+        // one: rebuild it from the value just written. An editor for a different
+        // template, version, row or item is left alone.
         const appliedIdentity = templateRowEditorIdentity({
           noteId: request.noteId,
           templateId: request.templateId,
           templateVersionId: request.templateVersionId,
           rowId,
           isCustomRow,
+          itemId,
         });
+        // The one editor whose identity does NOT name the item it is writing to
+        // is a materialising session: it deliberately keeps the ROW identity it
+        // was created with so it is not torn down mid-keystroke. Its next
+        // keystroke would serialize the pre-refinement text back over what was
+        // just written, so it is rebuilt too.
+        const materializing = materializedSectionRef.current;
+        const editorIdentity = rowEditorRegistrationRef.current?.identity;
         if (
-          canCommitRowEdit(
-            rowEditorRegistrationRef.current?.identity,
-            appliedIdentity
-          )
+          canCommitRowEdit(editorIdentity, appliedIdentity) ||
+          (!!itemId &&
+            !!materializing &&
+            materializing.rowId === rowId &&
+            materializing.itemId === itemId &&
+            canCommitRowEdit(editorIdentity, materializing.identity))
         ) {
           setRowEditorToken((t) => t + 1);
         }
@@ -2479,6 +2529,8 @@ export default function NoteTemplateDoc({
     [
       refineText,
       findCustomRow,
+      rowIsPresent,
+      sectionTextItemExists,
       readLiveInstance,
       showRowRefineMessage,
       onSetRowRefineBackup,
@@ -2487,31 +2539,44 @@ export default function NoteTemplateDoc({
   );
 
   /**
-   * Restore ONE row's pre-refinement answer. Scoped by note id AND row id, so
-   * another note's backup and another row's backup are both unreachable, and
-   * written through the same confirmed save so the restored answer persists.
-   * Only the answer text is restored — never a label, position, height or
-   * attachment.
+   * Restore ONE target's pre-refinement text. Scoped by note id AND target key,
+   * so another note's backup, another row's backup and another TEXT ITEM's
+   * backup in the same section are all unreachable. Written through the same
+   * confirmed save so the restored text persists.
+   *
+   * Only that one value is restored — never a label, a position, a height, an
+   * attachment, a neighbouring text item, the item order, or a whole
+   * `sectionContent` snapshot.
    */
   const handleRevertRowRefine = useCallback(
-    (rowId) => {
+    (rowId, itemId = null) => {
       const current = instanceRef.current;
       if (!rowId || !current?.noteId) return;
-      const backup = getRowRefineBackup(rowRefineBackups, current.noteId, rowId);
+      const targetKey = rowRefineTargetKey({ rowId, itemId });
+      if (!targetKey) return;
+      const backup = getRowRefineBackup(rowRefineBackups, current.noteId, targetKey);
       if (backup === null) return;
 
       const isCustomRow = !!findCustomRow(rowId);
       const live = readLiveInstance(current.noteId);
-      if (readRowAnswer(live, rowId, isCustomRow) === null) return;
 
-      const next = applyRowAnswerToInstance(live, { rowId, isCustomRow }, backup);
+      // The target must still be there. A text item that has gone is a refusal,
+      // exactly as it is on the apply path — never a write to its neighbour.
+      let next = null;
+      if (itemId) {
+        if (readSectionTextItemValue(live, rowId, itemId) === null) return;
+        next = applySectionTextItemToInstance(live, { rowId, itemId }, backup);
+      } else {
+        if (readRowAnswer(live, rowId, isCustomRow) === null) return;
+        next = applyRowAnswerToInstance(live, { rowId, isCustomRow }, backup);
+      }
       if (!next) return;
 
       try {
         saveInstanceConfirmed(next);
       } catch {
         showRowRefineMessage(
-          rowId,
+          targetKey,
           ROW_REFINE_STATUS.FAILURE,
           ROW_REFINE_REVERT_FAILED_MESSAGE
         );
@@ -2524,18 +2589,25 @@ export default function NoteTemplateDoc({
       setRowText(next.answers);
       // Restoring the complete previous value — formatting included — must also
       // reach the editor, but only when the editor open right now is genuinely
-      // this row under this template and version.
+      // this row (and this item) under this template and version.
+      const restoredIdentity = itemId
+        ? sectionItemIdentityFor(rowId, itemId)
+        : rowIdentityFor(rowId);
+      const materializing = materializedSectionRef.current;
+      const editorIdentity = rowEditorRegistrationRef.current?.identity;
       if (
-        canCommitRowEdit(
-          rowEditorRegistrationRef.current?.identity,
-          rowIdentityFor(rowId)
-        )
+        canCommitRowEdit(editorIdentity, restoredIdentity) ||
+        (!!itemId &&
+          !!materializing &&
+          materializing.rowId === rowId &&
+          materializing.itemId === itemId &&
+          canCommitRowEdit(editorIdentity, materializing.identity))
       ) {
         setRowEditorToken((t) => t + 1);
       }
-      if (onClearRowRefineBackup) onClearRowRefineBackup(current.noteId, rowId);
+      if (onClearRowRefineBackup) onClearRowRefineBackup(current.noteId, targetKey);
       showRowRefineMessage(
-        rowId,
+        targetKey,
         ROW_REFINE_STATUS.SUCCESS,
         ROW_REFINE_REVERTED_MESSAGE
       );
@@ -2548,10 +2620,12 @@ export default function NoteTemplateDoc({
       onClearRowRefineBackup,
       saveInstanceConfirmed,
       rowIdentityFor,
+      sectionItemIdentityFor,
     ]
   );
 
-  // Which of THIS note's rows currently have a Revert backup.
+  // Which of THIS note's refine TARGETS currently have a Revert backup — row
+  // ids for legacy rows, `rowId::item::itemId` keys for section text items.
   const rowRefineRevertableIds = useMemo(
     () => rowIdsWithBackup(rowRefineBackups, noteId),
     [rowRefineBackups, noteId]
@@ -2709,9 +2783,10 @@ export default function NoteTemplateDoc({
         onRowLabelChange={handleRowLabelChange}
         onRowHeightChange={handleRowHeightChange}
         onRowHeightCommit={handleRowHeightCommit}
-        // Row-level AI: offered for Text answer rows only (master and custom).
-        // The Template Builder passes none of these, so no AI control exists
-        // there at all.
+        // Text-target AI: a legacy Text answer row (master or custom), or ONE
+        // ordered section TEXT item addressed by its own stable id. The
+        // Template Builder passes none of these, so no AI control exists there
+        // at all.
         onRefineRow={handleRefineRow}
         onRevertRowRefine={handleRevertRowRefine}
         rowRefineStatus={rowRefineStatus}

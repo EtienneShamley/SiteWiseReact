@@ -50,6 +50,7 @@ import TemplateTextCell from "./TemplateTextCell";
 import {
   ROW_REFINE_STATUS,
   isRefinableRowType,
+  rowRefineTargetKey,
 } from "../../lib/templateRowRefine";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import useOutsideClose from "../../hooks/useOutsideClose";
@@ -310,13 +311,17 @@ export default function ResizableTwoColTable({
   fieldBusy = {}, // { [fieldId]: true while uploading }
   onDismissFieldError, // (fieldId) => void
   onFieldError, // (fieldId, message) => void — e.g. a failed file open
-  // ROW-LEVEL AI (note mode only). All four are optional and inert by default:
+  // TEXT-TARGET AI (note mode only). All four are optional and inert by default:
   // with no `onRefineRow` nothing about AI renders at all, which is how the
   // Template Builder stays entirely free of it.
-  onRefineRow, // (rowId, styleValue) => void — eligible Text rows only
-  onRevertRowRefine, // (rowId) => void
-  rowRefineStatus = {}, // { [rowId]: { status, message } }
-  rowRefineRevertableIds = null, // Set<rowId> with a session Revert backup
+  //
+  // A target is a legacy Text ROW (`itemId` omitted) or ONE ordered section TEXT
+  // ITEM (`itemId` given). Both maps below are keyed by `rowRefineTargetKey`,
+  // which is the bare row id in the legacy case.
+  onRefineRow, // (rowId, styleValue, itemId|null) => void
+  onRevertRowRefine, // (rowId, itemId|null) => void
+  rowRefineStatus = {}, // { [targetKey]: { status, message } }
+  rowRefineRevertableIds = null, // Set<targetKey> with a session Revert backup
   // Row actions: "builder" (master template rows) | "note" (note-specific
   // custom rows) | "none". See the block comment above.
   rowActionsMode = "none",
@@ -1000,16 +1005,16 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // True for a row that may be refined with AI: note mode, an answer row of the
-  // unified Text type (master or note-specific custom), and a handler wired.
-  // Number/date/time/checkbox/yes-no/dropdown/photo/file rows are excluded here,
-  // once, so no other call site has to remember the rule.
+  // True for a LEGACY row that may be refined with AI: note mode, an answer row
+  // of the unified Text type (master or note-specific custom), and a handler
+  // wired. Number/date/time/checkbox/yes-no/dropdown/photo/file rows are
+  // excluded here, once, so no other call site has to remember the rule.
   //
-  // A row whose body comes from ordered section content is also excluded: row
-  // Refine reads and rewrites `answers[rowId]`, which such a row no longer
-  // renders, so offering it would silently rewrite text the user cannot see.
-  // Per-item Refine is a later, deliberate change (it needs an item dimension
-  // in the request and in the Revert backup).
+  // A row whose body comes from ordered section content is excluded from THIS
+  // question, because "refine this row" has no meaning there: such a row does
+  // not render `answers[rowId]` at all. Its prose is refined per TEXT ITEM
+  // instead — see sectionItemAcceptsAiRefine — so nothing is lost, and no
+  // control can rewrite text the user cannot see.
   function rowAcceptsAiRefine(row) {
     return (
       !!onRefineRow &&
@@ -1020,11 +1025,75 @@ export default function ResizableTwoColTable({
     );
   }
 
+  // True for ONE ordered section TEXT item that may be refined with AI.
+  //
+  // The item's own kind is the whole rule: a section paragraph is prose whatever
+  // its row's field type is, so a Date row's supplementary text and a legacy
+  // Photo field's supplementary text are both refinable while their primary
+  // values — the typed answer, the primary attachment — are not reachable from
+  // here at all. A PHOTO or FILE item is never offered a Refine control.
+  function sectionItemAcceptsAiRefine(row, item) {
+    return (
+      !!onRefineRow &&
+      showRightEditor &&
+      !!row &&
+      !!item &&
+      item.kind === SECTION_ITEM_KIND.TEXT
+    );
+  }
+
+  // The section text item a row-level control would act on, or null.
+  //
+  // The row head IS the section's first item, so when that item is text the
+  // existing row-level affordance stays exactly where it has always been and
+  // simply names the item it was already sitting on. A section whose head is an
+  // image has no row-level text target: its paragraphs carry their own controls.
+  function headRefineItem(sectionHeadItem) {
+    return sectionHeadItem && sectionHeadItem.kind === SECTION_ITEM_KIND.TEXT
+      ? sectionHeadItem
+      : null;
+  }
+
+  // How this target is announced. A section holding a single paragraph is
+  // unambiguous and keeps the row's own label; one holding several says WHICH
+  // paragraph, so the user can always tell which text is about to be rewritten.
+  function refineTargetLabel(row, item) {
+    if (!item) return row.label;
+    const items = normalizedSectionContent[row.id] || [];
+    const textItems = items.filter((i) => i.kind === SECTION_ITEM_KIND.TEXT);
+    if (textItems.length <= 1) return row.label;
+    return sectionTextItemLabel(row, item);
+  }
+
+  // The Refine trigger for one target, in whichever action area it belongs to.
+  function renderRefineAction(row, item) {
+    return (
+      <RowRefineAction
+        rowId={row.id}
+        itemId={item ? item.id : null}
+        rowLabel={refineTargetLabel(row, item)}
+        loading={
+          (rowRefineStatus[rowRefineTargetKey({ rowId: row.id, itemId: item?.id })] || {})
+            .status === ROW_REFINE_STATUS.LOADING
+        }
+        onRefine={onRefineRow}
+      />
+    );
+  }
+
   // Compact per-row actions (hover/focus only, absolutely positioned so the
   // row's measured height never changes, hidden in print). Icon-free text
   // triggers with explicit accessible names.
-  function renderRowActions(row) {
-    const canAiRefine = rowAcceptsAiRefine(row);
+  //
+  // `sectionHeadItem` is the row's first ordered item when it has one. When that
+  // item is text it is the row-level Refine control's target, so a flexible
+  // section keeps ONE simple affordance in the familiar place while addressing
+  // the item by id underneath.
+  function renderRowActions(row, sectionHeadItem = null) {
+    const refineItem = headRefineItem(sectionHeadItem);
+    const canAiRefine = refineItem
+      ? sectionItemAcceptsAiRefine(row, refineItem)
+      : rowAcceptsAiRefine(row);
     if (!showRowActions && !canAiRefine) return null;
     const name = row.label || (row.isCustom ? "custom section" : "this field");
     const options = [
@@ -1047,16 +1116,7 @@ export default function ResizableTwoColTable({
     }
     return (
       <div className="twocol-row-actions">
-        {canAiRefine && (
-          <RowRefineAction
-            rowId={row.id}
-            rowLabel={row.label}
-            loading={
-              (rowRefineStatus[row.id] || {}).status === ROW_REFINE_STATUS.LOADING
-            }
-            onRefine={onRefineRow}
-          />
-        )}
+        {canAiRefine && renderRefineAction(row, refineItem)}
         {showRowActions && (
           <>
             <button
@@ -1090,18 +1150,28 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // Restrained per-row AI feedback, rendered inside the row's own content cell
-  // so a message is unambiguously ABOUT that field: the loading state, the
-  // outcome, and the Revert control for the last successful refinement of this
-  // row. It renders only when there is something to say, so an untouched form
-  // carries no extra chrome and no extra height.
-  function renderRowRefineStatus(row) {
-    if (!rowAcceptsAiRefine(row)) return null;
-    const entry = rowRefineStatus[row.id] || null;
+  // Restrained per-TARGET AI feedback, rendered inside the content cell of the
+  // text it is about — the row's own cell for a legacy row, the item's own
+  // segment for a section paragraph — so a message and its Revert are never
+  // ambiguous about which text they belong to. The loading state, the outcome,
+  // and the Revert control for the last successful refinement of THAT target.
+  // It renders only when there is something to say, so an untouched form carries
+  // no extra chrome and no extra height.
+  //
+  // Revert is addressed by the same target key the backup was recorded under, so
+  // restoring paragraph C cannot touch paragraph A, the images between them, the
+  // files, or their order.
+  function renderRowRefineStatus(row, item = null) {
+    const eligible = item
+      ? sectionItemAcceptsAiRefine(row, item)
+      : rowAcceptsAiRefine(row);
+    if (!eligible) return null;
+    const targetKey = rowRefineTargetKey({ rowId: row.id, itemId: item?.id });
+    const entry = rowRefineStatus[targetKey] || null;
     const canRevert = !!(
       onRevertRowRefine &&
       rowRefineRevertableIds &&
-      rowRefineRevertableIds.has(row.id)
+      rowRefineRevertableIds.has(targetKey)
     );
     if (!entry && !canRevert) return null;
 
@@ -1109,7 +1179,7 @@ export default function ResizableTwoColTable({
       entry &&
       (entry.status === ROW_REFINE_STATUS.UNAVAILABLE ||
         entry.status === ROW_REFINE_STATUS.FAILURE);
-    const name = (row.label || "").trim() || "this field";
+    const name = (refineTargetLabel(row, item) || "").trim() || "this field";
 
     return (
       <div className="twocol-row-ai-status">
@@ -1126,7 +1196,7 @@ export default function ResizableTwoColTable({
           <button
             type="button"
             className="twocol-row-ai-revert"
-            onClick={() => onRevertRowRefine(row.id)}
+            onClick={() => onRevertRowRefine(row.id, item ? item.id : null)}
             aria-label={`Revert the AI refinement of ${name}`}
             title={`Restore ${name} to its text from before the last AI refinement`}
           >
@@ -1446,7 +1516,7 @@ export default function ResizableTwoColTable({
             ? renderSectionItemBody(row, sectionHeadItem, { isRowHead: true })
             : showRightEditor && renderAnswerControl(row)}
 
-          {showRightEditor && renderRowRefineStatus(row)}
+          {showRightEditor && renderRowRefineStatus(row, headRefineItem(sectionHeadItem))}
 
           {enableFieldTypeEditor &&
             (type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE) && (
@@ -1464,7 +1534,7 @@ export default function ResizableTwoColTable({
           {isSectionTail && renderSectionTail(row, sectionExtraPx)}
         </div>
 
-        {renderRowActions(row)}
+        {renderRowActions(row, sectionHeadItem)}
         {renderColumnDivider()}
 
         {/* The insertion line, while an image is being dragged over this item.
@@ -1650,7 +1720,7 @@ export default function ResizableTwoColTable({
   function renderSegmentShell(
     row,
     ctx,
-    { extraClass = "", note = null, body, movableItem = null }
+    { extraClass = "", note = null, body, movableItem = null, actions = null }
   ) {
     const continued = !!(ctx && ctx.continuedFromPrevPage);
     const isTarget = !!targetRowId && row.id === targetRowId;
@@ -1681,6 +1751,11 @@ export default function ResizableTwoColTable({
           {note}
           {body}
         </div>
+        {/* Absolutely positioned overlay, exactly like `.twocol-row-actions` on
+            a row head: no measured height, revealed on hover/focus only, hidden
+            in print. Supplied only by a section TEXT item that is not the row
+            head — the head's own trigger stays in the row action area. */}
+        {actions && <div className="twocol-item-actions">{actions}</div>}
         {movableItem && renderItemDropIndicator(row, movableItem)}
       </div>
     );
@@ -1862,12 +1937,18 @@ export default function ResizableTwoColTable({
   // supporting material.
   function renderSectionSegment(row, item, ctx, section = null) {
     const isSectionTail = !!(section && section.isTail);
+    // A TEXT item that is not the row head carries its own Refine trigger and
+    // its own AI feedback, both addressed by this item's stable id. A photo or
+    // file item gets neither: there is no image or file Refine.
+    const canAiRefine = sectionItemAcceptsAiRefine(row, item);
     return renderSegmentShell(row, ctx, {
       extraClass: "twocol-seg--section",
       movableItem: item,
+      actions: canAiRefine ? renderRefineAction(row, item) : null,
       body: (
         <>
           {renderSectionItemBody(row, item)}
+          {canAiRefine && renderRowRefineStatus(row, item)}
           {/* The LAST block of the section carries its extra working space and
               its one resize handle — never a block in the middle, and never a
               fragment continuing onto another page. */}

@@ -1387,17 +1387,21 @@ export default function MainArea() {
     setRowRefineBackups((prev) => pruneRowRefineBackups(prev, liveNoteIds));
   }, [liveNoteIds, pruneSaveStatuses]);
 
-  // Row-level Refine backup writers handed to NoteTemplateDoc. Both are stable,
+  // Template Refine backup writers handed to NoteTemplateDoc. Both are stable,
   // so the async handler that captured them can still record a backup for the
   // note it started from after that note's form has been unmounted.
-  const handleSetRowRefineBackup = useCallback((targetNoteId, rowId, previousAnswer) => {
+  //
+  // `targetKey` (src/lib/templateRowRefine.js) is a bare row id for a legacy
+  // row and `rowId::item::itemId` for one ordered section text item, so two
+  // paragraphs of the same section hold two independent backups.
+  const handleSetRowRefineBackup = useCallback((targetNoteId, targetKey, previousAnswer) => {
     setRowRefineBackups((prev) =>
-      setRowRefineBackup(prev, targetNoteId, rowId, previousAnswer)
+      setRowRefineBackup(prev, targetNoteId, targetKey, previousAnswer)
     );
   }, []);
 
-  const handleClearRowRefineBackup = useCallback((targetNoteId, rowId) => {
-    setRowRefineBackups((prev) => clearRowRefineBackup(prev, targetNoteId, rowId));
+  const handleClearRowRefineBackup = useCallback((targetNoteId, targetKey) => {
+    setRowRefineBackups((prev) => clearRowRefineBackup(prev, targetNoteId, targetKey));
   }, []);
 
   /* ============================== AI Refine =============================== */
