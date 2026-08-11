@@ -89,6 +89,12 @@ function unitMd(unit) {
           unit.meta ? ` — ${escapeMd(unit.meta)}` : ""
         } — ${escapeMd(unit.note)}_`,
       ];
+    case EXPORT_UNIT.SPACE:
+      // Markdown has no page geometry, so blank physical height has no honest
+      // equivalent here. Emitting one blank line per few pixels would produce
+      // dozens of meaningless empty lines in the middle of a document that is
+      // meant to be read as structure, so the space is simply not represented.
+      return [];
     case EXPORT_UNIT.EMPTY:
     default:
       // Nothing is written for a blank answer — never "undefined" or "null".

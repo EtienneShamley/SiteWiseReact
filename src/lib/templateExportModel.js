@@ -58,6 +58,13 @@ import {
   EXPORT_ATTACHMENT_NOTE,
   EXPORT_ATTACHMENT_UNAVAILABLE_NOTE,
 } from "./editorFileAttachments";
+import {
+  SECTION_ITEM_KIND,
+  isTextSectionItem,
+  sectionItemsForRow,
+} from "./templateSectionContent";
+import { sectionExtraHeightFor } from "./templateSectionHeight";
+import { sectionReplacesRowAnswer } from "./templateRowEvidence";
 
 /* ------------------------------------------------------------------------ */
 /* Failure reasons                                                           */
@@ -96,6 +103,15 @@ export const UNNAMED_PHOTO = "Photo";
 //   { type: "photo", … }       one photo of a Photo field — atomic
 //   { type: "file", … }        one file of a File field — atomic
 //   { type: "empty" }          the branded empty state for a blank answer
+//   { type: "space", heightPx } deliberate blank working space at the END of a
+//                              flexible section — atomic, layout flavours only
+//
+// A FLEXIBLE SECTION (sectionContent[rowId], src/lib/templateSectionContent.js)
+// expands into exactly these units, in its stored order: a text item to its
+// BLOCK units, a photo item to a PHOTO, a file item to a FILE. The list is
+// heterogeneous and already ordered, so no renderer, splitter or paginator
+// needed a structural change to carry it — which is the whole reason ordered
+// section content was modelled as a list in the first place (§3.1).
 
 export const EXPORT_UNIT = {
   BLOCK: "block",
@@ -103,6 +119,7 @@ export const EXPORT_UNIT = {
   PHOTO: "photo",
   FILE: "file",
   EMPTY: "empty",
+  SPACE: "space",
 };
 
 /* ------------------------------------------------------------------------ */
@@ -190,6 +207,14 @@ export function collectTemplateExportAssetRefs(instance, version) {
       ? instance.attachments
       : {};
 
+  const claim = (assetId, isFile) => {
+    if (typeof assetId !== "string" || !assetId) return;
+    if (seen.has(assetId)) return;
+    seen.add(assetId);
+    if (isFile) fileAssetIds.push(assetId);
+    else photoAssetIds.push(assetId);
+  };
+
   for (const row of rows) {
     const entries = attachments[row.id];
     if (!Array.isArray(entries)) continue;
@@ -200,10 +225,46 @@ export function collectTemplateExportAssetRefs(instance, version) {
       if (!norm || typeof norm === "string") continue;
       // Non-attachment rows render only legacy evidence, exactly as on screen.
       if (!isAttachmentRow && !isLegacyMigratedAttachment(norm)) continue;
-      if (seen.has(norm.assetId)) continue;
-      seen.add(norm.assetId);
-      if (norm.kind === ATTACHMENT_KIND.FILE) fileAssetIds.push(norm.assetId);
-      else photoAssetIds.push(norm.assetId);
+      claim(norm.assetId, norm.kind === ATTACHMENT_KIND.FILE);
+    }
+  }
+
+  // Ordered section content is a THIRD source of asset references, and an
+  // asset named only from there must still be resolved or the exported document
+  // would show "Photo unavailable." for an image the user can see on screen.
+  //
+  // This is deliberately a CONSERVATIVE RAW SCAN, and it is deliberately not the
+  // same responsibility as visible unit expansion:
+  //
+  //   ASSET REFERENCE COLLECTION -> raw entries, tolerant (here)
+  //   VISIBLE DOCUMENT UNITS     -> normalized, recognized kinds only (below)
+  //
+  // So an entry too malformed for `normalizeSectionItem` to render — or carrying
+  // a kind a future version introduces — still gets its asset READ rather than
+  // being reported unavailable because this version could not interpret it. The
+  // cost of over-collecting is one wasted read; the cost of under-collecting is
+  // a missing photo in somebody's report. The same asymmetry drives
+  // `sectionContentReferencesAsset`, which protects the Blob from deletion.
+  //
+  // The WHOLE raw map is walked rather than only the pinned version's rows: a
+  // note-specific custom row's section content is keyed by its own row id, and
+  // that id is not in `version.rows`. Nothing is normalized, reordered, rewritten
+  // or removed here — this only reads ids.
+  const sectionContent =
+    instance?.sectionContent &&
+    typeof instance.sectionContent === "object" &&
+    !Array.isArray(instance.sectionContent)
+      ? instance.sectionContent
+      : {};
+
+  for (const rowId of Object.keys(sectionContent)) {
+    const entries = sectionContent[rowId];
+    if (!Array.isArray(entries)) continue;
+    for (const raw of entries) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      // A text item has no Blob, even if a corrupt record carries an assetId.
+      if (isTextSectionItem(raw)) continue;
+      claim(raw.assetId, raw.kind === SECTION_ITEM_KIND.FILE);
     }
   }
 
@@ -328,6 +389,63 @@ function fileUnit(norm, assets) {
   };
 }
 
+/**
+ * The BLOCK units of ONE ordered section text item.
+ *
+ * The existing safe Template rich-text path, reused verbatim: `textUnitsFor`
+ * runs the stored value back through `answerToModel`, so the sanitization
+ * boundary, the legacy plain-string demotion and every supported mark
+ * (paragraphs, bold, italic, underline, strike, lists, links, line breaks)
+ * behave exactly as they do for a legacy Text row's answer. No new conversion
+ * exists and no stored HTML is passed through.
+ *
+ * The one difference is the EMPTY unit. `textUnitsFor` emits the branded empty
+ * state for a blank answer because a legacy row with a blank answer IS an empty
+ * cell. An empty TEXT ITEM is not the same thing: an intentionally empty item
+ * exists so a section stays editable (§4.4), and a section holding a photo is
+ * not an empty cell. Emitting the empty state per item would print a stray
+ * blank line above or between real content, so it is dropped here and the ROW
+ * decides once, from its complete unit list, whether it is empty at all.
+ *
+ * The item's `id` is internal addressing and never becomes document content.
+ */
+function sectionTextUnits(value) {
+  return textUnitsFor(value).filter((unit) => unit.type !== EXPORT_UNIT.EMPTY);
+}
+
+/**
+ * One flexible section's ordered items as export units, IN STORED ORDER.
+ *
+ * The canonical expansion: every Template format consumes this same list, so
+ * `Text A, Photo B, Text C, File D` is A -> B -> C -> D in the PDF, the DOCX,
+ * the standalone HTML and the Markdown alike. Nothing is regrouped, nothing is
+ * hoisted, and text is never assumed to come first — an item that the user
+ * moved to the top of the section exports at the top.
+ *
+ * `items` are ALREADY NORMALIZED by `sectionItemsForRow`, which skips an entry
+ * with a missing, unknown or future kind rather than guessing at it. Such an
+ * entry therefore emits no visible content, is not mutated, and does not shift
+ * the items around it.
+ */
+function sectionUnitsFor(items, assets) {
+  const units = [];
+  for (const item of items) {
+    if (item.kind === SECTION_ITEM_KIND.TEXT) {
+      units.push(...sectionTextUnits(item.value));
+    } else if (item.kind === SECTION_ITEM_KIND.FILE) {
+      units.push(fileUnit(item, assets));
+    } else {
+      // A section photo IS an attachment reference, so it resolves its assetId,
+      // its stored `display.widthPct` and its alignment through exactly the same
+      // unit the primary Photo field uses. Camera-stamped and ordinary uploads
+      // are indistinguishable here by design: the stamp is baked into the stored
+      // pixels, so both export their bytes as-is.
+      units.push(photoUnit(item, assets));
+    }
+  }
+  return units;
+}
+
 function attachmentUnitsFor(row, rawList, assets) {
   const type = normalizeType(row.type);
   const isAttachmentRow = type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE;
@@ -392,6 +510,10 @@ export function buildTemplateExportModel({
     instance.attachments && typeof instance.attachments === "object"
       ? instance.attachments
       : {};
+  // Read raw and passed straight to the shared read model. Nothing here
+  // normalizes the stored map, writes it back, or creates a row in it.
+  const sectionContent = instance.sectionContent ?? null;
+  const sectionExtraHeight = instance.sectionExtraHeight ?? null;
 
   // Option ids belonging to THIS pinned version only. A value that is one of
   // them is internal metadata, not user text, and must not leak into a Text
@@ -411,29 +533,70 @@ export function buildTemplateExportModel({
   const rows = orderedRows.map((row) => {
     const isCustom = !!row.isCustom;
     const type = isCustom ? FIELD_TYPE.TEXT : normalizeType(row.type);
+    const isAttachmentRow = type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE;
     const units = [];
 
-    if (type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE) {
+    // AUTHORITY — the same rule the live document applies (§3.4), stated once in
+    // `sectionReplacesRowAnswer` and read here through the same read model the
+    // renderer uses. A row with no valid section content takes the untouched
+    // legacy path below and exports exactly as it always did.
+    const sectionItems = sectionItemsForRow(sectionContent, row.id);
+    const hasSection = sectionItems.length > 0;
+    const sectionOwnsBody =
+      hasSection && sectionReplacesRowAnswer(type, isAttachmentRow);
+    const sectionUnits = hasSection ? sectionUnitsFor(sectionItems, assets) : [];
+
+    if (isAttachmentRow) {
+      // A legacy Photo/File field keeps its PRIMARY attachments first and fixed;
+      // ordered items are supplementary content after them. `attachments[rowId]`
+      // is never migrated into `sectionContent`, so nothing is duplicated.
       units.push(...attachmentUnitsFor(row, attachments[row.id], assets));
-      if (units.length === 0) units.push({ type: EXPORT_UNIT.EMPTY });
+      units.push(...sectionUnits);
     } else {
-      // Legacy evidence attached to an ordinary row still renders there.
+      // Legacy evidence attached to an ordinary row still renders there. It is
+      // never copied into `sectionContent` by materialisation, so it cannot be
+      // duplicated by a section and is left exactly where it has always been.
       const legacy = attachmentUnitsFor(row, attachments[row.id], assets);
       units.push(...legacy);
 
-      const raw = isCustom ? customAnswers.get(row.id) : answers[row.id];
-      if (type === FIELD_TYPE.TEXT) {
-        const textUnits = textUnitsFor(raw);
-        // A row that already carries legacy evidence must not also emit the
-        // empty-state unit — the cell is not empty.
-        if (!(legacy.length && textUnits.length === 1 && textUnits[0].type === EXPORT_UNIT.EMPTY)) {
-          units.push(...textUnits);
-        }
+      if (sectionOwnsBody) {
+        // The section IS the body: the frozen `answers[rowId]` /
+        // `customRows[].answer` this row no longer renders is not exported as
+        // well, and neither is its frozen `evidence[rowId]`. Nothing is cleared
+        // — this is a read-time choice, exactly as it is on screen.
+        units.push(...sectionUnits);
       } else {
-        const text = structuredDisplayValue(row, raw, knownOptionIds);
-        if (text) units.push({ type: EXPORT_UNIT.VALUE, text });
-        else if (!legacy.length) units.push({ type: EXPORT_UNIT.EMPTY });
+        const raw = isCustom ? customAnswers.get(row.id) : answers[row.id];
+        if (type === FIELD_TYPE.TEXT) {
+          const textUnits = textUnitsFor(raw);
+          // A row that already carries legacy evidence must not also emit the
+          // empty-state unit — the cell is not empty.
+          if (!(legacy.length && textUnits.length === 1 && textUnits[0].type === EXPORT_UNIT.EMPTY)) {
+            units.push(...textUnits);
+          }
+        } else {
+          // A structured row's typed value stays FIRST and fixed, and is never
+          // turned into a text item. Ordered items follow it.
+          const text = structuredDisplayValue(row, raw, knownOptionIds);
+          if (text) units.push({ type: EXPORT_UNIT.VALUE, text });
+          units.push(...sectionUnits);
+        }
       }
+    }
+
+    // Decided ONCE from the complete list, which is what lets an intentionally
+    // empty text item exist in storage without printing a stray blank line.
+    if (units.length === 0) units.push({ type: EXPORT_UNIT.EMPTY });
+
+    // The user's deliberate extra working space, at the END of the section it
+    // belongs to — the same place the live document puts it (its last block).
+    // Only a flexible section has one; a structured row and a legacy Photo/File
+    // field keep their own `row.px`, exactly as the planner decides.
+    const extraPx = sectionOwnsBody
+      ? sectionExtraHeightFor(sectionExtraHeight, row.id)
+      : 0;
+    if (extraPx > 0) {
+      units.push({ type: EXPORT_UNIT.SPACE, heightPx: extraPx });
     }
 
     for (const unit of units) {
@@ -452,6 +615,12 @@ export function buildTemplateExportModel({
       label: typeof row.label === "string" ? row.label : "",
       type,
       preferredHeightPx: Number(row.px) > 0 ? Number(row.px) : 120,
+      // A flexible section is CONTENT-DRIVEN: its height is what is actually in
+      // it, never the legacy whole-row height. Reserving `row.px` above a
+      // section's first photo is the same defect the live document already fixed
+      // (§4.6), so the layout flavours skip the minimum box for such a row and
+      // for it alone. Every legacy row keeps `row.px` unchanged.
+      contentDriven: sectionOwnsBody,
       units,
       empty: units.every((u) => u.type === EXPORT_UNIT.EMPTY),
     };

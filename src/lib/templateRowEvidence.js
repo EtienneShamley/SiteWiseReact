@@ -100,6 +100,31 @@ const STRUCTURED_FIELD_TYPES = new Set([
 ]);
 
 /**
+ * Does ordered section content REPLACE this row's own answer control?
+ *
+ * The one statement of the authority rule §3.4 describes, so the on-screen
+ * planner below and the export model (src/lib/templateExportModel.js) can never
+ * disagree about which rows hand their whole body to `sectionContent`:
+ *
+ *   - a Text row, and a note-specific custom row (Text by definition), hand it
+ *     over — their first ordered item becomes the row head and carries the
+ *     label, and `answers[rowId]` is not rendered as well;
+ *   - a structured row keeps its typed control over `answers[rowId]` first;
+ *   - a legacy Photo/File field keeps its `attachments[rowId]` first.
+ *
+ * Says nothing about whether the row HAS any section content — that is the
+ * caller's question, and both callers ask it of the same read model.
+ *
+ * @param rowType           the row's normalized-or-raw stored type
+ * @param isAttachmentField whether the row is a legacy Photo/File field whose
+ *                          primary attachments are being rendered
+ */
+export function sectionReplacesRowAnswer(rowType, isAttachmentField = false) {
+  if (isAttachmentField) return false;
+  return !STRUCTURED_FIELD_TYPES.has(normalizeType(rowType));
+}
+
+/**
  * The renderable entries of one raw stored attachment/evidence array.
  *
  * Each entry keeps its RAW STORED INDEX alongside the normalized value, because
@@ -272,9 +297,7 @@ export function planRowBlocks({
   // Only a Text row hands its whole body over; every other type keeps its typed
   // value or its primary attachments first.
   const sectionOwnsRowHead =
-    hasSection &&
-    !isAttachmentField &&
-    !STRUCTURED_FIELD_TYPES.has(normalizeType(row.type));
+    hasSection && sectionReplacesRowAnswer(row.type, isAttachmentField);
 
   // A row is compound when it emits more than one block.
   const blockCount =

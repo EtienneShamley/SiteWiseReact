@@ -25,6 +25,7 @@ import {
   EXPORT_UNSUPPORTED_ASSET_MESSAGE,
 } from "./exportImageAssets";
 import { EXPORT_UNSPLITTABLE_MESSAGE } from "./freeformExportPlan";
+import { TEMPLATE_EXPORT_FAILURE } from "./templateExportModel";
 
 export const EXPORT_STATUS = {
   IDLE: "idle",
@@ -46,6 +47,43 @@ export const EXPORT_GENERIC_FAILURE_MESSAGE =
 
 export function exportFailureMessage(view) {
   return EXPORT_FAILURE_MESSAGE[view] || EXPORT_GENERIC_FAILURE_MESSAGE;
+}
+
+// Template SOURCE-RESOLUTION failures the user can actually act on.
+//
+// `resolveTemplateExportSource` already knows exactly why it refused, and
+// refusing is correct — there is deliberately no fallback, because substituting
+// another template or version would silently export a different document. What
+// was wrong was only that every refusal reached the user as the same sentence,
+// so a note whose Template had been deleted was indistinguishable from a broken
+// export pipeline.
+//
+// Only reasons that describe the note's own stored state are mapped. A runtime
+// failure (a renderer, an unsplittable page, an unexpected exception) stays on
+// the generic per-view wording: it is not something a user can act on, and an
+// unrecognised reason must never be able to put internal text on screen.
+const TEMPLATE_SOURCE_FAILURE_MESSAGE = Object.freeze({
+  [TEMPLATE_EXPORT_FAILURE.NO_INSTANCE]:
+    "This note no longer has Template form data to export.",
+  [TEMPLATE_EXPORT_FAILURE.NO_TEMPLATE]:
+    "This note's Template has been deleted, so the Template form cannot be exported.",
+  [TEMPLATE_EXPORT_FAILURE.NO_VERSION]:
+    "This note's saved Template version is no longer available, so the Template form cannot be exported.",
+});
+
+/**
+ * The user-facing sentence for one Template export failure.
+ *
+ * Shared by BOTH Template export entry points (the editor's Export menu and the
+ * ShareDialog batch export) so the same cause can never be described two
+ * different ways. An unknown, absent or runtime reason degrades to the existing
+ * generic Template wording.
+ */
+export function templateExportFailureMessage(reason) {
+  return (
+    TEMPLATE_SOURCE_FAILURE_MESSAGE[reason] ||
+    exportFailureMessage(NOTE_VIEW.TEMPLATE_FORM)
+  );
 }
 
 export function exportRunningMessage(view) {

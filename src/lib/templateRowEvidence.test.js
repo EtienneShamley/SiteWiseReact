@@ -26,6 +26,7 @@ import {
   hasRowEvidence,
   hasRowSectionContent,
   sectionItemMinHeight,
+  sectionReplacesRowAnswer,
 } from "./templateRowEvidence";
 import { resolveBlockHeight } from "./paginateBlocks";
 import { FIELD_TYPE } from "./templateFields";
@@ -1386,5 +1387,45 @@ describe("a flexible section's optional extra working space", () => {
     });
     expect(blocks).toHaveLength(1);
     expect(blocks[0].minHeight).toBe(120);
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* The shared authority predicate                                            */
+/* ------------------------------------------------------------------------ */
+//
+// `sectionReplacesRowAnswer` is now a CROSS-MODULE contract: the planner above
+// and the canonical export model (src/lib/templateExportModel.js) both decide
+// "does the section own this row's body?" from it, so the exported document and
+// the on-screen document can never disagree about which rows hand their whole
+// body to `sectionContent`.
+
+describe("sectionReplacesRowAnswer", () => {
+  test("a Text row hands its body over", () => {
+    expect(sectionReplacesRowAnswer(FIELD_TYPE.TEXT)).toBe(true);
+  });
+
+  test("a custom row — no stored type at all — is Text by definition", () => {
+    expect(sectionReplacesRowAnswer(undefined)).toBe(true);
+    expect(sectionReplacesRowAnswer(null)).toBe(true);
+    expect(sectionReplacesRowAnswer("nonsense")).toBe(true);
+  });
+
+  test("every structured type keeps its own typed control first", () => {
+    for (const type of [
+      FIELD_TYPE.NUMBER,
+      FIELD_TYPE.DATE,
+      FIELD_TYPE.TIME,
+      FIELD_TYPE.CHECKBOX,
+      FIELD_TYPE.YESNO,
+      FIELD_TYPE.SELECT,
+    ]) {
+      expect(sectionReplacesRowAnswer(type)).toBe(false);
+    }
+  });
+
+  test("a legacy Photo/File field keeps its primary attachments first", () => {
+    expect(sectionReplacesRowAnswer(FIELD_TYPE.PHOTO, true)).toBe(false);
+    expect(sectionReplacesRowAnswer(FIELD_TYPE.FILE, true)).toBe(false);
   });
 });

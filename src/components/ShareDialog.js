@@ -6,7 +6,11 @@ import {
 } from "../lib/exportUtils";
 import { downloadZip } from "../lib/zipUtils";
 import { NOTE_VIEW, noteViewLabel } from "../lib/noteViews";
-import { captureExportIdentity, exportFailureMessage } from "../lib/exportIdentity";
+import {
+  captureExportIdentity,
+  exportFailureMessage,
+  templateExportFailureMessage,
+} from "../lib/exportIdentity";
 import {
   buildTemplateExportFile,
   downloadExportFile,
@@ -151,16 +155,25 @@ export default function ShareDialog({
 
   // Restrained, name-based reporting. Internal ids and raw exception text are
   // never shown.
-  const templateFailureMessage = (titles) => {
-    const base = exportFailureMessage(NOTE_VIEW.TEMPLATE_FORM);
-    if (!titles || titles.length === 0) {
+  //
+  // The REASON comes from the SHARED mapping (`templateExportFailureMessage`),
+  // the same one the editor's Export menu uses, so one cause can never be
+  // described two different ways in the two places a Template export can start.
+  // A batch whose notes failed for DIFFERENT reasons has no single true
+  // explanation, so it keeps the generic sentence.
+  const templateFailureMessage = (failures) => {
+    const list = Array.isArray(failures) ? failures : [];
+    const reasons = new Set(list.map((f) => f.reason));
+    const base = templateExportFailureMessage(
+      reasons.size === 1 ? [...reasons][0] : null
+    );
+    if (list.length === 0) {
       return `${base} Nothing was downloaded.`;
     }
-    const named = titles.slice(0, 3).map((t) => `“${t}”`).join(", ");
-    const more = titles.length > 3 ? ` and ${titles.length - 3} more` : "";
-    return `${base} ${named}${more} ${
-      titles.length === 1 ? "has" : "have"
-    } no completed template to export. Nothing was downloaded.`;
+    const named = list.slice(0, 3).map((f) => `“${f.title}”`).join(", ");
+    const more = list.length > 3 ? ` and ${list.length - 3} more` : "";
+    const noun = list.length === 1 ? "Affected note" : "Affected notes";
+    return `${base} ${noun}: ${named}${more}. Nothing was downloaded.`;
   };
 
   /**
@@ -172,7 +185,12 @@ export default function ShareDialog({
   const preflightTemplate = (chosen) => {
     const missing = [];
     for (const n of chosen) {
-      if (!resolveTemplateExportSource(n.id).ok) missing.push(n.title || "Untitled");
+      // The refusal REASON is carried alongside the name — it is what turns
+      // "could not be exported" into something the user can act on.
+      const source = resolveTemplateExportSource(n.id);
+      if (!source.ok) {
+        missing.push({ title: n.title || "Untitled", reason: source.reason });
+      }
     }
     return missing;
   };
@@ -204,7 +222,11 @@ export default function ShareDialog({
               })
             : { ok: false };
           if (!result.ok) {
-            setExportError(templateFailureMessage([n.title || "Untitled"]));
+            setExportError(
+              templateFailureMessage([
+                { title: n.title || "Untitled", reason: result.reason },
+              ])
+            );
             return; // nothing has been downloaded
           }
           built.push({ note: n, file: result });

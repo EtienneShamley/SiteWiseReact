@@ -174,6 +174,35 @@ function fileHtml(unit) {
   );
 }
 
+/**
+ * The deliberate blank working space at the end of a flexible section.
+ *
+ * Real layout BELOW the section's content, never a constraint on it, so nothing
+ * can be clipped or compressed — the same model the live document uses.
+ *
+ * WORD (docx) GETS NOTHING. html-to-docx has no equivalent for a fixed-height
+ * empty box, and manufacturing a run of empty paragraphs to approximate one
+ * would put content the user never typed into their document. Word reflows the
+ * report anyway, so the honest conversion is to omit it.
+ *
+ * The height is CLAMPED to what one page's content area can actually hold. The
+ * stored maximum (one usable page, SECTION_EXTRA_MAX_PX) is larger than the
+ * PDF's per-page capacity once the footer is reserved, and an atomic unit taller
+ * than a page is an unsplittable export failure — so the clamp is what keeps a
+ * maximally-dragged section exportable rather than a hard error.
+ */
+function spaceHtml(unit, ctx) {
+  if (ctx.flavor === EXPORT_FLAVOR.DOCX) return "";
+  const border = Number(ctx.table?.borderWidthPx) || 0;
+  const ceiling = Math.max(
+    1,
+    Math.round(ctx.rowMaxHeightPx - ROW_CELL_VERTICAL_PADDING_PX - border)
+  );
+  const px = Math.min(ceiling, Math.max(1, Math.round(Number(unit.heightPx) || 0)));
+  if (!(px > 0)) return "";
+  return `<div class="nw-tpl-space" style="height: ${px}px" aria-hidden="true"></div>`;
+}
+
 export function unitHtml(unit, ctx) {
   if (!unit) return "";
   switch (unit.type) {
@@ -185,6 +214,8 @@ export function unitHtml(unit, ctx) {
       return photoHtml(unit, ctx);
     case EXPORT_UNIT.FILE:
       return fileHtml(unit);
+    case EXPORT_UNIT.SPACE:
+      return spaceHtml(unit, ctx);
     case EXPORT_UNIT.EMPTY:
     default:
       // The branded layout's intended empty state: an empty cell that still
@@ -211,6 +242,12 @@ export function unitHtml(unit, ctx) {
 export function rowMinBoxHeightPx(fragment, ctx) {
   if (!ctx || ctx.flavor !== EXPORT_FLAVOR.PDF) return 0;
   if (!fragment || fragment.continued) return 0;
+  // A flexible section's body is its ordered content, and its height is that
+  // content plus whatever space the user deliberately added below it. The legacy
+  // whole-row height is not a floor for such a row — applying it would reserve a
+  // blank band above its first photo, which is exactly the defect the live
+  // document removed. Only a row whose body IS section content is affected.
+  if (fragment.contentDriven) return 0;
   const normalized = normalizeRowHeightPx(
     fragment.preferredHeightPx,
     ctx.rowMaxHeightPx
@@ -520,6 +557,7 @@ export function templateExportComponentCss(flavor) {
     .nw-tpl-cell ul, .nw-tpl-cell ol { margin: 0 0 6px 18px; padding: 0; }
     .nw-tpl-cell a { color: inherit; text-decoration: underline; }
     .nw-tpl-empty { min-height: 1em; }
+    .nw-tpl-space { width: 100%; }
     .nw-tpl-missing { font-style: italic; color: #555555; }
     .nw-tpl-photo { margin: 4px 0; }
     .nw-tpl-photo img { object-fit: contain; height: auto; }

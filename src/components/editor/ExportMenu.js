@@ -23,6 +23,7 @@ import {
   freeformExportFailureMessage,
   isExportRunning,
   settleExport,
+  templateExportFailureMessage,
 } from "../../lib/exportIdentity";
 
 /**
@@ -187,9 +188,13 @@ export default function ExportMenu({ source }) {
           format: format.key,
         });
         ok = !!result.ok;
+        // The runner reports WHY it refused. A cause that describes the note's
+        // own stored state — its Template deleted, its pinned version gone — is
+        // stated plainly instead of as the generic sentence; anything else
+        // degrades to that sentence inside the shared mapping.
         message = ok
           ? exportSuccessMessage(capturedView)
-          : exportFailureMessage(capturedView);
+          : templateExportFailureMessage(result.reason);
       } else {
         // The captured snapshot and the captured editor — never "whatever the
         // toolbar owns now", and never anything re-read from the live view.

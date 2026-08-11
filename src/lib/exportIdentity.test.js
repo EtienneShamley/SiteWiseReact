@@ -20,7 +20,12 @@ import {
   isExportRunning,
   sameExportIdentity,
   settleExport,
+  templateExportFailureMessage,
 } from "./exportIdentity";
+import {
+  TEMPLATE_EXPORT_FAILURE,
+} from "./templateExportModel";
+import { TEMPLATE_EXPORT_RUNTIME_FAILURE } from "./templateExport";
 
 describe("export control naming", () => {
   test("the control always names the active view", () => {
@@ -205,5 +210,67 @@ describe("export transaction lifecycle", () => {
 
     const running = beginExport(createExportState(), { requestId: 2, identity });
     expect(clearExportMessage(running)).toBe(running);
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* Template source-resolution wording                                        */
+/* ------------------------------------------------------------------------ */
+//
+// `resolveTemplateExportSource` already knows exactly why it refused. Before
+// this mapping existed every refusal reached the user as one generic sentence,
+// so a note whose Template had been DELETED looked identical to a broken export
+// pipeline — which is precisely how it was misread in manual testing.
+
+describe("templateExportFailureMessage", () => {
+  const GENERIC = "The Template form could not be exported.";
+
+  test("NO_INSTANCE says the note has no Template form data", () => {
+    expect(templateExportFailureMessage(TEMPLATE_EXPORT_FAILURE.NO_INSTANCE)).toBe(
+      "This note no longer has Template form data to export."
+    );
+  });
+
+  test("NO_TEMPLATE says the Template was deleted", () => {
+    expect(templateExportFailureMessage(TEMPLATE_EXPORT_FAILURE.NO_TEMPLATE)).toBe(
+      "This note's Template has been deleted, so the Template form cannot be exported."
+    );
+  });
+
+  test("NO_VERSION says the pinned version is gone", () => {
+    expect(templateExportFailureMessage(TEMPLATE_EXPORT_FAILURE.NO_VERSION)).toBe(
+      "This note's saved Template version is no longer available, so the Template form cannot be exported."
+    );
+  });
+
+  test("an unknown, absent or runtime reason keeps the generic fallback", () => {
+    // A runtime failure is not something a user can act on, so it is
+    // deliberately NOT given a specific sentence.
+    for (const reason of [
+      undefined,
+      null,
+      "",
+      "something-new",
+      TEMPLATE_EXPORT_FAILURE.NO_NOTE,
+      TEMPLATE_EXPORT_FAILURE.NO_MODEL,
+      TEMPLATE_EXPORT_RUNTIME_FAILURE.RENDER_FAILED,
+      TEMPLATE_EXPORT_RUNTIME_FAILURE.UNSPLITTABLE,
+      TEMPLATE_EXPORT_RUNTIME_FAILURE.IDENTITY_CHANGED,
+      TEMPLATE_EXPORT_RUNTIME_FAILURE.UNKNOWN_FORMAT,
+    ]) {
+      expect(templateExportFailureMessage(reason)).toBe(GENERIC);
+    }
+  });
+
+  test("no internal reason token can reach the screen", () => {
+    for (const reason of Object.values(TEMPLATE_EXPORT_FAILURE)) {
+      expect(templateExportFailureMessage(reason)).not.toContain(reason);
+    }
+  });
+
+  test("the generic sentence is still the per-view Template wording", () => {
+    expect(templateExportFailureMessage("unmapped")).toBe(
+      exportFailureMessage(NOTE_VIEW.TEMPLATE_FORM)
+    );
   });
 });

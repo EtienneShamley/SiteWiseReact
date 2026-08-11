@@ -147,6 +147,14 @@ describe("failure behaviour", () => {
     expect(exportMenu).toMatch(/exportFailureMessage/);
   });
 
+  test("ExportMenu reports a Template failure through the SHARED mapping", () => {
+    // The runner's typed reason, not the one generic sentence: a deleted
+    // Template must not look like a broken export pipeline.
+    expect(exportMenu).toMatch(/templateExportFailureMessage\(result\.reason\)/);
+    // The reason is never assembled or worded locally.
+    expect(exportMenu).not.toMatch(/no-template|no-version|no-instance/);
+  });
+
   test("a duplicate export is refused synchronously as well as by the disabled state", () => {
     expect(exportMenu).toMatch(/if \(inFlightRef\.current\) return;/);
     expect(exportMenu).toMatch(/disabled=\{disabled\}/);
@@ -159,6 +167,17 @@ describe("failure behaviour", () => {
 });
 
 describe("share and batch scope", () => {
+  test("ShareDialog reports a Template failure through the SAME shared mapping", () => {
+    // Both Template export entry points describe one cause the same way.
+    expect(shareDialog).toMatch(/templateExportFailureMessage/);
+    // The refusal REASON is carried out of preflight alongside the note name.
+    expect(shareDialog).toMatch(/reason:\s*source\.reason/);
+    expect(shareDialog).toMatch(/reason:\s*result\.reason/);
+    // The old one-size-fits-all explanation is gone.
+    expect(shareDialog).not.toMatch(/no completed template to export/);
+    expect(shareDialog).not.toMatch(/no-template|no-version|no-instance/);
+  });
+
   test("ShareDialog exports one explicit source for the whole batch", () => {
     expect(shareDialog).toMatch(/const SOURCE_OPTS = \[/);
     expect(shareDialog).toMatch(/NOTE_VIEW\.FREEFORM/);
