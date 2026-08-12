@@ -10,7 +10,7 @@ import "./template.css";
 import PagedDocument from "./PagedDocument";
 import {
   FIELD_TYPE,
-  FIELD_TYPES,
+  builderFieldTypeOptions,
   makeOption,
   normalizeType,
   displayTextValue,
@@ -908,6 +908,14 @@ export default function ResizableTwoColTable({
   }
 
   // ---------- BUILDER-MODE FIELD-TYPE EDITOR (per field type) ----------
+  //
+  // The options come from the CREATION catalog (src/lib/templateFields.js), not
+  // from the validity set: the normal choice is a flexible Section, and Photo /
+  // File are not offered because photos and files are content added while
+  // completing a note, into any section. A row ALREADY stored as Photo/File
+  // gets its own legacy entry back — `builderFieldTypeOptions` decides that
+  // from the row's own current type — so an old template's row shows what it
+  // truthfully is and is never implicitly converted just by being opened.
   function renderFieldTypeEditor(row) {
     const type = normalizeType(row.type);
     return (
@@ -919,7 +927,7 @@ export default function ResizableTwoColTable({
             value={type}
             onChange={(e) => handleTypeChange(row.id, e.target.value)}
           >
-            {FIELD_TYPES.map((t) => (
+            {builderFieldTypeOptions(type).map((t) => (
               <option key={t.value} value={t.value}>
                 {t.label}
               </option>

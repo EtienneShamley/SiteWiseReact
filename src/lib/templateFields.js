@@ -5,7 +5,9 @@
 //
 // This module is pure and framework-agnostic so it can be unit-tested in
 // isolation. It provides:
-//   - the field-type catalog used by the builder's type selector,
+//   - the VALIDITY set of stored field types (`FIELD_TYPES`, `normalizeType`)
+//     and, separately, the smaller CREATION catalog the builder's type selector
+//     offers (`BUILDER_FIELD_TYPES`, `builderFieldTypeOptions`),
 //   - read-time row/option normalization that supplies safe rendering
 //     defaults WITHOUT mutating stored immutable template versions and
 //     WITHOUT ever generating a fresh id on an ordinary read,
@@ -37,7 +39,12 @@ export const FIELD_TYPE = {
   FILE: "file",
 };
 
-// Ordered catalog for the builder's per-row type selector.
+// Every type a STORED row may legitimately carry — the validity set behind
+// `normalizeType`. It is deliberately unchanged and complete: `photo` and
+// `file` remain fully valid stored types, so an existing pinned TemplateVersion
+// containing one keeps rendering and exporting exactly as it does today.
+//
+// This is NOT the builder's creation catalog — see BUILDER_FIELD_TYPES below.
 export const FIELD_TYPES = [
   { value: FIELD_TYPE.TEXT, label: "Text" },
   { value: FIELD_TYPE.NUMBER, label: "Number" },
@@ -49,6 +56,68 @@ export const FIELD_TYPES = [
   { value: FIELD_TYPE.PHOTO, label: "Photo" },
   { value: FIELD_TYPE.FILE, label: "File" },
 ];
+
+// ---------- BUILDER CREATION CATALOG ----------
+//
+// What the Template Builder OFFERS when a user chooses a row's type. It is a
+// strict subset of the validity set above, and the split is the whole point:
+// which types are STORABLE and which types are CREATABLE are different
+// questions, so narrowing the second one can never invalidate data written
+// under the first.
+//
+// The normal row is a SECTION — a flexible document area that may later hold
+// text, images and files in any order. Its stored type is the existing unified
+// `"text"`, unchanged: a Section is not a new persisted row type, it is the
+// user-facing name for the flexible area that type has already described since
+// the section model landed (see src/lib/templateSectionContent.js and the
+// authority rule in src/lib/templateRowEvidence.js). No migration, no schema
+// bump, and every existing `type: "text"` row IS a Section already.
+//
+// "Text" is therefore NOT offered alongside "Section": they would be the same
+// stored thing under two names, and a user choosing between them would be
+// choosing nothing.
+//
+// Photo and File are NOT offered. Photos and files are CONTENT a user adds
+// while completing a note (typing, Quick Add, camera, upload) into any section
+// — never something they should have to predict and design into the template.
+// The structured types below are not closed containers either: each defines one
+// primary typed control, and supplementary section content may still be added
+// beneath it at runtime.
+export const BUILDER_FIELD_TYPES = [
+  { value: FIELD_TYPE.TEXT, label: "Section" },
+  { value: FIELD_TYPE.NUMBER, label: "Number" },
+  { value: FIELD_TYPE.DATE, label: "Date" },
+  { value: FIELD_TYPE.TIME, label: "Time" },
+  { value: FIELD_TYPE.CHECKBOX, label: "Checkbox" },
+  { value: FIELD_TYPE.YESNO, label: "Yes / No" },
+  { value: FIELD_TYPE.SELECT, label: "Dropdown" },
+];
+
+// The type a brand-new row gets. Kept here next to the catalog so the default
+// and the catalog can never drift apart.
+export const DEFAULT_BUILDER_FIELD_TYPE = FIELD_TYPE.TEXT;
+
+// Legacy-only selector entries. These exist so that a row ALREADY stored as
+// Photo or File shows its own real type in the builder's selector instead of
+// silently displaying as something it is not. They are keyed by type and are
+// added ONLY for the row that already carries that type — never as a general
+// choice, so a Photo/File row cannot be created from a row that isn't one.
+const LEGACY_BUILDER_FIELD_TYPES = {
+  [FIELD_TYPE.PHOTO]: { value: FIELD_TYPE.PHOTO, label: "Photo (legacy)" },
+  [FIELD_TYPE.FILE]: { value: FIELD_TYPE.FILE, label: "File (legacy)" },
+};
+
+// The selector options for ONE builder row, given its CURRENT stored type.
+//
+// Ordinary rows get the creation catalog exactly. A row already stored as
+// Photo/File additionally gets its own legacy entry, so the selector reflects
+// the stored type truthfully and switching away from it stays a deliberate user
+// action rather than an implicit conversion on open. Nothing here writes: the
+// stored type is read, never rewritten.
+export function builderFieldTypeOptions(currentType) {
+  const legacy = LEGACY_BUILDER_FIELD_TYPES[currentType];
+  return legacy ? [...BUILDER_FIELD_TYPES, legacy] : BUILDER_FIELD_TYPES;
+}
 
 // True for the attachment-bearing field types (evidence lives on the note's
 // NoteTemplateInstance as asset references, never on the TemplateVersion).
