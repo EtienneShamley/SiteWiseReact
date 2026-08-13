@@ -31,7 +31,7 @@ export const defaultRows = [
 // The `px` is the row's PREFERRED height while it is still empty — it is a
 // starting point the user may drag, never a reserve a section carries once it
 // has content: an authoritative section is content-driven and does not inherit
-// `row.px` at all (see src/lib/templateRowEvidence.js).
+// `row.px` at all (see src/lib/templateRowContent.js).
 export function makeNewRow(label = 'New Field') {
   return { id: newId(), label, minPx: 48, px: 64, type: DEFAULT_BUILDER_FIELD_TYPE };
 }

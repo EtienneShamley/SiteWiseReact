@@ -64,7 +64,7 @@ import {
   sectionItemsForRow,
 } from "./templateSectionContent";
 import { sectionExtraHeightFor } from "./templateSectionHeight";
-import { sectionReplacesRowAnswer } from "./templateRowEvidence";
+import { sectionReplacesRowAnswer } from "./templateRowContent";
 
 /* ------------------------------------------------------------------------ */
 /* Failure reasons                                                           */

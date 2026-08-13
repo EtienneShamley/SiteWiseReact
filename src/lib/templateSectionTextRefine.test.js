@@ -40,7 +40,7 @@ import {
   makeRowRefineRequest,
   readRowAnswer,
   readSectionTextItemValue,
-  rowIdsWithBackup,
+  refineTargetKeysWithBackup,
   rowRefineTargetKey,
   setRowRefineBackup,
 } from "./templateRowRefine";
@@ -809,7 +809,7 @@ describe("the Revert backup", () => {
     backups = setRowRefineBackup(backups, NOTE, keyA, "A before");
     expect(getRowRefineBackup(backups, NOTE, keyC)).toBe("C before");
     expect(getRowRefineBackup(backups, NOTE, keyA)).toBe("A before");
-    expect(rowIdsWithBackup(backups, NOTE)).toEqual(new Set([keyC, keyA]));
+    expect(refineTargetKeysWithBackup(backups, NOTE)).toEqual(new Set([keyC, keyA]));
   });
 
   test("clearing one item's backup leaves the other's", () => {

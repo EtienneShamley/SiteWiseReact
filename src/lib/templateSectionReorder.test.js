@@ -28,7 +28,7 @@ import {
   sectionItemMoveTarget,
   visibleSectionItemIds,
 } from "./templateSectionReorder";
-import { planRowBlocks, ROW_BLOCK_KIND } from "./templateRowEvidence";
+import { planRowBlocks, ROW_BLOCK_KIND } from "./templateRowContent";
 import { sectionItemsForRow } from "./templateSectionContent";
 import { setRowSectionItems } from "./templateSectionEditing";
 
@@ -1098,7 +1098,7 @@ describe("the three interactions stay distinct", () => {
   });
 
   test("53. the extra space and its handle are placed by the planner, from array order", () => {
-    const planner = read("lib/templateRowEvidence.js");
+    const planner = read("lib/templateRowContent.js");
     expect(planner).toMatch(/const sectionTailIndex = sectionItems\.length - 1;/);
     expect(planner).toMatch(/position === sectionTailIndex/);
     // No tail item id is persisted anywhere.

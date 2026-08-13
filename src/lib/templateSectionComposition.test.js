@@ -15,7 +15,7 @@
 //      offers an item-level Remove. There is no DOM testing library in this
 //      project (docs/TESTING.md), so component-level facts are pinned this way.
 //      The page-relationship rule itself is proved in paginateBlocks.test.js and
-//      the block/group plan in templateRowEvidence.test.js.
+//      the block/group plan in templateRowContent.test.js.
 import fs from "fs";
 import path from "path";
 
@@ -282,8 +282,8 @@ describe("a flexible section's BOX is content-driven, not row-height driven", ()
   test("the DOM box and the pagination estimate are the SAME number", () => {
     // Two independent guesses would drift: the block would either overflow its
     // page or leave a gap. Both sites call the planner's own helper.
-    expect(table).toMatch(/sectionItemMinHeight,?\s*\n?\}? from "\.\.\/\.\.\/lib\/templateRowEvidence"/);
-    const planner = withoutComments(read("lib/templateRowEvidence.js"));
+    expect(table).toMatch(/sectionItemMinHeight,?\s*\n?\}? from "\.\.\/\.\.\/lib\/templateRowContent"/);
+    const planner = withoutComments(read("lib/templateRowContent.js"));
     expect(planner).toMatch(/export function sectionItemMinHeight\(item\)/);
     expect(planner).toMatch(
       /minHeight:\s*\n?\s*sectionItemMinHeight\(item\) \+ \(isSectionTail \? sectionExtraPx : 0\),/
@@ -353,7 +353,7 @@ describe("a flexible section has one resize handle, at its logical end", () => {
   const tailRenderer = between(table, "function renderSectionTail", "function renderRowBlock");
 
   test("the tail block is chosen by the planner, never re-derived here", () => {
-    const planner = withoutComments(read("lib/templateRowEvidence.js"));
+    const planner = withoutComments(read("lib/templateRowContent.js"));
     expect(planner).toMatch(
       /const isSectionTail = sectionOwnsRowHead && position === sectionTailIndex/
     );
@@ -377,7 +377,7 @@ describe("a flexible section has one resize handle, at its logical end", () => {
   test("a continuation fragment is never independently resizeable", () => {
     // Only ONE block of the section is the tail, so a section split across
     // pages exposes the handle on its final page only.
-    const planner = withoutComments(read("lib/templateRowEvidence.js"));
+    const planner = withoutComments(read("lib/templateRowContent.js"));
     expect(planner).toMatch(/const sectionTailIndex = sectionItems\.length - 1/);
     expect(planner).toMatch(/isSectionTail \? sectionExtraPx : 0/);
   });

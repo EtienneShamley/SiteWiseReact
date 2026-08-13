@@ -1,4 +1,4 @@
-// src/lib/templateRowEvidence.test.js
+// src/lib/templateRowContent.test.js
 //
 // What a Template row renders once supporting evidence and ordered section
 // content exist — and, just as importantly, what it still renders when neither
@@ -27,7 +27,7 @@ import {
   hasRowSectionContent,
   sectionItemMinHeight,
   sectionReplacesRowAnswer,
-} from "./templateRowEvidence";
+} from "./templateRowContent";
 import { resolveBlockHeight } from "./paginateBlocks";
 import { FIELD_TYPE } from "./templateFields";
 import { sectionItemsForRow } from "./templateSectionContent";

@@ -80,9 +80,7 @@ import { newId } from "../../lib/id";
 import { normalizeBranding } from "../../lib/templateBranding";
 import {
   answersEqual,
-  appendTextToAnswer,
   serializeAnswerFromHtml,
-  textInsertionNodes,
 } from "../../lib/templateRichText";
 import {
   TEMPLATE_FOCUS,
@@ -113,11 +111,12 @@ import {
   getRowRefineBackup,
   hasRefinableText,
   isRefinableRow,
+  isRefineTargetKeyForRow,
   isRowRefineCurrent,
   makeRowRefineRequest,
   readRowAnswer,
   readSectionTextItemValue,
-  rowIdsWithBackup,
+  refineTargetKeysWithBackup,
   rowRefineMessageFor,
   rowRefineTargetKey,
   setRowRefineMessage,
@@ -130,12 +129,18 @@ import {
  * - Renders from the note's pinned template version (never the live,
  *   editable template) via its NoteTemplateInstance — editing a master
  *   template does not change existing notes.
- * - Maintains per-note answers and attachment evidence for the right-hand
- *   fields, persisted on the instance so they survive note switches and page
- *   reloads. Attachment binaries live ONLY in IndexedDB (assetStorage); the
- *   instance stores lightweight references (see src/lib/noteAttachments.js).
+ * - Maintains per-note content for the right-hand cells, persisted on the
+ *   instance so it survives note switches and page reloads. The authoritative
+ *   body of a flexible Section is `sectionContent[rowId]` — an ORDERED list of
+ *   text / photo / file items. `answers`, `attachments` and the legacy
+ *   `evidence` map remain readable for older notes (see
+ *   src/lib/templateRowContent.js for the authority rule), but only
+ *   `attachments` still takes new writes, from a legacy Photo/File field's own
+ *   upload control. Attachment binaries live ONLY in IndexedDB (assetStorage);
+ *   the instance stores lightweight references (src/lib/noteAttachments.js).
  * - Lets the user re-pin the note to a different template via a selector.
- * - Exposes an insert handler so MainArea can push BottomBar text into a row.
+ * - Exposes a SECTION COMPOSER so a Quick Add composition — staged attachments
+ *   then the typed/dictated text — lands in the selected row's ordered content.
  * - Reports the CONFIRMED outcome of every write it makes to MainArea's
  *   per-note, per-view autosave status. There is no manual save: each write
  *   below goes through one wrapper (saveInstanceConfirmed) that reports
@@ -200,19 +205,18 @@ function validateComposedPhoto() {
 
 export default function NoteTemplateDoc({
   noteId,
-  onRegisterTemplateInsert, // (fn | null) => void
-  // Quick Add's image/file destination: the SAME confirmed attachment write
-  // path a Photo/File field's own upload control uses, handed up so the capture
-  // bar cannot grow a second attachment implementation.
-  //   (fn: (fieldId, kind, files) => Promise<void> | null) => void
-  onRegisterTemplateAttachments,
-  // Quick Add's image/file destination for an ORDINARY data row (Text/Number/
-  // Date/…/custom): the same confirmed write sequence as onRegisterTemplateAttachments,
-  // but the reference lands in the note's separate `evidence` collection instead
-  // of a Photo/File field's primary `attachments`. MainArea routes a capture to
-  // one or the other by the selected row's field type.
-  //   (fn: (rowId, kind, files) => Promise<void> | null) => void
-  onRegisterTemplateEvidence,
+  // Quick Add's ONE Template destination (Phase 10).
+  //
+  // Three earlier registrations were removed once every Quick Add route
+  // composed into `sectionContent`: a text handler that appended into
+  // `answers[rowId]`, a primary-attachment handler that appended into
+  // `attachments[rowId]`, and an evidence handler that appended into
+  // `evidence[rowId]`. Nothing could reach them, and their destinations
+  // contradict the section model. The row's own upload control still writes
+  // `attachments[rowId]` for a legacy Photo/File field, and a legacy
+  // `evidence[rowId]` entry is still rendered, removable and re-sizeable —
+  // reading and managing old data is untouched; only NEW writes were removed.
+  //
   // Quick Add's SECTION composer. A whole composition — the staged attachments
   // and then the typed/dictated text — is appended to the SELECTED row's
   // ordered `sectionContent`, through the shared section primitives and this
@@ -289,11 +293,13 @@ export default function NoteTemplateDoc({
   // structured references) so entry indexes always match persisted storage.
   const [rowAttachments, setRowAttachments] = useState(() => instance?.attachments || {});
   const [rowText, setRowText] = useState(() => instance?.answers || {});
-  // Supporting evidence for ordinary data rows, kept SEPARATE from a Photo/File
-  // field's primary `attachments`. Like `rowAttachments`, this holds the RAW
-  // stored map (keyed by stable row id) so an entry index always matches
-  // persisted storage; a malformed container falls back to {} (per-entry
-  // normalization is read-time, via normalizeEvidenceMap, for the render phase).
+  // LEGACY supporting evidence, kept SEPARATE from a Photo/File field's primary
+  // `attachments`. READ-ONLY COMPATIBILITY STORAGE: nothing creates a new entry
+  // any more (Phase 10) — an old note's entries still render, and may still be
+  // removed or re-sized. Like `rowAttachments`, this holds the RAW stored map
+  // (keyed by stable row id) so an entry index always matches persisted
+  // storage; a malformed container falls back to {}, and per-entry
+  // normalization is read-time, in the planner (src/lib/templateRowContent.js).
   const [rowEvidence, setRowEvidence] = useState(() => {
     const raw = instance?.evidence;
     return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -397,6 +403,12 @@ export default function NoteTemplateDoc({
   rowEvidenceRef.current = rowEvidence;
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
+  // The session Revert backups are owned by MainArea (this component is
+  // remounted per note). Mirrored in a ref so a handler can read the CURRENT
+  // set without taking the whole map as a dependency and being rebuilt on
+  // every refine.
+  const rowRefineBackupsRef = useRef(rowRefineBackups);
+  rowRefineBackupsRef.current = rowRefineBackups;
 
   // Is this note's form still on screen? A refine response can arrive after the
   // user has switched notes, which unmounts this component (it is keyed by note
@@ -1749,12 +1761,62 @@ export default function NoteTemplateDoc({
       setRowEvidence(nextEvidence);
       clearFieldError(rowId);
 
-      // The row is gone, so its session AI backup and its row-level AI feedback
-      // can never be acted on again — drop both rather than leaving them to be
-      // pruned only when the note is deleted. A response still in flight for
-      // this row is separately refused because the row no longer exists.
-      if (onClearRowRefineBackup) onClearRowRefineBackup(noteId, rowId);
-      setRowRefineStatus((prev) => clearRowRefineStatus(prev, rowId));
+      // The row is gone, so its session AI backups and its AI feedback can never
+      // be acted on again — drop them rather than leaving them to be pruned only
+      // when the note is deleted. A response still in flight for this row is
+      // separately refused because the row no longer exists.
+      //
+      // EVERY target key of the row, not just its own: a materialised section
+      // holds one refine target per TEXT ITEM (`rowId::item::itemId`), so
+      // clearing the bare row id alone used to strand a refined paragraph's
+      // backup and its status message for the rest of the session.
+      const removedTargetKeys = [rowId];
+      for (const key of refineTargetKeysWithBackup(rowRefineBackupsRef.current, noteId)) {
+        if (key !== rowId && isRefineTargetKeyForRow(key, rowId)) {
+          removedTargetKeys.push(key);
+        }
+      }
+      if (onClearRowRefineBackup) {
+        for (const key of removedTargetKeys) onClearRowRefineBackup(noteId, key);
+      }
+      setRowRefineStatus((prev) => {
+        let next = prev;
+        for (const key of Object.keys(prev || {})) {
+          if (isRefineTargetKeyForRow(key, rowId)) {
+            next = clearRowRefineStatus(next, key);
+          }
+        }
+        return next;
+      });
+
+      // Transient EDITOR state that named this row. The identity resolver
+      // already returns null for a row that no longer exists, so nothing could
+      // be written through it — but leaving the ids behind keeps a deleted row
+      // named as the active text target, which is orphan state by any reading.
+      if (activeTextRowIdRef.current === rowId) {
+        activeTextRowIdRef.current = null;
+        setActiveTextRowId(null);
+        activeSectionItemIdRef.current = null;
+        setActiveSectionItemId(null);
+      }
+      if (materializedSectionRef.current?.rowId === rowId) {
+        clearMaterializedSection();
+      }
+      // …and the un-committed drag values for the row's height and its section's
+      // extra working space. Both are keyed by row id and would otherwise
+      // outlive the row they describe.
+      setPendingHeights((prev) => {
+        if (!(rowId in prev)) return prev;
+        const next = { ...prev };
+        delete next[rowId];
+        return next;
+      });
+      setPendingSectionExtra((prev) => {
+        if (!(rowId in prev)) return prev;
+        const next = { ...prev };
+        delete next[rowId];
+        return next;
+      });
 
       // Clean the removed assets only AFTER the save is confirmed, and only
       // when each is provably referenced nowhere (this note's evidence AND
@@ -1785,6 +1847,7 @@ export default function NoteTemplateDoc({
       canDeleteAttachmentAsset,
       noteId,
       onClearRowRefineBackup,
+      clearMaterializedSection,
     ]
   );
 
@@ -2048,18 +2111,10 @@ export default function NoteTemplateDoc({
     [addAttachmentsInto, persistAttachments]
   );
 
-  // Supporting EVIDENCE on an ordinary data row (Quick Add only, in this phase).
-  const handleAddEvidence = useCallback(
-    (rowId, kind, files) =>
-      addAttachmentsInto({
-        fieldId: rowId,
-        kind,
-        files,
-        collectionRef: rowEvidenceRef,
-        persist: persistEvidence,
-      }),
-    [addAttachmentsInto, persistEvidence]
-  );
+  // NOTE (Phase 10): there is no evidence ADD path any more. `evidence[rowId]`
+  // is read-only compatibility storage — old entries render, and may be removed
+  // or re-sized below — but nothing creates a new one. Every new capture,
+  // whatever the row's field type, composes into `sectionContent[rowId]`.
 
   // The ONE confirmed removal sequence, parameterized by target collection.
   // Ordering is the contract: the reference is removed and the instance save is
@@ -2119,6 +2174,9 @@ export default function NoteTemplateDoc({
     [removeAttachmentFrom, persistAttachments]
   );
 
+  // LEGACY EVIDENCE MANAGEMENT — a write, deliberately kept. It only ever
+  // removes an entry the user can already see; it never creates one. Taking it
+  // away would leave an old note's evidence permanently un-deletable.
   const handleRemoveEvidence = useCallback(
     (rowId, index) =>
       removeAttachmentFrom({
@@ -2181,91 +2239,6 @@ export default function NoteTemplateDoc({
         persist: persistEvidence,
       }),
     [updateDisplayIn, persistEvidence]
-  );
-
-  /* --------------------------- BottomBar insert --------------------------- */
-
-  // Function for MainArea to push BottomBar text into a selected row.
-  //
-  // Only the free-text destination accepts inserted text; structured fields
-  // (number, date, time, checkbox, yes/no, dropdown, photo, file) reject it
-  // rather than being corrupted by arbitrary text — now through the same
-  // restrained inline per-field message the rest of this view uses, rather than
-  // a blocking dialog.
-  //
-  // Targeting is verified before anything is written: the row must exist in
-  // THIS note's pinned version or in THIS note's custom rows. A row id left
-  // over from another note, template or version matches neither and is refused,
-  // so a stale selection can never create an orphan answer.
-  const insertIntoRow = useCallback(
-    (rowId, text) => {
-      if (!rowId || !text) return;
-
-      const isCustom = customRowIds.has(rowId);
-      const masterRow = isCustom
-        ? null
-        : (rowsRef.current || []).find((r) => r && r.id === rowId);
-      if (!isCustom && !masterRow) return; // stale / unknown row: refused
-
-      if (!isCustom && !isTextInsertable(masterRow.type)) {
-        setFieldError(
-          rowId,
-          "This field type doesn't accept inserted text. Select a Text field."
-        );
-        return;
-      }
-
-      // The row being edited takes the text AT THE CURSOR, as literal text
-      // nodes — never parsed as HTML, so transcribed or pasted characters like
-      // "<" stay characters. Persistence follows through the editor's own
-      // change handler, so this adds no second write path.
-      //
-      // The registered editor must be the one for THIS row under the template
-      // and version the note is pinned to right now: an insertion aimed at a
-      // row of a template the note has since been re-pinned away from is not
-      // delivered to whatever editor happens to be open.
-      const registration = rowEditorRegistrationRef.current;
-      const targetIdentity = rowIdentityFor(rowId);
-      if (
-        registration &&
-        canCommitRowEdit(registration.identity, targetIdentity) &&
-        rowId === activeTextRowIdRef.current
-      ) {
-        const nodes = textInsertionNodes(text);
-        if (nodes.length) {
-          registration.editor.chain().focus().insertContent(nodes).run();
-        }
-        return;
-      }
-
-      // Not currently being edited: append at the end, preserving the answer's
-      // representation, then make the row the active one so the next insertion
-      // and the toolbar both address it. Focus is deliberately NOT taken — the
-      // user is working in the BottomBar.
-      if (isCustom) {
-        const target = templateCustomRows.find((r) => r.id === rowId);
-        handleCustomRowPatch(
-          rowId,
-          { answer: appendTextToAnswer(target?.answer, text) },
-          "The inserted text could not be saved to this section"
-        );
-      } else {
-        const nextText = {
-          ...rowTextRef.current,
-          [rowId]: appendTextToAnswer(rowTextRef.current?.[rowId], text),
-        };
-        rowTextRef.current = nextText;
-        setRowText(nextText);
-      }
-      setActiveTextRowId(rowId);
-    },
-    [
-      customRowIds,
-      templateCustomRows,
-      handleCustomRowPatch,
-      setFieldError,
-      rowIdentityFor,
-    ]
   );
 
   /* ------------------------ row-level AI refinement ----------------------- */
@@ -2626,40 +2599,12 @@ export default function NoteTemplateDoc({
 
   // Which of THIS note's refine TARGETS currently have a Revert backup — row
   // ids for legacy rows, `rowId::item::itemId` keys for section text items.
-  const rowRefineRevertableIds = useMemo(
-    () => rowIdsWithBackup(rowRefineBackups, noteId),
+  const refineRevertableTargetKeys = useMemo(
+    () => refineTargetKeysWithBackup(rowRefineBackups, noteId),
     [rowRefineBackups, noteId]
   );
 
-  /* ---------------------- BottomBar insert registration ------------------- */
-
-  // Register/unregister the insert handler with MainArea
-  useEffect(() => {
-    if (onRegisterTemplateInsert) {
-      onRegisterTemplateInsert(insertIntoRow);
-      return () => onRegisterTemplateInsert(null);
-    }
-  }, [onRegisterTemplateInsert, insertIntoRow]);
-
-  // Register the EXISTING attachment write path (validate → normalize → persist
-  // the Blob → persist the reference through the throwing instance save →
-  // delete the asset again if the reference write fails) so Quick Add reuses it
-  // verbatim. There is deliberately no second attachment implementation and no
-  // second asset store.
-  useEffect(() => {
-    if (!onRegisterTemplateAttachments) return;
-    onRegisterTemplateAttachments(handleAddAttachments);
-    return () => onRegisterTemplateAttachments(null);
-  }, [onRegisterTemplateAttachments, handleAddAttachments]);
-
-  // Register the evidence write path (same confirmed sequence, targeting the
-  // separate `evidence` collection) so MainArea can route a capture on an
-  // ordinary data row here instead of into a Photo/File field's attachments.
-  useEffect(() => {
-    if (!onRegisterTemplateEvidence) return;
-    onRegisterTemplateEvidence(handleAddEvidence);
-    return () => onRegisterTemplateEvidence(null);
-  }, [onRegisterTemplateEvidence, handleAddEvidence]);
+  /* ----------------------- Quick Add registration ------------------------- */
 
   // Register the SECTION composer — where a whole Quick Add composition lands.
   // Unregistering on unmount is what makes a delivery that outlives this note's
@@ -2683,9 +2628,9 @@ export default function NoteTemplateDoc({
    * The row can disappear underneath the selection in ways the user never
    * connects to the capture bar: deleting a note-specific custom row, or
    * re-pinning the note to a template or version that does not contain that
-   * field. `insertIntoRow` already REFUSES an unknown row id, so nothing could
-   * be written to it — but the bar would go on naming a row that is not on
-   * screen, which is its own kind of wrong.
+   * field. Every section writer already REFUSES an unknown row id (`rowIsPresent`
+   * gates the composer), so nothing could be written to it — but the bar would
+   * go on naming a row that is not on screen, which is its own kind of wrong.
    *
    * The row-editor equivalent of this already exists (activeRowIdentity above);
    * it does not cover structured, Photo or File targets, which never own an
@@ -2790,7 +2735,7 @@ export default function NoteTemplateDoc({
         onRefineRow={handleRefineRow}
         onRevertRowRefine={handleRevertRowRefine}
         rowRefineStatus={rowRefineStatus}
-        rowRefineRevertableIds={rowRefineRevertableIds}
+        refineRevertableTargetKeys={refineRevertableTargetKeys}
         lockTemplateLabels={true}
         // Structured controls (number/date/time/checkbox/yes-no/dropdown and
         // the Photo/File upload controls) select the row for BottomBar

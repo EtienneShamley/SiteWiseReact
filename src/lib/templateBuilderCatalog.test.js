@@ -46,7 +46,7 @@ import {
   planRowBlocks,
   ROW_BLOCK_KIND,
   sectionReplacesRowAnswer,
-} from "./templateRowEvidence";
+} from "./templateRowContent";
 import { sectionItemsForRow } from "./templateSectionContent";
 import { appendSectionText } from "./templateSectionText";
 import {

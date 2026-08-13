@@ -26,7 +26,7 @@ const table = withoutComments(read("components/template/ResizableTwoColTable.js"
 const templateDoc = withoutComments(read("components/template/NoteTemplateDoc.js"));
 const textCell = withoutComments(read("components/template/TemplateTextCell.js"));
 const fileRow = withoutComments(read("components/template/FileAttachmentRow.js"));
-const planner = withoutComments(read("lib/templateRowEvidence.js"));
+const planner = withoutComments(read("lib/templateRowContent.js"));
 const attachments = withoutComments(read("lib/templateSectionAttachments.js"));
 const css = read("components/template/template.css");
 
@@ -38,6 +38,16 @@ function fn(source, name) {
   const rest = source.slice(at + name.length);
   const next = rest.search(/\n {0,2}(const|function|export|return) /);
   return name + (next === -1 ? rest : rest.slice(0, next));
+}
+
+// The source between two markers, for a handler that lives inside an effect
+// rather than at the top level.
+function between(source, from, to) {
+  const start = source.indexOf(from);
+  const end = source.indexOf(to);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  return source.slice(start, end);
 }
 
 // One brace-balanced CSS block, starting at `opener`.
@@ -146,26 +156,33 @@ describe("15. the corner handles", () => {
 /* ========================================================================== */
 
 describe("25–28. persistence", () => {
+  // NOTE: `onCornerPointerMove` / `onCornerPointerUp` / `cancelCornerResize`
+  // were replaced by ONE window-bound gesture effect plus one exit,
+  // `endCornerResize` — see templateSectionImageResizeStability.test.js for why.
+  // The guarantees below are unchanged; only where they live moved.
   test("25. pointer MOVEMENT previews only — it never persists", () => {
-    const move = fn(photo, "const onCornerPointerMove");
+    const move = between(photo, "const onMove = (e)", "const onUp = (e)");
     expect(move).toMatch(/setResizePct\(pct\)/);
     expect(move).not.toMatch(/onResizeWidth/);
   });
 
   test("26. RELEASE persists exactly once, and only when the width changed", () => {
-    const up = fn(photo, "const onCornerPointerUp");
-    expect(up).toMatch(/widthPctChanged\(pct, st\.startPct\)/);
-    expect(up).toMatch(/onResizeWidth\(Math\.round\(pct\)\)/);
-    // One call, guarded by two early returns above it.
-    expect(up.match(/onResizeWidth\(/g)).toHaveLength(1);
+    const end = fn(photo, "const endCornerResize");
+    expect(end).toMatch(/widthPctChanged\(pct, st\.startPct\)/);
+    expect(end).toMatch(/onResizeWidth\(Math\.round\(pct\)\)/);
+    // One call, guarded by the early returns above it.
+    expect(end.match(/onResizeWidth\(Math\.round/g)).toHaveLength(1);
   });
 
   test("27. Escape and pointer-cancel abandon it with nothing written", () => {
-    const cancel = fn(photo, "const cancelCornerResize");
-    expect(cancel).toMatch(/setResizePct\(null\)/);
-    expect(cancel).not.toMatch(/onResizeWidth/);
-    expect(photo).toMatch(/if \(e\.key === "Escape"\) cancelCornerResize\(\)/);
-    expect(photo).toMatch(/onPointerCancel=\{cancelCornerResize\}/);
+    // `endCornerResize(null)` is the abandon form: no commit event, no write.
+    expect(photo).toMatch(/if \(e\.key === "Escape"\) endCornerResize\(null\)/);
+    expect(photo).toMatch(/window\.addEventListener\("pointercancel", onAbort\)/);
+    const abort = between(photo, "const onAbort = (e)", "const onKey = (e)");
+    expect(abort).toMatch(/endCornerResize\(null\)/);
+    expect(abort).not.toMatch(/onResizeWidth/);
+    const end = fn(photo, "const endCornerResize");
+    expect(end).toMatch(/if \(!commitEvent \|\| !onResizeWidth\) return;/);
   });
 
   test("28. a FAILED save reverts, because the preview is cleared on release", () => {
@@ -173,7 +190,7 @@ describe("25–28. persistence", () => {
     // changed if the confirmed save returned without throwing. There is no
     // separate "resized" flag that could survive a failure.
     expect(photo).toMatch(/const widthPct = dragPct \?\? resizePct \?\? clampWidthPct\(display\.widthPct\)/);
-    expect(fn(photo, "const onCornerPointerUp")).toMatch(/setResizePct\(null\)/);
+    expect(fn(photo, "const endCornerResize")).toMatch(/setResizePct\(null\)/);
     expect(templateDoc).toMatch(/That image could not be resized/);
   });
 

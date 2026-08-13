@@ -181,6 +181,26 @@ export function rowRefineTargetKey({ rowId, itemId = null } = {}) {
 }
 
 /**
+ * Does this target key belong to that row?
+ *
+ * True for the row's own key (which IS the row id) and for every one of its
+ * section text items (`rowId::item::itemId`). It is what lets a row's removal
+ * drop ALL of that row's session refine state in one pass — before section
+ * content existed, one key per row was the whole story, and deleting a row that
+ * had refined paragraphs would otherwise leave their backups and their status
+ * messages behind forever.
+ *
+ * The comparison is anchored at the START of the key, so a row id that merely
+ * appears inside another row's item id never matches.
+ */
+export function isRefineTargetKeyForRow(targetKey, rowId) {
+  if (typeof targetKey !== "string" || !targetKey) return false;
+  if (typeof rowId !== "string" || !rowId) return false;
+  if (targetKey === rowId) return true;
+  return targetKey.startsWith(`${rowId}${ROW_REFINE_ITEM_KEY_SEPARATOR}`);
+}
+
+/**
  * The current value of ONE ordered section TEXT item, canonicalized, or null.
  *
  * Null means "that text item is not there" — the row has no section content,
@@ -620,10 +640,13 @@ export function clearRowRefineBackup(backups, noteId, targetKey) {
 
 // The TARGET KEYS of ONE note that currently have a backup, for deciding which
 // rows and which section text items show a Revert control. Always a Set, never
-// null, so callers need no guard. (Named for the row-only world it was written
-// in; its entries are now target keys, which for a legacy row are still row
-// ids.)
-export function rowIdsWithBackup(backups, noteId) {
+// null, so callers need no guard.
+//
+// Its entries are refine TARGET KEYS — a bare row id for a legacy row, and
+// `rowId::item::itemId` for a section text item — which is why this is no
+// longer called `rowIdsWithBackup`. The stored shape is unchanged; only the
+// name is.
+export function refineTargetKeysWithBackup(backups, noteId) {
   const forNote = backups && noteId ? backups[noteId] : null;
   if (!forNote || typeof forNote !== "object") return new Set();
   return new Set(Object.keys(forNote));

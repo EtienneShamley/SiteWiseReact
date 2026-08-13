@@ -29,7 +29,7 @@ import {
   ROW_BLOCK_KIND,
   planRowBlocks,
   sectionItemMinHeight,
-} from "../../lib/templateRowEvidence";
+} from "../../lib/templateRowContent";
 import {
   SECTION_ITEM_KIND,
   normalizeSectionContent,
@@ -258,7 +258,7 @@ export default function ResizableTwoColTable({
   // SUPPORTING evidence (note mode): raw instance evidence map keyed by row id,
   // a collection entirely separate from the Photo/File `attachments` above. It
   // renders because the row HAS evidence, never because of its current field
-  // type — see src/lib/templateRowEvidence.js. These callbacks must address the
+  // type — see src/lib/templateRowContent.js. These callbacks must address the
   // evidence collection, never the primary one.
   evidence = {},
   onRemoveEvidence, // (rowId, index) => void
@@ -266,7 +266,7 @@ export default function ResizableTwoColTable({
   // ORDERED SECTION CONTENT (note mode): the raw instance sectionContent map
   // keyed by row id. When a row has valid items here they ARE its body, in
   // stored order — see src/lib/templateSectionContent.js and the authority rule
-  // in src/lib/templateRowEvidence.js.
+  // in src/lib/templateRowContent.js.
   //
   // TEXT items are directly editable through the same `richText` wiring a
   // legacy Text answer uses (the cell reports WHICH item was activated; the
@@ -321,7 +321,7 @@ export default function ResizableTwoColTable({
   onRefineRow, // (rowId, styleValue, itemId|null) => void
   onRevertRowRefine, // (rowId, itemId|null) => void
   rowRefineStatus = {}, // { [targetKey]: { status, message } }
-  rowRefineRevertableIds = null, // Set<targetKey> with a session Revert backup
+  refineRevertableTargetKeys = null, // Set<targetKey> with a session Revert backup
   // Row actions: "builder" (master template rows) | "note" (note-specific
   // custom rows) | "none". See the block comment above.
   rowActionsMode = "none",
@@ -1178,8 +1178,8 @@ export default function ResizableTwoColTable({
     const entry = rowRefineStatus[targetKey] || null;
     const canRevert = !!(
       onRevertRowRefine &&
-      rowRefineRevertableIds &&
-      rowRefineRevertableIds.has(targetKey)
+      refineRevertableTargetKeys &&
+      refineRevertableTargetKeys.has(targetKey)
     );
     if (!entry && !canRevert) return null;
 
@@ -2006,7 +2006,7 @@ export default function ResizableTwoColTable({
   // Which blocks each row produces — whether it carries supporting evidence,
   // and whether its body comes from ordered section content instead of its
   // legacy answer — is decided by one pure, tested planner
-  // (src/lib/templateRowEvidence.js) rather than re-derived here. A row with
+  // (src/lib/templateRowContent.js) rather than re-derived here. A row with
   // neither still produces exactly the single block it always did, with no
   // group and no keepWithNext, so such a note paginates identically.
   rows.forEach((row) => {

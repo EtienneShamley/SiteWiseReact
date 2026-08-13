@@ -1,13 +1,31 @@
-// src/lib/templateRowEvidence.js
+// src/lib/templateRowContent.js
 //
 // WHICH document blocks one Template row produces, and in what order.
+//
+// Named for what it decides: a row's CONTENT PLAN. It owns four things, and
+// evidence is only the smallest of them —
+//
+//   1. ROW AUTHORITY      — which collection is a row's body
+//                           (`sectionReplacesRowAnswer`)
+//   2. BLOCK PLANNING     — the ordered, atomic, pageable blocks of one row
+//                           (`planRowBlocks`) and their height hints
+//   3. SECTION ITEM PLAN  — one block per ordered `sectionContent` item, the
+//                           first standing in for the row itself
+//   4. LEGACY ORDERING    — a structured primary value, or a legacy Photo/File
+//                           primary, first; legacy `evidence` last
+//
+// (It was called `templateRowEvidence.js` while `evidence` was the only extra
+// collection a row could have. Renamed in Phase 10 — same behaviour, same
+// exports.)
 //
 // A completed note has THREE distinct per-row collections on its
 // NoteTemplateInstance, and they are never merged into one array:
 //
 //   attachments[rowId]     the PRIMARY value of a Photo/File field
-//   evidence[rowId]        optional SUPPORTING evidence for any row (legacy)
-//   sectionContent[rowId]  the ORDERED body of a flexible section
+//   evidence[rowId]        LEGACY supporting evidence for any row — READ-ONLY
+//                          compatibility storage; nothing creates new entries
+//   sectionContent[rowId]  the ORDERED body of a flexible section, and the
+//                          authoritative one wherever it exists
 //
 // Evidence follows the STABLE ROW ID, not the field type. A row that was Text
 // when its evidence was captured keeps that evidence after the note is re-pinned

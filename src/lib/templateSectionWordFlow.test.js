@@ -36,7 +36,7 @@ const fileRow = withoutComments(read("components/template/FileAttachmentRow.js")
 const textCell = withoutComments(read("components/template/TemplateTextCell.js"));
 const rowEditor = withoutComments(read("components/template/TemplateRowEditor.js"));
 const richTextView = withoutComments(read("components/template/TemplateRichTextView.js"));
-const planner = withoutComments(read("lib/templateRowEvidence.js"));
+const planner = withoutComments(read("lib/templateRowContent.js"));
 const css = read("components/template/template.css");
 
 /* ========================================================================== */

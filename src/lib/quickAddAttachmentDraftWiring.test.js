@@ -96,9 +96,32 @@ describe("the immediate insertion fallback still exists", () => {
     expect(bottomBar).toMatch(/const insertPoint = snapshotInsertPoint\(\)/);
   });
 
-  test("the Template form still has its own confirmed attachment path", () => {
-    expect(mainArea).toMatch(/handleTemplateAttachmentCapture/);
-    expect(mainArea).toMatch(/templateAttachmentsRef/);
+  // SUPERSEDED by Phase 10. The Template form used to have a SECOND capture
+  // path here — `handleTemplateAttachmentCapture`, routing by the selected
+  // row's field type into either the primary `attachments` map or the legacy
+  // `evidence` map. Nothing could reach it once every Template capture staged
+  // and Sent through the composer (a selected row always stages; with no row
+  // selected both capture controls are disabled), and both of its destinations
+  // contradict the section model, so it was removed rather than left as a
+  // fallback. The Template form now has exactly ONE confirmed attachment
+  // destination: the selected row's ordered `sectionContent`.
+  test("the Template form has exactly one attachment destination: the composer", () => {
+    expect(mainArea).not.toMatch(/handleTemplateAttachmentCapture/);
+    expect(mainArea).not.toMatch(/templateAttachmentsRef|templateEvidenceRef/);
+    expect(mainArea).toMatch(/templateComposeRef/);
+    expect(mainArea).toMatch(/compose\.appendAttachment\(rowId, \{/);
+  });
+
+  // The immediate-insert fallback above is FREE-FORM only now. Reaching it
+  // while the Template form is showing refuses and says why — it must never
+  // fall through into the Free-form editor hidden behind this view.
+  test("an insert attempted from the Template form refuses instead of writing", () => {
+    const imageInsert = mainArea.slice(
+      mainArea.indexOf("async function handleInsertImageAtCursor"),
+      mainArea.indexOf("async function handleInsertFileAtCursor")
+    );
+    expect(imageInsert).toMatch(/if \(!freeformEditingEnabled\)/);
+    expect(imageInsert).not.toMatch(/noteLayoutRef\.current === "template"/);
   });
 
   test("the composer send handler routes the Template form to its own delivery", () => {

@@ -70,7 +70,7 @@ export const FIELD_TYPES = [
 // `"text"`, unchanged: a Section is not a new persisted row type, it is the
 // user-facing name for the flexible area that type has already described since
 // the section model landed (see src/lib/templateSectionContent.js and the
-// authority rule in src/lib/templateRowEvidence.js). No migration, no schema
+// authority rule in src/lib/templateRowContent.js). No migration, no schema
 // bump, and every existing `type: "text"` row IS a Section already.
 //
 // "Text" is therefore NOT offered alongside "Section": they would be the same

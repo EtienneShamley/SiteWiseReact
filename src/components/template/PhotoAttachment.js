@@ -49,6 +49,25 @@
 // left/right arrow keys on the focused frame is the same command from the
 // keyboard, through the same clamp; plain arrow keys are never intercepted.
 //
+// THE RESIZE GESTURE CONTRACT (a manual-test defect made this explicit):
+//
+//   - A handle receives POINTERDOWN and nothing else. Move and release are
+//     handled on the WINDOW, by listeners that exist only while a gesture is in
+//     flight. A handle is a ~20px box on an edge of the frame the gesture is
+//     resizing, and height is derived from width — so for a portrait image the
+//     bottom handles travel away from the pointer FASTER than the pointer moves.
+//     Termination must not depend on the pointer still being over them.
+//   - The gesture's geometry is captured ONCE at pointerdown
+//     (`{ pointerId, corner, startX, startPct, containerWidth, maxPct }`) and is
+//     never re-derived from the box being resized. The preview never becomes the
+//     next basis, and the corner captured at pointerdown decides the direction
+//     for the whole gesture.
+//   - Only the pointer that started the gesture may drive it, and a move with no
+//     button held ENDS it. Hovering a handle can therefore never resize.
+//   - Every exit goes through one function that clears the record first, so no
+//     path can leave a gesture active. With no gesture there are no move
+//     listeners at all.
+//
 // Only `display.widthPct` is ever produced. No pixel width and no height is
 // stored, which is what makes it impossible for a resize to stretch, squash or
 // crop the photograph: the height follows the intrinsic aspect ratio through
@@ -195,21 +214,51 @@ export default function PhotoAttachment({
     };
   }, [maxWidthPx]);
 
-  const cornerPctFromPointer = useCallback((e) => {
-    const st = resizeState.current;
-    if (!st) return null;
-    return resizeWidthPctFromPointer({
-      corner: st.corner,
-      startWidthPct: st.startPct,
-      startX: st.startX,
-      clientX: e.clientX,
-      containerWidth: st.containerWidth,
-      maxPct: st.maxPct,
-    });
-  }, []);
+  // The width this gesture is asking for, computed ONLY from the immutable
+  // record captured at pointerdown plus the pointer's current x. The preview it
+  // produces is never fed back in as the next basis.
+  const cornerPctFor = useCallback(
+    (st, clientX) =>
+      resizeWidthPctFromPointer({
+        corner: st.corner,
+        startWidthPct: st.startPct,
+        startX: st.startX,
+        clientX,
+        containerWidth: st.containerWidth,
+        maxPct: st.maxPct,
+      }),
+    []
+  );
 
-  // Nothing is persisted here, and nothing is drawn outside this component: the
-  // gesture captures the pointer, so it survives the pointer leaving the image.
+  /**
+   * End the gesture in flight. The ONE exit, used by every terminator.
+   *
+   * `commitEvent` is the pointer event that ended it, or null to abandon with
+   * nothing written. State is cleared FIRST and unconditionally, so no exit path
+   * can leave a gesture record behind — which is exactly the failure this
+   * replaces (see the module note on window-bound gesture listeners).
+   */
+  const endCornerResize = useCallback(
+    (commitEvent) => {
+      const st = resizeState.current;
+      if (!st) return;
+      resizeState.current = null;
+      setResizing(false);
+      setResizePct(null);
+      if (!commitEvent || !onResizeWidth) return;
+      const pct = cornerPctFor(st, commitEvent.clientX);
+      if (pct == null) return;
+      // A gesture that ends where it started saves nothing.
+      if (!widthPctChanged(pct, st.startPct)) return;
+      onResizeWidth(Math.round(pct));
+    },
+    [cornerPctFor, onResizeWidth]
+  );
+
+  // Nothing is persisted here. The immutable geometry of the whole gesture is
+  // captured NOW — the corner, the pointer id, the pointer's x, the persisted
+  // width, the content column width and the one-page cap — and nothing below
+  // re-derives any of it from the box being resized.
   const onCornerPointerDown = useCallback(
     (corner) => (e) => {
       if (!onResizeWidth) return;
@@ -220,64 +269,91 @@ export default function PhotoAttachment({
       e.preventDefault();
       e.stopPropagation();
       resizeState.current = {
+        pointerId: e.pointerId,
         corner,
         startX: e.clientX,
         startPct: clampWidthPct(display.widthPct),
         containerWidth: limits.containerWidth,
         maxPct: limits.maxPct,
       };
+      // Kept for the cursor and for touch, but it is deliberately NOT what makes
+      // the gesture terminate — the window listeners below are.
       e.currentTarget.setPointerCapture?.(e.pointerId);
       frameRef.current?.focus?.();
       setResizing(true);
+      // The preview starts at the width it already has, so a press alone can
+      // never change the rendered size.
       setResizePct(resizeState.current.startPct);
     },
     [onResizeWidth, resizeLimits, display.widthPct]
   );
 
-  // PREVIEW ONLY — zero persistence, however far or however often the pointer
-  // moves.
-  const onCornerPointerMove = useCallback(
-    (e) => {
-      if (!resizeState.current) return;
-      const pct = cornerPctFromPointer(e);
-      if (pct != null) setResizePct(pct);
-    },
-    [cornerPctFromPointer]
-  );
-
-  // Abandon the gesture with nothing written and the previous width restored.
-  const cancelCornerResize = useCallback(() => {
-    if (!resizeState.current) return;
-    resizeState.current = null;
-    setResizing(false);
-    setResizePct(null);
-  }, []);
-
-  // ONE confirmed save, on release, and only when the width actually changed.
-  const onCornerPointerUp = useCallback(
-    (e) => {
-      const st = resizeState.current;
-      if (!st) return;
-      const pct = cornerPctFromPointer(e);
-      resizeState.current = null;
-      setResizing(false);
-      setResizePct(null);
-      if (pct == null) return;
-      if (!widthPctChanged(pct, st.startPct)) return;
-      onResizeWidth(Math.round(pct));
-    },
-    [cornerPctFromPointer, onResizeWidth]
-  );
-
-  // Escape abandons an in-flight resize, exactly as it abandons a move.
+  /**
+   * The gesture's move/end listeners — ONE set, on the window, existing ONLY
+   * while a gesture is actually in flight.
+   *
+   * They are not on the handle. A corner handle is a ~20px box positioned at an
+   * edge of the very frame this gesture is resizing, and because height is
+   * derived from width (dH = dW / aspectRatio) a bottom handle travels
+   * VERTICALLY faster than the pointer travels horizontally for any portrait
+   * image — so the pointer leaves the handle almost immediately. Handle-bound
+   * `pointerup` therefore could not be relied on to arrive, and a missed
+   * `pointerup` left the gesture record set: after that, merely HOVERING a
+   * corner recomputed a width from the previous gesture's origin and the image
+   * flickered between sizes. Binding to the window removes the dependency
+   * entirely rather than compensating for it.
+   *
+   * Because the listeners exist only while `resizing` is true, and every exit
+   * goes through `endCornerResize`, a stale gesture is structurally impossible:
+   * with no gesture there are no move listeners at all, so hover cannot resize.
+   * Unmount tears them down for free.
+   */
   useEffect(() => {
     if (!resizing) return undefined;
-    const onKey = (e) => {
-      if (e.key === "Escape") cancelCornerResize();
+
+    // Only the pointer that started this gesture may drive it.
+    const isThisPointer = (e) => {
+      const st = resizeState.current;
+      return !!st && (e.pointerId === undefined || e.pointerId === st.pointerId);
     };
+
+    const onMove = (e) => {
+      const st = resizeState.current;
+      if (!st || !isThisPointer(e)) return;
+      // No button held is not a drag. If the release was missed for any reason,
+      // this ends the gesture rather than continuing to track a pointer that is
+      // no longer pressed.
+      if (e.buttons === 0) {
+        endCornerResize(e);
+        return;
+      }
+      const pct = cornerPctFor(st, e.clientX);
+      if (pct != null) setResizePct(pct);
+    };
+    const onUp = (e) => {
+      if (!isThisPointer(e)) return;
+      endCornerResize(e);
+    };
+    const onAbort = (e) => {
+      if (!isThisPointer(e)) return;
+      endCornerResize(null);
+    };
+    const onKey = (e) => {
+      // Escape abandons an in-flight resize, exactly as it abandons a move.
+      if (e.key === "Escape") endCornerResize(null);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onAbort);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [resizing, cancelCornerResize]);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onAbort);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [resizing, cornerPctFor, endCornerResize]);
 
   /**
    * The keyboard equivalent, on the focused frame.
@@ -499,10 +575,11 @@ export default function PhotoAttachment({
                   IMAGE_CORNER_ZONE_MAX_RATIO * 100
                 }%)`,
               }}
+              // POINTERDOWN ONLY. Move and release are handled on the window
+              // for the gesture's lifetime — a handle that the gesture itself
+              // moves out from under the pointer cannot be trusted to receive
+              // them. See the gesture effect above.
               onPointerDown={onCornerPointerDown(corner)}
-              onPointerMove={onCornerPointerMove}
-              onPointerUp={onCornerPointerUp}
-              onPointerCancel={cancelCornerResize}
             />
           ))}
       </div>

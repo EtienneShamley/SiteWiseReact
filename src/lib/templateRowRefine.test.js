@@ -35,7 +35,7 @@ import {
   makeRowRefineRequest,
   pruneRowRefineBackups,
   readRowAnswer,
-  rowIdsWithBackup,
+  refineTargetKeysWithBackup,
   rowRefineMessageFor,
   setRowRefineBackup,
   setRowRefineMessage,
@@ -676,13 +676,13 @@ describe("row Revert backups", () => {
     expect(original).toEqual(snapshot);
   });
 
-  test("rowIdsWithBackup reports only the given note's rows", () => {
+  test("refineTargetKeysWithBackup reports only the given note's rows", () => {
     let backups = setRowRefineBackup({}, NOTE_A, MASTER_ROW, "a1");
     backups = setRowRefineBackup(backups, NOTE_B, CUSTOM_ROW, "b1");
-    expect(rowIdsWithBackup(backups, NOTE_A)).toEqual(new Set([MASTER_ROW]));
-    expect(rowIdsWithBackup(backups, NOTE_B)).toEqual(new Set([CUSTOM_ROW]));
-    expect(rowIdsWithBackup(backups, "note-c")).toEqual(new Set());
-    expect(rowIdsWithBackup(null, NOTE_A)).toEqual(new Set());
+    expect(refineTargetKeysWithBackup(backups, NOTE_A)).toEqual(new Set([MASTER_ROW]));
+    expect(refineTargetKeysWithBackup(backups, NOTE_B)).toEqual(new Set([CUSTOM_ROW]));
+    expect(refineTargetKeysWithBackup(backups, "note-c")).toEqual(new Set());
+    expect(refineTargetKeysWithBackup(null, NOTE_A)).toEqual(new Set());
   });
 
   test("deleted notes are pruned, and nothing changes when nothing is deleted", () => {
@@ -848,7 +848,7 @@ describe("end to end (mocked provider, real localStorage)", () => {
       expect(getRowRefineBackup(outcome.backups, NOTE_A, MASTER_ROW)).toBe(
         `${NOTE_A} conditions`
       );
-      expect(rowIdsWithBackup(outcome.backups, NOTE_A)).toEqual(new Set([MASTER_ROW]));
+      expect(refineTargetKeysWithBackup(outcome.backups, NOTE_A)).toEqual(new Set([MASTER_ROW]));
     });
   });
 

@@ -80,7 +80,6 @@ import useTransientMessage from "../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import { ATTACHMENT_KIND } from "../lib/noteAttachments";
-import { FIELD_TYPE } from "../lib/templateFields";
 import ListenInPanel from "./ListenInPanel";
 import { NOTE_VIEW, NOTE_VIEW_LABEL } from "../lib/noteViews";
 import { actionButtonClass, tabClass } from "../lib/interactionStyles";
@@ -249,17 +248,21 @@ export default function MainArea() {
    */
   const freeformRevisionRef = useRef(0);
 
-  // Template integration
-  const templateInsertRef = useRef(null); // (rowId, text) => void
-  // The Template form's own confirmed attachment write path, registered by
-  // NoteTemplateDoc. Quick Add's image/file capture calls THIS rather than
-  // implementing its own — there is one attachment architecture, not two.
-  const templateAttachmentsRef = useRef(null); // (fieldId, kind, files) => Promise
-  // The evidence sibling of the above: a capture on an ordinary data row goes
-  // here instead, landing in the note's separate `evidence` collection through
-  // the SAME confirmed write sequence. One attachment architecture, two
-  // destinations — primary Photo/File value vs. supporting evidence.
-  const templateEvidenceRef = useRef(null); // (rowId, kind, files) => Promise
+  // Template integration.
+  //
+  // There is exactly ONE Template destination for a Quick Add capture: the
+  // selected row's ordered `sectionContent`, through the composer below.
+  //
+  // Three earlier registrations are gone (Phase 10): a text-insert handler that
+  // wrote `answers[rowId]`, a primary-attachment handler that wrote
+  // `attachments[rowId]`, and an evidence handler that wrote `evidence[rowId]`.
+  // Every Quick Add route — text, image, file, camera — has composed into
+  // `sectionContent` since Phase 4, so none of the three could be reached: a
+  // selected row always stages and always Sends through `onSendComposer`, and
+  // with no row selected both capture controls are disabled and text may not be
+  // sent at all. They were removed rather than left as fallbacks because their
+  // destinations contradict the section model — see docs/PROJECT_DECISIONS.md.
+  //
   // The Template form's SECTION composer, registered by NoteTemplateDoc:
   //   { appendAttachment(rowId, { kind, file }) => Promise<{ok, error?}>,
   //     appendText(rowId, value)                => {ok, error?} }
@@ -729,64 +732,6 @@ export default function MainArea() {
     showQuickAddHint(quickAddHintMessage(quickAddRowLabel(quickAddTarget)));
   }, [activeTemplateRowId, quickAddTarget, showQuickAddHint]);
 
-  /**
-   * An image or a document captured while the Template form is showing.
-   *
-   * It goes to the SELECTED row's evidence through NoteTemplateDoc's existing
-   * confirmed attachment path — the same one that row's own upload control
-   * uses (validate → normalize → persist the Blob to IndexedDB → persist the
-   * reference through the throwing instance save → delete the asset again if
-   * the reference write fails). Quick Add adds no storage, no second write
-   * ordering and no second asset kind.
-   *
-   * The row's FIELD TYPE decides what it may accept, and it is re-checked here
-   * rather than trusted from whichever control was pressed.
-   */
-  async function handleTemplateAttachmentCapture(kind, files) {
-    if (!files || !files.length) return;
-
-    const target = quickAddTarget;
-    if (target.kind !== QUICK_ADD_KIND.TEMPLATE_ROW) {
-      showInsertNoticeError(
-        "Select a Photo or File row in this template first, then add the image or file."
-      );
-      return;
-    }
-
-    const ability = quickAddCapture(target);
-    const allowed = kind === ATTACHMENT_KIND.PHOTO ? ability.image : ability.file;
-    if (!allowed) {
-      // The row cannot hold this evidence under the note's pinned version. The
-      // refusal names the row and says what would work, and nothing is written.
-      showInsertNoticeError(ability.reason || "That row cannot hold this file.");
-      return;
-    }
-
-    // Route by the SELECTED row's field type, re-read from the resolved target
-    // rather than trusted from the pressed control: a Photo/File row's capture
-    // is its PRIMARY value (`attachments`); every other data row's capture is
-    // supporting EVIDENCE (`evidence`). The two paths share the same confirmed
-    // write sequence in NoteTemplateDoc — only the destination collection
-    // differs — so there is no second attachment implementation here.
-    const isPrimaryAttachmentRow =
-      target.fieldType === FIELD_TYPE.PHOTO ||
-      target.fieldType === FIELD_TYPE.FILE;
-    const add = isPrimaryAttachmentRow
-      ? templateAttachmentsRef.current
-      : templateEvidenceRef.current;
-    if (!add) return;
-
-    clearInsertNotice();
-    setInsertBusy(kind === ATTACHMENT_KIND.PHOTO ? "image" : "file");
-    try {
-      // Per-file failures surface as that field's own inline error, which is
-      // where every other attachment failure in the Template form appears.
-      await add(target.rowId, kind, files);
-    } finally {
-      setInsertBusy(null);
-    }
-  }
-
   // The literal text insertion itself, at wherever the caret ALREADY is. Split
   // out so a composer Send can reuse the exact same insertion — and therefore
   // the exact same multi-line behaviour — without re-restoring a captured point
@@ -838,19 +783,14 @@ export default function MainArea() {
   async function handleInsertImageAtCursor(sourceFile, options = {}) {
     if (!editor || !sourceFile) return;
 
-    // Template form: the image belongs to the SELECTED Photo row's evidence, not
-    // to the hidden Free-form document behind this view.
-    if (noteLayoutRef.current === "template") {
-      await handleTemplateAttachmentCapture(ATTACHMENT_KIND.PHOTO, [sourceFile]);
-      return;
-    }
-
     // The Free-form editor is only hidden behind the Template form, so an
     // insert from the Template form would land in a document the user cannot
-    // see. Say so instead.
+    // see. Say so instead. A Template capture never reaches here: a selected row
+    // stages and Sends through the composer, and with no row selected the
+    // capture controls are disabled — this is the refusal, not a second route.
     if (!freeformEditingEnabled) {
       showInsertNoticeError(
-        "Switch to the Free-form note to add an image there. Template form evidence uses the Photo and File fields."
+        "Switch to the Free-form note to add an image there. In a template, select a section first and Quick Add will put the image in it."
       );
       return;
     }
@@ -903,15 +843,10 @@ export default function MainArea() {
   async function handleInsertFileAtCursor(file, options = {}) {
     if (!editor || !file) return;
 
-    // Template form: the document belongs to the SELECTED File row's evidence.
-    if (noteLayoutRef.current === "template") {
-      await handleTemplateAttachmentCapture(ATTACHMENT_KIND.FILE, [file]);
-      return;
-    }
-
+    // Same refusal as the image path above, and for the same reason.
     if (!freeformEditingEnabled) {
       showInsertNoticeError(
-        "Switch to the Free-form note to attach a file there. Template form evidence uses the Photo and File fields."
+        "Switch to the Free-form note to attach a file there. In a template, select a section first and Quick Add will put the file in it."
       );
       return;
     }
@@ -1128,7 +1063,7 @@ export default function MainArea() {
     if (!editor) return refused;
     if (!freeformEditingEnabled) {
       showInsertNoticeError(
-        "Switch to the Free-form note to add an image or a file there. Template form evidence uses the Photo and File fields."
+        "Switch to the Free-form note to add an image or a file there. In a template, select a section first and Quick Add will put it in that section."
       );
       return refused;
     }
@@ -1218,9 +1153,15 @@ export default function MainArea() {
     if (message) showInsertNoticeError(message);
   }
 
-  // Quick Add text routing:
-  // - Free-form  -> the captured caret, or the end of the note
-  // - Template   -> the SELECTED row, never a guessed one
+  // Quick Add text routing — the FREE-FORM text-only path.
+  //
+  // A Template row's text is not routed here at all: it is part of the same
+  // composition as that row's attachments and takes the composer route into the
+  // row's ordered `sectionContent` (see handleTemplateComposerSend, and
+  // `textUsesComposer` in src/lib/quickAddDraft.js). The Template branch that
+  // used to append into `answers[rowId]` was removed in Phase 10; the guard
+  // below stays, because a text-only send while the Template form is showing
+  // must refuse rather than fall through into the HIDDEN Free-form editor.
   //
   // Returns true only when the text was actually delivered, so the capture bar
   // clears its draft on success and KEEPS it on refusal — a failed send must
@@ -1229,17 +1170,13 @@ export default function MainArea() {
     if (!text || !noteTitle) return false;
 
     if (noteLayout === "template") {
-      if (!activeTemplateRowId || !templateInsertRef.current) {
-        // Deliberately not a guessed destination, and no longer a blocking
-        // alert(): this reports through the same restrained inline channel as
-        // every other insertion outcome in this view.
-        showInsertNoticeError(
-          "Select a template row first, then Quick Add will put this text in it."
-        );
-        return false;
-      }
-      templateInsertRef.current(activeTemplateRowId, text);
-      return true;
+      // Deliberately not a guessed destination, and not a blocking alert():
+      // this reports through the same restrained inline channel as every other
+      // insertion outcome in this view.
+      showInsertNoticeError(
+        "Select a template section first, then Quick Add will put this text in it."
+      );
+      return false;
     }
 
     handleInsertTextAtCursor(text);
@@ -1859,15 +1796,6 @@ export default function MainArea() {
                     key={noteKey}
                     viewActive={noteLayout === "template"}
                     onRegisterRowEditor={handleRegisterTemplateRowEditor}
-                    onRegisterTemplateInsert={(fn) => {
-                      templateInsertRef.current = fn;
-                    }}
-                    onRegisterTemplateAttachments={(fn) => {
-                      templateAttachmentsRef.current = fn;
-                    }}
-                    onRegisterTemplateEvidence={(fn) => {
-                      templateEvidenceRef.current = fn;
-                    }}
                     onRegisterTemplateCompose={(api) => {
                       templateComposeRef.current = api;
                     }}
