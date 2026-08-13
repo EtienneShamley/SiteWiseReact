@@ -45,6 +45,18 @@
 // The zone is clamped against the image's own size, so a small image does not
 // end up being all corner and no body.
 //
+// ---------------------------------------------------------------------------
+// THE PREVIEW — what "being dragged" looks like
+// ---------------------------------------------------------------------------
+//
+// Once the gesture arms, the image must look like it is in the user's hand: a
+// floating, translucent preview of the picture follows the pointer while the
+// insertion line shows where it would land. The geometry of that preview is
+// decided here (`imageDragPreviewGeometry`) rather than at the render site, so
+// "follows the pointer, keeps its proportions, stays under the point that was
+// grabbed" is one tested rule. It is presentation only: the original item keeps
+// its place in the document, and nothing is written until the drop.
+//
 // Pure: no React, no DOM, no storage. It is given a rect and a point and
 // answers a question about them.
 
@@ -148,4 +160,62 @@ export function exceedsMoveThreshold({
   if (!finite(clientX) || !finite(clientY)) return false;
   const limit = finite(thresholdPx) && thresholdPx >= 0 ? thresholdPx : IMAGE_MOVE_THRESHOLD_PX;
   return Math.hypot(clientX - startX, clientY - startY) > limit;
+}
+
+/**
+ * The largest a drag preview may be drawn.
+ *
+ * A section image is commonly the full width of the content column, and a ghost
+ * that size would cover the document the user is trying to aim at — including
+ * the insertion line that tells them where it will land. So a large image's
+ * preview is scaled DOWN, proportionally; a small one is shown at its real
+ * size. It is a preview of the thing being held, not a second copy of the page.
+ */
+export const IMAGE_DRAG_PREVIEW_MAX_PX = 240;
+
+/**
+ * Where to draw the floating preview of the image currently being dragged.
+ *
+ * The preview exists so the image feels HELD: it follows the pointer, keeps the
+ * proportions of the picture on the page, and stays under the same point of the
+ * image the user pressed on (scaled with it), so it does not jump to a corner
+ * the moment the gesture arms.
+ *
+ * Purely presentational — this decides pixels on the screen and nothing else.
+ * It touches no stored data, and the original item keeps its place in the
+ * document while it is shown, so the layout underneath never moves.
+ *
+ * Returns null for an unusable rect or point, and a caller then simply draws no
+ * preview: a drag with no ghost is still a working drag.
+ */
+export function imageDragPreviewGeometry({
+  rect,
+  grabX,
+  grabY,
+  clientX,
+  clientY,
+  maxPx = IMAGE_DRAG_PREVIEW_MAX_PX,
+} = {}) {
+  const box = usableRect(rect);
+  if (!box) return null;
+  if (!finite(clientX) || !finite(clientY)) return null;
+
+  const limit = finite(maxPx) && maxPx > 0 ? maxPx : IMAGE_DRAG_PREVIEW_MAX_PX;
+  // Scaled by WIDTH only, and height follows — the aspect ratio is preserved by
+  // construction rather than by clamping two dimensions independently.
+  const scale = box.width > limit ? limit / box.width : 1;
+  const width = box.width * scale;
+  const height = box.height * scale;
+
+  // The grab point, in the preview's own coordinates. An unusable grab point
+  // falls back to the centre, which is still "held" rather than misplaced.
+  const offsetX = finite(grabX) ? (grabX - box.left) * scale : width / 2;
+  const offsetY = finite(grabY) ? (grabY - box.top) * scale : height / 2;
+
+  return {
+    left: clientX - offsetX,
+    top: clientY - offsetY,
+    width,
+    height,
+  };
 }

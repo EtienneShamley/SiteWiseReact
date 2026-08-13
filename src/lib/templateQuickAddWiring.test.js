@@ -349,10 +349,22 @@ describe("a live legacy editor is transitioned, not left writing the frozen answ
   });
 
   test("a removed item's session is dropped, and never re-pointed at a neighbour", () => {
-    expect(structural).toMatch(/current\.itemId === removedItemId/);
-    expect(structural).toMatch(/clearMaterializedSection\(\)/);
-    // No search for "some other text item" anywhere in the handler.
-    expect(structural).not.toMatch(/find\(|findIndex\(/);
+    // Superseded by the Word-flow correction: the handler now delegates to
+    // `forgetRemovedSectionItems`, which HEALING also uses (a heal removes a
+    // continuation item exactly as a removal removes an attachment). The rule
+    // itself is unchanged — the item is named by its own id, and nothing looks
+    // for a neighbour to fall back on.
+    expect(structural).toMatch(
+      /if \(removedItemId\) forgetRemovedSectionItems\(rowId, \[removedItemId\]\)/
+    );
+    const forget = templateDoc.slice(
+      templateDoc.indexOf("const forgetRemovedSectionItems = useCallback("),
+      templateDoc.indexOf("const persistSectionContentHealed")
+    );
+    expect(forget).toMatch(/ids\.includes\(materializing\.itemId\)/);
+    expect(forget).toMatch(/clearMaterializedSection\(\)/);
+    // No search for "some other text item" anywhere in the cleanup.
+    expect(forget).not.toMatch(/findIndex\(/);
   });
 
   test("the editor's identity is carried into the record, not invented", () => {

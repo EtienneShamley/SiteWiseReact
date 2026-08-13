@@ -105,9 +105,9 @@ export default function PhotoAttachment({
   attachment,
   onChangeDisplay, // (displayPatch) => void — persists size/alignment metadata
   onRemove, // () => void — omitted entirely when this photo cannot be removed
-  // (mouseDownEvent) => void — omitted entirely when this photo cannot be moved.
-  // Called ONLY for a primary press on the image BODY; the reserved corners and
-  // every control on top of the image are excluded.
+  // (pointerDownEvent) => void — omitted entirely when this photo cannot be
+  // moved. Called ONLY for a primary press on the image BODY; the reserved
+  // corners and every control on top of the image are excluded.
   onMoveStart,
   // (widthPct) => void — omitted entirely when this photo cannot be resized.
   // Called at most ONCE per gesture, on release, and only when the width
@@ -386,32 +386,43 @@ export default function PhotoAttachment({
   );
 
   /**
-   * A press on the image itself.
+   * A press on the image itself — a POINTER press, so the gesture owner knows
+   * which pointer started it and can refuse every other one.
    *
-   * It always SELECTS the photo (the frame takes focus, exactly as clicking it
-   * has always done, which is also what reveals the toolbar for a keyboard
-   * user). Whether it additionally begins a move is decided by where the press
-   * landed: the reserved corners are declined here, so a press there behaves as
-   * it does today and stays available for the corner-resize work.
+   * Whether the press becomes a move is decided by where it landed: the
+   * reserved corners are declined here, so a press there behaves as it does
+   * today and stays available for the corner-resize gesture.
    *
-   * Nothing about a CLICK changes: this handler starts nothing on its own, and
-   * `preventDefault` only stops the browser's own image-drag and text-selection
-   * defaults, neither of which is a control the user was reaching for.
+   * The press deliberately does NOT focus the frame any more. Focus — and
+   * therefore the toolbar it reveals — belongs to the CLICK below: a short
+   * click still selects the photo exactly as before, but a completed drag's
+   * trailing click is consumed by the gesture owner
+   * (src/lib/templateSectionItemDragSession.js), so dropping an image no
+   * longer pops its controls the instant it lands.
    */
-  const handleImageMouseDown = useCallback(
+  const handleImagePointerDown = useCallback(
     (e) => {
       if (!onMoveStart) return;
       if (typeof e.button === "number" && e.button !== 0) return;
+      // A second touch mid-gesture is not a new move.
+      if (e.isPrimary === false) return;
       const rect =
         e.currentTarget && typeof e.currentTarget.getBoundingClientRect === "function"
           ? e.currentTarget.getBoundingClientRect()
           : null;
       if (!isImageMoveSurface({ rect, clientX: e.clientX, clientY: e.clientY })) return;
-      frameRef.current?.focus?.();
       onMoveStart(e);
     },
     [onMoveStart]
   );
+
+  // The SHORT-CLICK half of the gesture: select the photo (the frame takes
+  // focus, which is what reveals the toolbar — Open larger, Remove — for a
+  // keyboard user too). An armed drag's trailing click never reaches this
+  // handler; every ordinary later click does.
+  const handleImageClick = useCallback(() => {
+    frameRef.current?.focus?.();
+  }, []);
 
   const name = attachment.name || "Photo";
 
@@ -473,7 +484,8 @@ export default function PhotoAttachment({
           // The move surface, when this photo can be moved at all. It is the
           // image and nothing else: the toolbar and the resize handle sit ON TOP
           // of it as siblings, so a press on one of them never reaches here.
-          onMouseDown={onMoveStart ? handleImageMouseDown : undefined}
+          onPointerDown={onMoveStart ? handleImagePointerDown : undefined}
+          onClick={onMoveStart ? handleImageClick : undefined}
           title={onMoveStart ? "Drag to move this image within the section" : undefined}
         />
 

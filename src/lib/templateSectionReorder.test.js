@@ -1030,8 +1030,8 @@ describe("the reorder writer still places an item beside another", () => {
 describe("the drag performs no persistence until the drop", () => {
   test("20. the pointer-move handler only updates visual state", () => {
     const move = table.slice(
-      table.indexOf("const onItemDragMove"),
-      table.indexOf("const stopItemDrag")
+      table.indexOf("const handleItemDragMove"),
+      table.indexOf("const handleItemDragEnd")
     );
     expect(move).toMatch(/setItemDrag/);
     expect(move).not.toMatch(/onReorderSectionItem|persist|save/i);
@@ -1039,11 +1039,11 @@ describe("the drag performs no persistence until the drop", () => {
 
   test("21. the release handler calls the reorder writer exactly once", () => {
     const stop = table.slice(
-      table.indexOf("const stopItemDrag"),
-      table.indexOf("const cancelItemDrag")
+      table.indexOf("const handleItemDragEnd"),
+      table.indexOf("itemDragCallbacksRef.current =")
     );
     expect(stop.match(/onReorderSectionItem\(/g)).toHaveLength(1);
-    expect(stop).toMatch(/if \(!drag \|\| !drag\.armed \|\| !drag\.drop\) return;/);
+    expect(stop).toMatch(/if \(!commitEvent \|\| !drag\.armed \|\| !drag\.drop\) return;/);
   });
 
   test("the drop indicator is derived from the drag state, and stores nothing", () => {
@@ -1056,8 +1056,17 @@ describe("the drag performs no persistence until the drop", () => {
   });
 
   test("a drop is only ever offered inside the SAME section", () => {
-    expect(table).toMatch(/host\.getAttribute\("data-section-row"\) !== drag\.rowId/);
-    expect(table).toMatch(/!id \|\| id === drag\.itemId/);
+    // The destination rule now lives in its own pure module (the image-move
+    // regression fix), which the table calls with the row the drag started in.
+    // Its own suite proves the behaviour; this pins the wiring.
+    const dropRule = fs.readFileSync(
+      path.join(__dirname, "templateSectionItemDrop.js"),
+      "utf8"
+    );
+    expect(dropRule).toMatch(/host\.getAttribute\("data-section-row"\) !== rowId/);
+    expect(dropRule).toMatch(/if \(itemId === movingItemId\) return null;/);
+    expect(table).toMatch(/rowId: drag\.rowId,/);
+    expect(table).toMatch(/movingItemId: drag\.itemId,/);
   });
 
   test("only an ordered section item's block is a drop zone", () => {

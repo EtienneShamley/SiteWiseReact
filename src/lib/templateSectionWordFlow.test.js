@@ -37,6 +37,10 @@ const textCell = withoutComments(read("components/template/TemplateTextCell.js")
 const rowEditor = withoutComments(read("components/template/TemplateRowEditor.js"));
 const richTextView = withoutComments(read("components/template/TemplateRichTextView.js"));
 const planner = withoutComments(read("lib/templateRowContent.js"));
+// The destination rule moved out of the renderer into its own pure module (the
+// image-move regression fix) so the whole pointer path is testable without a
+// browser — see templateSectionItemDrop.test.js.
+const dropRule = withoutComments(read("lib/templateSectionItemDrop.js"));
 const css = read("components/template/template.css");
 
 /* ========================================================================== */
@@ -86,7 +90,9 @@ describe("the block-editor reorder UI is gone", () => {
     expect(reorder).toMatch(/export function moveSectionItem\b/);
     expect(reorder).toMatch(/export function reorderSectionItem\b/);
     expect(reorder).toMatch(/export function sectionItemMoveTarget\b/);
-    expect(table).toMatch(/from "\.\.\/\.\.\/lib\/templateSectionReorder"/);
+    // The table now reaches the reorder rule through the destination resolver
+    // (src/lib/templateSectionItemDrop.js), which imports it directly.
+    expect(dropRule).toMatch(/from "\.\/templateSectionReorder"/);
     expect(templateDoc).toMatch(/reorderSectionItem/);
   });
 });
@@ -97,7 +103,7 @@ describe("the block-editor reorder UI is gone", () => {
 
 describe("4. the image body initiates the move", () => {
   test("PhotoAttachment attaches the gesture to the IMG element itself", () => {
-    expect(photoAttachment).toMatch(/onMouseDown=\{onMoveStart \? handleImageMouseDown : undefined\}/);
+    expect(photoAttachment).toMatch(/onPointerDown=\{onMoveStart \? handleImagePointerDown : undefined\}/);
     expect(photoAttachment).toMatch(/className=\{`photo-att-img \$\{onMoveStart \? "photo-att-img--movable"/);
   });
 
@@ -122,27 +128,35 @@ describe("4. the image body initiates the move", () => {
     expect(photoAttachment).toMatch(/if \(typeof e\.button === "number" && e\.button !== 0\) return;/);
   });
 
-  test("the photo is SELECTED by the press, exactly as it was before", () => {
-    // Focus is taken explicitly BEFORE preventDefault runs in the drag starter,
-    // so suppressing the browser default costs the user nothing.
-    expect(photoAttachment).toMatch(/frameRef\.current\?\.focus\?\.\(\);\s*\n\s*onMoveStart\(e\);/);
+  test("the photo is SELECTED by the short CLICK — not by the press any more", () => {
+    // Focus (and the toolbar it reveals) moved from pointerdown to click, so a
+    // completed drag — whose trailing click the gesture owner consumes — no
+    // longer pops the controls the instant the image lands. An ordinary click
+    // selects the photo exactly as it always did.
+    const down = photoAttachment.slice(
+      photoAttachment.indexOf("const handleImagePointerDown"),
+      photoAttachment.indexOf("const handleImageClick")
+    );
+    expect(down).not.toMatch(/frameRef\.current/);
+    expect(photoAttachment).toMatch(/const handleImageClick = useCallback\(\(\) => \{\s*frameRef\.current\?\.focus\?\.\(\);/);
+    expect(photoAttachment).toMatch(/onClick=\{onMoveStart \? handleImageClick : undefined\}/);
   });
 });
 
 describe("5/6/7. click and drag are separated by MOVEMENT", () => {
   test("a press starts PENDING — armed is false until the pointer travels", () => {
-    expect(table).toMatch(/setItemDrag\(\{[\s\S]*?armed: false,[\s\S]*?\}\)/);
+    expect(table).toMatch(/const record = \{[\s\S]*?armed: false,[\s\S]*?\};\s*itemDragRef\.current = record;\s*setItemDrag\(record\);/);
   });
 
   test("6. movement below the threshold resolves nothing and draws nothing", () => {
     expect(table).toMatch(
-      /if \(\s*!itemDrag\.armed &&\s*!exceedsMoveThreshold\(\{[\s\S]*?\}\)\s*\) \{\s*return;/
+      /if \(\s*!drag\.armed &&\s*!exceedsMoveThreshold\(\{[\s\S]*?\}\)\s*\) \{\s*return;/
     );
     expect(table).toMatch(/exceedsMoveThreshold/);
   });
 
   test("5. releasing an UNARMED press writes nothing at all", () => {
-    expect(table).toMatch(/if \(!drag \|\| !drag\.armed \|\| !drag\.drop\) return;/);
+    expect(table).toMatch(/if \(!commitEvent \|\| !drag\.armed \|\| !drag\.drop\) return;/);
   });
 
   test("34. an armed drag never opens the larger preview", () => {
@@ -152,7 +166,8 @@ describe("5/6/7. click and drag are separated by MOVEMENT", () => {
     // The preview is opened by a BUTTON's onClick and by nothing else.
     expect(photoAttachment).toMatch(/onClick=\{\(\) => setPreview\(true\)\}/);
     expect(photoAttachment.match(/setPreview\(true\)/g)).toHaveLength(1);
-    expect(photoAttachment).not.toMatch(/handleImageMouseDown[\s\S]{0,400}setPreview/);
+    expect(photoAttachment).not.toMatch(/handleImagePointerDown[\s\S]{0,400}setPreview/);
+    expect(photoAttachment).not.toMatch(/handleImageClick[\s\S]{0,200}setPreview/);
   });
 
   test("33/35. Open larger and Remove are untouched by any of this", () => {
@@ -167,8 +182,11 @@ describe("5/6/7. click and drag are separated by MOVEMENT", () => {
   });
 
   test("Escape cancels, and nothing is written on cancel", () => {
-    expect(table).toMatch(/if \(e\.key === "Escape"\) cancelItemDrag\(\);/);
-    expect(table).toMatch(/const cancelItemDrag = useCallback\(\(\) => setItemDrag\(null\), \[\]\);/);
+    // Escape lives in the gesture session and ends the drag with NO commit
+    // event; the one end handler writes nothing without one.
+    const session = withoutComments(read("lib/templateSectionItemDragSession.js"));
+    expect(session).toMatch(/if \(e\.key === "Escape"\) end\(null\);/);
+    expect(table).toMatch(/if \(!commitEvent \|\| !drag\.armed \|\| !drag\.drop\) return;/);
   });
 });
 
@@ -178,9 +196,12 @@ describe("5/6/7. click and drag are separated by MOVEMENT", () => {
 
 describe("8/9. a move stays inside its own section", () => {
   test("a block belonging to another row is not a destination at all", () => {
-    expect(table).toMatch(
-      /if \(host\.getAttribute\("data-section-row"\) !== drag\.rowId\) return null;/
+    // The check moved into the destination resolver, where the row the drag
+    // started in is passed in explicitly.
+    expect(dropRule).toMatch(
+      /if \(host\.getAttribute\("data-section-row"\) !== rowId\) return null;/
     );
+    expect(table).toMatch(/rowId: drag\.rowId,/);
   });
 
   test("the data attributes exist ONLY on an ordered section item's block", () => {
@@ -200,7 +221,7 @@ describe("8/9. a move stays inside its own section", () => {
   });
 
   test("an item can never be its own destination", () => {
-    expect(table).toMatch(/if \(!id \|\| id === drag\.itemId\) return null;/);
+    expect(dropRule).toMatch(/if \(itemId === movingItemId\) return null;/);
   });
 
   test("the move path introduces no second selection concept", () => {
@@ -218,8 +239,8 @@ describe("8/9. a move stays inside its own section", () => {
 
 describe("10/11/12. beside another item", () => {
   test("a photo or file destination resolves to before/after by the pointer's half", () => {
-    expect(table).toMatch(
-      /placement:\s*e\.clientY < rect\.top \+ rect\.height \/ 2\s*\?\s*SECTION_PLACEMENT\.BEFORE\s*:\s*SECTION_PLACEMENT\.AFTER,/
+    expect(dropRule).toMatch(
+      /clientY < rect\.top \+ rect\.height \/ 2\s*\?\s*SECTION_PLACEMENT\.BEFORE\s*:\s*SECTION_PLACEMENT\.AFTER;/
     );
   });
 
@@ -231,15 +252,19 @@ describe("10/11/12. beside another item", () => {
 
 describe("13. into the middle of text", () => {
   test("a TEXT destination resolves a caret position through the shared resolver", () => {
-    expect(table).toMatch(
-      /import \{ answerPointFromCoords \} from "\.\.\/\.\.\/lib\/templateSectionTextPoint"/
+    expect(dropRule).toMatch(
+      /import \{ answerPointFromCoords \} from "\.\/templateSectionTextPoint"/
     );
-    expect(table).toMatch(/target\.kind === SECTION_ITEM_KIND\.TEXT && onDropSectionItemIntoText/);
-    expect(table).toMatch(/model: answerToModel\(target\.value\),/);
+    // A split is attempted only for text that has something IN it — an empty
+    // paragraph stays a plain before/after target (see the simplified model).
+    expect(dropRule).toMatch(
+      /target\.kind === SECTION_ITEM_KIND\.TEXT &&\s*allowTextDrop &&\s*!isEmptyAnswerValue\(target\.value\)/
+    );
+    expect(dropRule).toMatch(/model: answerToModel\(target\.value\),/);
   });
 
   test("both the static rendering and the LIVE editor are resolvable containers", () => {
-    expect(table).toMatch(
+    expect(dropRule).toMatch(
       /host\.querySelector\("\.twocol-rich-input"\) \|\| host\.querySelector\("\.twocol-rich"\)/
     );
     expect(rowEditor).toMatch(/class: "twocol-rich-input"/);
@@ -247,8 +272,8 @@ describe("13. into the middle of text", () => {
   });
 
   test("an unresolvable caret falls back to a before/after placement, never a guess", () => {
-    expect(table).toMatch(/if \(resolved && resolved\.point\) \{/);
-    expect(table).toMatch(/if \(!onReorderSectionItem\) return null;/);
+    expect(dropRule).toMatch(/resolved &&\s*resolved\.point &&/);
+    expect(dropRule).toMatch(/if \(!allowPlacement\) return null;/);
   });
 
   test("the caret's own line is where the insertion line is drawn", () => {
@@ -298,12 +323,12 @@ describe("30/31/32. text still behaves like text", () => {
 
   test("31/32. no key handler was added to the text path — Enter and Backspace are the editor's", () => {
     expect(textCell).not.toMatch(/onKeyDown/);
-    // The only keydown listener the renderer binds is Escape, for the drag.
-    const keydowns = table.match(/onKeyDown|addEventListener\("keydown"/g) || [];
-    expect(keydowns).toHaveLength(
-      (table.match(/onKeyDown/g) || []).length + 1
-    );
-    expect(table).toMatch(/addEventListener\("keydown", kd\)/);
+    // The renderer itself binds NO keydown listener at all any more — the
+    // drag's Escape moved into the gesture session with the rest of the
+    // gesture's listeners (templateSectionItemDragSession.js).
+    expect(table).not.toMatch(/addEventListener\("keydown"/);
+    const session = withoutComments(read("lib/templateSectionItemDragSession.js"));
+    expect(session).toMatch(/win\.addEventListener\("keydown", handleKey\);/);
   });
 
   test("32. Backspace can still never implicitly delete an adjacent image", () => {
@@ -377,8 +402,14 @@ describe("40/41. pagination and stored data are untouched", () => {
 
   test("41. no TemplateVersion is written by any of this", () => {
     expect(read("lib/templateSectionTextSplit.js")).not.toMatch(/templateVersion/i);
+    // Superseded by the Word-flow correction: the drop persists through the
+    // HEALED writer, which closes any split whose image this move is taking
+    // away. It is the same confirmed instance save underneath.
     expect(templateDoc).toMatch(
-      /dropSectionItemIntoText[\s\S]*?persist: persistSectionContent,/
+      /dropSectionItemIntoText[\s\S]*?persist: persistSectionContentHealed,/
+    );
+    expect(templateDoc).toMatch(
+      /const persistSectionContentHealed = useCallback\([\s\S]*?persistSectionContent\(rowId,/
     );
     // The only save path is the confirmed instance save every section writer uses.
     expect(templateDoc).toMatch(/const persistSectionContent = useCallback\(/);
@@ -400,21 +431,21 @@ describe("40/41. pagination and stored data are untouched", () => {
 describe("the drag itself writes nothing", () => {
   test("pointer movement only updates transient component state", () => {
     const move = table.slice(
-      table.indexOf("const onItemDragMove = useCallback"),
-      table.indexOf("const stopItemDrag = useCallback")
+      table.indexOf("const handleItemDragMove = useCallback"),
+      table.indexOf("const handleItemDragEnd = useCallback")
     );
     expect(move).toMatch(/setItemDrag\(/);
     expect(move).not.toMatch(/onReorderSectionItem|onDropSectionItemIntoText|persist/);
   });
 
   test("an unchanged destination does not even re-render", () => {
-    expect(table).toMatch(/if \(prev\.armed && sameItemDrop\(prev\.drop, drop\)\) \{\s*return prev;/);
+    expect(table).toMatch(/if \(drag\.armed && sameItemDrop\(drag\.drop, drop\)\) \{[\s\S]{0,300}?return;/);
   });
 
   test("the release path calls exactly ONE writer, exactly once", () => {
     const stop = table.slice(
-      table.indexOf("const stopItemDrag = useCallback"),
-      table.indexOf("const cancelItemDrag")
+      table.indexOf("const handleItemDragEnd = useCallback"),
+      table.indexOf("itemDragCallbacksRef.current =")
     );
     expect((stop.match(/onDropSectionItemIntoText\(/g) || [])).toHaveLength(1);
     expect((stop.match(/onReorderSectionItem\(/g) || [])).toHaveLength(1);

@@ -127,8 +127,8 @@ describe("15. the corner handles", () => {
   });
 
   test("16. the image BODY is still the move surface, unchanged", () => {
-    expect(photo).toMatch(/onMouseDown=\{onMoveStart \? handleImageMouseDown : undefined\}/);
-    expect(fn(photo, "const handleImageMouseDown")).toMatch(/isImageMoveSurface/);
+    expect(photo).toMatch(/onPointerDown=\{onMoveStart \? handleImagePointerDown : undefined\}/);
+    expect(fn(photo, "const handleImagePointerDown")).toMatch(/isImageMoveSurface/);
     expect(table).toMatch(/onMoveStart=\{[\s\S]{0,120}startItemDrag\(row\.id, item\.id, e\)/);
   });
 
@@ -240,7 +240,8 @@ describe("29–34. the gestures stay apart", () => {
   });
 
   test("31. a MOVE cannot open the preview", () => {
-    expect(fn(photo, "const handleImageMouseDown")).not.toMatch(/setPreview/);
+    expect(fn(photo, "const handleImagePointerDown")).not.toMatch(/setPreview/);
+    expect(fn(photo, "const handleImageClick")).not.toMatch(/setPreview/);
   });
 
   test("32/33. the same item can be resized and then moved, keeping its width", () => {

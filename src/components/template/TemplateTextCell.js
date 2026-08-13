@@ -38,6 +38,11 @@ export default function TemplateTextCell({
   // items needs each one named distinctly, or they all read as "Label — answer".
   ariaLabel,
   active,
+  // This cell is created ALREADY ACTIVE — it is the leading insertion point a
+  // user clicked above a section's first image, so there was no static view to
+  // have recorded where the caret should go. It seeds its own caret hint, or
+  // the click would produce an editor the user cannot type into.
+  focusOnActivate = false,
   reloadToken,
   onActivate,
   onChange,
@@ -47,6 +52,13 @@ export default function TemplateTextCell({
   // that replaces this view, consumed once by the editor. The ref survives the
   // swap because this component instance does.
   const caretHintRef = useRef(null);
+  // Seeded at most ONCE per mounted cell: a later editor recreation (a
+  // programmatic content replacement) must not steal focus back.
+  const seededCaretRef = useRef(false);
+  if (focusOnActivate && active && identity && !seededCaretRef.current) {
+    seededCaretRef.current = true;
+    if (!caretHintRef.current) caretHintRef.current = { mode: "end", identity };
+  }
 
   const answerLabel =
     (ariaLabel || "").trim() || `${(label || "").trim() || "Answer"} — answer`;

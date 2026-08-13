@@ -80,6 +80,56 @@ export const SECTION_ITEM_KIND = {
   FILE: ATTACHMENT_KIND.FILE,
 };
 
+/**
+ * How the two halves of an image-induced split were separated, and therefore
+ * how they must be put back together if the image between them goes away.
+ *
+ *   INLINE  the cut fell INSIDE a paragraph. "…this morning " / "and conditions"
+ *           must heal back to "…this morning and conditions" — one paragraph,
+ *           no boundary invented.
+ *   BLOCK   the cut fell at a real paragraph / list-item boundary. That boundary
+ *           is the user's own and must survive healing.
+ */
+export const SECTION_TEXT_JOIN = {
+  INLINE: "inline",
+  BLOCK: "block",
+};
+
+/**
+ * SPLIT PROVENANCE — the ONLY thing that makes two adjacent text items heal.
+ *
+ * When an image is dropped into the middle of a paragraph the one text item
+ * becomes two, and the continuation (the RIGHT half) records where it came
+ * from: `continuesFrom: { itemId, join }`, naming the item that keeps the LEFT
+ * half. Nothing else in the product ever writes this field — two consecutive
+ * Quick Add sends are two independent captured blocks and carry none — which is
+ * exactly what stops "adjacent" from being mistaken for "belongs together".
+ *
+ * It is note-instance state on the SectionItem and nowhere else: no
+ * TemplateVersion carries it, and it is never document content (export reads a
+ * text item's `value`, and only its `value`).
+ *
+ * Refused, so a corrupt or hostile record cannot invent a relationship:
+ *   - a non-object, or one with no usable `itemId`;
+ *   - an item naming ITSELF, which would describe a merge with no second item.
+ * An unrecognised or missing `join` normalizes to BLOCK — the conservative
+ * answer, because it preserves a paragraph boundary rather than silently
+ * running two paragraphs of the user's report together.
+ */
+export function normalizeTextContinuation(raw, ownId) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const itemId = raw.itemId;
+  if (typeof itemId !== "string" || !itemId) return null;
+  if (itemId === ownId) return null;
+  return {
+    itemId,
+    join:
+      raw.join === SECTION_TEXT_JOIN.INLINE
+        ? SECTION_TEXT_JOIN.INLINE
+        : SECTION_TEXT_JOIN.BLOCK,
+  };
+}
+
 /** True for the text kind — the one item kind that is not an asset reference. */
 export function isTextSectionItem(entry) {
   return !!(entry && typeof entry === "object" && entry.kind === SECTION_ITEM_KIND.TEXT);
@@ -125,13 +175,21 @@ export function normalizeSectionItem(entry) {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
 
   switch (entry.kind) {
-    case SECTION_ITEM_KIND.TEXT:
+    case SECTION_ITEM_KIND.TEXT: {
       if (typeof entry.id !== "string" || !entry.id) return null;
-      return {
+      const item = {
         id: entry.id,
         kind: SECTION_ITEM_KIND.TEXT,
         value: normalizeAnswerValue(entry.value),
       };
+      // Carried through the read model deliberately: healing decides from what
+      // is on screen ("are these two adjacent right now?"), so the relationship
+      // has to survive normalization. It is added only when a valid one is
+      // stored, so an ordinary text item's normalized shape is unchanged.
+      const continuesFrom = normalizeTextContinuation(entry.continuesFrom, entry.id);
+      if (continuesFrom) item.continuesFrom = continuesFrom;
+      return item;
+    }
 
     case SECTION_ITEM_KIND.PHOTO:
     case SECTION_ITEM_KIND.FILE:

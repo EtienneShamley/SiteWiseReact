@@ -111,6 +111,18 @@ export default function TemplateRowEditor({
   // Caret placement on activation. The hint is set by the static view that was
   // just replaced and is consumed once: a recreated editor with no hint (an AI
   // refinement landing in this row) must not steal focus from anywhere else.
+  //
+  // FOCUS IS SYNCHRONOUS, deliberately. TipTap's own `commands.focus(...)`
+  // defers the actual DOM focus through requestAnimationFrame, which opens a
+  // real race a browser session proved: the user clicks a text target, the
+  // editor mounts, they start typing — and until that animation frame runs the
+  // keystrokes land on whatever was focused BEFORE the click (in the observed
+  // failure, the view-toggle button, where a Space would flip the whole form).
+  // In a backgrounded tab the frame never runs at all. `editor.view.focus()`
+  // is the underlying ProseMirror call and is synchronous: it focuses the
+  // content element and then writes the CURRENT state selection into the DOM —
+  // which is why the selection transaction is dispatched FIRST, so the caret
+  // position the activation asked for is exactly what focus realizes.
   useEffect(() => {
     if (!editor) return;
     const hint = caretHintRef?.current || null;
@@ -121,6 +133,10 @@ export default function TemplateRowEditor({
     // focused by an intent aimed at the previous one.
     if (hint.identity && hint.identity !== identity) return;
 
+    // Where the caret should land: the resolved click point, or — for keyboard
+    // activation and a click the browser could not resolve to a text position —
+    // the end of the answer, the predictable place to be.
+    let selectionPos = editor.state.doc.content.size;
     if (hint.mode === "point") {
       let position = null;
       try {
@@ -129,13 +145,17 @@ export default function TemplateRowEditor({
         position = null;
       }
       if (position && typeof position.pos === "number") {
-        editor.chain().focus().setTextSelection(position.pos).run();
-        return;
+        selectionPos = position.pos;
       }
     }
-    // Keyboard activation, or a click the browser could not resolve to a text
-    // position: the end of the answer is the predictable place to be.
-    editor.commands.focus("end");
+
+    // Selection first (setTextSelection clamps to the document), then the
+    // synchronous view focus that realizes it, then the scroll the deferred
+    // command used to perform. No requestAnimationFrame, no timers: the very
+    // next keystroke after activation reaches THIS editor.
+    editor.commands.setTextSelection(selectionPos);
+    editor.view.focus();
+    editor.commands.scrollIntoView();
   }, [editor, identity, caretHintRef]);
 
   if (!editor) return null;

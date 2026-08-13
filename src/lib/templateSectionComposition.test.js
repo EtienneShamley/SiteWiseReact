@@ -614,9 +614,19 @@ describe("removal goes through the ONE Phase 3 primitive", () => {
       "const handleSectionStructuralChange = useCallback(",
       "const sectionMaterialisationFor"
     );
-    expect(structural).toMatch(/current\.itemId === removedItemId/);
+    // Superseded by the Word-flow correction: the invalidation moved into
+    // `forgetRemovedSectionItems`, which the healed writer also uses (a heal
+    // removes a continuation item exactly as a removal removes an attachment).
+    // It is still addressed by the item's own id and nothing else.
+    expect(structural).toMatch(/if \(removedItemId\) forgetRemovedSectionItems\(rowId, \[removedItemId\]\)/);
+    const forget = between(
+      templateDoc,
+      "const forgetRemovedSectionItems = useCallback(",
+      "const persistSectionContentHealed"
+    );
+    expect(forget).toMatch(/ids\.includes\(materializing\.itemId\)/);
     // Never re-pointed at a neighbour.
-    expect(structural).not.toMatch(/find\(|findIndex\(|\[0\]/);
+    expect(forget).not.toMatch(/findIndex\(|\[0\]/);
   });
 });
 

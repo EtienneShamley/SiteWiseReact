@@ -6,9 +6,11 @@
 
 import {
   IMAGE_CORNER_ZONE_PX,
+  IMAGE_DRAG_PREVIEW_MAX_PX,
   IMAGE_MOVE_THRESHOLD_PX,
   IMAGE_MOVE_ZONE,
   exceedsMoveThreshold,
+  imageDragPreviewGeometry,
   imagePointerZone,
   isImageMoveSurface,
 } from "./templateSectionImageMove";
@@ -138,6 +140,98 @@ describe("5/6/7. a short click is a click; only real travel starts a move", () =
       false
     );
     expect(exceedsMoveThreshold()).toBe(false);
+  });
+});
+
+/* ========================================================================== */
+/* THE DRAG PREVIEW — the image has to feel like it is being held (11, 12)     */
+/* ========================================================================== */
+
+describe("the floating drag preview", () => {
+  // Grabbed a quarter of the way across and a third of the way down.
+  const grab = { grabX: 200, grabY: 300 };
+
+  test("11. the preview follows the pointer on BOTH axes", () => {
+    const a = imageDragPreviewGeometry({ rect, ...grab, clientX: 200, clientY: 300 });
+    const b = imageDragPreviewGeometry({ rect, ...grab, clientX: 260, clientY: 340 });
+    expect(b.left - a.left).toBeCloseTo(60);
+    expect(b.top - a.top).toBeCloseTo(40);
+  });
+
+  test("11. it stays under the point of the image that was grabbed", () => {
+    // A small image is shown at its real size, so the grab offset is exact.
+    const small = { left: 0, top: 0, width: 100, height: 80 };
+    const geo = imageDragPreviewGeometry({
+      rect: small,
+      grabX: 30,
+      grabY: 20,
+      clientX: 500,
+      clientY: 400,
+    });
+    expect(geo).toEqual({ left: 470, top: 380, width: 100, height: 80 });
+  });
+
+  test("12. the preview keeps the image's aspect ratio exactly", () => {
+    const geo = imageDragPreviewGeometry({ rect, ...grab, clientX: 0, clientY: 0 });
+    expect(geo.width / geo.height).toBeCloseTo(rect.width / rect.height);
+  });
+
+  test("12. a small image is previewed at its displayed size", () => {
+    const small = { left: 0, top: 0, width: 120, height: 90 };
+    const geo = imageDragPreviewGeometry({
+      rect: small,
+      grabX: 10,
+      grabY: 10,
+      clientX: 10,
+      clientY: 10,
+    });
+    expect(geo.width).toBe(120);
+    expect(geo.height).toBe(90);
+  });
+
+  test("12. a full-width image is scaled DOWN proportionally, never cropped", () => {
+    const wide = { left: 0, top: 0, width: 720, height: 540 };
+    const geo = imageDragPreviewGeometry({
+      rect: wide,
+      grabX: 360,
+      grabY: 270,
+      clientX: 100,
+      clientY: 100,
+    });
+    expect(geo.width).toBe(IMAGE_DRAG_PREVIEW_MAX_PX);
+    expect(geo.width / geo.height).toBeCloseTo(720 / 540);
+  });
+
+  test("the grab offset is scaled with the preview, so it does not jump", () => {
+    const wide = { left: 0, top: 0, width: 480, height: 360 };
+    const geo = imageDragPreviewGeometry({
+      rect: wide,
+      grabX: 240, // the centre
+      grabY: 180,
+      clientX: 1000,
+      clientY: 800,
+    });
+    expect(geo.left).toBeCloseTo(1000 - geo.width / 2);
+    expect(geo.top).toBeCloseTo(800 - geo.height / 2);
+  });
+
+  test("an unusable grab point falls back to the centre rather than a corner", () => {
+    const geo = imageDragPreviewGeometry({ rect, clientX: 500, clientY: 500 });
+    expect(geo.left).toBeCloseTo(500 - geo.width / 2);
+    expect(geo.top).toBeCloseTo(500 - geo.height / 2);
+  });
+
+  test("an unusable rect or pointer produces no preview at all", () => {
+    expect(imageDragPreviewGeometry({ rect: null, clientX: 1, clientY: 1 })).toBeNull();
+    expect(
+      imageDragPreviewGeometry({
+        rect: { left: 0, top: 0, width: 0, height: 0 },
+        clientX: 1,
+        clientY: 1,
+      })
+    ).toBeNull();
+    expect(imageDragPreviewGeometry({ rect, clientX: undefined, clientY: 1 })).toBeNull();
+    expect(imageDragPreviewGeometry()).toBeNull();
   });
 });
 

@@ -38,9 +38,15 @@ import {
   normalizeSectionExtraHeight,
   resizeSectionExtraHeight,
 } from "../../lib/templateSectionHeight";
-import { SECTION_PLACEMENT } from "../../lib/templateSectionReorder";
-import { exceedsMoveThreshold } from "../../lib/templateSectionImageMove";
-import { answerPointFromCoords } from "../../lib/templateSectionTextPoint";
+import { resolveSectionItemDrop } from "../../lib/templateSectionItemDrop";
+import {
+  beginItemDragGesture,
+  suppressGestureTrailingClick,
+} from "../../lib/templateSectionItemDragSession";
+import {
+  exceedsMoveThreshold,
+  imageDragPreviewGeometry,
+} from "../../lib/templateSectionImageMove";
 import { answerToModel } from "../../lib/templateRichText";
 import TemplateRichTextView from "./TemplateRichTextView";
 import PhotoAttachment from "./PhotoAttachment";
@@ -300,6 +306,14 @@ export default function ResizableTwoColTable({
   // gesture. Omit it and no corner handle is rendered at all (the Template
   // Builder never passes it). A TEXT or FILE item is never given this action.
   onResizeSectionPhoto, // (rowId, itemId, widthPct) => void
+  // OPEN A LEADING CARET above a section whose first visible item is an image or
+  // a file, so the user can type ABOVE it exactly as they would in a word
+  // processor. It writes NOTHING: the parent mints an item id, opens the one
+  // editor against it, and the stored list gains a text item only when the user
+  // actually types (src/lib/templateSectionLeadingText.js). Omit it and no
+  // leading insertion point is offered at all (the Template Builder never
+  // passes it).
+  onOpenSectionLeadingText, // (rowId) => void
   // OPTIONAL EXTRA WORKING SPACE on a flexible section, keyed by row id. It is
   // additive trailing space the user dragged into existence — never the legacy
   // `row.px`, which is a different value with a different owner (see
@@ -539,15 +553,33 @@ export default function ResizableTwoColTable({
   // rule in src/lib/templateSectionImageMove.js, so a resize gesture and a move
   // gesture never contend for the same pixel.
   //
-  // The drag is pointer-based (the same window-listener shape the height drags
-  // use) rather than HTML5 drag-and-drop, because the document surface is full
-  // of rich-text editors that handle native drop events themselves.
+  // The drag is pointer-based rather than HTML5 drag-and-drop, because the
+  // document surface is full of rich-text editors that handle native drop
+  // events themselves. Its move/up/cancel listeners are installed
+  // SYNCHRONOUSLY inside the pointerdown handler, through
+  // src/lib/templateSectionItemDragSession.js — never through a React effect.
+  // A browser session proved why: an effect gated on the gesture state attaches
+  // only after React commits, and a fast press-flick-release fits entirely
+  // inside that gap, so the whole drag was silently lost.
   //
   // `itemDrag` is PURELY VISUAL. It starts PENDING (`armed: false`) — a press is
   // not yet a move — and arms only once the pointer has travelled past the
   // threshold, which is what keeps an ordinary click on an image an ordinary
   // click. Nothing is written at any point before the drop.
   const [itemDrag, setItemDrag] = useState(null);
+  // The SAME gesture record, readable synchronously: the window listeners run
+  // outside React's render cycle and must see the gesture as it is NOW, not as
+  // of the last committed render. Updated together with the state, always.
+  const itemDragRef = useRef(null);
+  // The live gesture's listener handle. Set synchronously at pointerdown,
+  // cleared exactly once when the gesture ends — whichever exit ends it.
+  const itemDragSessionRef = useRef(null);
+  // The latest move/end handlers, re-pointed every render, so the listeners
+  // installed at pointerdown never call a stale closure mid-gesture.
+  const itemDragCallbacksRef = useRef({ move: () => {}, end: () => {} });
+  // Cancels an armed trailing-click suppression on unmount; it otherwise
+  // resolves itself on the very next click or pointerdown.
+  const suppressItemClickRef = useRef(null);
   const canMoveSectionItems =
     typeof onReorderSectionItem === "function" ||
     typeof onDropSectionItemIntoText === "function";
@@ -555,18 +587,63 @@ export default function ResizableTwoColTable({
   const startItemDrag = useCallback(
     (rowId, itemId, e) => {
       if (!canMoveSectionItems) return;
-      // The photo has already taken focus itself, so suppressing the browser
-      // defaults here costs the user nothing: it stops the native image drag and
-      // stops a drag across the page selecting the text it passes over.
+      // One gesture at a time: a second pointer pressing mid-drag cannot mint
+      // a competing session or orphan the first one's listeners.
+      if (itemDragSessionRef.current) return;
+      // Suppressing the browser defaults stops the native image drag and stops
+      // a drag across the page selecting the text it passes over.
       e.preventDefault();
       e.stopPropagation();
-      setItemDrag({
+      // WHAT THE PREVIEW WILL SHOW, captured now — the gesture starts on the
+      // <img> itself, so its resolved object URL and its box on the page are
+      // both right here. Read synchronously, while the event is still being
+      // dispatched. A source we cannot read simply produces no preview; the
+      // move still works.
+      const img = e.currentTarget;
+      const rect =
+        img && typeof img.getBoundingClientRect === "function"
+          ? img.getBoundingClientRect()
+          : null;
+      const src = (img && (img.currentSrc || img.src)) || null;
+      const record = {
         rowId,
         itemId,
+        // Only the pointer that started the gesture may drive or end it.
+        pointerId: e.pointerId,
         startX: e.clientX,
         startY: e.clientY,
         armed: false,
         drop: null,
+        // Presentation only. Nothing here is stored, and the item keeps its
+        // place in the document while it is shown.
+        preview:
+          rect && src
+            ? {
+                src,
+                rect: {
+                  left: rect.left,
+                  top: rect.top,
+                  width: rect.width,
+                  height: rect.height,
+                },
+                grabX: e.clientX,
+                grabY: e.clientY,
+              }
+            : null,
+        pointerX: e.clientX,
+        pointerY: e.clientY,
+      };
+      itemDragRef.current = record;
+      setItemDrag(record);
+      // The gesture's listeners exist from THIS instant — before the browser
+      // can deliver the next event — so a fast press-move-release can never
+      // outrun a React commit and be lost. They dispatch through the callbacks
+      // ref, so mid-gesture re-renders never leave them calling stale closures.
+      itemDragSessionRef.current = beginItemDragGesture({
+        win: window,
+        pointerId: record.pointerId,
+        onMove: (ev) => itemDragCallbacksRef.current.move(ev),
+        onEnd: (commitEvent) => itemDragCallbacksRef.current.end(commitEvent),
       });
     },
     [canMoveSectionItems]
@@ -590,78 +667,65 @@ export default function ResizableTwoColTable({
    *               instead of creating an empty fragment, so no separate
    *               before/after code path is needed for text.
    *   "placement" the pointer is over a photo or a file item (or over text whose
-   *               caret could not be resolved): before or after it, by which
+   *               caret could not be resolved, or resolved to a position the
+   *               image is already sitting beside): before or after it, by which
    *               half of the band the pointer is in.
+   *
+   * A destination is only ever a position the image would ACTUALLY move to — a
+   * drop that would change nothing resolves to no destination at all, so an
+   * insertion line never promises a move that the writer then refuses. The rule
+   * itself lives in src/lib/templateSectionItemDrop.js, with the document
+   * injected, so the whole resolution is testable without a browser.
    */
   const resolveItemDrop = useCallback(
-    (drag, e) => {
-      const el =
-        typeof document !== "undefined" && document.elementFromPoint
-          ? document.elementFromPoint(e.clientX, e.clientY)
-          : null;
-      const host = el && el.closest ? el.closest("[data-section-item]") : null;
-      if (!host) return null;
-      if (host.getAttribute("data-section-row") !== drag.rowId) return null;
-      const id = host.getAttribute("data-section-item");
-      if (!id || id === drag.itemId) return null;
-
-      const items = normalizedSectionContent[drag.rowId] || [];
-      const target = items.find((item) => item.id === id);
-      if (!target) return null;
-
-      if (target.kind === SECTION_ITEM_KIND.TEXT && onDropSectionItemIntoText) {
-        // The active editor's ProseMirror content element, or the static
-        // rendering — both are one element per model block, which is what the
-        // resolver maps through.
-        const container =
-          host.querySelector(".twocol-rich-input") || host.querySelector(".twocol-rich");
-        const resolved = container
-          ? answerPointFromCoords({
-              container,
-              clientX: e.clientX,
-              clientY: e.clientY,
-              model: answerToModel(target.value),
-              doc: document,
-            })
-          : null;
-        if (resolved && resolved.point) {
-          const hostTop = host.getBoundingClientRect().top;
-          return {
-            kind: "text",
-            targetItemId: id,
-            point: resolved.point,
-            // Presentation only: where the insertion line is drawn, relative to
-            // this block. Null simply falls back to the top of the item.
-            caretOffsetTop:
-              typeof resolved.caretTop === "number" ? resolved.caretTop - hostTop : null,
-          };
-        }
-      }
-
-      if (!onReorderSectionItem) return null;
-      const rect = host.getBoundingClientRect();
-      return {
-        kind: "placement",
-        targetItemId: id,
-        placement:
-          e.clientY < rect.top + rect.height / 2
-            ? SECTION_PLACEMENT.BEFORE
-            : SECTION_PLACEMENT.AFTER,
-      };
-    },
+    (drag, e) =>
+      resolveSectionItemDrop({
+        doc: typeof document !== "undefined" ? document : null,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        rowId: drag.rowId,
+        movingItemId: drag.itemId,
+        items: normalizedSectionContent[drag.rowId] || [],
+        allowTextDrop: !!onDropSectionItemIntoText,
+        allowPlacement: !!onReorderSectionItem,
+      }),
     [normalizedSectionContent, onDropSectionItemIntoText, onReorderSectionItem]
   );
 
-  const onItemDragMove = useCallback(
+  // The floating preview's element, positioned IMPERATIVELY while the pointer
+  // moves. Re-rendering the whole document on every mousemove to move a ghost
+  // would be a real cost on a long note; one style write is not. Nothing about
+  // the preview is state the document depends on.
+  const itemGhostRef = useRef(null);
+
+  const positionItemGhost = useCallback((preview, clientX, clientY) => {
+    const el = itemGhostRef.current;
+    if (!el || !preview) return;
+    const geo = imageDragPreviewGeometry({
+      rect: preview.rect,
+      grabX: preview.grabX,
+      grabY: preview.grabY,
+      clientX,
+      clientY,
+    });
+    if (!geo) return;
+    el.style.left = `${geo.left}px`;
+    el.style.top = `${geo.top}px`;
+  }, []);
+
+  // A pointermove belonging to the live gesture (the session has already
+  // checked the pointer id and that a button is still held).
+  const handleItemDragMove = useCallback(
     (e) => {
-      if (!itemDrag) return;
+      const drag = itemDragRef.current;
+      if (!drag) return;
       // A press that has not travelled far enough is still a click. Nothing is
       // resolved, nothing is drawn, and releasing here does nothing at all.
       if (
-        !itemDrag.armed &&
+        !drag.armed &&
         !exceedsMoveThreshold({
-          startX: itemDrag.startX,
-          startY: itemDrag.startY,
+          startX: drag.startX,
+          startY: drag.startY,
           clientX: e.clientX,
           clientY: e.clientY,
         })
@@ -669,62 +733,78 @@ export default function ResizableTwoColTable({
         return;
       }
 
-      const drop = resolveItemDrop(itemDrag, e);
-      setItemDrag((prev) => {
-        if (!prev) return prev;
-        if (prev.armed && sameItemDrop(prev.drop, drop)) {
-          return prev; // no state change, no re-render, no persistence
-        }
-        return { ...prev, armed: true, drop };
-      });
+      positionItemGhost(drag.preview, e.clientX, e.clientY);
+
+      const drop = resolveItemDrop(drag, e);
+      if (drag.armed && sameItemDrop(drag.drop, drop)) {
+        // No state change, no re-render, no persistence — the preview has
+        // already followed the pointer imperatively above.
+        return;
+      }
+      const next = { ...drag, armed: true, drop, pointerX: e.clientX, pointerY: e.clientY };
+      itemDragRef.current = next;
+      setItemDrag(next);
     },
-    [itemDrag, resolveItemDrop]
+    [resolveItemDrop, positionItemGhost]
   );
 
-  // ONE confirmed persistence attempt, on release, and only when an ARMED
-  // gesture actually named a destination. A short press, or a drop on nothing,
-  // simply ends the drag and writes nowhere.
-  const stopItemDrag = useCallback(() => {
-    const drag = itemDrag;
-    setItemDrag(null);
-    if (!drag || !drag.armed || !drag.drop) return;
-    if (drag.drop.kind === "text") {
-      if (!onDropSectionItemIntoText) return;
-      onDropSectionItemIntoText(
+  // The gesture is over — every exit funnels through here exactly once.
+  // `commitEvent` is the pointerup that completed it, or null for every
+  // abandoning exit (Escape, pointercancel, stale gesture, unmount).
+  //
+  // ONE confirmed persistence attempt, on a committing release, and only when
+  // an ARMED gesture actually named a destination. A short press, a drop on
+  // nothing, and every abandoning exit end the drag and write nowhere.
+  const handleItemDragEnd = useCallback(
+    (commitEvent) => {
+      itemDragSessionRef.current = null;
+      const drag = itemDragRef.current;
+      itemDragRef.current = null;
+      setItemDrag(null);
+      if (!drag) return;
+      if (drag.armed) {
+        // The drag genuinely moved: the click the browser generates after its
+        // pointerup is not something the user asked for, so it is consumed —
+        // and ONLY it. A press that stayed a click never comes through here
+        // armed, so ordinary clicks keep their ordinary behaviour.
+        suppressItemClickRef.current = suppressGestureTrailingClick({ win: window });
+      }
+      if (!commitEvent || !drag.armed || !drag.drop) return;
+      if (drag.drop.kind === "text") {
+        if (!onDropSectionItemIntoText) return;
+        onDropSectionItemIntoText(
+          drag.rowId,
+          drag.itemId,
+          drag.drop.targetItemId,
+          drag.drop.point
+        );
+        return;
+      }
+      if (!onReorderSectionItem) return;
+      onReorderSectionItem(
         drag.rowId,
         drag.itemId,
         drag.drop.targetItemId,
-        drag.drop.point
+        drag.drop.placement
       );
-      return;
-    }
-    if (!onReorderSectionItem) return;
-    onReorderSectionItem(
-      drag.rowId,
-      drag.itemId,
-      drag.drop.targetItemId,
-      drag.drop.placement
-    );
-  }, [itemDrag, onReorderSectionItem, onDropSectionItemIntoText]);
+    },
+    [onReorderSectionItem, onDropSectionItemIntoText]
+  );
 
-  const cancelItemDrag = useCallback(() => setItemDrag(null), []);
+  // Re-pointed every render, so the window listeners installed at pointerdown
+  // always dispatch into the newest handlers.
+  itemDragCallbacksRef.current = { move: handleItemDragMove, end: handleItemDragEnd };
 
-  React.useEffect(() => {
-    if (!itemDrag) return;
-    const mm = (e) => onItemDragMove(e);
-    const mu = () => stopItemDrag();
-    const kd = (e) => {
-      if (e.key === "Escape") cancelItemDrag();
-    };
-    window.addEventListener("mousemove", mm);
-    window.addEventListener("mouseup", mu);
-    window.addEventListener("keydown", kd);
-    return () => {
-      window.removeEventListener("mousemove", mm);
-      window.removeEventListener("mouseup", mu);
-      window.removeEventListener("keydown", kd);
-    };
-  }, [itemDrag, onItemDragMove, stopItemDrag, cancelItemDrag]);
+  // Unmounting mid-gesture abandons it: listeners torn down, nothing written.
+  // The session's own exits (pointerup, pointercancel, Escape, stale gesture)
+  // need no effect at all — they were installed synchronously at pointerdown.
+  React.useEffect(
+    () => () => {
+      if (itemDragSessionRef.current) itemDragSessionRef.current.end();
+      if (suppressItemClickRef.current) suppressItemClickRef.current();
+    },
+    []
+  );
 
   // ---------- ROW MUTATION HELPERS (builder field-type editor) ----------
   const patchRow = useCallback(
@@ -1514,15 +1594,28 @@ export default function ResizableTwoColTable({
 
           {showRightEditor && renderFieldError(row.id)}
 
-          {/* THE ANSWER SLOT — the row's own control, or the head item of its
-              ordered section. Both render at THIS one position, deliberately:
-              when a legacy Text row materialises into a section mid-keystroke,
-              React reconciles the same TemplateTextCell instance here instead
-              of unmounting it, so the live editor keeps its focus, its caret
-              and its undo history while the user is still typing. */}
-          {sectionHeadItem
-            ? renderSectionItemBody(row, sectionHeadItem, { isRowHead: true })
-            : showRightEditor && renderAnswerControl(row)}
+          {/* THE ANSWER SLOT — TWO fixed positions, always in this order.
+              Everything that can hold the one live editor renders at the FIRST
+              of them, deliberately: React reconciles by position, so an editor
+              survives every transition that happens underneath it while the
+              user is typing.
+
+                slot 1   the row's own control, OR the head item of its ordered
+                         section, OR — for a section whose first item is an
+                         image — the leading insertion point above that image
+                         (a caret once clicked, a thin click target before that)
+                slot 2   the head MEDIA item, but only while a leading caret
+                         sits above it. It becomes null the moment the leading
+                         text is written, because the text is then the section's
+                         head and the image has become its own block.
+
+              Two transitions depend on this shape. A legacy Text row
+              MATERIALISING into a section keeps the same cell in slot 1, and a
+              leading caret being TYPED INTO keeps the same cell in slot 1 while
+              slot 2 empties. In both cases the live editor keeps its focus, its
+              caret and its undo history. */}
+          {renderAnswerSlot(row, sectionHeadItem)}
+          {renderHeadMediaSlot(row, sectionHeadItem)}
 
           {showRightEditor && renderRowRefineStatus(row, headRefineItem(sectionHeadItem))}
 
@@ -1822,6 +1915,145 @@ export default function ResizableTwoColTable({
     return `${name} — text ${position} of ${textItems.length}`;
   }
 
+  // Which item id, if any, the LEADING CARET of this section is currently open
+  // against. It is a virtual item: nothing with this id is stored until the
+  // user types (src/lib/templateSectionLeadingText.js).
+  function sectionLeadingItemId(row) {
+    if (!richText || richText.leadingRowId !== row.id) return null;
+    return richText.leadingItemId || null;
+  }
+
+  /**
+   * THE LEADING INSERTION POINT — how a user types ABOVE a section's first
+   * image.
+   *
+   * A section whose first item is a picture has no text to click into above it,
+   * so this is the click target that gives them one: press at the top-left of
+   * the content area and a caret appears, exactly as it would in a word
+   * processor. There is deliberately no button, no toolbar and no label — the
+   * affordance is the cursor and the position, nothing more.
+   *
+   * It costs NO layout. The element sits inside the cell's own top padding
+   * (a negative margin exactly cancels its height), so an image-only section is
+   * as compact as it was before, with no blank band and no reserved height. It
+   * is not printed, and it is not rendered at all in the Template Builder.
+   *
+   * Clicking it writes nothing — see the leading-caret rule in NoteTemplateDoc.
+   */
+  function renderSectionLeadingInsertionPoint(row) {
+    if (!richText || typeof onOpenSectionLeadingText !== "function") return null;
+    const open = () => onOpenSectionLeadingText(row.id);
+    return (
+      <div
+        className="twocol-section-lead"
+        role="button"
+        tabIndex={0}
+        title="Click to type above this image"
+        aria-label={`Add text above the first image in ${row.label || "this section"}`}
+        onMouseDown={(e) => {
+          // Take the click ourselves: the browser would otherwise focus this
+          // div a moment before the editor that replaces it exists.
+          e.preventDefault();
+          open();
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          e.preventDefault();
+          open();
+        }}
+      />
+    );
+  }
+
+  // The leading caret itself, once opened: the same TemplateTextCell every other
+  // text target uses, created ALREADY ACTIVE against the virtual item id. It
+  // becomes the section's real head item on the first keystroke, at this same
+  // position, so the editor is never torn down mid-word.
+  function renderSectionLeadingCell(row, itemId) {
+    const active = richText.activeRowId === row.id && richText.activeItemId === itemId;
+    return (
+      <TemplateTextCell
+        identity={active ? richText.activeIdentity : null}
+        rowId={row.id}
+        itemId={itemId}
+        label={row.label}
+        ariaLabel={`${(row.label || "").trim() || "Section"} — text above the image`}
+        value=""
+        // No prompt here: the section's own prompt belongs to its first stored
+        // text item, and duplicating it would read as two empty answers.
+        placeholder=""
+        active={active}
+        focusOnActivate
+        reloadToken={richText.reloadToken}
+        onActivate={richText.onActivate}
+        onChange={richText.onChange}
+        onRegisterEditor={richText.onRegisterEditor}
+      />
+    );
+  }
+
+  // SLOT 1 of the answer area (see renderRowBlock): whatever can hold the one
+  // live editor.
+  function renderAnswerSlot(row, sectionHeadItem) {
+    if (!sectionHeadItem) return showRightEditor && renderAnswerControl(row);
+    if (sectionHeadItem.kind === SECTION_ITEM_KIND.TEXT) {
+      return renderSectionItemBody(row, sectionHeadItem, { isRowHead: true });
+    }
+    const leadingItemId = sectionLeadingItemId(row);
+    if (leadingItemId) return renderSectionLeadingCell(row, leadingItemId);
+    return renderSectionLeadingInsertionPoint(row);
+  }
+
+  // SLOT 2: the head item when it is an image or a file. It is a sibling BELOW
+  // slot 1, so text typed above it pushes it down through ordinary document
+  // flow — nothing is absolutely positioned and no height is reserved.
+  function renderHeadMediaSlot(row, sectionHeadItem) {
+    if (!sectionHeadItem || sectionHeadItem.kind === SECTION_ITEM_KIND.TEXT) {
+      return null;
+    }
+    return renderSectionItemBody(row, sectionHeadItem, { isRowHead: true });
+  }
+
+  /**
+   * The floating preview of the image being dragged.
+   *
+   * It exists so a move FEELS like moving a picture: the image follows the
+   * pointer, keeps its proportions, and is drawn translucently above the page
+   * while the insertion line shows where it would land. The original item stays
+   * exactly where it is in the document, so nothing reflows underneath the
+   * gesture, and nothing is persisted until the drop.
+   *
+   * `pointer-events: none` (in CSS) is what keeps it out of its own way:
+   * `elementFromPoint` must see the document, not the ghost.
+   */
+  function renderItemDragGhost() {
+    if (!itemDrag || !itemDrag.armed || !itemDrag.preview) return null;
+    const geo = imageDragPreviewGeometry({
+      rect: itemDrag.preview.rect,
+      grabX: itemDrag.preview.grabX,
+      grabY: itemDrag.preview.grabY,
+      clientX: itemDrag.pointerX,
+      clientY: itemDrag.pointerY,
+    });
+    if (!geo) return null;
+    return (
+      <img
+        ref={itemGhostRef}
+        className="twocol-item-ghost"
+        src={itemDrag.preview.src}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+        style={{
+          left: `${geo.left}px`,
+          top: `${geo.top}px`,
+          width: `${geo.width}px`,
+          height: `${geo.height}px`,
+        }}
+      />
+    );
+  }
+
   // The visual body of ONE ordered section item.
   //
   // A TEXT item is DIRECTLY EDITABLE wherever the contextual rich-text cell is
@@ -2102,6 +2334,11 @@ export default function ResizableTwoColTable({
 
       {/* PAGE-AWARE DOCUMENT */}
       <PagedDocument blocks={blocks} />
+
+      {/* The image currently being dragged, drawn under the pointer. Transient
+          visual state only: it exists while a gesture is armed and disappears
+          the instant it is dropped or cancelled. */}
+      {renderItemDragGhost()}
     </div>
   );
 }

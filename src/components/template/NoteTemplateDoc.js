@@ -72,6 +72,11 @@ import {
   SECTION_TEXT_DROP_OUTCOME,
   moveSectionItemIntoText,
 } from "../../lib/templateSectionTextSplit";
+import { healSectionSplitText } from "../../lib/templateSectionTextHeal";
+import {
+  sectionListWithLeadingText,
+  sectionStartsWithMedia,
+} from "../../lib/templateSectionLeadingText";
 import {
   removeSectionExtraHeight,
   setSectionExtraHeight,
@@ -80,6 +85,7 @@ import { newId } from "../../lib/id";
 import { normalizeBranding } from "../../lib/templateBranding";
 import {
   answersEqual,
+  isEmptyAnswerValue,
   serializeAnswerFromHtml,
 } from "../../lib/templateRichText";
 import {
@@ -387,6 +393,23 @@ export default function NoteTemplateDoc({
   const [materializedSection, setMaterializedSection] = useState(null);
   const materializedSectionRef = useRef(null);
   materializedSectionRef.current = materializedSection;
+
+  // THE LEADING CARET, as `{ rowId, itemId }` — the caret a user opened ABOVE a
+  // section whose first item is an image.
+  //
+  // The item does not exist yet. Clicking the insertion point writes NOTHING:
+  // this record is the whole of it, the editor is opened against the id it
+  // names, and the stored list gains that text item only when the user actually
+  // types (src/lib/templateSectionLeadingText.js). A click that types nothing
+  // therefore leaves the section exactly as it was — no blank band, no orphaned
+  // empty paragraph, and focusing a section still never produces a write.
+  //
+  // The id is minted here rather than at write time so the editor's identity is
+  // the same before and after that first keystroke: it is not torn down and
+  // rebuilt mid-word, and it keeps its focus, caret and undo history.
+  const [leadingCaret, setLeadingCaret] = useState(null);
+  const leadingCaretRef = useRef(null);
+  leadingCaretRef.current = leadingCaret;
   // The one registered editor, held as { identity, editor } so a cleanup
   // belonging to a replaced editor cannot unregister its replacement.
   const rowEditorRegistrationRef = useRef(null);
@@ -768,6 +791,23 @@ export default function NoteTemplateDoc({
     );
   }, []);
 
+  // The one text target that is allowed to have no stored item behind it: the
+  // leading caret currently open above a section's first image. It is a real
+  // editable position the user asked for, so its editor needs a real identity —
+  // but nothing is stored until they type. Every OTHER unknown item id is still
+  // no identity at all, so a late callback aimed at a removed item still
+  // refuses.
+  const isOpenLeadingCaret = useCallback((rowId, itemId) => {
+    const open = leadingCaretRef.current;
+    return !!open && !!rowId && !!itemId && open.rowId === rowId && open.itemId === itemId;
+  }, []);
+
+  const sectionTextTargetExists = useCallback(
+    (rowId, itemId) =>
+      sectionTextItemExists(rowId, itemId) || isOpenLeadingCaret(rowId, itemId),
+    [sectionTextItemExists, isOpenLeadingCaret]
+  );
+
   /**
    * The COMPLETE identity of the editor for ONE ordered section text item: the
    * row identity above plus the item. Two text items in the same section are
@@ -784,10 +824,10 @@ export default function NoteTemplateDoc({
         rowId,
         isCustomRow: customRowIds.has(rowId),
         itemId,
-        rowExists: rowIsPresent(rowId) && sectionTextItemExists(rowId, itemId),
+        rowExists: rowIsPresent(rowId) && sectionTextTargetExists(rowId, itemId),
       });
     },
-    [noteId, customRowIds, rowIsPresent, sectionTextItemExists]
+    [noteId, customRowIds, rowIsPresent, sectionTextTargetExists]
   );
 
   // Focusing a Text answer makes it the toolbar's owner; focusing anything else
@@ -803,8 +843,20 @@ export default function NoteTemplateDoc({
     setMaterializedSection(null);
   }, []);
 
+  // Abandon a leading caret. Nothing was written, so there is nothing to undo:
+  // the section returns to exactly the shape it had before it was clicked.
+  const clearLeadingCaret = useCallback(() => {
+    if (!leadingCaretRef.current) return;
+    leadingCaretRef.current = null;
+    setLeadingCaret(null);
+  }, []);
+
   const handleAnswerFocus = useCallback(
     (rowId, itemId = null) => {
+      // Moving the caret anywhere else abandons an unwritten leading caret. The
+      // leading cell's own editor never comes through here (it is created
+      // already active), so this cannot cancel the caret it just opened.
+      if (!isOpenLeadingCaret(rowId, itemId)) clearLeadingCaret();
       // Selecting the Quick Add destination — always the ROW, even when the
       // caret lands in one of its ordered section text items. Focus is NOT
       // moved anywhere by this: the caret stays exactly where the user clicked
@@ -841,6 +893,8 @@ export default function NoteTemplateDoc({
       sectionItemIdentityFor,
       rowMetaFor,
       clearMaterializedSection,
+      clearLeadingCaret,
+      isOpenLeadingCaret,
     ]
   );
 
@@ -853,11 +907,12 @@ export default function NoteTemplateDoc({
       activeSectionItemIdRef.current = null;
       setActiveSectionItemId(null);
       clearMaterializedSection();
+      clearLeadingCaret();
       setActiveTextRowId(
         nextActiveTextRow({ target: TEMPLATE_FOCUS.STRUCTURED, rowId, isTextRow: false })
       );
     },
-    [onSelectRow, rowMetaFor, clearMaterializedSection]
+    [onSelectRow, rowMetaFor, clearMaterializedSection, clearLeadingCaret]
   );
 
   // A row label is plain text and is never a rich-text target. It deliberately
@@ -867,10 +922,11 @@ export default function NoteTemplateDoc({
     activeSectionItemIdRef.current = null;
     setActiveSectionItemId(null);
     clearMaterializedSection();
+    clearLeadingCaret();
     setActiveTextRowId(
       nextActiveTextRow({ target: TEMPLATE_FOCUS.LABEL, rowId: null, isTextRow: false })
     );
-  }, [clearMaterializedSection]);
+  }, [clearMaterializedSection, clearLeadingCaret]);
 
   /**
    * The identity of the editor that should exist right now — recomputed from
@@ -895,11 +951,19 @@ export default function NoteTemplateDoc({
         isCustom || (rows || []).some((r) => r && r.id === activeTextRowId);
       const itemPresent =
         rowPresent &&
-        sectionItemsForRow(sectionContent, activeTextRowId).some(
+        (sectionItemsForRow(sectionContent, activeTextRowId).some(
           (item) =>
             item.kind === SECTION_ITEM_KIND.TEXT &&
             item.id === activeSectionItemId
-        );
+        ) ||
+          // The leading caret is a real editable position with no stored item
+          // behind it YET — see the leadingCaret record. Every other unknown
+          // item id still resolves to no identity at all.
+          !!(
+            leadingCaret &&
+            leadingCaret.rowId === activeTextRowId &&
+            leadingCaret.itemId === activeSectionItemId
+          ));
       return resolveActiveRowIdentity({
         noteId,
         templateId: instance?.templateId ?? null,
@@ -929,6 +993,7 @@ export default function NoteTemplateDoc({
     noteId,
     activeTextRowId,
     activeSectionItemId,
+    leadingCaret,
     sectionContent,
     customRowIds,
     rows,
@@ -963,8 +1028,9 @@ export default function NoteTemplateDoc({
       activeSectionItemIdRef.current = null;
       setActiveSectionItemId(null);
       clearMaterializedSection();
+      clearLeadingCaret();
     }
-  }, [activeTextRowId, activeRowIdentity, clearMaterializedSection]);
+  }, [activeTextRowId, activeRowIdentity, clearMaterializedSection, clearLeadingCaret]);
 
   /* ------------------------- per-field error surface ---------------------- */
 
@@ -1023,6 +1089,138 @@ export default function NoteTemplateDoc({
     return Array.isArray(list) ? list : [];
   }, []);
 
+  /* ---------------- typing ABOVE a section's first image ------------------- */
+
+  /**
+   * OPEN A LEADING CARET above a section's first image — the Word-like "click
+   * at the top of the content area and start typing".
+   *
+   * It writes NOTHING. The id is minted here so the editor keeps one identity
+   * across the first keystroke (which is what actually creates the item), and
+   * the row becomes the Quick Add destination exactly as clicking any other
+   * text in it would.
+   *
+   * Refused when the section does not begin with an image or a file: a section
+   * whose first item is already text needs no leading caret, and offering one
+   * would put a second empty paragraph above the user's own.
+   */
+  const openSectionLeadingText = useCallback(
+    (rowId) => {
+      if (!rowId || !rowIsPresent(rowId)) return;
+      if (!sectionStartsWithMedia(rawSectionItems(rowId))) return;
+
+      const itemId = newId();
+      const record = { rowId, itemId };
+      leadingCaretRef.current = record;
+      setLeadingCaret(record);
+
+      if (onSelectRow) onSelectRow(rowId, rowMetaFor(rowId));
+      clearMaterializedSection();
+      activeSectionItemIdRef.current = itemId;
+      setActiveSectionItemId(itemId);
+      setActiveTextRowId(rowId);
+    },
+    [rowIsPresent, rawSectionItems, onSelectRow, rowMetaFor, clearMaterializedSection]
+  );
+
+  /**
+   * FORGET the transient state that belonged to section text items that have
+   * just ceased to exist — because they were removed, or because a heal merged
+   * a continuation back into the fragment it came from.
+   *
+   * Three kinds of state, and each is dropped for the same reason: it names an
+   * identity that is gone.
+   *
+   *   - a MATERIALISING session pointing at the item. It is dropped, never
+   *     re-pointed at a neighbour.
+   *   - the EDITOR, when it was open on that item. Clearing the active item is
+   *     enough: the identity effect above then resolves to none, and a late
+   *     callback from that editor is refused rather than redirected.
+   *   - the item's Refine BACKUP and its Refine STATUS. A Revert must not be
+   *     offered for text that is no longer a target of its own.
+   *
+   * What is deliberately NOT done: a pending Refine RESULT for a removed item is
+   * not redirected anywhere. It goes on refusing on arrival (the apply gate
+   * re-checks that the item still exists), which is the only safe answer — the
+   * surviving item is different text and never asked for it.
+   */
+  const forgetRemovedSectionItems = useCallback(
+    (rowId, removedItemIds) => {
+      const ids = (Array.isArray(removedItemIds) ? removedItemIds : []).filter(Boolean);
+      if (!rowId || !ids.length) return;
+
+      const materializing = materializedSectionRef.current;
+      if (
+        materializing &&
+        materializing.rowId === rowId &&
+        ids.includes(materializing.itemId)
+      ) {
+        clearMaterializedSection();
+      }
+
+      const leading = leadingCaretRef.current;
+      if (leading && leading.rowId === rowId && ids.includes(leading.itemId)) {
+        clearLeadingCaret();
+      }
+
+      if (
+        activeTextRowIdRef.current === rowId &&
+        ids.includes(activeSectionItemIdRef.current)
+      ) {
+        activeSectionItemIdRef.current = null;
+        setActiveSectionItemId(null);
+      }
+
+      const currentNoteId = instanceRef.current?.noteId;
+      for (const itemId of ids) {
+        const targetKey = rowRefineTargetKey({ rowId, itemId });
+        if (!targetKey) continue;
+        setRowRefineStatus((prev) => clearRowRefineStatus(prev, targetKey));
+        if (currentNoteId && onClearRowRefineBackup) {
+          onClearRowRefineBackup(currentNoteId, targetKey);
+        }
+      }
+    },
+    [clearMaterializedSection, clearLeadingCaret, onClearRowRefineBackup]
+  );
+
+  /**
+   * Persist one row's ordered content, HEALING any split whose image has just
+   * gone away.
+   *
+   * This is the persistence path for the three writes that can change which
+   * items are ADJACENT: moving an item beside another, dropping one inside a
+   * paragraph, and removing one. When the image that was sitting between the two
+   * halves of a split paragraph leaves, those halves become neighbours again and
+   * must become ONE text item — otherwise the user is left with an invisible
+   * line they cannot type across (src/lib/templateSectionTextHeal.js).
+   *
+   * Only fragments of one split ever merge: the heal is driven by the split
+   * provenance the splitter wrote, so two independently captured text items that
+   * merely end up adjacent are never joined.
+   *
+   * It is deliberately a SEPARATE function rather than a change to
+   * `persistSectionContent`: typing, appending and resizing cannot change
+   * adjacency, and their writes must go on storing exactly what they computed.
+   *
+   * Still exactly ONE confirmed save, and it still THROWS on failure — the
+   * writers depend on that to report SAVE_FAILED and leave the old list
+   * authoritative.
+   */
+  const persistSectionContentHealed = useCallback(
+    (rowId, items) => {
+      const healed = healSectionSplitText(items);
+      persistSectionContent(rowId, healed ? healed.items : items);
+      if (!healed) return;
+      // The surviving fragment's stored text has just changed underneath any
+      // editor open on it, so that editor is rebuilt from what was written —
+      // the same programmatic-replacement mechanism a split itself uses.
+      forgetRemovedSectionItems(rowId, healed.removedItemIds);
+      setRowEditorToken((t) => t + 1);
+    },
+    [persistSectionContent, forgetRemovedSectionItems]
+  );
+
   /* ------------------- Quick Add composition into a section ---------------- */
 
   /**
@@ -1074,17 +1272,9 @@ export default function NoteTemplateDoc({
         return;
       }
 
-      const current = materializedSectionRef.current;
-      if (
-        removedItemId &&
-        current &&
-        current.rowId === rowId &&
-        current.itemId === removedItemId
-      ) {
-        clearMaterializedSection();
-      }
+      if (removedItemId) forgetRemovedSectionItems(rowId, [removedItemId]);
     },
-    [clearMaterializedSection]
+    [forgetRemovedSectionItems]
   );
 
   /**
@@ -1277,7 +1467,9 @@ export default function NoteTemplateDoc({
         itemId,
         deps: {
           readSectionList: rawSectionItems,
-          persist: persistSectionContent,
+          // Removing the image that was sitting inside a paragraph puts that
+          // paragraph's two halves back together — see the healed writer.
+          persist: persistSectionContentHealed,
           canDeleteAsset: canDeleteAttachmentAsset,
           deleteAsset,
           onStructuralChange: handleSectionStructuralChange,
@@ -1300,7 +1492,7 @@ export default function NoteTemplateDoc({
     },
     [
       rawSectionItems,
-      persistSectionContent,
+      persistSectionContentHealed,
       canDeleteAttachmentAsset,
       handleSectionStructuralChange,
       clearFieldError,
@@ -1393,7 +1585,9 @@ export default function NoteTemplateDoc({
         placement,
         deps: {
           readSectionList: rawSectionItems,
-          persist: persistSectionContent,
+          // Moving the image out from between two halves of one paragraph makes
+          // them neighbours again, and they must become one text item.
+          persist: persistSectionContentHealed,
         },
       });
       if (result.outcome === SECTION_REORDER_OUTCOME.SAVE_FAILED) {
@@ -1408,7 +1602,7 @@ export default function NoteTemplateDoc({
       }
       return result;
     },
-    [rawSectionItems, persistSectionContent, setFieldError, clearFieldError]
+    [rawSectionItems, persistSectionContentHealed, setFieldError, clearFieldError]
   );
 
   /**
@@ -1446,7 +1640,11 @@ export default function NoteTemplateDoc({
         point,
         deps: {
           readSectionList: rawSectionItems,
-          persist: persistSectionContent,
+          // Moving the image AWAY from an earlier split — into a different
+          // paragraph — heals the paragraph it is leaving. The split it is
+          // making right now is not healed: its halves are not adjacent, the
+          // image is between them.
+          persist: persistSectionContentHealed,
           newId,
           onStructuralChange: handleSectionStructuralChange,
         },
@@ -1466,7 +1664,7 @@ export default function NoteTemplateDoc({
     },
     [
       rawSectionItems,
-      persistSectionContent,
+      persistSectionContentHealed,
       handleSectionStructuralChange,
       setFieldError,
       clearFieldError,
@@ -1515,6 +1713,38 @@ export default function NoteTemplateDoc({
       const itemId =
         activeSectionItemIdRef.current ||
         (materialized && materialized.rowId === rowId ? materialized.itemId : null);
+
+      /* 0 — the LEADING CARET above a section's first image, on its first real
+             keystroke. Nothing was stored for it until now; this is the write
+             that creates it, at the FRONT of the section. The editor keeps the
+             identity it was opened with, so it is not torn down mid-word, and
+             every later keystroke takes route 1 like any other text item.
+
+             An empty change writes nothing at all: a caret that was opened and
+             abandoned leaves the section exactly as it was — no blank band and
+             no orphaned empty paragraph. */
+      const leading = leadingCaretRef.current;
+      if (leading && leading.rowId === rowId && leading.itemId === itemId) {
+        if (isEmptyAnswerValue(next)) return;
+        const items = sectionListWithLeadingText({
+          items: rawSectionItems(rowId),
+          itemId,
+          value: next,
+        });
+        if (!items) return;
+        try {
+          persistSectionContent(rowId, items);
+          clearFieldError(rowId);
+        } catch (err) {
+          setFieldError(
+            rowId,
+            `This section's text could not be saved (${err?.message || err}). The last change was not kept.`
+          );
+          return;
+        }
+        clearLeadingCaret();
+        return;
+      }
 
       /* 1 — an existing ordered section text item. */
       if (itemId) {
@@ -1589,6 +1819,7 @@ export default function NoteTemplateDoc({
       persistSectionContent,
       clearFieldError,
       setFieldError,
+      clearLeadingCaret,
     ]
   );
 
@@ -2757,6 +2988,11 @@ export default function NoteTemplateDoc({
           // the Quick Add destination stays the ROW.
           activeItemId: activeRowIdentity ? activeSectionItemKey : null,
           activeIdentity: activeRowIdentity,
+          // The leading caret currently open above a section's first image, if
+          // any. It is a VIRTUAL text item: nothing with this id is stored
+          // until the user types into it.
+          leadingRowId: leadingCaret ? leadingCaret.rowId : null,
+          leadingItemId: leadingCaret ? leadingCaret.itemId : null,
           reloadToken: rowEditorToken,
           onActivate: handleAnswerFocus,
           onChange: handleRowEditorChange,
@@ -2787,6 +3023,9 @@ export default function NoteTemplateDoc({
         onReorderSectionItem={reorderSectionContentItem}
         onDropSectionItemIntoText={dropSectionItemIntoText}
         onResizeSectionPhoto={resizeSectionPhoto}
+        // Typing ABOVE a section whose first item is an image. Opening the caret
+        // writes nothing; the text item is created by the first keystroke.
+        onOpenSectionLeadingText={openSectionLeadingText}
         sectionExtraHeight={displaySectionExtraHeight}
         onSectionExtraHeightChange={handleSectionExtraHeightChange}
         onSectionExtraHeightCommit={handleSectionExtraHeightCommit}

@@ -562,7 +562,7 @@ describe("20–21. persistence and abandonment", () => {
 
 describe("22–26. the surrounding gestures and data are untouched", () => {
   test("22. the image BODY still starts a move", () => {
-    expect(photo).toMatch(/onMouseDown=\{onMoveStart \? handleImageMouseDown : undefined\}/);
+    expect(photo).toMatch(/onPointerDown=\{onMoveStart \? handleImagePointerDown : undefined\}/);
     expect(photo).toMatch(/isImageMoveSurface\(\{ rect, clientX: e\.clientX, clientY: e\.clientY \}\)/);
     expect(photo).toMatch(/onMoveStart\(e\)/);
   });

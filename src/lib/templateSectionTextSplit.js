@@ -51,6 +51,15 @@
 //   - the AFTER half is genuinely new content in a new position, so a new id is
 //     the honest description of it.
 //
+// The AFTER half also records WHERE IT CAME FROM — `continuesFrom: { itemId,
+// join }` naming the BEFORE half (src/lib/templateSectionContent.js). That one
+// field is what makes the split reversible: if the image between them is later
+// removed or moved somewhere else, the two halves are recognised as fragments
+// of ONE paragraph and heal back into it
+// (src/lib/templateSectionTextHeal.js). Nothing else in the product writes it,
+// so two separately captured text items that merely end up adjacent are never
+// merged.
+//
 // The moving image is carried by REFERENCE. Its item id, `assetId`, `display`,
 // name, MIME type, size, intrinsic dimensions, creation time and any property
 // this version does not know about are untouched, and no asset is created,
@@ -98,7 +107,11 @@ import {
   modelToHtml,
   modelToPlainString,
 } from "./templateRichText";
-import { SECTION_ITEM_KIND, normalizeSectionItem } from "./templateSectionContent";
+import {
+  SECTION_ITEM_KIND,
+  SECTION_TEXT_JOIN,
+  normalizeSectionItem,
+} from "./templateSectionContent";
 import { visibleSectionEntries } from "./templateSectionReorder";
 import { ANSWER_POINT_KIND } from "./templateSectionTextPoint";
 
@@ -174,9 +187,20 @@ export function splitInlineContent(content, offset) {
 /**
  * A normalized block model cut into two, at a resolved point.
  *
- * Returns null for a point that does not describe a position in this model —
- * an out-of-range block, or a kind that does not match the block there. A
- * caller must then write nothing rather than cut somewhere approximate.
+ * Returns `{ before, after, join }`, or null for a point that does not describe
+ * a position in this model — an out-of-range block, or a kind that does not
+ * match the block there. A caller must then write nothing rather than cut
+ * somewhere approximate.
+ *
+ * `join` records WHAT WAS CUT, which is the only thing that can tell a later
+ * heal how to put the halves back:
+ *
+ *   INLINE  the cut fell inside a paragraph's own inline content, so content
+ *           survived on both sides of it. The paragraph must come back as ONE
+ *           paragraph.
+ *   BLOCK   the cut fell at a real block boundary — between two paragraphs, at
+ *           the edge of one, or between two list items. That boundary is the
+ *           user's own and must survive a heal.
  */
 export function splitAnswerModel(model, point) {
   const blocks = Array.isArray(model) ? model : [];
@@ -201,6 +225,9 @@ export function splitAnswerModel(model, point) {
         ...(at < items.length ? [{ type: block.type, items: items.slice(at) }] : []),
         ...blocks.slice(blockIndex + 1),
       ],
+      // A list is always cut at an ITEM boundary (§12.4), never mid-clause, so
+      // there is never an inline join to restore.
+      join: SECTION_TEXT_JOIN.BLOCK,
     };
   }
 
@@ -227,12 +254,18 @@ export function splitAnswerModel(model, point) {
   // downward past it.
   const emptyBefore = before.length === 0;
   const emptyAfter = after.length === 0;
+  // The cut is INLINE only when the paragraph genuinely carried content on both
+  // sides of it. An empty side means the pointer landed at the paragraph's own
+  // edge, which is a real block boundary and must stay one.
+  const join =
+    emptyBefore || emptyAfter ? SECTION_TEXT_JOIN.BLOCK : SECTION_TEXT_JOIN.INLINE;
   if (emptyBefore && emptyAfter) {
-    return { before: beforeBlocks, after: [afterParagraph, ...afterBlocks] };
+    return { before: beforeBlocks, after: [afterParagraph, ...afterBlocks], join };
   }
   return {
     before: emptyBefore ? beforeBlocks : [...beforeBlocks, beforeParagraph],
     after: emptyAfter ? afterBlocks : [afterParagraph, ...afterBlocks],
+    join,
   };
 }
 
@@ -246,6 +279,7 @@ export function splitAnswerValue(value, point) {
   return {
     before: modelToAnswerValue(halves.before),
     after: modelToAnswerValue(halves.after),
+    join: halves.join,
   };
 }
 
@@ -312,10 +346,22 @@ export function splitSectionTextForItem({
     if (visible.some((entry) => entry.id === newItemId)) return null;
     mintedId = newItemId;
     replacement = [
-      // The ORIGINAL id stays with the text BEFORE the image.
+      // The ORIGINAL id stays with the text BEFORE the image. Its own
+      // provenance — if it is itself the continuation of an earlier split — is
+      // carried through untouched: it still continues whatever it continued.
       { ...target.entry, kind: SECTION_ITEM_KIND.TEXT, value: halves.before },
       source.entry,
-      { id: newItemId, kind: SECTION_ITEM_KIND.TEXT, value: halves.after },
+      {
+        id: newItemId,
+        kind: SECTION_ITEM_KIND.TEXT,
+        value: halves.after,
+        // THE SPLIT PROVENANCE. This half exists only because an image was put
+        // inside one paragraph; if that image is later removed or moved away
+        // and the two halves become adjacent again, this is what lets them heal
+        // back into the single text item they came from — and what stops any
+        // OTHER pair of adjacent text items from being merged.
+        continuesFrom: { itemId: target.id, join: halves.join },
+      },
     ];
   }
 
@@ -343,6 +389,44 @@ export function splitSectionTextForItem({
   }
 
   return { items: next, newTextItemId: mintedId };
+}
+
+// A placeholder id for the probe below. It is never written anywhere: the probe
+// only asks WHETHER a split would change the order, and throws the result away.
+// A collision with a real id simply makes the probe answer "no", which is the
+// safe direction — the caller then offers a before/after placement instead.
+const DROP_PROBE_ITEM_ID = "__section-text-drop-probe__";
+
+/**
+ * WOULD dropping the moving item at this position in this text item actually
+ * change the section's order?
+ *
+ * A caret position is not automatically a destination. Dropping at the very
+ * START of the text item that already sits immediately BELOW the image — or at
+ * the very END of the one immediately ABOVE it — resolves to "put the image
+ * beside this item", which is exactly where it already is. `splitSectionTextForItem`
+ * correctly refuses to write for those, so offering them as destinations gives
+ * the user an insertion line, a drop, and no movement.
+ *
+ * The question is answered by RUNNING the real rule rather than by restating its
+ * edge cases here, so the destination the gesture offers and the write that
+ * follows can never disagree about what would happen.
+ */
+export function sectionTextDropChangesOrder({
+  items,
+  movingItemId,
+  targetItemId,
+  point,
+} = {}) {
+  return (
+    splitSectionTextForItem({
+      items,
+      movingItemId,
+      targetItemId,
+      point,
+      newItemId: DROP_PROBE_ITEM_ID,
+    }) !== null
+  );
 }
 
 const refused = (error) => ({
