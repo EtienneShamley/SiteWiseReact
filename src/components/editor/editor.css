@@ -255,11 +255,63 @@
   background: #111827;
 }
 
-/* Resizing and removing are editing affordances; the resulting size is
-   document content. Nothing of the chrome reaches paper. */
+/* A body drag in flight. The source image keeps its layout position (nothing
+   underneath may move while aiming) but fades, so the floating ghost reads as
+   the image in hand rather than a second copy. */
+.note-editor .nw-media--dragging {
+  opacity: 0.4;
+}
+
+/* While an image is in hand (class set by the drop-indicator plugin on the
+   editor root), a drag across the page must not sweep a text selection under
+   it, and the cursor says "carrying". */
+.note-editor.nw-media-drag-active {
+  user-select: none;
+  cursor: grabbing;
+}
+.note-editor.nw-media-drag-active * {
+  cursor: grabbing;
+}
+
+/* The floating drag preview (appended to document.body — see
+   src/lib/editorMediaDragGhost.js, which sets the load-bearing styles inline:
+   fixed positioning, size, pointer-events: none). Cosmetics only here. */
+.nw-media-drag-ghost {
+  opacity: 0.85;
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+/* The insertion indicator: a zero-height widget decoration anchored at the
+   candidate ProseMirror position, with the visible line drawn absolutely —
+   showing it can never alter layout or intercept a pointer. */
+.note-editor .nw-media-drop-indicator {
+  position: relative;
+  height: 0;
+  pointer-events: none;
+}
+.note-editor .nw-media-drop-indicator__line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -2px;
+  height: 3px;
+  border-radius: 2px;
+  background: #3b82f6;
+}
+.dark .note-editor .nw-media-drop-indicator__line {
+  background: #60a5fa;
+}
+
+/* Resizing, removing and dragging are editing affordances; the resulting
+   size and position are document content. Nothing of the chrome — controls,
+   handles, ghost or insertion indicator — reaches paper. */
 @media print {
   .note-editor .nw-media-controls,
-  .note-editor .nw-media-corner {
+  .note-editor .nw-media-corner,
+  .note-editor .nw-media-drop-indicator,
+  .nw-media-drag-ghost {
     display: none !important;
   }
 }

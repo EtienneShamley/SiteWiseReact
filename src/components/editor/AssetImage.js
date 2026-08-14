@@ -9,8 +9,9 @@
 //     of carrying its own bytes;
 //   - every supported image — asset-backed, legacy base64, remote — is one
 //     directly manipulable NoteWise image object: click to select, four corner
-//     handles for proportional resize, Alt/Option+←/→ keyboard resize, and an
-//     explicit Remove control.
+//     handles for proportional resize, Alt/Option+←/→ keyboard resize, an
+//     explicit Remove control, and a pointer-owned BODY DRAG that moves the
+//     block image to a real ProseMirror document position (Phase C2).
 //
 // This file is shared editor infrastructure (docs/PROJECT_DECISIONS.md →
 // "Shared NoteWise Editor Core"): nothing in it is Free-form-specific, and the
@@ -39,7 +40,13 @@
 //   - four corner resize handles (shared arithmetic, live preview only, ONE
 //     transaction on release — see editorMediaResizeGesture.js);
 //   - a Remove control (deleteNode — the same transaction Backspace/Delete on
-//     a selected node dispatches through the editor's own keymap).
+//     a selected node dispatches through the editor's own keymap);
+//   - body drag (shared gesture over the shared session; ghost + insertion
+//     indicator while moving, ONE moveMediaNode transaction on drop, zero on
+//     cancel — see editorMediaDragGesture.js / editorMediaDrag.js). The
+//     node spec is `draggable: false` and every native dragstart inside the
+//     view is prevented, so the browser's HTML5 node drag — the old,
+//     inconsistent move path — cannot compete with this gesture.
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Image from "@tiptap/extension-image";
 import { mergeAttributes } from "@tiptap/core";
@@ -66,9 +73,22 @@ import {
 } from "../../lib/editorMediaResize";
 import { beginMediaResizeGesture } from "../../lib/editorMediaResizeGesture";
 import {
+  moveMediaNode,
+  resolveMediaDragDestination,
+} from "../../lib/editorMediaDrag";
+import {
+  beginMediaBodyDragGesture,
+  suppressMediaGestureTrailingClick,
+} from "../../lib/editorMediaDragGesture";
+import { createMediaDragGhost } from "../../lib/editorMediaDragGhost";
+import {
   nudgeSelectedMediaWidth,
   updateMediaAttrs,
 } from "../../lib/editorCommands";
+import {
+  createMediaDropIndicatorPlugin,
+  setMediaDragState,
+} from "./mediaDropIndicatorPlugin";
 
 /** An element's content-box width in px, or null when it cannot be measured. */
 function contentBoxWidth(el) {
@@ -110,8 +130,10 @@ function nodeViewWrapperOf(dom) {
   return dom;
 }
 
-// A press on a handle or a control must never become a node drag — the
-// wrapper is draggable (that is the existing move behaviour, untouched here).
+// No native HTML5 drag may start anywhere inside this node view — an <img> is
+// natively draggable by default, and image movement is the pointer-owned body
+// drag below. Two drag systems competing for one gesture was exactly the
+// inconsistency C2 replaces.
 const stopDrag = (e) => {
   e.preventDefault();
   e.stopPropagation();
@@ -129,13 +151,23 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
   // back to the persisted attribute.
   const [previewPct, setPreviewPct] = useState(null);
   const [resizing, setResizing] = useState(false);
+  // An ARMED body drag: the source stays in place but fades, so the ghost
+  // reads as the image in hand rather than a second copy.
+  const [draggingBody, setDraggingBody] = useState(false);
   const wrapperRef = useRef(null);
   const gestureRef = useRef(null);
+  const bodyDragRef = useRef(null);
+  // Cancels an armed trailing-click suppression on unmount; it otherwise
+  // resolves itself on the very next click or pointerdown.
+  const suppressClickRef = useRef(null);
 
-  // Unmount abandons an in-flight gesture uncommitted.
+  // Unmount abandons an in-flight gesture uncommitted. Ending the body drag
+  // runs its settle path, which destroys the ghost and clears the indicator.
   useEffect(
     () => () => {
       if (gestureRef.current) gestureRef.current.end();
+      if (bodyDragRef.current) bodyDragRef.current.end();
+      if (suppressClickRef.current) suppressClickRef.current();
     },
     []
   );
@@ -172,7 +204,9 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
       if (!editable) return;
       if (typeof event.button === "number" && event.button !== 0) return;
       if (event.isPrimary === false) return;
-      if (gestureRef.current) return;
+      // One gesture at a time — a body drag in flight (a second pointer,
+      // for instance) must not mint a competing resize.
+      if (gestureRef.current || bodyDragRef.current) return;
 
       const wrapper = wrapperRef.current;
       const container =
@@ -213,6 +247,125 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
     [editable, editor, storedPct]
   );
 
+  /**
+   * One press on the image BODY begins one candidate move, synchronously — no
+   * preventDefault at pointerdown, because below the ~4px threshold this press
+   * is an ordinary click and ProseMirror's own selection must keep working.
+   * Crossing the threshold arms the drag: ghost + insertion indicator +
+   * trailing-click suppression. Movement only ever previews (ghost position,
+   * candidate destination via the shared resolver — real posAtCoords document
+   * positions); release commits through moveMediaNode exactly once, and every
+   * abandoning exit (Escape, pointercancel, stale gesture, unmount) commits
+   * nothing and tears the presentation down through the one settle path.
+   *
+   * The corner handles and the Remove control are separate elements whose own
+   * handlers never reach this one, so resize and Remove can never begin a move.
+   */
+  const beginBodyDrag = useCallback(
+    (event) => {
+      if (!editable) return;
+      if (typeof event.button === "number" && event.button !== 0) return;
+      if (event.isPrimary === false) return;
+      // One gesture at a time — a resize in flight, or a second pointer
+      // pressing mid-drag, cannot mint a competing session.
+      if (gestureRef.current || bodyDragRef.current) return;
+
+      const view = editor && editor.view;
+      if (!view) return;
+
+      // WHAT THE GHOST WILL SHOW, captured now, synchronously, while the event
+      // is still being dispatched: the rendered src and the image's box on the
+      // page. A source that cannot be read simply produces no ghost; the move
+      // itself still works.
+      const img = event.currentTarget;
+      const box =
+        img && typeof img.getBoundingClientRect === "function"
+          ? img.getBoundingClientRect()
+          : null;
+      const runtime = {
+        src: (img && (img.currentSrc || img.src)) || null,
+        rect: box
+          ? { left: box.left, top: box.top, width: box.width, height: box.height }
+          : null,
+        grabX: event.clientX,
+        grabY: event.clientY,
+        ownerDoc: img && img.ownerDocument ? img.ownerDocument : null,
+        ghost: null,
+        lastPos: null,
+      };
+
+      const srcPosOf = () => {
+        if (typeof getPos !== "function") return null;
+        const pos = getPos();
+        return typeof pos === "number" ? pos : null;
+      };
+
+      const gesture = beginMediaBodyDragGesture({
+        win: window,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        onArm: () => {
+          // The drag genuinely moved, so the click its release will generate
+          // is not something the user asked for — consume exactly that one.
+          suppressClickRef.current = suppressMediaGestureTrailingClick({
+            win: window,
+          });
+          runtime.ghost = createMediaDragGhost({
+            doc: runtime.ownerDoc,
+            src: runtime.src,
+            rect: runtime.rect,
+            grabX: runtime.grabX,
+            grabY: runtime.grabY,
+          });
+          setMediaDragState(view, { active: true, pos: null });
+          setDraggingBody(true);
+        },
+        onDragMove: (e) => {
+          if (runtime.ghost) runtime.ghost.moveTo(e.clientX, e.clientY);
+          const from = srcPosOf();
+          const dest =
+            from === null
+              ? null
+              : resolveMediaDragDestination(view, {
+                  x: e.clientX,
+                  y: e.clientY,
+                  srcPos: from,
+                });
+          const pos = dest ? dest.pos : null;
+          if (pos !== runtime.lastPos) {
+            runtime.lastPos = pos;
+            setMediaDragState(view, { active: true, pos });
+          }
+        },
+        onDrop: (e) => {
+          const from = srcPosOf();
+          if (from === null) return;
+          const dest = resolveMediaDragDestination(view, {
+            x: e.clientX,
+            y: e.clientY,
+            srcPos: from,
+          });
+          if (dest) moveMediaNode(view, { from, to: dest.pos });
+        },
+        onSettle: ({ armed }) => {
+          bodyDragRef.current = null;
+          if (runtime.ghost) {
+            runtime.ghost.destroy();
+            runtime.ghost = null;
+          }
+          if (armed) {
+            setMediaDragState(view, { active: false, pos: null });
+            setDraggingBody(false);
+          }
+        },
+      });
+      if (!gesture) return;
+      bodyDragRef.current = gesture;
+    },
+    [editable, editor, getPos]
+  );
+
   const label = alt || "Image";
   const dimensionProps = {};
   if (Number(width) > 0) dimensionProps.width = Math.round(Number(width));
@@ -234,7 +387,10 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
           src={url}
           alt={label}
           title={title || undefined}
+          draggable={false}
           onClick={selectSelf}
+          onPointerDown={beginBodyDrag}
+          onDragStart={stopDrag}
           {...dimensionProps}
         />
       );
@@ -257,7 +413,10 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
         src={src}
         alt={label}
         title={title || undefined}
+        draggable={false}
         onClick={selectSelf}
+        onPointerDown={beginBodyDrag}
+        onDragStart={stopDrag}
         {...dimensionProps}
       />
     );
@@ -283,6 +442,7 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
     effectivePct !== null ? `${MEDIA_CLASS}--sized` : "",
     showChrome ? `${MEDIA_CLASS}--selected` : "",
     resizing ? `${MEDIA_CLASS}--resizing` : "",
+    draggingBody ? `${MEDIA_CLASS}--dragging` : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -293,7 +453,7 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
       as="div"
       className={classNames}
       style={mediaWidthStyle(effectivePct) || undefined}
-      data-drag-handle
+      onDragStart={stopDrag}
     >
       {body}
 
@@ -334,6 +494,12 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
 }
 
 export const AssetImage = Image.extend({
+  // The stock Image node is `draggable: true`, which handed image movement to
+  // the browser's HTML5 drag-and-drop — the old, inconsistent vertical moves.
+  // Movement is now the pointer-owned body drag in the NodeView above, so the
+  // native path is switched off at the schema; exactly one drag system exists.
+  draggable: false,
+
   // Legacy notes hold data: images; refusing to parse them would delete them.
   addOptions() {
     return {
@@ -448,6 +614,12 @@ export const AssetImage = Image.extend({
 
   addNodeView() {
     return ReactNodeViewRenderer(AssetImageView);
+  },
+
+  addProseMirrorPlugins() {
+    // The body-drag insertion indicator travels WITH the node: every surface
+    // that installs AssetImage gets it, with no per-surface wiring.
+    return [createMediaDropIndicatorPlugin()];
   },
 });
 

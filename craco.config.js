@@ -5,17 +5,19 @@ module.exports = {
   // Test-only resolution. `@tiptap/pm/*` is an alias package whose published
   // entry points are TypeScript sources resolved through the "exports" field;
   // webpack handles that, Jest's CommonJS resolver does not and fails on the
-  // raw `export *`. Mapping the four ProseMirror sub-paths the app actually
-  // imports onto the underlying packages (which ship a CJS build) lets the
-  // Free-form page-spacer plugin be tested against a REAL ProseMirror schema,
-  // document and DecorationSet instead of source-text assertions. This affects
-  // the test runner only — no production build, dependency or import changes.
+  // raw `export *`. Mapping the ProseMirror sub-paths the app and its tests
+  // actually import onto the underlying packages (which ship a CJS build)
+  // lets the Free-form page-spacer plugin, the media drop-indicator plugin
+  // and the media move transaction be tested against a REAL ProseMirror
+  // schema, document, DecorationSet and history instead of source-text
+  // assertions. This affects the test runner only — no production build,
+  // dependency or import changes.
   jest: {
     configure: (config) => ({
       ...config,
       moduleNameMapper: {
         ...(config.moduleNameMapper || {}),
-        "^@tiptap/pm/(model|state|view|transform)$": "prosemirror-$1",
+        "^@tiptap/pm/(model|state|view|transform|history)$": "prosemirror-$1",
       },
     }),
   },

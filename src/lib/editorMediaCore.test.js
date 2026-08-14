@@ -30,6 +30,9 @@ const CORE_LIB_FILES = [
   "lib/editorMediaResize.js",
   "lib/editorMediaResizeSession.js",
   "lib/editorMediaResizeGesture.js",
+  "lib/editorMediaDrag.js",
+  "lib/editorMediaDragGesture.js",
+  "lib/editorMediaDragGhost.js",
   "lib/editorImageAssets.js",
   "lib/editorCommands.js",
 ];
@@ -39,6 +42,9 @@ const CORE_LIB = Object.fromEntries(
 
 const ASSET_IMAGE = withoutComments(read("components/editor/AssetImage.js"));
 const MAIN_AREA = withoutComments(read("components/MainArea.js"));
+const DROP_INDICATOR_PLUGIN = withoutComments(
+  read("components/editor/mediaDropIndicatorPlugin.js")
+);
 
 /* ========================= Surface-agnostic core ========================= */
 
@@ -50,17 +56,29 @@ describe("the shared media core is surface-agnostic", () => {
     }
   });
 
-  test("the new core modules import no Template code at all — except the sanctioned resize wrap", () => {
-    // editorMediaResize deliberately WRAPS the proven arithmetic where it
-    // still lives (consolidation is Phase G); nothing else may reach into a
-    // template-named module.
+  test("the new core modules import no Template code at all — except the sanctioned wraps", () => {
+    // Three modules deliberately WRAP proven rules where they still live
+    // (consolidation is Phase G); nothing else may reach into a
+    // template-named module, and the sanctioned three may reach ONLY the
+    // modules they wrap.
     expect(CORE_LIB["lib/editorMediaResize.js"]).toMatch(/from "\.\/templateSectionImageResize"/);
-    for (const file of [
-      "lib/editorMediaLayout.js",
-      "lib/editorMediaResizeSession.js",
-      "lib/editorMediaResizeGesture.js",
-    ]) {
-      expect({ file, hit: /templateSection/.test(CORE_LIB[file]) }).toEqual({ file, hit: false });
+    expect(CORE_LIB["lib/editorMediaDrag.js"]).toMatch(/from "\.\/templateSectionImageMove"/);
+    expect(CORE_LIB["lib/editorMediaDragGesture.js"]).toMatch(/from "\.\/templateSectionImageMove"/);
+    expect(CORE_LIB["lib/editorMediaDragGesture.js"]).toMatch(
+      /from "\.\/templateSectionItemDragSession"/
+    );
+    const sanctioned = {
+      "lib/editorMediaResize.js": [/templateSectionImageResize/g],
+      "lib/editorMediaDrag.js": [/templateSectionImageMove/g],
+      "lib/editorMediaDragGesture.js": [
+        /templateSectionImageMove/g,
+        /templateSectionItemDragSession/g,
+      ],
+    };
+    for (const [file, source] of Object.entries(CORE_LIB)) {
+      let stripped = source;
+      for (const re of sanctioned[file] || []) stripped = stripped.replace(re, "");
+      expect({ file, hit: /templateSection/.test(stripped) }).toEqual({ file, hit: false });
     }
   });
 
@@ -167,6 +185,67 @@ describe("the C1 NodeView is built ON the shared core, not beside it", () => {
     // Still exactly one AssetImage registration; MainArea itself gained no
     // media-core wiring — the capability lives inside the shared node.
     expect(MAIN_AREA.match(/AssetImage/g).length).toBeGreaterThanOrEqual(1);
-    expect(MAIN_AREA).not.toMatch(/editorMediaLayout|editorMediaResize/);
+    expect(MAIN_AREA).not.toMatch(/editorMediaLayout|editorMediaResize|editorMediaDrag/);
+  });
+});
+
+/* ================ C2: body drag replaces the native node drag ============= */
+
+describe("the C2 body drag is the ONE image-move system", () => {
+  test("the native HTML5 node drag is off: draggable false, no drag handle, dragstart prevented", () => {
+    expect(ASSET_IMAGE).toMatch(/draggable: false/);
+    expect(ASSET_IMAGE).not.toMatch(/data-drag-handle/);
+    // Both rendered <img> forms refuse the browser's own image drag, and the
+    // wrapper swallows any dragstart raised inside the view.
+    expect(ASSET_IMAGE.match(/draggable=\{false\}/g).length).toBe(2);
+    expect(ASSET_IMAGE.match(/onDragStart=\{stopDrag\}/g).length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("the drag is the shared gesture over the shared session, never a private lifecycle", () => {
+    expect(ASSET_IMAGE).toMatch(/beginMediaBodyDragGesture/);
+    expect(CORE_LIB["lib/editorMediaDragGesture.js"]).toMatch(/beginMediaResizeSession/);
+    // Still no second listener system in the NodeView.
+    expect(ASSET_IMAGE).not.toMatch(/addEventListener/);
+  });
+
+  test("both rendered image forms — asset-backed and remote/legacy src — share one body-drag surface", () => {
+    expect(ASSET_IMAGE.match(/onPointerDown=\{beginBodyDrag\}/g).length).toBe(2);
+  });
+
+  test("destination and move go through the shared document rules, ghost through the shared preview", () => {
+    expect(ASSET_IMAGE).toMatch(/resolveMediaDragDestination/);
+    expect(ASSET_IMAGE).toMatch(/moveMediaNode/);
+    expect(ASSET_IMAGE).toMatch(/createMediaDragGhost/);
+    expect(ASSET_IMAGE).toMatch(/setMediaDragState/);
+    expect(ASSET_IMAGE).toMatch(/suppressMediaGestureTrailingClick/);
+  });
+
+  test("the destination is ProseMirror's own: posAtCoords + dropPoint, no external slots", () => {
+    expect(CORE_LIB["lib/editorMediaDrag.js"]).toMatch(/posAtCoords/);
+    expect(CORE_LIB["lib/editorMediaDrag.js"]).toMatch(/dropPoint/);
+  });
+
+  test("the drop-indicator plugin travels with the shared node and is itself surface-agnostic", () => {
+    expect(ASSET_IMAGE).toMatch(/createMediaDropIndicatorPlugin/);
+    expect(DROP_INDICATOR_PLUGIN).not.toMatch(/components\/template|templateSection|MainArea/);
+    expect(DROP_INDICATOR_PLUGIN).not.toMatch(
+      /localStorage|sessionStorage|indexedDB|assetStorage/
+    );
+    expect(DROP_INDICATOR_PLUGIN).not.toMatch(/from "react"|require\(["']react/);
+    // Indicator updates are meta-only: never history, never an update event.
+    expect(DROP_INDICATOR_PLUGIN).toMatch(/"addToHistory", false/);
+    expect(DROP_INDICATOR_PLUGIN).toMatch(/"preventUpdate", true/);
+  });
+
+  test("the Template surface is untouched: no Template component consumes the C2 drag modules", () => {
+    const templateDir = path.join(SRC, "components/template");
+    for (const file of fs.readdirSync(templateDir)) {
+      if (!file.endsWith(".js")) continue;
+      const source = withoutComments(read(path.join("components/template", file)));
+      expect({
+        file,
+        hit: /editorMediaDrag|mediaDropIndicatorPlugin/.test(source),
+      }).toEqual({ file, hit: false });
+    }
   });
 });
