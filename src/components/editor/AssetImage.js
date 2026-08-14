@@ -1,28 +1,46 @@
 // src/components/editor/AssetImage.js
 //
-// The Free-form note's image node. It extends the installed TipTap Image
-// extension rather than replacing it, adding exactly one capability: an image
-// may be a REFERENCE to a Blob in IndexedDB (`assetId`) instead of carrying its
-// own bytes.
+// THE SHARED NOTEWISE IMAGE NODE — extension and NodeView.
 //
-// Three things it fixes or guarantees:
+// It extends the installed TipTap Image extension rather than replacing it,
+// adding two capabilities:
+//
+//   - an image may be a REFERENCE to a Blob in IndexedDB (`assetId`) instead
+//     of carrying its own bytes;
+//   - every supported image — asset-backed, legacy base64, remote — is one
+//     directly manipulable NoteWise image object: click to select, four corner
+//     handles for proportional resize, Alt/Option+←/→ keyboard resize, and an
+//     explicit Remove control.
+//
+// This file is shared editor infrastructure (docs/PROJECT_DECISIONS.md →
+// "Shared NoteWise Editor Core"): nothing in it is Free-form-specific, and the
+// future per-Section Template editor consumes the same node and NodeView.
+//
+// Serialization and parsing guarantees are unchanged from the original node:
 //
 //  - Serialization. Every attribute renders through one pure function
 //    (editorImageAttrsToHTML), so the stored note HTML can never contain a
 //    `blob:` URL, and an asset-backed image can never contain a `src` at all.
-//    That function is unit-tested; this file only wires it up.
 //
 //  - Parsing. The stock extension parses `img[src]:not([src^="data:"])`, which
-//    silently DROPS a base64 image whenever the note HTML is re-parsed — on a
-//    note switch or a reload. Existing notes contain such images from the
-//    previous data-URL stopgap, so `allowBase64` is enabled and the parse rules
-//    below also match an <img> that has a data-asset-id and no src at all.
+//    silently DROPS a base64 image whenever the note HTML is re-parsed.
+//    Existing notes contain such images from the previous data-URL stopgap, so
+//    `allowBase64` is enabled and the parse rules below also match an <img>
+//    that has a data-asset-id and no src at all.
 //
-//  - Rendering. A NodeView resolves the asset id to an object URL through the
-//    shared hook that owns that URL's lifecycle (created on demand, revoked
-//    when the asset id changes and on unmount, never persisted). A missing
-//    asset renders readable text, never a broken-image icon.
-import React from "react";
+// NODEVIEW RESPONSIBILITIES — presentation and gesture ONLY. Every document
+// change goes through a command (`updateMediaAttrs`, `deleteNode`), each of
+// which is one ProseMirror transaction and therefore one undo step flowing
+// through the surface's own autosave. No persistence logic lives here.
+//
+//   - resolve and render the image (asset id via the shared object-URL hook;
+//     remote/legacy src directly; a missing asset renders readable text);
+//   - selection chrome while the node is ProseMirror-NodeSelected;
+//   - four corner resize handles (shared arithmetic, live preview only, ONE
+//     transaction on release — see editorMediaResizeGesture.js);
+//   - a Remove control (deleteNode — the same transaction Backspace/Delete on
+//     a selected node dispatches through the editor's own keymap).
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Image from "@tiptap/extension-image";
 import { mergeAttributes } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
@@ -35,14 +53,165 @@ import {
   editorImageAttrsToHTML,
   isPersistableImageSrc,
 } from "../../lib/editorImageAssets";
-import { MEDIA_LAYOUT_MODE } from "../../lib/editorMediaLayout";
+import {
+  MEDIA_CLASS,
+  MEDIA_LAYOUT_MODE,
+  mediaLayoutClassNames,
+  mediaWidthStyle,
+  normalizeMediaWidthPct,
+} from "../../lib/editorMediaLayout";
+import {
+  MEDIA_RESIZE_CORNERS,
+  mediaCornerResizeCursor,
+} from "../../lib/editorMediaResize";
+import { beginMediaResizeGesture } from "../../lib/editorMediaResizeGesture";
+import {
+  nudgeSelectedMediaWidth,
+  updateMediaAttrs,
+} from "../../lib/editorCommands";
 
-function AssetImageView({ node }) {
+/** An element's content-box width in px, or null when it cannot be measured. */
+function contentBoxWidth(el) {
+  if (!el || typeof el.getBoundingClientRect !== "function") return null;
+  const rect = el.getBoundingClientRect();
+  let width = rect && Number.isFinite(rect.width) ? rect.width : 0;
+  const win = el.ownerDocument && el.ownerDocument.defaultView;
+  if (win && typeof win.getComputedStyle === "function") {
+    const cs = win.getComputedStyle(el);
+    width -= (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  }
+  return width > 0 ? width : null;
+}
+
+/**
+ * The width percentage a node view wrapper currently RENDERS at, measured
+ * against the content box `widthPct` is a percentage of. This is how a legacy
+ * image — which has no stored widthPct — gets a truthful starting width for a
+ * resize, so its first gesture begins from the size the user actually sees.
+ */
+function measuredWidthPctOf(wrapperEl) {
+  if (!wrapperEl || !wrapperEl.parentElement) return null;
+  const container = contentBoxWidth(wrapperEl.parentElement);
+  if (!container) return null;
+  const rect = wrapperEl.getBoundingClientRect();
+  if (!rect || !(rect.width > 0)) return null;
+  return normalizeMediaWidthPct((rect.width / container) * 100);
+}
+
+/** The sized wrapper inside whatever DOM ProseMirror holds for the node. */
+function nodeViewWrapperOf(dom) {
+  if (!dom) return null;
+  if (typeof dom.matches === "function" && dom.matches("[data-node-view-wrapper]")) {
+    return dom;
+  }
+  if (typeof dom.querySelector === "function") {
+    return dom.querySelector("[data-node-view-wrapper]") || dom;
+  }
+  return dom;
+}
+
+// A press on a handle or a control must never become a node drag — the
+// wrapper is draggable (that is the existing move behaviour, untouched here).
+const stopDrag = (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+};
+
+function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
   const { assetId, src, alt, title, width, height } = node.attrs;
   // The hook is called unconditionally (rules of hooks) and no-ops for a
   // non-asset image, which is what keeps remote and legacy images on the same
   // component without a second renderer.
   const { url, status } = useAssetObjectUrl(assetId || null);
+
+  // The live resize preview: inline width only, NEVER the document. Null when
+  // idle, so a cancelled gesture reverts by itself — the rendered width falls
+  // back to the persisted attribute.
+  const [previewPct, setPreviewPct] = useState(null);
+  const [resizing, setResizing] = useState(false);
+  const wrapperRef = useRef(null);
+  const gestureRef = useRef(null);
+
+  // Unmount abandons an in-flight gesture uncommitted.
+  useEffect(
+    () => () => {
+      if (gestureRef.current) gestureRef.current.end();
+    },
+    []
+  );
+
+  const editable = !!(editor && editor.isEditable);
+  const storedPct = normalizeMediaWidthPct(node.attrs.widthPct);
+  const effectivePct = previewPct !== null ? previewPct : storedPct;
+
+  // Clicking the image body selects the node. ProseMirror selects a leaf node
+  // on mousedown by itself in the common case; this explicit fallback covers
+  // the placeholder states and keeps selection PM-native — it IS a
+  // NodeSelection, just dispatched deliberately.
+  const selectSelf = useCallback(() => {
+    if (!editable || selected) return;
+    if (typeof getPos !== "function") return;
+    const pos = getPos();
+    if (typeof pos !== "number") return;
+    editor.commands.setNodeSelection(pos);
+  }, [editable, selected, getPos, editor]);
+
+  const handleRemove = useCallback(() => {
+    if (typeof deleteNode === "function") deleteNode();
+  }, [deleteNode]);
+
+  /**
+   * One corner press begins one gesture, synchronously — the immutable
+   * geometry (corner, pointer, start x, start width, container width) is
+   * captured NOW and never re-derived from the box being resized. Movement
+   * previews through state; release commits through updateMediaAttrs exactly
+   * once (see editorMediaResizeGesture.js for the commit policy).
+   */
+  const beginCornerResize = useCallback(
+    (corner) => (event) => {
+      if (!editable) return;
+      if (typeof event.button === "number" && event.button !== 0) return;
+      if (event.isPrimary === false) return;
+      if (gestureRef.current) return;
+
+      const wrapper = wrapperRef.current;
+      const container =
+        wrapper && wrapper.parentElement
+          ? contentBoxWidth(wrapper.parentElement)
+          : null;
+      // Each gesture starts from the PERSISTED width; a legacy image starts
+      // from the width it actually renders at.
+      const startPct = storedPct !== null ? storedPct : measuredWidthPctOf(wrapper);
+      if (container === null || startPct === null) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const gesture = beginMediaResizeGesture({
+        win: window,
+        corner,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startWidthPct: startPct,
+        containerWidth: container,
+        onPreview: (pct) => setPreviewPct(pct),
+        onCommit: (pct) => updateMediaAttrs(editor, { widthPct: pct }),
+        onSettle: () => {
+          gestureRef.current = null;
+          setResizing(false);
+          setPreviewPct(null);
+        },
+      });
+      if (!gesture) return;
+
+      gestureRef.current = gesture;
+      setResizing(true);
+      // The preview starts at the width it already has, so a press alone can
+      // never change the rendered size.
+      setPreviewPct(startPct);
+    },
+    [editable, editor, storedPct]
+  );
 
   const label = alt || "Image";
   const dimensionProps = {};
@@ -50,20 +219,31 @@ function AssetImageView({ node }) {
   if (Number(height) > 0) dimensionProps.height = Math.round(Number(height));
 
   let body;
+  let renderable = false;
   if (assetId) {
     if (status === "loading") {
       body = (
-        <span className="note-image-placeholder" role="status">
+        <span className="note-image-placeholder" role="status" onClick={selectSelf}>
           {EDITOR_IMAGE_LOADING_TEXT}
         </span>
       );
     } else if (status === "ready" && url) {
+      renderable = true;
       body = (
-        <img src={url} alt={label} title={title || undefined} {...dimensionProps} />
+        <img
+          src={url}
+          alt={label}
+          title={title || undefined}
+          onClick={selectSelf}
+          {...dimensionProps}
+        />
       );
     } else {
       body = (
-        <span className="note-image-placeholder note-image-placeholder--missing">
+        <span
+          className="note-image-placeholder note-image-placeholder--missing"
+          onClick={selectSelf}
+        >
           {EDITOR_IMAGE_UNAVAILABLE_TEXT}
           {alt ? ` (${alt})` : ""}
         </span>
@@ -71,18 +251,84 @@ function AssetImageView({ node }) {
     }
   } else if (isPersistableImageSrc(src)) {
     // A remote http/https image, or a legacy data:image kept for compatibility.
-    body = <img src={src} alt={label} title={title || undefined} {...dimensionProps} />;
+    renderable = true;
+    body = (
+      <img
+        src={src}
+        alt={label}
+        title={title || undefined}
+        onClick={selectSelf}
+        {...dimensionProps}
+      />
+    );
   } else {
     body = (
-      <span className="note-image-placeholder note-image-placeholder--missing">
+      <span
+        className="note-image-placeholder note-image-placeholder--missing"
+        onClick={selectSelf}
+      >
         {EDITOR_IMAGE_UNAVAILABLE_TEXT}
       </span>
     );
   }
 
+  const showChrome = selected && editable;
+  // A placeholder has no meaningful proportional width, so it offers Remove
+  // but no resize handles.
+  const showHandles = showChrome && renderable;
+
+  const classNames = [
+    "note-image-node",
+    ...mediaLayoutClassNames({ mode: node.attrs.layoutMode, side: node.attrs.layoutSide }),
+    effectivePct !== null ? `${MEDIA_CLASS}--sized` : "",
+    showChrome ? `${MEDIA_CLASS}--selected` : "",
+    resizing ? `${MEDIA_CLASS}--resizing` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <NodeViewWrapper as="div" className="note-image-node" data-drag-handle>
+    <NodeViewWrapper
+      ref={wrapperRef}
+      as="div"
+      className={classNames}
+      style={mediaWidthStyle(effectivePct) || undefined}
+      data-drag-handle
+    >
       {body}
+
+      {showChrome && (
+        <div
+          className={`${MEDIA_CLASS}-controls`}
+          role="toolbar"
+          aria-label={`Image options for ${label}`}
+          contentEditable={false}
+          onDragStart={stopDrag}
+        >
+          <button
+            type="button"
+            className={`${MEDIA_CLASS}-btn ${MEDIA_CLASS}-btn--danger`}
+            onClick={handleRemove}
+            title={`Remove image ${label}`}
+            aria-label={`Remove image ${label}`}
+          >
+            Remove
+          </button>
+        </div>
+      )}
+
+      {showHandles &&
+        MEDIA_RESIZE_CORNERS.map((corner) => (
+          <div
+            key={corner}
+            className={`${MEDIA_CLASS}-corner ${MEDIA_CLASS}-corner--${corner}`}
+            role="presentation"
+            title="Drag a corner to resize this image"
+            style={{ cursor: mediaCornerResizeCursor(corner) }}
+            onPointerDown={beginCornerResize(corner)}
+            onDragStart={stopDrag}
+          />
+        ))}
     </NodeViewWrapper>
   );
 }
@@ -132,10 +378,9 @@ export const AssetImage = Image.extend({
         parseHTML: (el) => editorImageAttrsFromElement(el).assetId,
         renderHTML: none,
       },
-      // Shared media-core presentation attributes (editorMediaLayout.js).
-      // Schema/serialization foundation only in this phase: the NodeView above
-      // does not read them yet, and the defaults are never emitted, so an
-      // existing document renders and round-trips exactly as before.
+      // Shared media-core presentation attributes (editorMediaLayout.js). The
+      // defaults are never emitted, so an existing document renders and
+      // round-trips exactly as before.
       widthPct: {
         default: null,
         parseHTML: (el) => editorImageAttrsFromElement(el).widthPct,
@@ -178,6 +423,27 @@ export const AssetImage = Image.extend({
         editorImageAttrsToHTML(node.attrs)
       ),
     ];
+  },
+
+  addKeyboardShortcuts() {
+    // Alt/Option + ←/→ resizes the SELECTED image in 5% steps — one key
+    // action, one transaction, same clamp as the pointer path. Any other
+    // selection returns false, so the keys keep their ordinary meaning.
+    // Backspace/Delete are deliberately NOT bound here: deleting a selected
+    // node is the editor's own base behaviour and must stay untouched.
+    const nudge = (direction) => () =>
+      nudgeSelectedMediaWidth(this.editor, direction, {
+        measureWidthPct: () => {
+          const view = this.editor && this.editor.view;
+          if (!view || typeof view.nodeDOM !== "function") return null;
+          const dom = view.nodeDOM(this.editor.state.selection.from);
+          return measuredWidthPctOf(nodeViewWrapperOf(dom));
+        },
+      });
+    return {
+      "Alt-ArrowRight": nudge(1),
+      "Alt-ArrowLeft": nudge(-1),
+    };
   },
 
   addNodeView() {

@@ -33,6 +33,11 @@ import {
   EXPORT_IMAGE_UNAVAILABLE_TEXT,
   isBlobUrl,
 } from "./editorImageAssets";
+import {
+  MEDIA_WIDTH_PCT_ATTR,
+  mediaWidthStyle,
+  normalizeMediaWidthPct,
+} from "./editorMediaLayout";
 
 // Only images owned by the Free-form editor may be inlined by this path.
 export const EXPORTABLE_IMAGE_ASSET_KINDS = [ASSET_KIND_EDITOR_IMAGE];
@@ -201,6 +206,20 @@ export async function resolveExportImageHtml(html, deps = {}) {
       // Only reachable in PLACEHOLDER mode — ABORT already threw.
       img.replaceWith(buildImagePlaceholder(doc, img.getAttribute("alt")));
       continue;
+    }
+    // A stored width applies to every surviving image — asset-backed, remote
+    // and legacy alike — as the SAME inline width the editor renders, derived
+    // through the shared vocabulary so the two can never disagree. Height is
+    // pinned to auto so the intrinsic width/height hints cannot distort the
+    // scaled image. An image with no stored width is left exactly as it was.
+    // The attribute itself is kept: the paginated PDF preparation reads it
+    // downstream to compute its exact pixel box, and it is inert descriptive
+    // metadata in every other format. Setting the same style twice is a no-op,
+    // so this resolution stays idempotent.
+    const widthPct = normalizeMediaWidthPct(img.getAttribute(MEDIA_WIDTH_PCT_ATTR));
+    if (widthPct !== null) {
+      img.style.width = mediaWidthStyle(widthPct).width;
+      img.style.height = "auto";
     }
     if (!id) continue;
     img.setAttribute("src", resolved.get(id));

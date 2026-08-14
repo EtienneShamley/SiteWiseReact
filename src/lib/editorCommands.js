@@ -14,6 +14,7 @@
 
 import { EDITOR_IMAGE_INSERT_MESSAGE } from "./editorImageAssets";
 import { normalizeMediaLayout, normalizeMediaWidthPct } from "./editorMediaLayout";
+import { MEDIA_WIDTH_KEY_STEP_PCT, nudgeMediaWidthPct } from "./editorMediaResize";
 import {
   FILE_ATTACHMENT_NODE_NAME,
   FILE_INSERT_MESSAGE,
@@ -232,6 +233,46 @@ export function updateMediaAttrs(editor, patch = {}) {
 
   if (!applied) return { ok: false, error: null };
   return { ok: true, attrs };
+}
+
+/**
+ * One keyboard resize step — Alt/Option + Arrow — for the SELECTED image node.
+ *
+ * Applies only when the current selection is a NodeSelection on an image;
+ * anything else returns false so the key keeps its ordinary meaning. The step
+ * goes through the same clamp as the pointer path (nudgeMediaWidthPct), and a
+ * step that lands where it started — already at a bound — is a consumed
+ * no-op, never a save of the width the node already has.
+ *
+ * A legacy image has no stored widthPct, so its current width must be read
+ * from the rendered box; the NodeView's DOM measurement is injected as
+ * `deps.measureWidthPct`. When neither a stored nor a measured width exists,
+ * the safe answer is to do nothing rather than jump the image to a guessed
+ * size.
+ *
+ * One key action is one `updateMediaAttrs` transaction — one undo step.
+ */
+export function nudgeSelectedMediaWidth(editor, direction, deps = {}) {
+  if (!editor) return false;
+  const selection = editor.state && editor.state.selection;
+  const node = selection && selection.node;
+  if (!node || !node.type || node.type.name !== "image") return false;
+  if (direction !== 1 && direction !== -1) return false;
+
+  let current = normalizeMediaWidthPct(node.attrs && node.attrs.widthPct);
+  if (current === null && typeof deps.measureWidthPct === "function") {
+    current = normalizeMediaWidthPct(deps.measureWidthPct());
+  }
+  // The key was aimed at a selected image, so it is consumed either way; it
+  // just may have nothing safe to do.
+  if (current === null) return true;
+
+  const next = nudgeMediaWidthPct({
+    widthPct: current,
+    stepPct: direction * MEDIA_WIDTH_KEY_STEP_PCT,
+  });
+  if (next === null) return true;
+  return updateMediaAttrs(editor, { widthPct: next }).ok;
 }
 
 // Does the document actually contain an attachment node for this asset?

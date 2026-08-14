@@ -331,3 +331,53 @@ describe("the missing-image policy is opt-in, so other formats cannot change", (
     expect(html).toBe(source);
   });
 });
+
+describe("stored width activation (shared media core)", () => {
+  test("a stored width becomes the same inline width the editor renders", async () => {
+    const s = store({ a: asset("image/png") });
+    const html = await resolveExportImageHtml(
+      imgRef("a", ' data-width-pct="45"'),
+      { loadAsset: s.loadAsset, blobToDataUrl }
+    );
+    expect(html).toContain("width: 45%");
+    // Height pinned to auto, so intrinsic width/height hints cannot distort
+    // the scaled image.
+    expect(html).toContain("height: auto");
+  });
+
+  test("the width applies to remote and legacy images too — the model is not asset-only", async () => {
+    for (const src of ["https://example.com/r.png", "data:image/png;base64,AAA"]) {
+      const html = await resolveExportImageHtml(
+        `<img src="${src}" data-width-pct="30">`,
+        {}
+      );
+      expect(html).toContain("width: 30%");
+    }
+  });
+
+  test("an out-of-range stored width exports through the shared clamp", async () => {
+    const html = await resolveExportImageHtml(
+      '<img src="https://example.com/r.png" data-width-pct="500">',
+      {}
+    );
+    expect(html).toContain("width: 100%");
+  });
+
+  test("no stored width leaves the image exactly as before — the default export is unchanged", async () => {
+    const s = store({ a: asset("image/png") });
+    const html = await resolveExportImageHtml(imgRef("a", ' width="640" height="480"'), {
+      loadAsset: s.loadAsset,
+      blobToDataUrl,
+    });
+    expect(html).not.toContain("style=");
+    expect(html).toContain('width="640"');
+  });
+
+  test("an invalid stored width is ignored, never guessed at", async () => {
+    const html = await resolveExportImageHtml(
+      '<img src="https://example.com/r.png" data-width-pct="abc">',
+      {}
+    );
+    expect(html).not.toContain("style=");
+  });
+});

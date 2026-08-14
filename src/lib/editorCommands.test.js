@@ -12,6 +12,7 @@ import {
   insertImageAsset,
   insertImageFromUrl,
   isHexColor,
+  nudgeSelectedMediaWidth,
   removeLink,
   updateMediaAttrs,
 } from "./editorCommands";
@@ -343,5 +344,67 @@ describe("updateMediaAttrs", () => {
 
   test("no editor means no dispatch", () => {
     expect(updateMediaAttrs(null, { widthPct: 45 }).ok).toBe(false);
+  });
+});
+
+describe("nudgeSelectedMediaWidth (Alt/Option + Arrow)", () => {
+  function makeImageEditor(attrs = {}) {
+    const editor = makeEditor();
+    editor.state = {
+      selection: { node: { type: { name: "image" }, attrs } },
+    };
+    return editor;
+  }
+
+  test("anything but a selected image returns false and dispatches nothing", () => {
+    const noSelection = makeEditor();
+    expect(nudgeSelectedMediaWidth(noSelection, 1)).toBe(false);
+    expect(noSelection.calls).toEqual([]);
+
+    const otherNode = makeEditor();
+    otherNode.state = { selection: { node: { type: { name: "fileAttachment" }, attrs: {} } } };
+    expect(nudgeSelectedMediaWidth(otherNode, 1)).toBe(false);
+    expect(otherNode.calls).toEqual([]);
+  });
+
+  test("one key action is one 5% step through one updateAttributes transaction", () => {
+    const grow = makeImageEditor({ widthPct: 50 });
+    expect(nudgeSelectedMediaWidth(grow, 1)).toBe(true);
+    expect(grow.calls).toContainEqual(["updateAttributes", "image", { widthPct: 55 }]);
+    expect(names(grow).filter((n) => n === "run")).toHaveLength(1);
+
+    const shrink = makeImageEditor({ widthPct: 50 });
+    expect(nudgeSelectedMediaWidth(shrink, -1)).toBe(true);
+    expect(shrink.calls).toContainEqual(["updateAttributes", "image", { widthPct: 45 }]);
+  });
+
+  test("a step at the bound is a consumed no-op, never a save of the same width", () => {
+    const atMax = makeImageEditor({ widthPct: 100 });
+    expect(nudgeSelectedMediaWidth(atMax, 1)).toBe(true);
+    expect(atMax.calls).toEqual([]);
+
+    const atMin = makeImageEditor({ widthPct: 15 });
+    expect(nudgeSelectedMediaWidth(atMin, -1)).toBe(true);
+    expect(atMin.calls).toEqual([]);
+  });
+
+  test("a legacy image with no stored width starts from its MEASURED width", () => {
+    const editor = makeImageEditor({ widthPct: null });
+    expect(nudgeSelectedMediaWidth(editor, 1, { measureWidthPct: () => 40 })).toBe(true);
+    expect(editor.calls).toContainEqual(["updateAttributes", "image", { widthPct: 45 }]);
+  });
+
+  test("no stored width and no measurement means a safe consumed no-op", () => {
+    const editor = makeImageEditor({ widthPct: null });
+    expect(nudgeSelectedMediaWidth(editor, 1)).toBe(true);
+    expect(nudgeSelectedMediaWidth(editor, 1, { measureWidthPct: () => null })).toBe(true);
+    expect(editor.calls).toEqual([]);
+  });
+
+  test("an invalid direction dispatches nothing", () => {
+    const editor = makeImageEditor({ widthPct: 50 });
+    expect(nudgeSelectedMediaWidth(editor, 0)).toBe(false);
+    expect(nudgeSelectedMediaWidth(editor, 2)).toBe(false);
+    expect(editor.calls).toEqual([]);
   });
 });

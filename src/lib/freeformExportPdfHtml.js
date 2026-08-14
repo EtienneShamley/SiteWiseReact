@@ -33,6 +33,10 @@ import {
   IMAGE_PLACEHOLDER_CLASS,
   createInertDocument,
 } from "./freeformExportBlocks";
+import {
+  MEDIA_WIDTH_PCT_ATTR,
+  normalizeMediaWidthPct,
+} from "./editorMediaLayout";
 
 export const FREEFORM_DOC_CLASS = "nw-ff-doc";
 export const FREEFORM_PAGE_CLASS = "nw-ff-page";
@@ -120,11 +124,22 @@ export function prepareFreeformPdfHtml(html, options = {}) {
     const attrWidth = Number(img.getAttribute("width"));
     const attrHeight = Number(img.getAttribute("height"));
 
+    // A user-chosen width (shared media core, `data-width-pct`) is a fraction
+    // of the content column — the same meaning it has on screen — and takes
+    // precedence over the intrinsic width hint. It is read through the shared
+    // normalizer, so this path and the editor can never disagree about what a
+    // stored value means. Absent, the pre-existing rule stands unchanged.
+    const widthPct = normalizeMediaWidthPct(img.getAttribute(MEDIA_WIDTH_PCT_ATTR));
+    const requestedWidth =
+      widthPct !== null && Number(contentWidthPx) > 0
+        ? (widthPct / 100) * Number(contentWidthPx)
+        : attrWidth;
+
     const layout = imageLayout(
       {
         intrinsicWidth: decoded ? decoded.width : attrWidth,
         intrinsicHeight: decoded ? decoded.height : attrHeight,
-        requestedWidth: attrWidth,
+        requestedWidth,
       },
       { contentWidthPx, maxHeightPx }
     );

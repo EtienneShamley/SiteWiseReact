@@ -1,16 +1,16 @@
 // src/lib/editorMediaCore.test.js
 //
-// ARCHITECTURAL BOUNDARIES of the shared editor media core (Phase B of
-// docs/PROJECT_DECISIONS.md → "Shared NoteWise Editor Core").
+// ARCHITECTURAL BOUNDARIES of the shared editor media core (Phases B and C1
+// of docs/PROJECT_DECISIONS.md → "Shared NoteWise Editor Core").
 //
 // The behaviour of each module is proven in its own suite. What no behavioural
 // test can show is the wiring and the absences: that the shared modules are
 // genuinely surface-agnostic (no Template components, no MainArea, no React,
 // no persistence), that the image serializer remains the single serialization
-// authority, and that Phase B registered NO new runtime behaviour — the
-// foundation exists, and nothing user-visible consumes it yet. No DOM testing
-// library is installed (see docs/TESTING.md), so these are source-text
-// assertions — used deliberately and only for facts of that kind.
+// authority, and that the C1 NodeView consumes the shared core rather than
+// growing a private copy of any of its rules. No DOM testing library is
+// installed (see docs/TESTING.md), so these are source-text assertions — used
+// deliberately and only for facts of that kind.
 import fs from "fs";
 import path from "path";
 
@@ -29,6 +29,7 @@ const CORE_LIB_FILES = [
   "lib/editorMediaLayout.js",
   "lib/editorMediaResize.js",
   "lib/editorMediaResizeSession.js",
+  "lib/editorMediaResizeGesture.js",
   "lib/editorImageAssets.js",
   "lib/editorCommands.js",
 ];
@@ -49,12 +50,16 @@ describe("the shared media core is surface-agnostic", () => {
     }
   });
 
-  test("the three new core modules import no Template code at all — except the sanctioned resize wrap", () => {
+  test("the new core modules import no Template code at all — except the sanctioned resize wrap", () => {
     // editorMediaResize deliberately WRAPS the proven arithmetic where it
     // still lives (consolidation is Phase G); nothing else may reach into a
     // template-named module.
     expect(CORE_LIB["lib/editorMediaResize.js"]).toMatch(/from "\.\/templateSectionImageResize"/);
-    for (const file of ["lib/editorMediaLayout.js", "lib/editorMediaResizeSession.js"]) {
+    for (const file of [
+      "lib/editorMediaLayout.js",
+      "lib/editorMediaResizeSession.js",
+      "lib/editorMediaResizeGesture.js",
+    ]) {
       expect({ file, hit: /templateSection/.test(CORE_LIB[file]) }).toEqual({ file, hit: false });
     }
   });
@@ -108,30 +113,60 @@ describe("the image serializer remains the single authority", () => {
   });
 });
 
-/* ===================== Phase B is behaviour-neutral ====================== */
+/* ================= C1: the NodeView consumes the shared core ============= */
 
-describe("Phase B registers no new runtime behaviour", () => {
-  test("nothing consumes the resize core or the session yet — foundation only", () => {
-    for (const consumer of [ASSET_IMAGE, MAIN_AREA]) {
-      expect(/editorMediaResize/.test(consumer)).toBe(false);
-      expect(/editorMediaResizeSession/.test(consumer)).toBe(false);
-    }
+describe("the C1 NodeView is built ON the shared core, not beside it", () => {
+  test("presentation derives from the shared vocabulary, never a private mapping", () => {
+    expect(ASSET_IMAGE).toMatch(/mediaLayoutClassNames/);
+    expect(ASSET_IMAGE).toMatch(/mediaWidthStyle/);
+    expect(ASSET_IMAGE).toMatch(/normalizeMediaWidthPct/);
   });
 
-  test("the AssetImage NodeView gained no gesture or selection chrome", () => {
-    expect(ASSET_IMAGE).not.toMatch(/onPointerDown|onMouseDown|onPointerMove/);
-    expect(ASSET_IMAGE).not.toMatch(/useState|useEffect/);
-    expect(ASSET_IMAGE).not.toMatch(/nw-media|[Rr]esize|[Cc]orner/);
+  test("the resize gesture is the shared controller over the shared corners", () => {
+    expect(ASSET_IMAGE).toMatch(/beginMediaResizeGesture/);
+    expect(ASSET_IMAGE).toMatch(/MEDIA_RESIZE_CORNERS\.map/);
+    expect(ASSET_IMAGE).toMatch(/mediaCornerResizeCursor/);
+    // No second lifecycle: the NodeView never installs its own window
+    // listeners for the gesture.
+    expect(ASSET_IMAGE).not.toMatch(/addEventListener/);
   });
 
-  test("the NodeView does not read the new presentation attributes yet", () => {
-    // Rendering them is C1. Reading them here would change what a user sees.
-    expect(ASSET_IMAGE).not.toMatch(/mediaWidthStyle|mediaLayoutClassNames/);
+  test("a resize commits through updateMediaAttrs and nothing else writes attributes", () => {
+    // Exactly two callers: the pointer commit (in the view) and the import.
+    expect(ASSET_IMAGE).toMatch(/updateMediaAttrs\(editor, \{ widthPct: pct \}\)/);
+    expect(ASSET_IMAGE).not.toMatch(/updateAttributes|setNodeMarkup|insertContent/);
+  });
+
+  test("keyboard resize routes through the shared command, one step per key", () => {
+    expect(ASSET_IMAGE).toMatch(/"Alt-ArrowRight": nudge\(1\)/);
+    expect(ASSET_IMAGE).toMatch(/"Alt-ArrowLeft": nudge\(-1\)/);
+    expect(ASSET_IMAGE).toMatch(/nudgeSelectedMediaWidth/);
+    // Deleting a selected node is the editor's own base behaviour; the
+    // extension must not rebind it.
+    expect(ASSET_IMAGE).not.toMatch(/Backspace|"Delete"/);
+  });
+
+  test("selection is ProseMirror-native and chrome exists only while selected", () => {
+    expect(ASSET_IMAGE).toMatch(/setNodeSelection/);
+    expect(ASSET_IMAGE).toMatch(/const showChrome = selected && editable/);
+  });
+
+  test("Remove is the node view's own deleteNode — one node-removal transaction", () => {
+    expect(ASSET_IMAGE).toMatch(/deleteNode\(\)/);
+  });
+
+  test("the NodeView holds no persistence logic", () => {
+    expect(ASSET_IMAGE).not.toMatch(/localStorage|sessionStorage|indexedDB|assetStorage|getAsset|saveAsset|deleteAsset/);
+  });
+
+  test("the NodeView imports nothing Template-specific", () => {
+    expect(ASSET_IMAGE).not.toMatch(/components\/template|templateSection/);
   });
 
   test("the Free-form editor's extension registration is unchanged", () => {
-    // Still exactly one AssetImage registration, and no new media extension.
+    // Still exactly one AssetImage registration; MainArea itself gained no
+    // media-core wiring — the capability lives inside the shared node.
     expect(MAIN_AREA.match(/AssetImage/g).length).toBeGreaterThanOrEqual(1);
-    expect(MAIN_AREA).not.toMatch(/editorMediaLayout/);
+    expect(MAIN_AREA).not.toMatch(/editorMediaLayout|editorMediaResize/);
   });
 });
