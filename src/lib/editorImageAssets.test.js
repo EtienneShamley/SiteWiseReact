@@ -143,6 +143,108 @@ describe("parsing an image back out of stored HTML", () => {
   });
 });
 
+describe("presentation attributes (shared media core)", () => {
+  test("a stored width and wrap layout serialize as the three data attributes", () => {
+    const out = editorImageAttrsToHTML({
+      assetId: "a1",
+      widthPct: 45,
+      layoutMode: "wrap",
+      layoutSide: "right",
+    });
+    expect(out["data-width-pct"]).toBe("45");
+    expect(out["data-layout-mode"]).toBe("wrap");
+    expect(out["data-layout-side"]).toBe("right");
+  });
+
+  test("DEFAULTS ARE NEVER EMITTED — a legacy image serializes exactly as before", () => {
+    const out = editorImageAttrsToHTML({
+      assetId: "a1",
+      alt: "site.jpg",
+      width: 1600,
+      height: 1200,
+    });
+    expect(Object.keys(out).sort()).toEqual(
+      [EDITOR_IMAGE_ASSET_ATTR, "alt", "height", "width"].sort()
+    );
+    // Explicit defaults are just as silent as absent values.
+    const explicit = editorImageAttrsToHTML({
+      assetId: "a1",
+      widthPct: null,
+      layoutMode: "block",
+      layoutSide: null,
+    });
+    expect("data-width-pct" in explicit).toBe(false);
+    expect("data-layout-mode" in explicit).toBe(false);
+    expect("data-layout-side" in explicit).toBe(false);
+  });
+
+  test("an invalid width or an incomplete wrap degrades and is not emitted", () => {
+    expect("data-width-pct" in editorImageAttrsToHTML({ assetId: "a", widthPct: "abc" })).toBe(
+      false
+    );
+    // Wrap without a usable side is block, so no layout attributes at all.
+    const out = editorImageAttrsToHTML({ assetId: "a", layoutMode: "wrap", layoutSide: "middle" });
+    expect("data-layout-mode" in out).toBe(false);
+    expect("data-layout-side" in out).toBe(false);
+    // An out-of-range number is clamped, not dropped: the user chose a width.
+    expect(editorImageAttrsToHTML({ assetId: "a", widthPct: 500 })["data-width-pct"]).toBe("100");
+  });
+
+  test("presentation attributes ride on remote images too — the model is not asset-only", () => {
+    const out = editorImageAttrsToHTML({
+      src: "https://example.com/a.png",
+      widthPct: 60,
+      layoutMode: "wrap",
+      layoutSide: "left",
+    });
+    expect(out.src).toBe("https://example.com/a.png");
+    expect(out["data-width-pct"]).toBe("60");
+    expect(out["data-layout-mode"]).toBe("wrap");
+  });
+
+  test("parsing validates in: invalid stored values degrade to the defaults", () => {
+    const parsed = editorImageAttrsFromElement(
+      el({
+        [EDITOR_IMAGE_ASSET_ATTR]: "a1",
+        "data-width-pct": "banana",
+        "data-layout-mode": "hologram",
+        "data-layout-side": "left",
+      })
+    );
+    expect(parsed.widthPct).toBeNull();
+    expect(parsed.layoutMode).toBe("block");
+    expect(parsed.layoutSide).toBeNull();
+  });
+
+  test("a legacy element without the attributes parses to the legacy defaults", () => {
+    const parsed = editorImageAttrsFromElement(el({ [EDITOR_IMAGE_ASSET_ATTR]: "a1" }));
+    expect(parsed.widthPct).toBeNull();
+    expect(parsed.layoutMode).toBe("block");
+    expect(parsed.layoutSide).toBeNull();
+  });
+
+  test("a full presentation round trip survives serialize -> parse", () => {
+    const serialized = editorImageAttrsToHTML({
+      assetId: "a1",
+      widthPct: 38,
+      layoutMode: "wrap",
+      layoutSide: "left",
+    });
+    const parsed = editorImageAttrsFromElement(el(serialized));
+    expect(parsed.widthPct).toBe(38);
+    expect(parsed.layoutMode).toBe("wrap");
+    expect(parsed.layoutSide).toBe("left");
+  });
+
+  test("a wrap whose stored side is missing parses as block AS ONE UNIT", () => {
+    const parsed = editorImageAttrsFromElement(
+      el({ [EDITOR_IMAGE_ASSET_ATTR]: "a1", "data-layout-mode": "wrap" })
+    );
+    expect(parsed.layoutMode).toBe("block");
+    expect(parsed.layoutSide).toBeNull();
+  });
+});
+
 describe("collectAssetIdsFromHtml", () => {
   test("finds each distinct id once, in first-appearance order", () => {
     const html = `

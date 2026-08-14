@@ -13,6 +13,7 @@ import {
   insertImageFromUrl,
   isHexColor,
   removeLink,
+  updateMediaAttrs,
 } from "./editorCommands";
 import { UNSAFE_IMAGE_URL_MESSAGE, UNSAFE_LINK_MESSAGE } from "./editorUrlSafety";
 
@@ -203,7 +204,32 @@ describe("image insertion", () => {
       alt: "site.jpg",
       width: 1600,
       height: 1200,
+      // A caller that passes no presentation attributes inserts a node with
+      // exactly the schema defaults — the same node it always inserted.
+      widthPct: null,
+      layoutMode: "block",
+      layoutSide: null,
     });
+  });
+
+  test("optional presentation attributes are normalized on the way in", () => {
+    const editor = makeEditor();
+    insertImageAsset(editor, {
+      assetId: "asset-1",
+      widthPct: "45",
+      layoutMode: "wrap",
+      layoutSide: "left",
+    });
+    const [, attrs] = editor.calls.find((c) => c[0] === "setImage");
+    expect(attrs.widthPct).toBe(45);
+    expect(attrs.layoutMode).toBe("wrap");
+    expect(attrs.layoutSide).toBe("left");
+    // And an unusable layout degrades to block as one unit.
+    const editor2 = makeEditor();
+    insertImageAsset(editor2, { assetId: "a", layoutMode: "wrap", layoutSide: "middle" });
+    const [, attrs2] = editor2.calls.find((c) => c[0] === "setImage");
+    expect(attrs2.layoutMode).toBe("block");
+    expect(attrs2.layoutSide).toBeNull();
   });
 
   test("a missing or blank assetId inserts nothing", () => {
@@ -245,5 +271,77 @@ describe("image insertion", () => {
     const editor = makeEditor();
     insertImageFromUrl(editor, "https://example.com/a.png");
     expect(names(editor)[0]).toBe("focus");
+  });
+});
+
+describe("updateMediaAttrs", () => {
+  test("a width commit is one focused updateAttributes transaction", () => {
+    const editor = makeEditor();
+    const result = updateMediaAttrs(editor, { widthPct: 45 });
+    expect(result).toEqual({ ok: true, attrs: { widthPct: 45 } });
+    expect(names(editor)).toEqual(["focus", "updateAttributes", "run"]);
+    expect(editor.calls).toContainEqual(["updateAttributes", "image", { widthPct: 45 }]);
+  });
+
+  test("a layout change writes mode and side together", () => {
+    const editor = makeEditor();
+    const result = updateMediaAttrs(editor, { layoutMode: "wrap", layoutSide: "right" });
+    expect(result.ok).toBe(true);
+    expect(editor.calls).toContainEqual([
+      "updateAttributes",
+      "image",
+      { layoutMode: "wrap", layoutSide: "right" },
+    ]);
+    // Returning to block clears the side in the same transaction.
+    const editor2 = makeEditor();
+    updateMediaAttrs(editor2, { layoutMode: "block" });
+    expect(editor2.calls).toContainEqual([
+      "updateAttributes",
+      "image",
+      { layoutMode: "block", layoutSide: null },
+    ]);
+  });
+
+  test("width is normalized through the shared clamp", () => {
+    const editor = makeEditor();
+    updateMediaAttrs(editor, { widthPct: 500 });
+    expect(editor.calls).toContainEqual(["updateAttributes", "image", { widthPct: 100 }]);
+  });
+
+  test("an invalid or empty patch dispatches NOTHING", () => {
+    for (const patch of [{}, { widthPct: "abc" }, { widthPct: null }, undefined]) {
+      const editor = makeEditor();
+      const result = updateMediaAttrs(editor, patch);
+      expect(result.ok).toBe(false);
+      expect(editor.calls).toEqual([]);
+    }
+  });
+
+  test("a wrap patch without a usable side degrades to block, never half a layout", () => {
+    const editor = makeEditor();
+    updateMediaAttrs(editor, { layoutMode: "wrap" });
+    expect(editor.calls).toContainEqual([
+      "updateAttributes",
+      "image",
+      { layoutMode: "block", layoutSide: null },
+    ]);
+  });
+
+  test("a refused or throwing transaction reports failure without propagating", () => {
+    const refusing = makeEditor();
+    refusing.chain = () => ({
+      focus: () => ({ updateAttributes: () => ({ run: () => false }) }),
+    });
+    expect(updateMediaAttrs(refusing, { widthPct: 45 }).ok).toBe(false);
+
+    const throwing = makeEditor();
+    throwing.chain = () => {
+      throw new Error("no image node here");
+    };
+    expect(updateMediaAttrs(throwing, { widthPct: 45 }).ok).toBe(false);
+  });
+
+  test("no editor means no dispatch", () => {
+    expect(updateMediaAttrs(null, { widthPct: 45 }).ok).toBe(false);
   });
 });

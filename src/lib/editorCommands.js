@@ -13,6 +13,7 @@
 // selection after the click.
 
 import { EDITOR_IMAGE_INSERT_MESSAGE } from "./editorImageAssets";
+import { normalizeMediaLayout, normalizeMediaWidthPct } from "./editorMediaLayout";
 import {
   FILE_ATTACHMENT_NODE_NAME,
   FILE_INSERT_MESSAGE,
@@ -148,11 +149,19 @@ export function insertImageFromUrl(editor, rawUrl) {
  * Returns ok:false when the editor refuses the transaction, so the caller can
  * delete the now-unreferenced asset rather than orphaning it.
  */
-export function insertImageAsset(editor, { assetId, alt, width, height } = {}) {
+export function insertImageAsset(
+  editor,
+  { assetId, alt, width, height, widthPct, layoutMode, layoutSide } = {}
+) {
   if (!editor) return noEditor();
 
   const id = typeof assetId === "string" ? assetId.trim() : "";
   if (!id) return { ok: false, error: EDITOR_IMAGE_INSERT_MESSAGE };
+
+  // Optional presentation attributes (shared media core). Callers that do not
+  // pass them get exactly the schema defaults — null width, block layout — so
+  // every existing call site inserts the same node it always did.
+  const layout = normalizeMediaLayout({ mode: layoutMode, side: layoutSide });
 
   let applied = false;
   try {
@@ -166,6 +175,9 @@ export function insertImageAsset(editor, { assetId, alt, width, height } = {}) {
           alt: typeof alt === "string" && alt.trim() ? alt.trim() : null,
           width: Number(width) > 0 ? Math.round(Number(width)) : null,
           height: Number(height) > 0 ? Math.round(Number(height)) : null,
+          widthPct: normalizeMediaWidthPct(widthPct),
+          layoutMode: layout.mode,
+          layoutSide: layout.side,
         })
         .run() !== false;
   } catch {
@@ -174,6 +186,52 @@ export function insertImageAsset(editor, { assetId, alt, width, height } = {}) {
 
   if (!applied) return { ok: false, error: EDITOR_IMAGE_INSERT_MESSAGE };
   return { ok: true, assetId: id };
+}
+
+/**
+ * Update the PRESENTATION attributes of the image node at the current
+ * selection — the one transaction a resize or layout change commits.
+ *
+ * Transaction-based by design: the caller previews a gesture however it likes
+ * (inline style, never the document) and calls this exactly once, on release,
+ * so one gesture is one undo step and one autosave. Persistence is not this
+ * module's business — the transaction flows through the editor's own update
+ * handler like any other edit.
+ *
+ * The patch is partial: only the keys the caller provides are written.
+ *   - `widthPct` alone commits a resize.
+ *   - a layout change must pass `layoutMode` (and `layoutSide` for wrap) —
+ *     mode and side are normalized TOGETHER, so a wrap without a usable side
+ *     degrades to block rather than trusting half a layout.
+ *
+ * An invalid or empty patch dispatches NOTHING and reports ok:false — a
+ * programmatic misuse, so there is no user-facing message.
+ */
+export function updateMediaAttrs(editor, patch = {}) {
+  if (!editor) return noEditor();
+
+  const attrs = {};
+  if ("widthPct" in patch) {
+    const pct = normalizeMediaWidthPct(patch.widthPct);
+    if (pct === null) return { ok: false, error: null };
+    attrs.widthPct = pct;
+  }
+  if ("layoutMode" in patch || "layoutSide" in patch) {
+    const layout = normalizeMediaLayout({ mode: patch.layoutMode, side: patch.layoutSide });
+    attrs.layoutMode = layout.mode;
+    attrs.layoutSide = layout.side;
+  }
+  if (Object.keys(attrs).length === 0) return { ok: false, error: null };
+
+  let applied = false;
+  try {
+    applied = editor.chain().focus().updateAttributes("image", attrs).run() !== false;
+  } catch {
+    applied = false;
+  }
+
+  if (!applied) return { ok: false, error: null };
+  return { ok: true, attrs };
 }
 
 // Does the document actually contain an attachment node for this asset?

@@ -1,0 +1,151 @@
+// src/lib/editorMediaLayout.js
+//
+// THE LAYOUT VOCABULARY OF THE SHARED NOTEWISE EDITOR MEDIA CORE.
+//
+// This module is the single authority for what a media node's presentation
+// attributes may hold — the layout mode/side vocabulary, the width-percentage
+// rule, and the class/style derivation future consumers (the NodeView and the
+// export path) will read. Because both sides derive their presentation from
+// the same functions here, the editor and an export can never disagree about
+// what a stored layout means.
+//
+// Decision record: docs/PROJECT_DECISIONS.md → "Shared NoteWise Editor Core"
+// (2026-08-14). This foundation is shared by the Free-form editor and the
+// future per-Section Template editor; nothing in it may be surface-specific.
+//
+// ---------------------------------------------------------------------------
+// THE MODEL, AND WHY IT IS OPEN
+// ---------------------------------------------------------------------------
+//
+//   widthPct     15–100 (the existing photo width rule), or null. Null means
+//                "no stored width" — the legacy rendering (intrinsic size,
+//                max-width: 100%) that every image written before this
+//                vocabulary existed still gets.
+//
+//   layout mode  an OPEN vocabulary, currently `block` and `wrap`. A mode this
+//                build does not recognise normalizes to `block` — a future
+//                document degrades to safe stacked placement rather than
+//                breaking, and an old document (no mode at all) means `block`
+//                by definition.
+//
+//   layout side  `left` | `right`, meaningful ONLY for `wrap`. A wrap with no
+//                usable side is not renderable as a wrap, so it degrades to
+//                `block` as one unit — mode and side are normalized TOGETHER,
+//                never trusted separately.
+//
+// Extending the model later means adding a mode token (and only the attributes
+// that mode actually renders), not reshaping what is already stored.
+//
+// Pure: no DOM, no React, no storage, no editor.
+
+import { MAX_PHOTO_WIDTH_PCT, MIN_PHOTO_WIDTH_PCT, clampWidthPct } from "./noteAttachments";
+
+/** The serialized attribute names — owned here, emitted only by the image serializer. */
+export const MEDIA_WIDTH_PCT_ATTR = "data-width-pct";
+export const MEDIA_LAYOUT_MODE_ATTR = "data-layout-mode";
+export const MEDIA_LAYOUT_SIDE_ATTR = "data-layout-side";
+
+export const MEDIA_LAYOUT_MODE = {
+  BLOCK: "block",
+  WRAP: "wrap",
+};
+
+export const MEDIA_LAYOUT_SIDE = {
+  LEFT: "left",
+  RIGHT: "right",
+};
+
+/** Every mode this build can render, in a stable order. */
+export const MEDIA_LAYOUT_MODES = [MEDIA_LAYOUT_MODE.BLOCK, MEDIA_LAYOUT_MODE.WRAP];
+export const MEDIA_LAYOUT_SIDES = [MEDIA_LAYOUT_SIDE.LEFT, MEDIA_LAYOUT_SIDE.RIGHT];
+
+/** The model's own width bounds, re-stated once so consumers never hard-code them. */
+export const MEDIA_MIN_WIDTH_PCT = MIN_PHOTO_WIDTH_PCT;
+export const MEDIA_MAX_WIDTH_PCT = MAX_PHOTO_WIDTH_PCT;
+
+function token(value) {
+  if (typeof value !== "string") return null;
+  const t = value.trim().toLowerCase();
+  return t || null;
+}
+
+/**
+ * A stored/parsed width percentage → a whole point within 15–100, or null.
+ *
+ * Null (not a default width) is the answer for anything that is not a finite
+ * number, because "no stored width" must keep meaning "legacy rendering". An
+ * out-of-range NUMBER is clamped rather than dropped — the user chose a width,
+ * and the nearest width the model allows is closer to their intent than
+ * silently losing it.
+ */
+export function normalizeMediaWidthPct(value) {
+  // Only a number or a numeric string can describe a width. Anything else —
+  // including an array, whose Number() coercion is a well-known 0 — is null.
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(clampWidthPct(n));
+}
+
+/** A mode token → a member of the open vocabulary, else `block`. */
+export function normalizeMediaLayoutMode(value) {
+  const t = token(value);
+  return MEDIA_LAYOUT_MODES.includes(t) ? t : MEDIA_LAYOUT_MODE.BLOCK;
+}
+
+/** A side token → `left` | `right`, else null. */
+export function normalizeMediaLayoutSide(value) {
+  const t = token(value);
+  return MEDIA_LAYOUT_SIDES.includes(t) ? t : null;
+}
+
+/**
+ * Normalize a (mode, side) pair AS ONE UNIT.
+ *
+ * `{ mode: "block" }` is the universal fallback: unknown mode, missing mode,
+ * and a wrap without a usable side all land there. `side` is null for block —
+ * it is not meaningful, so it is not carried.
+ */
+export function normalizeMediaLayout({ mode, side } = {}) {
+  const m = normalizeMediaLayoutMode(mode);
+  if (m === MEDIA_LAYOUT_MODE.WRAP) {
+    const s = normalizeMediaLayoutSide(side);
+    if (s) return { mode: m, side: s };
+    return { mode: MEDIA_LAYOUT_MODE.BLOCK, side: null };
+  }
+  return { mode: MEDIA_LAYOUT_MODE.BLOCK, side: null };
+}
+
+/** True when this layout is the default the serializer may omit entirely. */
+export function isDefaultMediaLayout(layout) {
+  const l = normalizeMediaLayout(layout || {});
+  return l.mode === MEDIA_LAYOUT_MODE.BLOCK;
+}
+
+// ---------------------------------------------------------------------------
+// Presentation derivation — the ONE mapping from stored attributes to how a
+// consumer presents them. Classes carry the layout (so a stylesheet owns the
+// actual float/clear rules); the inline style carries only the width.
+// ---------------------------------------------------------------------------
+
+export const MEDIA_CLASS = "nw-media";
+
+/** The class list a media wrapper renders for a layout. Always includes the base class. */
+export function mediaLayoutClassNames(layout) {
+  const l = normalizeMediaLayout(layout || {});
+  if (l.mode === MEDIA_LAYOUT_MODE.WRAP) {
+    return [MEDIA_CLASS, `${MEDIA_CLASS}--wrap`, `${MEDIA_CLASS}--wrap-${l.side}`];
+  }
+  return [MEDIA_CLASS, `${MEDIA_CLASS}--block`];
+}
+
+/**
+ * The inline style a stored width produces — `{ width: "45%" }` — or null when
+ * there is no stored width, so a legacy image keeps its legacy rendering with
+ * no style attribute at all.
+ */
+export function mediaWidthStyle(widthPct) {
+  const pct = normalizeMediaWidthPct(widthPct);
+  return pct === null ? null : { width: `${pct}%` };
+}

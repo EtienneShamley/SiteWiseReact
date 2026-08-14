@@ -23,7 +23,25 @@
 // it does not recognise: destroying content in an existing note is worse than
 // carrying a scheme forward that an <img> could never execute anyway.
 //
+// PRESENTATION ATTRIBUTES (shared editor media core). An image may additionally
+// carry `data-width-pct` / `data-layout-mode` / `data-layout-side`, whose
+// vocabulary and normalization live in src/lib/editorMediaLayout.js. Two rules
+// keep them legacy-safe: values are validated in BOTH directions (an invalid
+// stored value degrades to the block/legacy default rather than surviving),
+// and the DEFAULTS ARE NEVER EMITTED — no stored width means no attribute, and
+// block layout means no layout attributes — so an existing document
+// round-trips byte-identically and is never rewritten merely by loading.
+//
 // Pure: no DOM, no IndexedDB, no React, no editor.
+
+import {
+  MEDIA_LAYOUT_MODE_ATTR,
+  MEDIA_LAYOUT_SIDE_ATTR,
+  MEDIA_WIDTH_PCT_ATTR,
+  isDefaultMediaLayout,
+  normalizeMediaLayout,
+  normalizeMediaWidthPct,
+} from "./editorMediaLayout";
 
 export const EDITOR_IMAGE_ASSET_ATTR = "data-asset-id";
 
@@ -100,6 +118,16 @@ export function editorImageAttrsToHTML(attrs) {
   const height = positiveInt(source.height);
   if (height) out.height = String(height);
 
+  // Presentation attributes: defaults are never emitted, so a document written
+  // before they existed serializes byte-identically to what it stored.
+  const widthPct = normalizeMediaWidthPct(source.widthPct);
+  if (widthPct !== null) out[MEDIA_WIDTH_PCT_ATTR] = String(widthPct);
+  const layout = normalizeMediaLayout({ mode: source.layoutMode, side: source.layoutSide });
+  if (!isDefaultMediaLayout(layout)) {
+    out[MEDIA_LAYOUT_MODE_ATTR] = layout.mode;
+    out[MEDIA_LAYOUT_SIDE_ATTR] = layout.side;
+  }
+
   return out;
 }
 
@@ -118,6 +146,15 @@ export function editorImageAttrsFromElement(element) {
   const assetId = trimmedString(get(EDITOR_IMAGE_ASSET_ATTR));
   const rawSrc = get("src");
 
+  // Presentation attributes are normalized as one unit on the way in: a
+  // missing/invalid width parses as null (legacy rendering), and a missing,
+  // unknown or incomplete layout parses as block — stored HTML is untrusted
+  // input, so an invalid value can never survive into a node.
+  const layout = normalizeMediaLayout({
+    mode: get(MEDIA_LAYOUT_MODE_ATTR),
+    side: get(MEDIA_LAYOUT_SIDE_ATTR),
+  });
+
   return {
     assetId,
     // An asset-backed image ignores any src it happens to carry, and a blob:
@@ -128,6 +165,9 @@ export function editorImageAttrsFromElement(element) {
     title: trimmedString(get("title")),
     width: positiveInt(get("width")),
     height: positiveInt(get("height")),
+    widthPct: normalizeMediaWidthPct(get(MEDIA_WIDTH_PCT_ATTR)),
+    layoutMode: layout.mode,
+    layoutSide: layout.side,
   };
 }
 

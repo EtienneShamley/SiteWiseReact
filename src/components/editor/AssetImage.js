@@ -35,6 +35,7 @@ import {
   editorImageAttrsToHTML,
   isPersistableImageSrc,
 } from "../../lib/editorImageAssets";
+import { MEDIA_LAYOUT_MODE } from "../../lib/editorMediaLayout";
 
 function AssetImageView({ node }) {
   const { assetId, src, alt, title, width, height } = node.attrs;
@@ -129,6 +130,25 @@ export const AssetImage = Image.extend({
       assetId: {
         default: null,
         parseHTML: (el) => editorImageAttrsFromElement(el).assetId,
+        renderHTML: none,
+      },
+      // Shared media-core presentation attributes (editorMediaLayout.js).
+      // Schema/serialization foundation only in this phase: the NodeView above
+      // does not read them yet, and the defaults are never emitted, so an
+      // existing document renders and round-trips exactly as before.
+      widthPct: {
+        default: null,
+        parseHTML: (el) => editorImageAttrsFromElement(el).widthPct,
+        renderHTML: none,
+      },
+      layoutMode: {
+        default: MEDIA_LAYOUT_MODE.BLOCK,
+        parseHTML: (el) => editorImageAttrsFromElement(el).layoutMode,
+        renderHTML: none,
+      },
+      layoutSide: {
+        default: null,
+        parseHTML: (el) => editorImageAttrsFromElement(el).layoutSide,
         renderHTML: none,
       },
     };
