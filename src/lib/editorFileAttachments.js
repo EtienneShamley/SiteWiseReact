@@ -36,7 +36,7 @@
 //
 // Pure: no DOM, no IndexedDB, no React, no editor.
 
-import { fileExtension } from "./assetStorage";
+import { ASSET_KIND_EDITOR_FILE, fileExtension } from "./assetStorage";
 import {
   isDangerousInlineMimeType,
   normalizeMimeType,
@@ -54,6 +54,46 @@ export const FILE_ATTACHMENT_TYPE_ATTR = "data-file-type";
 export const FILE_ATTACHMENT_SIZE_ATTR = "data-file-size";
 
 export const FILE_ATTACHMENT_CLASS = "note-file-attachment";
+
+/**
+ * Which IndexedDB asset KIND the shared file-attachment card may open —
+ * separate from the id/attribute SHAPE checks above. Kind is the runtime
+ * ownership boundary (see src/lib/assetStorage.js): a card must never open a
+ * Blob belonging to a different feature just because a document happens to
+ * point at it, even a well-formed, safely-shaped reference.
+ *
+ * FREE-FORM'S DEFAULT IS UNCHANGED: a card with no explicit `.configure()`
+ * accepts only `editor-file`, exactly as before this option existed. A future
+ * Template Section editor is expected to `.configure({ acceptedAssetKinds })`
+ * with its OWN kind(s) (see src/components/editor/sectionEditorExtensions.js)
+ * — the node itself neither knows nor cares which surface is using it.
+ *
+ * This is a KIND allowlist only. It says nothing about, and never rewrites,
+ * an asset's id — a long historical migrated id is refused or accepted by
+ * `isSafeAssetId` exactly as it always was, upstream of this check.
+ */
+export const DEFAULT_FILE_ATTACHMENT_ASSET_KINDS = Object.freeze([
+  ASSET_KIND_EDITOR_FILE,
+]);
+
+/**
+ * Is this asset's KIND one this card is configured to open?
+ *
+ * `acceptedKinds` defaults to the Free-form default, so a caller that has not
+ * configured anything gets EXACTLY today's behaviour. An empty or malformed
+ * `acceptedKinds` (a `.configure()` call that supplied nothing usable) falls
+ * back to the default too, rather than silently accepting every kind.
+ */
+export function isAcceptedFileAssetKind(
+  kind,
+  acceptedKinds = DEFAULT_FILE_ATTACHMENT_ASSET_KINDS
+) {
+  const list =
+    Array.isArray(acceptedKinds) && acceptedKinds.length
+      ? acceptedKinds
+      : DEFAULT_FILE_ATTACHMENT_ASSET_KINDS;
+  return list.includes(kind);
+}
 
 /* --------------------------------- limits -------------------------------- */
 

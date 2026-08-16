@@ -19,13 +19,15 @@ import {
   canonicalMimeForExtension,
   collectFileAssetIdsFromHtml,
   countLegacyBlobLinks,
+  DEFAULT_FILE_ATTACHMENT_ASSET_KINDS,
   fileAttachmentAttrsFromElement,
   fileAttachmentAttrsToHTML,
   fileAttachmentLabel,
+  isAcceptedFileAssetKind,
   isSafeAssetId,
   validateEditorFileAttachment,
 } from "./editorFileAttachments";
-import { MAX_NOTE_FILE_BYTES } from "./assetStorage";
+import { ASSET_KIND_EDITOR_FILE, ASSET_KIND_NOTE_FILE, MAX_NOTE_FILE_BYTES } from "./assetStorage";
 import { safeDownloadFilename } from "./safeAttachmentOpen";
 
 const ASSET_ID = "3f9a1c02-7b41-4a55-9f2e-11c0de4a77bd";
@@ -502,5 +504,63 @@ describe("safe download filenames (shared with Template-form evidence)", () => {
     expect(safeDownloadFilename("<img onerror=alert(1)>.txt")).toBe(
       "img onerror=alert(1) .txt"
     );
+  });
+});
+
+/* --------------------- shared node asset-kind policy --------------------- */
+// Phase F2 (shared editor core): a card's asset KIND policy is now
+// configurable, so the same FileAttachment node can later serve a Template
+// Section (a different asset kind) without becoming a second component. Kind
+// policy is deliberately independent of id/attribute SHAPE — see the "shape
+// vs kind" tests at the bottom of this block.
+
+describe("DEFAULT_FILE_ATTACHMENT_ASSET_KINDS / isAcceptedFileAssetKind", () => {
+  test("1. Free-form's default accepted kind is unchanged: editor-file only", () => {
+    expect(DEFAULT_FILE_ATTACHMENT_ASSET_KINDS).toEqual([ASSET_KIND_EDITOR_FILE]);
+    expect(isAcceptedFileAssetKind(ASSET_KIND_EDITOR_FILE)).toBe(true);
+    expect(isAcceptedFileAssetKind(ASSET_KIND_NOTE_FILE)).toBe(false);
+    expect(isAcceptedFileAssetKind("logo")).toBe(false);
+    expect(isAcceptedFileAssetKind("note-photo")).toBe(false);
+  });
+
+  test("2. an explicit Template configuration can accept the Template attachment kind", () => {
+    expect(isAcceptedFileAssetKind(ASSET_KIND_NOTE_FILE, [ASSET_KIND_NOTE_FILE])).toBe(true);
+  });
+
+  test("3. a disallowed kind stays refused under an explicit configuration", () => {
+    expect(isAcceptedFileAssetKind(ASSET_KIND_EDITOR_FILE, [ASSET_KIND_NOTE_FILE])).toBe(false);
+    expect(isAcceptedFileAssetKind("logo", [ASSET_KIND_NOTE_FILE])).toBe(false);
+  });
+
+  test("a configuration may list more than one accepted kind", () => {
+    const both = [ASSET_KIND_NOTE_FILE, ASSET_KIND_EDITOR_FILE];
+    expect(isAcceptedFileAssetKind(ASSET_KIND_NOTE_FILE, both)).toBe(true);
+    expect(isAcceptedFileAssetKind(ASSET_KIND_EDITOR_FILE, both)).toBe(true);
+    expect(isAcceptedFileAssetKind("logo", both)).toBe(false);
+  });
+
+  test("an empty, missing or malformed configuration falls back to the default rather than accepting everything", () => {
+    expect(isAcceptedFileAssetKind(ASSET_KIND_EDITOR_FILE, [])).toBe(true);
+    expect(isAcceptedFileAssetKind(ASSET_KIND_NOTE_FILE, [])).toBe(false);
+    expect(isAcceptedFileAssetKind(ASSET_KIND_EDITOR_FILE, undefined)).toBe(true);
+    expect(isAcceptedFileAssetKind(ASSET_KIND_EDITOR_FILE, null)).toBe(true);
+    expect(isAcceptedFileAssetKind(ASSET_KIND_EDITOR_FILE, "editor-file")).toBe(true);
+    expect(isAcceptedFileAssetKind(ASSET_KIND_NOTE_FILE, "not-an-array")).toBe(false);
+  });
+
+  test("6. kind policy is independent of id shape — neither function reads the other's concern", () => {
+    // isSafeAssetId governs SHAPE (id length/characters); isAcceptedFileAssetKind
+    // governs KIND (which surface's Blobs may be opened). Both take an id/kind
+    // as their ONLY input and answer a single yes/no question, so this
+    // configuration option can never widen, narrow or rewrite an id — it
+    // decides nothing about shape at all.
+    // A historical migrated id near/over the shared shape limit (see
+    // ASSET_ID_RE, 8-64 chars) is neither truncated nor normalized by a kind
+    // check — it is refused or accepted by isSafeAssetId alone, upstream and
+    // unaffected by this option.
+    const overLongMigratedId = `note-att-${"a".repeat(80)}`;
+    expect(overLongMigratedId).toBe(`note-att-${"a".repeat(80)}`); // unmodified
+    expect(isSafeAssetId(overLongMigratedId)).toBe(false); // too long — shape's call
+    expect(isAcceptedFileAssetKind(ASSET_KIND_EDITOR_FILE)).toBe(true); // kind's call, separately
   });
 });

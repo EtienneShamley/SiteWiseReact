@@ -64,6 +64,7 @@ import {
   isFreeformEditingEnabled,
   resolveToolbarOwner,
 } from "../lib/editorToolbarState";
+import { MEDIA_EDITOR_ROOT_CLASS } from "../lib/editorMediaLayout";
 import {
   clearRowRefineBackup,
   pruneRowRefineBackups,
@@ -458,7 +459,12 @@ export default function MainArea() {
       editable: !!noteTitle,
       editorProps: {
         attributes: {
-          class: "note-editor min-h-[400px] focus:outline-none",
+          // `.note-editor` — this surface's own document typography (headings,
+          // lists, tables, blockquotes, code, links); MEDIA_EDITOR_ROOT_CLASS —
+          // the shared-core editor-root marker the media/file chrome CSS is
+          // scoped to (see editorMediaLayout.js). A future Template Section
+          // editor root carries ONLY the second class.
+          class: `note-editor ${MEDIA_EDITOR_ROOT_CLASS} min-h-[400px] focus:outline-none`,
           spellCheck: "true",
         },
       },

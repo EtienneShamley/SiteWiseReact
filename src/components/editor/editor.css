@@ -134,7 +134,7 @@
 }
 
 /* Images */
-.note-editor img {
+.nw-editor-root img {
   max-width: 100%;
   height: auto;
 }
@@ -143,7 +143,7 @@
    floated near the end of the document must extend the editor's own height,
    never spill under the paged shell or the page-guide measurement. flow-root
    changes nothing for a document with no floats. */
-.note-editor {
+.nw-editor-root {
   display: flow-root;
 }
 
@@ -152,10 +152,10 @@
    content (fit-content) so the selection ring and the corner handles sit on
    the image itself, never on the empty remainder of the column; a stored
    width (inline style, written only by the shared media core) overrides it. */
-.note-editor .note-image-node {
+.nw-editor-root .note-image-node {
   margin: 0.5rem 0;
 }
-.note-editor .nw-media {
+.nw-editor-root .nw-media {
   position: relative;
   width: fit-content;
   max-width: 100%;
@@ -168,11 +168,11 @@
    the ONE shared mapping (mediaLayoutClassNames), so the editor and every
    export agree on what a stored layout means. Margins keep a readable gutter
    between image and text on the wrapped side only. */
-.note-editor .nw-media--wrap-left {
+.nw-editor-root .nw-media--wrap-left {
   float: left;
   margin: 0.25rem 1rem 0.5rem 0;
 }
-.note-editor .nw-media--wrap-right {
+.nw-editor-root .nw-media--wrap-right {
   float: right;
   margin: 0.25rem 0 0.5rem 1rem;
 }
@@ -180,14 +180,14 @@
 /* Block placement starts below any wrapped image above it — two images can
    never end up side by side by accident, and dragging a wrapped image back to
    the centre restores genuine stacked flow. No-op in a float-free document. */
-.note-editor .nw-media--block {
+.nw-editor-root .nw-media--block {
   clear: both;
 }
 
 /* A stored width sizes the WRAPPER; the image fills it and its height stays
    derived from the intrinsic ratio, so a resize can never stretch or crop.
    An image with no stored width keeps its legacy rendering untouched. */
-.note-editor .nw-media--sized > img {
+.nw-editor-root .nw-media--sized > img {
   display: block;
   width: 100%;
   height: auto;
@@ -196,7 +196,7 @@
 /* Selection chrome: a restrained ring, present only while the node is
    ProseMirror-selected. Shown with the handles and the Remove control, so the
    state is never communicated by colour alone. */
-.note-editor .nw-media--selected {
+.nw-editor-root .nw-media--selected {
   border-radius: 2px;
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.55);
 }
@@ -205,13 +205,13 @@
 }
 
 /* A gesture in flight must not start a text selection. */
-.note-editor .nw-media--resizing {
+.nw-editor-root .nw-media--resizing {
   user-select: none;
 }
 
 /* Compact controls over the selected image. The image body itself is never a
    destructive click target. */
-.note-editor .nw-media-controls {
+.nw-editor-root .nw-media-controls {
   position: absolute;
   top: 0.375rem;
   right: 0.375rem;
@@ -219,7 +219,7 @@
   gap: 0.25rem;
   z-index: 3;
 }
-.note-editor .nw-media-btn {
+.nw-editor-root .nw-media-btn {
   padding: 0.15rem 0.5rem;
   border: 1px solid #d1d5db;
   border-radius: 0.25rem;
@@ -230,14 +230,14 @@
   cursor: pointer;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
-.note-editor .nw-media-btn:hover {
+.nw-editor-root .nw-media-btn:hover {
   background: #f3f4f6;
 }
-.note-editor .nw-media-btn:focus-visible {
+.nw-editor-root .nw-media-btn:focus-visible {
   outline: 2px solid #3b82f6;
   outline-offset: 1px;
 }
-.note-editor .nw-media-btn--danger {
+.nw-editor-root .nw-media-btn--danger {
   color: #b91c1c;
 }
 .dark .note-editor .nw-media-btn {
@@ -254,7 +254,7 @@
 
 /* The four proportional resize handles. Cursor comes inline from the shared
    corner derivation; positions live here. Rendered only while selected. */
-.note-editor .nw-media-corner {
+.nw-editor-root .nw-media-corner {
   position: absolute;
   width: 12px;
   height: 12px;
@@ -265,19 +265,19 @@
   touch-action: none;
   z-index: 3;
 }
-.note-editor .nw-media-corner--top-left {
+.nw-editor-root .nw-media-corner--top-left {
   top: -6px;
   left: -6px;
 }
-.note-editor .nw-media-corner--top-right {
+.nw-editor-root .nw-media-corner--top-right {
   top: -6px;
   right: -6px;
 }
-.note-editor .nw-media-corner--bottom-left {
+.nw-editor-root .nw-media-corner--bottom-left {
   bottom: -6px;
   left: -6px;
 }
-.note-editor .nw-media-corner--bottom-right {
+.nw-editor-root .nw-media-corner--bottom-right {
   bottom: -6px;
   right: -6px;
 }
@@ -289,18 +289,18 @@
 /* A body drag in flight. The source image keeps its layout position (nothing
    underneath may move while aiming) but fades, so the floating ghost reads as
    the image in hand rather than a second copy. */
-.note-editor .nw-media--dragging {
+.nw-editor-root .nw-media--dragging {
   opacity: 0.4;
 }
 
 /* While an image is in hand (class set by the drop-indicator plugin on the
    editor root), a drag across the page must not sweep a text selection under
    it, and the cursor says "carrying". */
-.note-editor.nw-media-drag-active {
+.nw-editor-root.nw-media-drag-active {
   user-select: none;
   cursor: grabbing;
 }
-.note-editor.nw-media-drag-active * {
+.nw-editor-root.nw-media-drag-active * {
   cursor: grabbing;
 }
 
@@ -320,12 +320,12 @@
    destination draws the full-width insertion line; a wrap destination draws
    the dashed placement outline instead, hugging the chosen side at the
    dragged image's own width (inline %, written by the indicator plugin). */
-.note-editor .nw-media-drop-indicator {
+.nw-editor-root .nw-media-drop-indicator {
   position: relative;
   height: 0;
   pointer-events: none;
 }
-.note-editor .nw-media-drop-indicator__line {
+.nw-editor-root .nw-media-drop-indicator__line {
   position: absolute;
   left: 0;
   right: 0;
@@ -337,7 +337,7 @@
 .dark .note-editor .nw-media-drop-indicator__line {
   background: #60a5fa;
 }
-.note-editor .nw-media-drop-indicator__box {
+.nw-editor-root .nw-media-drop-indicator__box {
   position: absolute;
   top: 0;
   height: 4.5em;
@@ -345,10 +345,10 @@
   border-radius: 4px;
   background: rgba(59, 130, 246, 0.12);
 }
-.note-editor .nw-media-drop-indicator--wrap-left .nw-media-drop-indicator__box {
+.nw-editor-root .nw-media-drop-indicator--wrap-left .nw-media-drop-indicator__box {
   left: 0;
 }
-.note-editor .nw-media-drop-indicator--wrap-right .nw-media-drop-indicator__box {
+.nw-editor-root .nw-media-drop-indicator--wrap-right .nw-media-drop-indicator__box {
   right: 0;
 }
 .dark .note-editor .nw-media-drop-indicator__box {
@@ -360,9 +360,9 @@
    size and position are document content. Nothing of the chrome — controls,
    handles, ghost or insertion indicator — reaches paper. */
 @media print {
-  .note-editor .nw-media-controls,
-  .note-editor .nw-media-corner,
-  .note-editor .nw-media-drop-indicator,
+  .nw-editor-root .nw-media-controls,
+  .nw-editor-root .nw-media-corner,
+  .nw-editor-root .nw-media-drop-indicator,
   .nw-media-drag-ghost {
     display: none !important;
   }
@@ -371,7 +371,7 @@
 /* Loading / unavailable states. An image whose stored file cannot be found
    reads as text rather than showing a broken-image icon — a field note must say
    what is missing, not just fail to draw it. */
-.note-editor .note-image-placeholder {
+.nw-editor-root .note-image-placeholder {
   display: inline-block;
   padding: 0.5rem 0.75rem;
   border: 1px dashed #d1d5db;
@@ -382,7 +382,7 @@
   line-height: 1.25rem;
   max-width: 100%;
 }
-.note-editor .note-image-placeholder--missing {
+.nw-editor-root .note-image-placeholder--missing {
   border-color: #fca5a5;
   background: #fef2f2;
   color: #b91c1c;

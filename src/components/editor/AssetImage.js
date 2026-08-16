@@ -51,22 +51,21 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import Image from "@tiptap/extension-image";
 import { mergeAttributes } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
-import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import {
   EDITOR_IMAGE_ASSET_ATTR,
-  EDITOR_IMAGE_LOADING_TEXT,
-  EDITOR_IMAGE_UNAVAILABLE_TEXT,
   editorImageAttrsFromElement,
   editorImageAttrsToHTML,
-  isPersistableImageSrc,
 } from "../../lib/editorImageAssets";
 import {
   MEDIA_CLASS,
   MEDIA_LAYOUT_MODE,
-  mediaLayoutClassNames,
   mediaWidthStyle,
   normalizeMediaWidthPct,
 } from "../../lib/editorMediaLayout";
+import {
+  mediaImageWrapperClassNames,
+  useMediaImagePresentation,
+} from "./mediaImagePresentation";
 import {
   MEDIA_RESIZE_CORNERS,
   mediaCornerResizeCursor,
@@ -145,10 +144,6 @@ const stopDrag = (e) => {
 
 function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
   const { assetId, src, alt, title, width, height } = node.attrs;
-  // The hook is called unconditionally (rules of hooks) and no-ops for a
-  // non-asset image, which is what keeps remote and legacy images on the same
-  // component without a second renderer.
-  const { url, status } = useAssetObjectUrl(assetId || null);
 
   // The live resize preview: inline width only, NEVER the document. Null when
   // idle, so a cancelled gesture reverts by itself — the rendered width falls
@@ -396,86 +391,38 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
     [editable, editor, getPos, storedPct]
   );
 
-  const label = alt || "Image";
-  const dimensionProps = {};
-  if (Number(width) > 0) dimensionProps.width = Math.round(Number(width));
-  if (Number(height) > 0) dimensionProps.height = Math.round(Number(height));
-
-  let body;
-  let renderable = false;
-  if (assetId) {
-    if (status === "loading") {
-      body = (
-        <span className="note-image-placeholder" role="status" onClick={selectSelf}>
-          {EDITOR_IMAGE_LOADING_TEXT}
-        </span>
-      );
-    } else if (status === "ready" && url) {
-      renderable = true;
-      body = (
-        <img
-          src={url}
-          alt={label}
-          title={title || undefined}
-          draggable={false}
-          onClick={selectSelf}
-          onPointerDown={beginBodyDrag}
-          onDragStart={stopDrag}
-          {...dimensionProps}
-        />
-      );
-    } else {
-      body = (
-        <span
-          className="note-image-placeholder note-image-placeholder--missing"
-          onClick={selectSelf}
-        >
-          {EDITOR_IMAGE_UNAVAILABLE_TEXT}
-          {alt ? ` (${alt})` : ""}
-        </span>
-      );
-    }
-  } else if (isPersistableImageSrc(src)) {
-    // A remote http/https image, or a legacy data:image kept for compatibility.
-    renderable = true;
-    body = (
-      <img
-        src={src}
-        alt={label}
-        title={title || undefined}
-        draggable={false}
-        onClick={selectSelf}
-        onPointerDown={beginBodyDrag}
-        onDragStart={stopDrag}
-        {...dimensionProps}
-      />
-    );
-  } else {
-    body = (
-      <span
-        className="note-image-placeholder note-image-placeholder--missing"
-        onClick={selectSelf}
-      >
-        {EDITOR_IMAGE_UNAVAILABLE_TEXT}
-      </span>
-    );
-  }
+  // The presentation shared with a future static Section view (see
+  // mediaImagePresentation.js) — asset resolution, the missing/loading
+  // placeholder, and the <img>'s own element semantics. Everything ELSE on
+  // this NodeView — selection, resize, drag, Remove, keyboard — is attached
+  // on top of what this returns and never moves into the shared module.
+  const { body, renderable, label } = useMediaImagePresentation({
+    assetId,
+    src,
+    alt,
+    title,
+    width,
+    height,
+    onImageClick: selectSelf,
+    onImagePointerDown: beginBodyDrag,
+    onImageDragStart: stopDrag,
+  });
 
   const showChrome = selected && editable;
   // A placeholder has no meaningful proportional width, so it offers Remove
   // but no resize handles.
   const showHandles = showChrome && renderable;
 
-  const classNames = [
-    "note-image-node",
-    ...mediaLayoutClassNames({ mode: node.attrs.layoutMode, side: node.attrs.layoutSide }),
-    effectivePct !== null ? `${MEDIA_CLASS}--sized` : "",
-    showChrome ? `${MEDIA_CLASS}--selected` : "",
-    resizing ? `${MEDIA_CLASS}--resizing` : "",
-    draggingBody ? `${MEDIA_CLASS}--dragging` : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const classNames = mediaImageWrapperClassNames({
+    layoutMode: node.attrs.layoutMode,
+    layoutSide: node.attrs.layoutSide,
+    sized: effectivePct !== null,
+    extra: [
+      showChrome ? `${MEDIA_CLASS}--selected` : "",
+      resizing ? `${MEDIA_CLASS}--resizing` : "",
+      draggingBody ? `${MEDIA_CLASS}--dragging` : "",
+    ],
+  });
 
   return (
     <NodeViewWrapper

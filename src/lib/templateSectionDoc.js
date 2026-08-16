@@ -79,6 +79,17 @@
 // or deletes a stored value, and the deletion gate below deliberately keeps
 // protecting the assets a malformed document names.
 //
+// "THE SUPPORTED SECTION SCHEMA" named in rule 3 is
+// src/components/editor/sectionEditorExtensions.js — the ONE place the future
+// Section editor's real node identities and rich-text vocabulary are declared.
+// This module's own image/file detection (the `img` tag, the shared
+// `FILE_ATTACHMENT_ASSET_ATTR` / `FILE_ATTACHMENT_CLASS` contracts imported
+// below) is built from the SAME canonical attribute contracts that factory's
+// nodes parse via, so the two cannot silently name different things even
+// though this module does not import a live ProseMirror schema from it — see
+// that file's own header for exactly why, and exactly what is and is not
+// consolidated between them.
+//
 // Pure apart from DOMParser (browser + jsdom), exactly like templateRichText.js.
 // No React, no storage, no editor.
 

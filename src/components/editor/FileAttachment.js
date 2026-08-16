@@ -13,8 +13,14 @@
 //
 // SECURITY: the node's metadata is DISPLAY data, never authority.
 //   - the asset record retrieved from IndexedDB decides everything;
-//   - its `kind` must be `editor-file` — a Template-form File or Photo asset,
-//     an editor image or a logo is refused even if the note points at it;
+//   - its `kind` must be one this INSTANCE of the node was configured to open
+//     (`acceptedAssetKinds`, default `editor-file` — see
+//     src/lib/editorFileAttachments.js). A Photo asset, a logo, or a file
+//     belonging to a surface this instance was not configured for is refused
+//     even if the note points at it. Kind policy and id/attribute SHAPE
+//     validation are deliberately separate concerns — this option only ever
+//     widens which SURFACE'S bytes a card may open, never how an id is
+//     shaped or trusted;
 //   - whether the file may be rendered inline is decided ONLY by the MIME type
 //     of the Blob actually retrieved, through the shared allowlist policy in
 //     src/lib/safeAttachmentOpen.js. The filename, the extension, the displayed
@@ -31,9 +37,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Node, mergeAttributes } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
-import { getAsset, ASSET_KIND_EDITOR_FILE } from "../../lib/assetStorage";
+import { getAsset } from "../../lib/assetStorage";
 import useTransientMessage from "../../hooks/useTransientMessage";
 import {
+  DEFAULT_FILE_ATTACHMENT_ASSET_KINDS,
   FILE_ATTACHMENT_ASSET_ATTR,
   FILE_ATTACHMENT_CLASS,
   FILE_ATTACHMENT_LOADING_TEXT,
@@ -47,6 +54,7 @@ import {
   fileAttachmentAttrsToHTML,
   fileAttachmentLabel,
   fileAttachmentMetaText,
+  isAcceptedFileAssetKind,
 } from "../../lib/editorFileAttachments";
 import {
   ATTACHMENT_DOWNLOAD_FAILED_MESSAGE,
@@ -68,12 +76,17 @@ import TextPreviewDialog from "../template/TextPreviewDialog";
 const STATUS = { LOADING: "loading", READY: "ready", MISSING: "missing" };
 
 /**
- * Retrieve the asset and confirm it is genuinely a Free-form file attachment.
- * Returns null for a missing asset, an unreadable one, or one of the wrong
- * kind — all three present identically to the user, because in every case this
- * note cannot open this file.
+ * Retrieve the asset and confirm it is genuinely a file attachment THIS CARD
+ * is configured to open. Returns null for a missing asset, an unreadable one,
+ * or one of a kind this card was not configured to accept — all three present
+ * identically to the user, because in every case this note cannot open this
+ * file.
+ *
+ * `acceptedKinds` defaults to the Free-form default (see
+ * DEFAULT_FILE_ATTACHMENT_ASSET_KINDS), so a card with no explicit
+ * `.configure()` behaves exactly as it always has.
  */
-async function loadAttachmentAsset(assetId) {
+async function loadAttachmentAsset(assetId, acceptedKinds) {
   if (!assetId) return null;
   let asset;
   try {
@@ -82,12 +95,18 @@ async function loadAttachmentAsset(assetId) {
     return null;
   }
   if (!asset || !asset.blob) return null;
-  if (asset.kind !== ASSET_KIND_EDITOR_FILE) return null;
+  if (!isAcceptedFileAssetKind(asset.kind, acceptedKinds)) return null;
   return asset;
 }
 
-function FileAttachmentView({ node, selected, deleteNode, editor }) {
+function FileAttachmentView({ node, selected, deleteNode, editor, extension }) {
   const { assetId, name, mimeType, size } = node.attrs;
+  // The kinds THIS instance of the node was configured to open — Free-form's
+  // default when nothing was configured, a Template Section's own kind(s)
+  // when it was. Read from the extension's resolved options, never assumed.
+  const acceptedAssetKinds =
+    (extension && extension.options && extension.options.acceptedAssetKinds) ||
+    DEFAULT_FILE_ATTACHMENT_ASSET_KINDS;
 
   // Serialized display metadata — used to draw the card before the asset
   // arrives, and to label the unavailable state if it never does.
@@ -145,7 +164,7 @@ function FileAttachmentView({ node, selected, deleteNode, editor }) {
     });
     if (!assetId) return undefined;
 
-    loadAttachmentAsset(assetId).then((asset) => {
+    loadAttachmentAsset(assetId, acceptedAssetKinds).then((asset) => {
       if (cancelled) return;
       if (!asset) {
         setState({ status: STATUS.MISSING, policy: null, meta: null });
@@ -167,7 +186,11 @@ function FileAttachmentView({ node, selected, deleteNode, editor }) {
     return () => {
       cancelled = true;
     };
-  }, [assetId, mimeType, name]);
+    // `acceptedAssetKinds` is stable for the life of this node instance (it
+    // comes from the extension's own resolved `.configure()` options, set at
+    // editor-construction time, never per-render), so it is listed but never
+    // actually changes the effect's cadence.
+  }, [assetId, mimeType, name, acceptedAssetKinds]);
 
   const displayName = state.meta?.name || fallbackName;
   const displayMime = state.meta ? state.meta.mimeType : mimeType;
@@ -217,7 +240,7 @@ function FileAttachmentView({ node, selected, deleteNode, editor }) {
       reservedTab,
       metadataMimeType: mimeType,
       getBlob: async () => {
-        const asset = await loadAttachmentAsset(assetId);
+        const asset = await loadAttachmentAsset(assetId, acceptedAssetKinds);
         return asset ? asset.blob : null;
       },
       createUrl: (blob, options) => trackUrl(createManagedObjectUrl(blob, options)),
@@ -261,7 +284,7 @@ function FileAttachmentView({ node, selected, deleteNode, editor }) {
   async function handleDownload() {
     if (!beginAction()) return;
     try {
-      const asset = await loadAttachmentAsset(assetId);
+      const asset = await loadAttachmentAsset(assetId, acceptedAssetKinds);
       if (!asset) {
         setState({ status: STATUS.MISSING, policy: null, meta: null });
         showNoticeError(ATTACHMENT_UNAVAILABLE_MESSAGE);
@@ -394,6 +417,19 @@ export const FileAttachment = Node.create({
   // Deliberately not draggable: a card carrying its own buttons has no
   // unambiguous drag surface, and dragging is not part of this feature.
   draggable: false,
+
+  // `acceptedAssetKinds` is the ONE thing a consuming surface configures.
+  // Free-form never calls `.configure()`, so it gets exactly today's
+  // behaviour; a future Template Section editor configures its own kind(s)
+  // (see src/components/editor/sectionEditorExtensions.js). Everything else
+  // about the node — its schema, its parser, its serializer, its NodeView —
+  // is shared and unconfigured.
+  addOptions() {
+    return {
+      ...this.parent?.(),
+      acceptedAssetKinds: DEFAULT_FILE_ATTACHMENT_ASSET_KINDS,
+    };
+  },
 
   addAttributes() {
     // Every attribute renders nothing on its own — renderHTML below emits the

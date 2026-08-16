@@ -1,0 +1,151 @@
+// src/components/editor/mediaImagePresentation.js
+//
+// THE SHARED MEDIA IMAGE PRESENTATION (Phase F2, shared editor core).
+//
+// The RENDERING every media image needs, whichever surface shows it — the
+// live Free-form NodeView today, a future STATIC (inactive) Template Section
+// view later. It is deliberately the presentation half only:
+//
+//   - resolve an asset-backed image (the shared object-URL hook) and render
+//     the loading / ready / missing states;
+//   - render a legacy base64 or remote image, and the placeholder for
+//     anything else;
+//   - the <img>'s own element semantics — draggable={false}, alt, title,
+//     intrinsic width/height — and the shared wrapper class derivation
+//     (layout mode/side, and whether a stored width sizes the wrapper).
+//
+// NOTHING HERE IS A PROSEMIRROR CONCERN. There is no NodeSelection, no resize
+// handle, no drag gesture, no keyboard shortcut, no editor transaction — those
+// stay exactly where they are, in the live NodeView (AssetImage.js), which
+// calls this module and attaches its OWN gesture handlers on top of what it
+// renders. A caller that passes no handlers gets a non-interactive image —
+// which is exactly what a future static Section view needs.
+//
+// No second serializer and no second asset-loading rule exist here: asset
+// resolution is the SAME shared hook (useAssetObjectUrl) the NodeView has
+// always used, and "is this src safe to render" is the SAME serializer
+// authority (isPersistableImageSrc, editorImageAssets.js) it has always used.
+//
+// Pure apart from the one shared hook call — no storage, no persistence.
+
+import React from "react";
+import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
+import {
+  EDITOR_IMAGE_LOADING_TEXT,
+  EDITOR_IMAGE_UNAVAILABLE_TEXT,
+  isPersistableImageSrc,
+} from "../../lib/editorImageAssets";
+import { MEDIA_CLASS, mediaLayoutClassNames } from "../../lib/editorMediaLayout";
+
+/**
+ * The wrapper class list every media image shares: the legacy Free-form
+ * layout marker, the shared layout derivation (block / wrap-left / wrap-right,
+ * from the ONE authority in editorMediaLayout.js), and whether a stored width
+ * sizes the wrapper. `extra` appends caller-owned classes AFTER these, in the
+ * order given — which is how a live NodeView adds its own interaction-only
+ * classes (selected/resizing/dragging) without this function knowing they
+ * exist.
+ */
+export function mediaImageWrapperClassNames({
+  layoutMode,
+  layoutSide,
+  sized = false,
+  extra = [],
+} = {}) {
+  return [
+    "note-image-node",
+    ...mediaLayoutClassNames({ mode: layoutMode, side: layoutSide }),
+    sized ? `${MEDIA_CLASS}--sized` : "",
+    ...(Array.isArray(extra) ? extra : []),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/**
+ * The presentation body every media image shares, and whether it is
+ * something a corner-resize handle would make sense on (`renderable` — a
+ * placeholder has no meaningful proportional width).
+ *
+ * `onImageClick` / `onImagePointerDown` / `onImageDragStart` are optional and
+ * attached ONLY to a real `<img>` element, never to the placeholder text
+ * beyond a click handler (a placeholder still needs to be selectable) — the
+ * exact split the live NodeView has always rendered. Omitting all three
+ * produces a fully non-interactive image, which is the static-view case.
+ *
+ * @returns { body: ReactNode, renderable: boolean, label: string }
+ */
+export function useMediaImagePresentation({
+  assetId,
+  src,
+  alt,
+  title,
+  width,
+  height,
+  onImageClick,
+  onImagePointerDown,
+  onImageDragStart,
+}) {
+  // The hook is called unconditionally (rules of hooks) and no-ops for a
+  // non-asset image — the same behaviour the live NodeView has always relied
+  // on to keep asset-backed, legacy and remote images on one component.
+  const { url, status } = useAssetObjectUrl(assetId || null);
+
+  const label = alt || "Image";
+  const dimensionProps = {};
+  if (Number(width) > 0) dimensionProps.width = Math.round(Number(width));
+  if (Number(height) > 0) dimensionProps.height = Math.round(Number(height));
+
+  // `alt` is written directly on each <img> below (not spread) so static
+  // analysis can see it is always present — the same requirement every other
+  // image in this codebase satisfies.
+  const imgProps = {
+    title: title || undefined,
+    draggable: false,
+    onClick: onImageClick,
+    onPointerDown: onImagePointerDown,
+    onDragStart: onImageDragStart,
+    ...dimensionProps,
+  };
+
+  let body;
+  let renderable = false;
+
+  if (assetId) {
+    if (status === "loading") {
+      body = (
+        <span className="note-image-placeholder" role="status" onClick={onImageClick}>
+          {EDITOR_IMAGE_LOADING_TEXT}
+        </span>
+      );
+    } else if (status === "ready" && url) {
+      renderable = true;
+      body = <img src={url} alt={label} {...imgProps} />;
+    } else {
+      body = (
+        <span
+          className="note-image-placeholder note-image-placeholder--missing"
+          onClick={onImageClick}
+        >
+          {EDITOR_IMAGE_UNAVAILABLE_TEXT}
+          {alt ? ` (${alt})` : ""}
+        </span>
+      );
+    }
+  } else if (isPersistableImageSrc(src)) {
+    // A remote http/https image, or a legacy data:image kept for compatibility.
+    renderable = true;
+    body = <img src={src} alt={label} {...imgProps} />;
+  } else {
+    body = (
+      <span
+        className="note-image-placeholder note-image-placeholder--missing"
+        onClick={onImageClick}
+      >
+        {EDITOR_IMAGE_UNAVAILABLE_TEXT}
+      </span>
+    );
+  }
+
+  return { body, renderable, label };
+}

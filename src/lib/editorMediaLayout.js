@@ -131,6 +131,33 @@ export function isDefaultMediaLayout(layout) {
 
 export const MEDIA_CLASS = "nw-media";
 
+/**
+ * THE SHARED EDITOR ROOT MARKER (Phase F2).
+ *
+ * The class a shared-core editor's OWN root element carries — the contenteditable
+ * root Tiptap mounts on, exactly like `.note-editor` was until now. It exists so
+ * `.nw-media*` interaction chrome (and any future shared editor UI) can be
+ * styled ONCE, against this one class, instead of being duplicated per surface.
+ *
+ * Free-form's root carries BOTH `.note-editor` and this class — `.note-editor`
+ * for its own document typography (headings, lists, tables, blockquotes, code,
+ * links — none of which a restrained Template Section editor will ever have),
+ * this class for the shared media/file chrome. A future Template Section editor
+ * root carries ONLY this class: it is never `.note-editor` and must never look
+ * like the Free-form document surface, so its own document typography styling
+ * (typography inside `.note-editor`-scoped rules) never leaks onto it.
+ *
+ * CRITICAL — dark-theme scoping. Every `.dark` OVERRIDE of shared chrome stays
+ * qualified by `.note-editor` (e.g. `.dark .note-editor .nw-media--selected`),
+ * never bare `.dark .nw-editor-root`. The Template paper is white in BOTH app
+ * themes (see docs/ARCHITECTURE.md → Page-aware document layout); a Section
+ * editor root, carrying this class but never `.note-editor`, can therefore
+ * NEVER match a `.dark .note-editor …` override however the app theme is set —
+ * it always renders the light/base chrome its white paper needs. Only
+ * Free-form's root, which carries both classes, ever sees the dark override.
+ */
+export const MEDIA_EDITOR_ROOT_CLASS = "nw-editor-root";
+
 /** The class list a media wrapper renders for a layout. Always includes the base class. */
 export function mediaLayoutClassNames(layout) {
   const l = normalizeMediaLayout(layout || {});

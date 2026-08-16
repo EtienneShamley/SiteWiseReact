@@ -43,6 +43,14 @@ const CORE_LIB = Object.fromEntries(
 
 const ASSET_IMAGE = withoutComments(read("components/editor/AssetImage.js"));
 const MAIN_AREA = withoutComments(read("components/MainArea.js"));
+// Phase F2: the presentation half of AssetImageView (asset resolution, the
+// missing/loading placeholder, the <img>'s own element semantics) was
+// extracted so a future static Section view can share it without a second
+// copy — see mediaImagePresentation.js's own header for the exact boundary
+// (NodeSelection/resize/drag/keyboard/transactions all stay in AssetImage.js).
+const MEDIA_IMAGE_PRESENTATION = withoutComments(
+  read("components/editor/mediaImagePresentation.js")
+);
 const DROP_INDICATOR_PLUGIN = withoutComments(
   read("components/editor/mediaDropIndicatorPlugin.js")
 );
@@ -136,9 +144,16 @@ describe("the image serializer remains the single authority", () => {
 
 describe("the C1 NodeView is built ON the shared core, not beside it", () => {
   test("presentation derives from the shared vocabulary, never a private mapping", () => {
-    expect(ASSET_IMAGE).toMatch(/mediaLayoutClassNames/);
+    // Phase F2: the wrapper class-list assembly itself now lives in
+    // mediaImagePresentation.js (mediaImageWrapperClassNames) so a future
+    // static Section view builds the identical class list; AssetImage.js
+    // calls THAT rather than deriving classes inline, and the shared helper
+    // still derives from mediaLayoutClassNames — one authority, one hop away.
+    expect(ASSET_IMAGE).toMatch(/mediaImageWrapperClassNames/);
     expect(ASSET_IMAGE).toMatch(/mediaWidthStyle/);
     expect(ASSET_IMAGE).toMatch(/normalizeMediaWidthPct/);
+    expect(MEDIA_IMAGE_PRESENTATION).toMatch(/mediaLayoutClassNames/);
+    expect(ASSET_IMAGE).not.toMatch(/mediaLayoutClassNames/);
   });
 
   test("the resize gesture is the shared controller over the shared corners", () => {
@@ -184,9 +199,18 @@ describe("the C1 NodeView is built ON the shared core, not beside it", () => {
 
   test("the Free-form editor's extension registration is unchanged", () => {
     // Still exactly one AssetImage registration; MainArea itself gained no
-    // media-core wiring — the capability lives inside the shared node.
+    // media-core BEHAVIOUR wiring — the capability lives inside the shared
+    // node. Phase F2 adds exactly ONE narrow import to MainArea — the shared
+    // editor-root CLASS NAME CONSTANT (a plain string, no resize/drag/layout
+    // logic) — asserted precisely below rather than by a blanket ban that
+    // would make that deliberate, in-scope import look like a violation.
     expect(MAIN_AREA.match(/AssetImage/g).length).toBeGreaterThanOrEqual(1);
-    expect(MAIN_AREA).not.toMatch(/editorMediaLayout|editorMediaResize|editorMediaDrag/);
+    expect(MAIN_AREA).not.toMatch(/editorMediaResize|editorMediaDrag/);
+    const editorMediaLayoutMentions = MAIN_AREA.match(/editorMediaLayout/g) || [];
+    expect(editorMediaLayoutMentions).toHaveLength(1);
+    expect(MAIN_AREA).toContain(
+      'import { MEDIA_EDITOR_ROOT_CLASS } from "../lib/editorMediaLayout"'
+    );
   });
 });
 
@@ -196,9 +220,14 @@ describe("the C2 body drag is the ONE image-move system", () => {
   test("the native HTML5 node drag is off: draggable false, no drag handle, dragstart prevented", () => {
     expect(ASSET_IMAGE).toMatch(/draggable: false/);
     expect(ASSET_IMAGE).not.toMatch(/data-drag-handle/);
-    // Both rendered <img> forms refuse the browser's own image drag, and the
-    // wrapper swallows any dragstart raised inside the view.
-    expect(ASSET_IMAGE.match(/draggable=\{false\}/g).length).toBe(2);
+    // Phase F2: the <img> rendering itself moved into mediaImagePresentation.js
+    // — draggable:false is set ONCE there, in the shared imgProps object, and
+    // spread into BOTH rendered <img> forms (asset-backed/ready and
+    // remote/legacy), so the two forms cannot drift by definition rather than
+    // by two independent literals. The wrapper still swallows any dragstart
+    // raised anywhere inside the view.
+    expect(MEDIA_IMAGE_PRESENTATION.match(/draggable: false,/g).length).toBe(1);
+    expect(MEDIA_IMAGE_PRESENTATION.match(/\{\.\.\.imgProps\}/g).length).toBe(2);
     expect(ASSET_IMAGE.match(/onDragStart=\{stopDrag\}/g).length).toBeGreaterThanOrEqual(3);
   });
 
@@ -210,7 +239,12 @@ describe("the C2 body drag is the ONE image-move system", () => {
   });
 
   test("both rendered image forms — asset-backed and remote/legacy src — share one body-drag surface", () => {
-    expect(ASSET_IMAGE.match(/onPointerDown=\{beginBodyDrag\}/g).length).toBe(2);
+    // Phase F2: AssetImage.js hands beginBodyDrag to the shared presentation
+    // hook ONCE (onImagePointerDown); mediaImagePresentation.js attaches it to
+    // BOTH rendered <img> forms via the one shared imgProps object spread
+    // (asserted above), so "shares one surface" is now true by construction.
+    expect(ASSET_IMAGE).toMatch(/onImagePointerDown:\s*beginBodyDrag/);
+    expect(ASSET_IMAGE.match(/onPointerDown=\{beginBodyDrag\}/g)).toBeNull();
   });
 
   test("destination and move go through the shared document rules, ghost through the shared preview", () => {
@@ -275,10 +309,14 @@ describe("the C3 placement is pointer geometry over the C2 drag, never a second 
   });
 
   test("the editor stylesheet floats the shared wrap classes and contains its floats", () => {
-    expect(EDITOR_CSS).toMatch(/\.note-editor \.nw-media--wrap-left \{\n  float: left;/);
-    expect(EDITOR_CSS).toMatch(/\.note-editor \.nw-media--wrap-right \{\n  float: right;/);
-    expect(EDITOR_CSS).toMatch(/\.note-editor \{\n  display: flow-root;/);
-    expect(EDITOR_CSS).toMatch(/\.note-editor \.nw-media--block \{\n  clear: both;/);
+    // Phase F2: this chrome is scoped to the shared editor-root marker, not
+    // bare .note-editor — Free-form's root carries both, so the float rules
+    // apply identically; see mediaEditorRoot.test.js for the full re-scope
+    // proof and the dark-theme scoping guarantee that motivated it.
+    expect(EDITOR_CSS).toMatch(/\.nw-editor-root \.nw-media--wrap-left \{\n  float: left;/);
+    expect(EDITOR_CSS).toMatch(/\.nw-editor-root \.nw-media--wrap-right \{\n  float: right;/);
+    expect(EDITOR_CSS).toMatch(/\.nw-editor-root \{\n  display: flow-root;/);
+    expect(EDITOR_CSS).toMatch(/\.nw-editor-root \.nw-media--block \{\n  clear: both;/);
   });
 
   test("both export stylesheets read the ONE shared wrap-CSS derivation", () => {
