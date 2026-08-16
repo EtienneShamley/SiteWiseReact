@@ -89,6 +89,18 @@ function unitMd(unit) {
           unit.meta ? ` — ${escapeMd(unit.meta)}` : ""
         } — ${escapeMd(unit.note)}_`,
       ];
+    case EXPORT_UNIT.WRAP: {
+      // LOCKED POLICY (Phase F6b): a wrapped modern image degrades
+      // DETERMINISTICALLY to BLOCK in Markdown — the same photo line every other
+      // photo gets, then the text that flowed beside it, in document order. No
+      // float CSS, no style attribute, no layout-side HTML: this exporter emits
+      // portable Markdown only, and a wrap has no honest equivalent in it.
+      const lines = unitMd(unit.photo);
+      for (const block of Array.isArray(unit.blocks) ? unit.blocks : []) {
+        lines.push(...unitMd(block));
+      }
+      return lines;
+    }
     case EXPORT_UNIT.SPACE:
       // Markdown has no page geometry, so blank physical height has no honest
       // equivalent here. Emitting one blank line per few pixels would produce

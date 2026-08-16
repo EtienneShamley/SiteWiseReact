@@ -803,17 +803,24 @@ describe("51-55. the legacy interaction still owns editing, and everything else 
 
   test("54. export expands a DOCUMENT when a row has one, and the ordered list otherwise", () => {
     const exporter = stripComments(read("lib/templateExportModel.js"));
-    // Transitional (Phase F4): an edited Section must never export content
-    // that differs from what is on screen. The unit shapes are unchanged, so
-    // no renderer, splitter or paginator was touched.
+    // An edited Section must never export content that differs from what is
+    // on screen. Since Phase F6b the exporter asks the SAME canonical body
+    // reader the screen asks and projects the document through the SAME
+    // segment projection (one wrap-group definition for screen and export);
+    // an un-migrated row still takes the untouched ordered-list path.
     expect(exporter).toContain("sectionUnitsFor");
     expect(exporter).toContain("sectionDocUnitsFor");
-    expect(exporter).toContain("const hasDoc = !!(docNodes && docNodes.length)");
-    // It never reaches for the render-path modules or re-derives validity.
+    expect(exporter).toContain(
+      "const hasDoc = body.source === SECTION_BODY_SOURCE.SECTION_DOC"
+    );
+    expect(exporter).toContain("resolveSectionBody");
+    expect(exporter).toContain("sectionDocSegments");
+    // It never re-derives validity or reaches for the raw document module's
+    // row lookup: the shared reader decides, once.
     for (const forbidden of [
-      "templateSectionBody",
-      "templateSectionDocSegments",
-      "resolveSectionBody",
+      "sectionDocNodesForRow",
+      "isSectionDocValue",
+      "parseSectionDocHtml",
     ]) {
       expect({ forbidden, hit: exporter.includes(forbidden) }).toEqual({
         forbidden,

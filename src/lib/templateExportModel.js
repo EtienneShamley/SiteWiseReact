@@ -65,15 +65,18 @@ import {
 import {
   SECTION_ITEM_KIND,
   isTextSectionItem,
+  normalizeSectionItem,
   sectionItemsForRow,
 } from "./templateSectionContent";
 import { sectionExtraHeightFor } from "./templateSectionHeight";
 import { sectionReplacesRowAnswer } from "./templateRowContent";
+import { sectionDocAssetIds } from "./templateSectionDoc";
+import { SECTION_BODY_SOURCE, resolveSectionBody } from "./templateSectionBody";
 import {
-  SECTION_DOC_NODE,
-  sectionDocAssetIds,
-  sectionDocNodesForRow,
-} from "./templateSectionDoc";
+  SECTION_SEGMENT_KIND,
+  sectionDocSegments,
+} from "./templateSectionDocSegments";
+import { MEDIA_LAYOUT_SIDE, normalizeMediaLayout } from "./editorMediaLayout";
 
 /* ------------------------------------------------------------------------ */
 /* Failure reasons                                                           */
@@ -114,6 +117,16 @@ export const UNNAMED_PHOTO = "Photo";
 //   { type: "empty" }          the branded empty state for a blank answer
 //   { type: "space", heightPx } deliberate blank working space at the END of a
 //                              flexible section — atomic, layout flavours only
+//   { type: "wrap", side, photo, blocks }
+//                              ONE WRAPPED image of a MODERN Section document
+//                              (`side` = "left" | "right") together with the
+//                              text run that flows beside it — `photo` is an
+//                              ordinary PHOTO unit and `blocks` are ordinary
+//                              BLOCK units, so every renderer that already
+//                              understands those two understands this one.
+//                              Atomic as a group for the PDF (see
+//                              templateExportPagination.js, which degrades it
+//                              to `photo` + `blocks` when it cannot fit a page).
 //
 // A FLEXIBLE SECTION (sectionContent[rowId], src/lib/templateSectionContent.js)
 // expands into exactly these units, in its stored order: a text item to its
@@ -121,6 +134,21 @@ export const UNNAMED_PHOTO = "Photo";
 // heterogeneous and already ordered, so no renderer, splitter or paginator
 // needed a structural change to carry it — which is the whole reason ordered
 // section content was modelled as a list in the first place (§3.1).
+//
+// A MODERN SECTION DOCUMENT (sectionDoc[rowId], src/lib/templateSectionDoc.js)
+// expands into the same units through ONE canonical adapter, `sectionDocUnitsFor`
+// below — the only place a Section document is turned into export units, for
+// every format at once. WRAP is the one unit kind that exists for it alone.
+//
+// LOCKED FORMAT POLICY for a wrapped modern image (Phase F6b):
+//   HTML      block / wrap-left / wrap-right preserved (a real CSS float inside
+//             a float-containing group, the shared media core's own rule)
+//   PDF       wrap preserved through conservative grouping: the WRAP unit is
+//             one atomic page unit when it fits a page, and degrades to a block
+//             image plus splittable text when it cannot
+//   DOCX      degrades deterministically to BLOCK (no floating-image support)
+//   Markdown  degrades deterministically to BLOCK (no float HTML/CSS)
+// The semantic ORDER — text, image, text, file, text — is identical in all four.
 
 export const EXPORT_UNIT = {
   BLOCK: "block",
@@ -129,6 +157,7 @@ export const EXPORT_UNIT = {
   FILE: "file",
   EMPTY: "empty",
   SPACE: "space",
+  WRAP: "wrap",
 };
 
 /* ------------------------------------------------------------------------ */
@@ -478,66 +507,127 @@ function sectionUnitsFor(items, assets) {
 }
 
 /**
- * One MODERN Section document's nodes as export units, IN DOCUMENT ORDER.
+ * Is this run of model blocks blank — nothing a reader would see?
  *
- * TRANSITIONAL (Phase F4). Phase F6 owns the proper `sectionDoc` export
- * adapter; this exists because the alternative is unacceptable: once a Section
- * has been edited, its document is what the user sees, and an exporter still
- * reading only the frozen `sectionContent` would export STALE content — a
- * report that silently disagrees with the screen. It is deliberately the
- * SMALLEST such adapter: it produces exactly the units `sectionUnitsFor`
- * already produces for the ordered list, so every renderer, splitter and
- * paginator is untouched.
- *
- *   text node  -> the same BLOCK units a text ITEM produces (per model block).
- *                 A run that reads as nothing produces none, exactly as
- *                 `sectionTextUnits` suppresses the branded empty state per
- *                 item — the ROW still decides once whether it is empty.
- *   image node -> the same PHOTO unit a photo item produces, resolved through
- *                 the same asset map. `layoutMode`/`layoutSide` are NOT carried:
- *                 v1 exports every placement as BLOCK in every format, which is
- *                 deterministic and honest (recorded follow-up).
- *   file node  -> the same FILE unit a file item produces.
+ * The SAME verdict the legacy text path reaches through `isEmptyAnswerValue`
+ * (`richAnswerText`): a LIST is content — its markers read as text even when an
+ * item is empty — and a run of paragraphs is blank only when their text is
+ * whitespace. Decided structurally on the already-parsed blocks so no stored
+ * value has to be re-serialized and re-parsed to ask.
  */
-function sectionDocUnitsFor(nodes, assets) {
-  const units = [];
-  for (const node of Array.isArray(nodes) ? nodes : []) {
-    if (!node || typeof node !== "object") continue;
+function sectionDocTextIsBlank(blocks) {
+  if (!blocks.every((block) => !block || block.type === "paragraph")) return false;
+  return !modelToPlainString(blocks).trim();
+}
 
-    if (node.type === SECTION_DOC_NODE.TEXT) {
-      const blocks = Array.isArray(node.blocks) ? node.blocks : [];
-      if (!blocks.length) continue;
-      // A run of blank paragraphs is not content, and must not print a stray
-      // blank line above or between real content.
-      if (!modelToPlainString(blocks).trim()) continue;
-      for (const block of blocks) units.push({ type: EXPORT_UNIT.BLOCK, block });
+/** The BLOCK units of one text run of a MODERN Section document. */
+function sectionDocTextUnits(blocks) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  if (!list.length) return [];
+  // A run of blank paragraphs is not content, and must not print a stray
+  // blank line above or between real content — the same rule `sectionTextUnits`
+  // applies per legacy text item; the ROW still decides once whether it is
+  // empty at all.
+  if (sectionDocTextIsBlank(list)) return [];
+  return list.map((block) => ({ type: EXPORT_UNIT.BLOCK, block }));
+}
+
+/** The PHOTO unit of one MODERN image node, through the SAME builder a photo item uses. */
+function sectionDocPhotoUnit(attrs, index, assets) {
+  if (!attrs.assetId && isSafeImageDataUrl(attrs.src)) {
+    return legacyPhotoUnit(attrs.src, index);
+  }
+  // The SAME unit builder a photo item uses, so an exported document image and
+  // an exported section photo can never differ in shape. `alignment` is not a
+  // concept of the shared media vocabulary; a document image is left-placed
+  // exactly as the editor renders it.
+  return photoUnit(
+    {
+      assetId: attrs.assetId,
+      name: attrs.alt,
+      display: { widthPct: attrs.widthPct, alignment: "left" },
+      intrinsicWidth: attrs.width,
+      intrinsicHeight: attrs.height,
+    },
+    assets
+  );
+}
+
+/**
+ * THE CANONICAL MODERN SECTION EXPORT ADAPTER (Phase F6b).
+ *
+ * One resolved, AUTHORITATIVE modern Section body → export units, IN DOCUMENT
+ * ORDER, for every format at once. No renderer parses `sectionDoc` for itself:
+ * HTML, PDF, DOCX and Markdown all consume the units this produces, and each
+ * applies its own LOCKED policy to the one unit kind that is new (WRAP).
+ *
+ * The body is projected through `sectionDocSegments` — the SAME pure projection
+ * the on-screen static Section view and the runtime planner use — so the export
+ * cannot hold a different opinion from the screen about what a document
+ * contains, in what order, or which text a wrapped image is fused with:
+ *
+ *   text segment           -> BLOCK units (a blank-only run produces none)
+ *   image, block placement -> the SAME PHOTO unit a photo item produces
+ *   image, wrapped         -> ONE WRAP unit: `side`, the PHOTO unit, and the
+ *                             BLOCK units of the text run that flows beside it
+ *                             (empty when nothing follows the image)
+ *   file                   -> the SAME FILE unit a file item produces
+ *   compat                 -> the frozen stored item the document could not
+ *                             represent, through the SAME legacy unit path it
+ *                             renders through on screen (after the document,
+ *                             exactly where the static view shows it)
+ *
+ * THE WRAP GROUP IS DEFINED ONCE — by `sectionDocSegments`' fusion rule: a
+ * wrapped image and the whole text run immediately after it (a run ends at the
+ * next image or file), never another image, never a file, never the next
+ * Template row. What that means per format is the renderers' locked policy.
+ *
+ * Read-only and pure: nothing here creates, repairs, migrates or writes a
+ * document, and no editor is instantiated. Editor-only metadata (segment keys,
+ * provenance, ids) never becomes a unit field.
+ */
+export function sectionDocUnitsFor(body, assets) {
+  const units = [];
+  if (!body || !Array.isArray(body.nodes)) return units;
+  const segments = sectionDocSegments({
+    nodes: body.nodes,
+    sources: body.sources,
+    skipped: body.skipped,
+  });
+
+  for (const segment of segments) {
+    if (!segment) continue;
+
+    if (segment.kind === SECTION_SEGMENT_KIND.TEXT) {
+      units.push(...sectionDocTextUnits(segment.blocks));
       continue;
     }
 
-    const attrs = node.attrs || {};
-    if (node.type === SECTION_DOC_NODE.IMAGE) {
-      if (!attrs.assetId && isSafeImageDataUrl(attrs.src)) {
-        units.push(legacyPhotoUnit(attrs.src, units.length));
+    if (segment.kind === SECTION_SEGMENT_KIND.IMAGE) {
+      const attrs = segment.attrs || {};
+      const photo = sectionDocPhotoUnit(attrs, units.length, assets);
+      if (!segment.wrapped) {
+        units.push(photo);
         continue;
       }
-      // The SAME unit builder a photo item uses, so an exported document image
-      // and an exported section photo can never differ in shape.
-      units.push(
-        photoUnit(
-          {
-            assetId: attrs.assetId,
-            name: attrs.alt,
-            display: { widthPct: attrs.widthPct, alignment: "left" },
-            intrinsicWidth: attrs.width,
-            intrinsicHeight: attrs.height,
-          },
-          assets
-        )
-      );
+      // The layout is normalized through the shared vocabulary AS ONE UNIT —
+      // a wrap with no usable side is not a wrap (the projection would not have
+      // fused it), so `side` here is always left or right.
+      const layout = normalizeMediaLayout({
+        mode: attrs.layoutMode,
+        side: attrs.layoutSide,
+      });
+      units.push({
+        type: EXPORT_UNIT.WRAP,
+        side: layout.side === MEDIA_LAYOUT_SIDE.RIGHT ? MEDIA_LAYOUT_SIDE.RIGHT : MEDIA_LAYOUT_SIDE.LEFT,
+        photo,
+        blocks: sectionDocTextUnits(segment.blocks),
+      });
       continue;
     }
 
-    if (node.type === SECTION_DOC_NODE.FILE) {
+    if (segment.kind === SECTION_SEGMENT_KIND.FILE) {
+      const attrs = segment.attrs || {};
       units.push(
         fileUnit(
           {
@@ -549,6 +639,17 @@ function sectionDocUnitsFor(nodes, assets) {
           assets
         )
       );
+      continue;
+    }
+
+    if (segment.kind === SECTION_SEGMENT_KIND.COMPAT) {
+      // A frozen stored item the document cannot represent still renders on
+      // screen (through its legacy renderer), so it still exports — through the
+      // legacy unit path, never re-interpreted as a document node.
+      const item = normalizeSectionItem(segment.entry);
+      if (item && item.kind !== SECTION_ITEM_KIND.TEXT) {
+        units.push(...sectionUnitsFor([item], assets));
+      }
     }
   }
   return units;
@@ -621,8 +722,6 @@ export function buildTemplateExportModel({
   // Read raw and passed straight to the shared read model. Nothing here
   // normalizes the stored map, writes it back, or creates a row in it.
   const sectionContent = instance.sectionContent ?? null;
-  // Read raw; validity is decided once, by the shared reader, per row.
-  const sectionDoc = instance.sectionDoc ?? null;
   const sectionExtraHeight = instance.sectionExtraHeight ?? null;
 
   // Option ids belonging to THIS pinned version only. A value that is one of
@@ -652,18 +751,31 @@ export function buildTemplateExportModel({
     // legacy path below and exports exactly as it always did.
     //
     // The MODERN Section document outranks the ordered item list exactly as it
-    // does on screen (src/lib/templateSectionBody.js): a valid `sectionDoc`
-    // entry is the row's body, and the frozen `sectionContent` underneath it is
-    // neither exported as well nor cleared. An invalid or absent entry falls
-    // through to the unchanged legacy path.
-    const docNodes = sectionDocNodesForRow(sectionDoc, row.id);
-    const hasDoc = !!(docNodes && docNodes.length);
+    // does on screen, and the question is asked of the ONE canonical authority
+    // boundary the screen asks (`resolveSectionBody`, src/lib/templateSectionBody.js)
+    // rather than of `instance.sectionDoc[rowId]` directly: a VALID `sectionDoc`
+    // entry is the row's body and goes through the canonical modern export
+    // adapter; the frozen `sectionContent` underneath it is neither exported as
+    // well nor cleared. Anything else — no entry, a malformed one, an
+    // unsupported or future format, a document this build cannot represent —
+    // is not authoritative, and the row takes the UNCHANGED legacy path below
+    // (`sectionItemsForRow` → `sectionUnitsFor`, then answers/evidence), so an
+    // un-migrated note exports byte-for-byte as it always did. Read-only: the
+    // reader repairs, migrates and writes nothing.
+    const body = resolveSectionBody({
+      instance,
+      rowId: row.id,
+      rowType: type,
+      isCustomRow: isCustom,
+      isAttachmentField: isAttachmentRow,
+    });
+    const hasDoc = body.source === SECTION_BODY_SOURCE.SECTION_DOC;
     const sectionItems = hasDoc ? [] : sectionItemsForRow(sectionContent, row.id);
     const hasSection = hasDoc || sectionItems.length > 0;
     const sectionOwnsBody =
       hasSection && sectionReplacesRowAnswer(type, isAttachmentRow);
     const sectionUnits = hasDoc
-      ? sectionDocUnitsFor(docNodes, assets)
+      ? sectionDocUnitsFor(body, assets)
       : hasSection
       ? sectionUnitsFor(sectionItems, assets)
       : [];
@@ -722,9 +834,11 @@ export function buildTemplateExportModel({
     }
 
     for (const unit of units) {
-      if (unit.type === EXPORT_UNIT.PHOTO) {
+      // A WRAP unit carries one photo; it is counted exactly like a block one.
+      const photo = unit.type === EXPORT_UNIT.WRAP ? unit.photo : unit;
+      if (photo && photo.type === EXPORT_UNIT.PHOTO) {
         totalPhotos += 1;
-        if (unit.unavailable) unavailablePhotos += 1;
+        if (photo.unavailable) unavailablePhotos += 1;
       } else if (unit.type === EXPORT_UNIT.FILE) {
         totalFiles += 1;
         if (unit.unavailable) unavailableFiles += 1;

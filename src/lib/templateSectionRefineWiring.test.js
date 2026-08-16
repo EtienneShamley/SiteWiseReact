@@ -624,9 +624,12 @@ describe("41-45. what F6a deliberately does not touch", () => {
     expect(REFINE_HANDLER()).not.toContain("appendComposed");
   });
 
-  test("45. no export architecture was broadened", () => {
+  test("45. no export architecture was broadened by Refine", () => {
+    // Export never depends on Refine. (Phase F6b later gave the exporter its
+    // own canonical modern adapter, reading through the shared body reader —
+    // that is export's business and still names nothing of Refine's.)
     const exportModel = read("lib/templateExportModel.js");
-    expect(exportModel).toContain("sectionDocNodesForRow");
+    expect(exportModel).toContain("resolveSectionBody");
     expect(exportModel).not.toContain("templateSectionRefine");
   });
 });

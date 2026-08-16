@@ -183,6 +183,10 @@ describe("36-41. no runtime path reads or writes the modern document for itself"
       "lib/templateRowContent.js": ["templateSectionDocSegments"],
       "lib/templateSectionDocSegments.js": ["templateSectionDoc"],
       "components/template/TemplateSectionDocView.js": ["templateSectionDocSegments"],
+      // Phase F6b: the exporter asks the SAME reader for authority and projects
+      // a modern body through the SAME segment projection — one wrap-group
+      // definition for the screen and every export format. Never the adapter.
+      "lib/templateExportModel.js": ["templateSectionBody", "templateSectionDocSegments"],
     };
     for (const [file, source] of Object.entries(SOURCE)) {
       if (allowed.has(file)) continue;
@@ -216,12 +220,19 @@ describe("36-41. no runtime path reads or writes the modern document for itself"
     }
   });
 
-  test("36. the canonical reader has EXACTLY ONE production caller", () => {
-    // One place resolves every Section body on the form, and hands the result
-    // down. A second caller would be a second opinion about authority.
+  test("36. the canonical reader has EXACTLY TWO production callers: the form and the exporter", () => {
+    // One place resolves every Section body on the FORM, and hands the result
+    // down. The only other caller is the export model (Phase F6b), which must
+    // hold the SAME opinion about authority as the screen — asking the reader
+    // is how it does so without a second opinion. No render site, planner or
+    // interaction file may call it.
+    const CALLERS = new Set([
+      "components/template/NoteTemplateDoc.js",
+      "lib/templateExportModel.js",
+    ]);
     for (const [file, source] of Object.entries(SOURCE)) {
       if (file === "lib/templateSectionBody.js") continue;
-      const expected = file === "components/template/NoteTemplateDoc.js";
+      const expected = CALLERS.has(file);
       expect({ file, calls: source.includes("resolveSectionBody") }).toEqual({
         file,
         calls: expected,
@@ -305,9 +316,12 @@ describe("36-41. no runtime path reads or writes the modern document for itself"
     const exporter = SOURCE["lib/templateExportModel.js"];
     // Both paths exist, and the document outranks the item list exactly as it
     // does on screen — an un-migrated note exports byte-for-byte as before.
+    // Since Phase F6b the authority question is asked of the canonical reader
+    // itself, never of the raw row lookup.
     expect(exporter).toContain("sectionUnitsFor");
     expect(exporter).toContain("sectionDocUnitsFor");
-    expect(exporter).toContain("sectionDocNodesForRow");
+    expect(exporter).toContain("resolveSectionBody");
+    expect(exporter).not.toContain("sectionDocNodesForRow");
     // It never re-derives validity: the shared reader decides, once.
     expect(exporter).not.toContain("isSectionDocValue");
     expect(exporter).not.toContain("parseSectionDocHtml");

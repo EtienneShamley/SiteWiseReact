@@ -2,17 +2,17 @@
 //
 // Phase F4 — 52. AN EDITED SECTION MUST NOT EXPORT STALE CONTENT.
 //
-// Transitional (Phase F6 owns the proper `sectionDoc` export adapter). Once a
-// Section has been edited its modern document is what the user sees, and the
-// frozen `sectionContent` underneath it is not. An exporter still reading only
-// the ordered item list would print the OLD body — a report that silently
-// disagrees with the screen — so the export model resolves the document with
-// the same authority rule the screen uses, and expands it into exactly the
-// units it already produces for the ordered list.
+// Once a Section has been edited its modern document is what the user sees,
+// and the frozen `sectionContent` underneath it is not. An exporter still
+// reading only the ordered item list would print the OLD body — a report that
+// silently disagrees with the screen — so the export model resolves the
+// document with the same authority rule the screen uses, and expands it into
+// the units the ordered list already produces.
 //
-// The point of these tests is that NOTHING downstream changed: same unit types,
-// same fields, same order, same asset resolution — so no renderer, splitter or
-// paginator needed touching, and an un-migrated note exports as it always did.
+// These F4 tests still hold under the final Phase F6b adapter
+// (src/lib/templateSectionDocExportAdapter.test.js covers F6b itself): same
+// unit types for block content, same fields, same order, same asset resolution,
+// and an un-migrated note exports as it always did.
 
 import {
   EXPORT_UNIT,

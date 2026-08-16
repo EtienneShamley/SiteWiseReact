@@ -30,6 +30,13 @@ import {
 } from "./templateBranding";
 import { modelToHtml } from "./templateRichText";
 import { EXPORT_UNIT } from "./templateExportModel";
+import {
+  MEDIA_LAYOUT_MODE,
+  MEDIA_LAYOUT_MODE_ATTR,
+  MEDIA_LAYOUT_SIDE,
+  MEDIA_LAYOUT_SIDE_ATTR,
+  mediaWrapExportCss,
+} from "./editorMediaLayout";
 import { normalizeRowHeightPx, photoLayout } from "./templateExportPagination";
 import { USABLE_HEIGHT_PX, USABLE_WIDTH_PX } from "./pageGeometry";
 import {
@@ -148,20 +155,78 @@ function photoHtml(unit, ctx) {
     )}" alt="${escAttr(unit.name)}" width="${layout.widthPx}"${height} /></p>`;
   }
 
-  // Only the width is CHOSEN; the height is derived from the stored intrinsic
-  // ratio (or left to the browser, capped by max-height + object-fit: contain).
-  // The image scales down to fit the page and can never be cropped.
-  const sizing = layout.heightPx
+  return (
+    `<div class="nw-tpl-photo" style="text-align: ${align}">` +
+    `<img src="${escAttr(unit.dataUrl)}" alt="${escAttr(unit.name)}" ` +
+    `style="${photoSizingStyle(layout)} max-width: 100%;" />` +
+    `</div>`
+  );
+}
+
+// Only the width is CHOSEN; the height is derived from the stored intrinsic
+// ratio (or left to the browser, capped by max-height + object-fit: contain).
+// The image scales down to fit the page and can never be cropped.
+function photoSizingStyle(layout) {
+  return layout.heightPx
     ? `width: ${layout.widthPx}px; height: ${layout.heightPx}px;`
     : `width: ${layout.widthPx}px; height: auto;${
         layout.maxHeightPx ? ` max-height: ${layout.maxHeightPx}px;` : ""
       }`;
-  return (
-    `<div class="nw-tpl-photo" style="text-align: ${align}">` +
-    `<img src="${escAttr(unit.dataUrl)}" alt="${escAttr(unit.name)}" ` +
-    `style="${sizing} max-width: 100%;" />` +
-    `</div>`
-  );
+}
+
+/**
+ * ONE WRAPPED modern Section image with the text that flows beside it.
+ *
+ * LOCKED FORMAT POLICY (Phase F6b):
+ *
+ *   DOCX      degrades DETERMINISTICALLY to BLOCK: the same block photo markup
+ *             every other photo gets (explicit pixel width, derived height),
+ *             followed by the text — content, order and sizing preserved, the
+ *             wrap visually lost on purpose. html-to-docx cannot carry a CSS
+ *             float reliably, and no native floating-image support is built.
+ *   HTML/PDF  the wrap is PRESERVED through the shared media core's own export
+ *             derivation: the `<img>` carries the same `data-layout-*`
+ *             attributes the shared serializer emits, `mediaWrapExportCss`
+ *             (the ONE float rule every NoteWise export reads) floats it, and
+ *             the `.nw-tpl-wrap` group is a `flow-root` formatting context, so
+ *             the float can never escape its group into unrelated later
+ *             content, a later row, or another page. Only the width is chosen
+ *             (`widthPct` of the answer column, capped like every photo); the
+ *             height follows the intrinsic ratio.
+ *
+ * A missing image follows the existing missing-photo policy (an explicit
+ * placeholder, never a silent omission); the text still follows it.
+ */
+function wrapHtml(unit, ctx) {
+  const photo = unit.photo || {};
+  const blocks = (Array.isArray(unit.blocks) ? unit.blocks : [])
+    .map((block) => unitHtml(block, ctx))
+    .join("");
+
+  if (ctx.flavor === EXPORT_FLAVOR.DOCX) {
+    return photoHtml(photo, ctx) + blocks;
+  }
+
+  let image;
+  if (photo.unavailable || !photo.dataUrl) {
+    image = `<p class="nw-tpl-missing">${esc(photo.unavailableText)}</p>`;
+  } else {
+    const layout = photoLayout(photo, {
+      contentWidthPx: ctx.contentWidthPx,
+      maxHeightPx: ctx.photoMaxHeightPx,
+    });
+    const side =
+      unit.side === MEDIA_LAYOUT_SIDE.RIGHT
+        ? MEDIA_LAYOUT_SIDE.RIGHT
+        : MEDIA_LAYOUT_SIDE.LEFT;
+    image =
+      `<img class="nw-tpl-wrapimg" ` +
+      `${MEDIA_LAYOUT_MODE_ATTR}="${MEDIA_LAYOUT_MODE.WRAP}" ` +
+      `${MEDIA_LAYOUT_SIDE_ATTR}="${side}" ` +
+      `src="${escAttr(photo.dataUrl)}" alt="${escAttr(photo.name)}" ` +
+      `style="${photoSizingStyle(layout)} max-width: 100%;" />`;
+  }
+  return `<div class="nw-tpl-wrap">${image}${blocks}</div>`;
 }
 
 function fileHtml(unit) {
@@ -214,6 +279,8 @@ export function unitHtml(unit, ctx) {
       return photoHtml(unit, ctx);
     case EXPORT_UNIT.FILE:
       return fileHtml(unit);
+    case EXPORT_UNIT.WRAP:
+      return wrapHtml(unit, ctx);
     case EXPORT_UNIT.SPACE:
       return spaceHtml(unit, ctx);
     case EXPORT_UNIT.EMPTY:
@@ -525,6 +592,16 @@ export function buildTemplateExportBody(
  */
 export function templateExportComponentCss(flavor) {
   const pdf = flavor === EXPORT_FLAVOR.PDF;
+  const docx = flavor === EXPORT_FLAVOR.DOCX;
+  // The wrapped-image rules of the SHARED media core, scoped to the wrap group.
+  // The DOCX flavour deliberately carries NO float rule at all (its markup never
+  // emits a wrapped image — see `wrapHtml`), exactly as the Free-form DOCX
+  // export builds its input without them, so Word input degrades to block
+  // placement deterministically.
+  const wrapCss =
+    "\n    .nw-tpl-wrap { display: flow-root; }\n" +
+    "    .nw-tpl-wrap img { object-fit: contain; }" +
+    mediaWrapExportCss(".nw-tpl-wrap");
   return `
     .nw-tpl-doc {
       width: 100%; margin: 0 auto;
@@ -560,7 +637,7 @@ export function templateExportComponentCss(flavor) {
     .nw-tpl-space { width: 100%; }
     .nw-tpl-missing { font-style: italic; color: #555555; }
     .nw-tpl-photo { margin: 4px 0; }
-    .nw-tpl-photo img { object-fit: contain; height: auto; }
+    .nw-tpl-photo img { object-fit: contain; height: auto; }${docx ? "" : wrapCss}
     .nw-tpl-file {
       border: 1px solid #cccccc; border-radius: 4px; padding: 6px 8px; margin: 4px 0;
       font-size: 10pt; page-break-inside: avoid; break-inside: avoid;

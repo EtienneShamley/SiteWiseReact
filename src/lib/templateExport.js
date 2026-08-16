@@ -229,7 +229,9 @@ function createMeasureProbe() {
 export async function resolvePhotoIntrinsics(model) {
   const pending = [];
   for (const row of model.rows || []) {
-    for (const unit of row.units || []) {
+    for (const entry of row.units || []) {
+      // A WRAP unit's photo is measured exactly like a block photo.
+      const unit = entry && entry.type === EXPORT_UNIT.WRAP ? entry.photo : entry;
       if (!unit || unit.type !== EXPORT_UNIT.PHOTO) continue;
       if (unit.unavailable || !unit.dataUrl) continue;
       if (Number(unit.intrinsicWidth) > 0 && Number(unit.intrinsicHeight) > 0) {

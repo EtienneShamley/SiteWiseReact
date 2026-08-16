@@ -206,9 +206,26 @@ function splitList(block) {
 /**
  * Split one unit into smaller units of the same meaning, or return [] when it
  * is atomic. Photos, files, structured values and the empty state are atomic.
+ *
+ * A WRAP unit — a wrapped modern Section image fused with the text beside it —
+ * is a GROUP that is kept whole whenever it fits one page (the caller only
+ * splits a unit that cannot fit a page on its own). When it cannot, it degrades
+ * DETERMINISTICALLY the way the Free-form PDF degrades a wrap group that cannot
+ * fit a page: the image becomes a block photo and the text blocks stand on their
+ * own, splittable as text always is. Nothing is dropped, nothing is repeated,
+ * and the semantic order — image, then its text — is preserved.
  */
 export function splitUnit(unit) {
-  if (!unit || unit.type !== EXPORT_UNIT.BLOCK) return [];
+  if (!unit) return [];
+  if (unit.type === EXPORT_UNIT.WRAP) {
+    const pieces = [];
+    if (unit.photo) pieces.push(unit.photo);
+    for (const block of Array.isArray(unit.blocks) ? unit.blocks : []) {
+      pieces.push(block);
+    }
+    return pieces;
+  }
+  if (unit.type !== EXPORT_UNIT.BLOCK) return [];
   const block = unit.block;
   if (!block) return [];
   if (block.type === "paragraph") return splitParagraph(block);
@@ -261,7 +278,12 @@ export function fragmentRowUnits(units, fits) {
     }
 
     const pieces = splitUnit(unit);
-    if (pieces.length < 2) return false; // atomic, or already indivisible
+    // Atomic, or already indivisible. (A WRAP unit with no beside-text
+    // legitimately degrades to ONE smaller piece — its block photo — which is
+    // why "at least one piece" rather than "at least two" is the guard; every
+    // other splittable unit yields two or more, and the depth cap above bounds
+    // any degenerate oracle.)
+    if (pieces.length < 1) return false;
     for (const piece of pieces) {
       if (!place(piece, depth + 1)) return false;
     }
