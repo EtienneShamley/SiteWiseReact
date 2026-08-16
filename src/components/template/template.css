@@ -957,6 +957,37 @@
   background: #fafafa;
 }
 
+/* ---------- Static Section document view (Phase F3) ----------
+ *
+ * The shared media presentation (see editor.css, scoped to .nw-doc-root) draws
+ * a Section's images; these rules are the TEMPLATE PAGE's own two additions, so
+ * a photo occupies exactly the box the legacy interactive rendering
+ * (.photo-att, below) gives it and activating a Section cannot move the
+ * pagination:
+ *
+ *   - no vertical margin. The Section's segments are separate document blocks
+ *     with their own cell padding, so the shared 0.5rem gap would be a second
+ *     gap the legacy rendering never had. A WRAPPED image keeps its float
+ *     margins — those are the gutter between the picture and the text beside
+ *     it, not spacing between blocks.
+ *   - the one-page height cap, for a photo whose intrinsic size is unknown and
+ *     therefore cannot be capped exactly by width. Same constant, same rule and
+ *     same object-fit the legacy photo uses (PHOTO_MAX_HEIGHT_PX).
+ */
+.nw-tpl-section-doc {
+  width: 100%;
+}
+
+.nw-tpl-section-doc .nw-media--block {
+  margin: 0;
+}
+
+.nw-tpl-section-doc .nw-media img {
+  border-radius: 2px;
+  max-height: var(--nw-tpl-photo-max-h);
+  object-fit: contain;
+}
+
 /* ---------- Photo attachment (in-flow document image) ---------- */
 .photo-att {
   display: flex; /* justify-content set inline per alignment */

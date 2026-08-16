@@ -94,7 +94,7 @@ describe("fix 1: the caret-hint effect focuses synchronously", () => {
     expect(textCell).toMatch(/caretHintRef\.current = \{\s*mode: "point",/);
     expect(textCell).toMatch(/identity: onActivate\(rowId, itemId\) \|\| null,/);
     // And the leading cell still seeds its own end-of-answer hint once.
-    expect(textCell).toMatch(/caretHintRef\.current = \{ mode: "end", identity \};/);
+    expect(textCell).toMatch(/caretHintRef\.current =\s*\n?\s*caretPoint && typeof caretPoint\.left === "number"[\s\S]*?: \{ mode: "end", identity \};/);
   });
 
   test("typing nothing still persists nothing: the leading caret's empty-change gate is intact", () => {

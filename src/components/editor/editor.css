@@ -134,6 +134,7 @@
 }
 
 /* Images */
+.nw-doc-root img,
 .nw-editor-root img {
   max-width: 100%;
   height: auto;
@@ -143,6 +144,7 @@
    floated near the end of the document must extend the editor's own height,
    never spill under the paged shell or the page-guide measurement. flow-root
    changes nothing for a document with no floats. */
+.nw-doc-root,
 .nw-editor-root {
   display: flow-root;
 }
@@ -152,9 +154,11 @@
    content (fit-content) so the selection ring and the corner handles sit on
    the image itself, never on the empty remainder of the column; a stored
    width (inline style, written only by the shared media core) overrides it. */
+.nw-doc-root .note-image-node,
 .nw-editor-root .note-image-node {
   margin: 0.5rem 0;
 }
+.nw-doc-root .nw-media,
 .nw-editor-root .nw-media {
   position: relative;
   width: fit-content;
@@ -168,10 +172,12 @@
    the ONE shared mapping (mediaLayoutClassNames), so the editor and every
    export agree on what a stored layout means. Margins keep a readable gutter
    between image and text on the wrapped side only. */
+.nw-doc-root .nw-media--wrap-left,
 .nw-editor-root .nw-media--wrap-left {
   float: left;
   margin: 0.25rem 1rem 0.5rem 0;
 }
+.nw-doc-root .nw-media--wrap-right,
 .nw-editor-root .nw-media--wrap-right {
   float: right;
   margin: 0.25rem 0 0.5rem 1rem;
@@ -180,6 +186,7 @@
 /* Block placement starts below any wrapped image above it — two images can
    never end up side by side by accident, and dragging a wrapped image back to
    the centre restores genuine stacked flow. No-op in a float-free document. */
+.nw-doc-root .nw-media--block,
 .nw-editor-root .nw-media--block {
   clear: both;
 }
@@ -187,6 +194,7 @@
 /* A stored width sizes the WRAPPER; the image fills it and its height stays
    derived from the intrinsic ratio, so a resize can never stretch or crop.
    An image with no stored width keeps its legacy rendering untouched. */
+.nw-doc-root .nw-media--sized > img,
 .nw-editor-root .nw-media--sized > img {
   display: block;
   width: 100%;
@@ -371,6 +379,7 @@
 /* Loading / unavailable states. An image whose stored file cannot be found
    reads as text rather than showing a broken-image icon — a field note must say
    what is missing, not just fail to draw it. */
+.nw-doc-root .note-image-placeholder,
 .nw-editor-root .note-image-placeholder {
   display: inline-block;
   padding: 0.5rem 0.75rem;
@@ -382,6 +391,7 @@
   line-height: 1.25rem;
   max-width: 100%;
 }
+.nw-doc-root .note-image-placeholder--missing,
 .nw-editor-root .note-image-placeholder--missing {
   border-color: #fca5a5;
   background: #fef2f2;

@@ -158,6 +158,27 @@ export const MEDIA_CLASS = "nw-media";
  */
 export const MEDIA_EDITOR_ROOT_CLASS = "nw-editor-root";
 
+/**
+ * THE SHARED STATIC MEDIA ROOT MARKER (Phase F3).
+ *
+ * The class a NON-editor surface carries when it renders the same media
+ * PRESENTATION — today the static Template Section document view
+ * (src/components/template/TemplateSectionDocView.js), which shows a Section's
+ * images exactly as the editor would while nobody is editing it.
+ *
+ * It scopes the PRESENTATION half of the shared media CSS only: layout (block /
+ * wrap-left / wrap-right), the stored-width sizing rule, the loading and
+ * unavailable placeholders, and float containment. It deliberately does NOT
+ * scope any interaction chrome — the selection ring, the corner handles, the
+ * controls, the drop indicator and the drag ghost stay `.nw-editor-root`-only,
+ * because a static view has none of them and must never be able to show one.
+ *
+ * Like the editor marker, it is never `.note-editor`, so it can never match a
+ * `.dark .note-editor …` override and always renders the light presentation the
+ * white Template paper needs.
+ */
+export const MEDIA_DOC_ROOT_CLASS = "nw-doc-root";
+
 /** The class list a media wrapper renders for a layout. Always includes the base class. */
 export function mediaLayoutClassNames(layout) {
   const l = normalizeMediaLayout(layout || {});

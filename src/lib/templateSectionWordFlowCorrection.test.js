@@ -95,11 +95,13 @@ describe("2/8/9. an unfocused insertion point costs no layout at all", () => {
     // The head block's minimum comes from the ITEM's kind — 60px for a photo —
     // and the leading point adds nothing to it.
     expect(planner).toMatch(/export function sectionItemMinHeight\(item\)/);
-    expect(table).toMatch(/const baseMin = sectionHeadItem\s*\?\s*sectionItemMinHeight\(sectionHeadItem\)/);
+    expect(table).toMatch(
+      /const baseMin = headSegment\s*\?\s*sectionSegmentMinHeight\(headSegment\)\s*:\s*sectionHeadItem\s*\?\s*sectionItemMinHeight\(sectionHeadItem\)/
+    );
   });
 
   test("9. no 120px reserve comes back for a section", () => {
-    const heightRule = between(table, "const baseMin = sectionHeadItem", "const effectiveMin");
+    const heightRule = between(table, "const baseMin = headSegment", "const effectiveMin");
     // The SECTION branch is content-driven; 120 survives only as the LEGACY
     // row's own fallback, on the other side of the same conditional.
     expect(heightRule).toMatch(/\? sectionItemMinHeight\(sectionHeadItem\)/);
@@ -146,7 +148,7 @@ describe("3. clicking it focuses the correct text target", () => {
   test("the caret cell opens focused, since no static view could hint one", () => {
     expect(table).toMatch(/focusOnActivate/);
     expect(textCell).toMatch(/focusOnActivate = false/);
-    expect(textCell).toMatch(/caretHintRef\.current = \{ mode: "end", identity \}/);
+    expect(textCell).toMatch(/caretHintRef\.current =\s*\n?\s*caretPoint && typeof caretPoint\.left === "number"[\s\S]*?: \{ mode: "end", identity \};/);
     // Seeded at most once per mounted cell.
     expect(textCell).toMatch(/seededCaretRef/);
   });
@@ -191,7 +193,7 @@ describe("4. typing stores the text BEFORE the photo item", () => {
 
 describe("5/6/7. the image moves down through ordinary document flow", () => {
   test("the leading text and the head media are two IN-FLOW siblings", () => {
-    expect(table).toMatch(/\{renderAnswerSlot\(row, sectionHeadItem\)\}\s*\{renderHeadMediaSlot\(row, sectionHeadItem\)\}/);
+    expect(table).toMatch(/\{renderAnswerSlot\(row, sectionHeadItem, headSegment\)\}\s*\{renderHeadMediaSlot\(row, sectionHeadItem, headSegment\)\}/);
   });
 
   test("7. no image is ever absolutely positioned", () => {

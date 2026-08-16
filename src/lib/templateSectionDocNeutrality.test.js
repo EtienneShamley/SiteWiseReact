@@ -1,11 +1,23 @@
 // src/lib/templateSectionDocNeutrality.test.js
 //
-// PHASE F1 IS BEHAVIOUR-NEUTRAL — the absences that prove it.
+// WHAT THE MODERN SECTION DOCUMENT IS STILL NOT ALLOWED TO DO.
 //
-// F1 adds the modern Section document model, the legacy adapter, the canonical
-// authority reader and the deletion-gate scan. It deliberately switches NOTHING
-// at runtime: no rendering reads the new body, no writer creates a document, no
-// editor lifecycle exists, and Quick Add, Refine and export are untouched.
+// F1 added the model, the legacy adapter, the canonical authority reader and
+// the deletion-gate scan, and switched nothing at all. F3 switches exactly ONE
+// thing — the READ path: an inactive flexible Section now renders from the
+// canonical reader, through the static Section view, one block per document
+// segment. Everything else F1 asserted is still asserted here:
+//
+//   - NO WRITER. Nothing mints the format string, nothing persists a document,
+//     and merely rendering a note writes nothing at all.
+//   - NO EDITOR. No Section editor is constructed; the legacy per-item
+//     interaction still owns every edit.
+//   - EXPORT, QUICK ADD AND REFINE ARE UNTOUCHED.
+//   - NOTHING outside the reader decides which representation is authoritative:
+//     no render site, no planner and no writer names `sectionDoc` at all.
+//
+// The read-path wiring F3 DID add is enumerated exactly, so a later phase that
+// switches something it was not supposed to still fails loudly.
 //
 // Behavioural tests cannot show an absence, so these are source-text
 // assertions — the same technique, and the same comment-stripping convention,
@@ -33,12 +45,29 @@ const NEW_MODULES = [
   "lib/templateSectionBody.js",
 ];
 
-/** Every runtime path F1 must leave exactly as it was. */
-const UNCHANGED_RUNTIME = [
+/**
+ * The three modules F3 adds on top: the layout projection, the static view and
+ * the two files that wire the read path.
+ */
+const READ_PATH = [
+  "lib/templateSectionDocSegments.js",
+  "components/template/TemplateSectionDocView.js",
+];
+
+/**
+ * The runtime paths that read the unified body in F3. They may import the
+ * reader and the projection — and nothing more: not the raw document module,
+ * not the adapter, and not `sectionDoc` itself.
+ */
+const READ_PATH_CONSUMERS = [
   "components/template/NoteTemplateDoc.js",
   "components/template/ResizableTwoColTable.js",
+  "lib/templateRowContent.js",
+];
+
+/** Every runtime path that must still be exactly as it was. */
+const UNCHANGED_RUNTIME = [
   "components/template/TemplateRowEditor.js",
-  "components/template/TemplateTextCell.js",
   "components/template/PhotoAttachment.js",
   "components/template/FileAttachmentRow.js",
   "components/template/PagedDocument.js",
@@ -46,7 +75,6 @@ const UNCHANGED_RUNTIME = [
   "components/BottomBar.js",
   "components/editor/AssetImage.js",
   "components/editor/FileAttachment.js",
-  "lib/templateRowContent.js",
   "lib/templateExportModel.js",
   "lib/templateExportHtml.js",
   "lib/templateExportMarkdown.js",
@@ -73,33 +101,87 @@ const UNCHANGED_RUNTIME = [
 ];
 
 const SOURCE = Object.fromEntries(
-  [...NEW_MODULES, ...UNCHANGED_RUNTIME, "lib/templateModel.js"].map((f) => [
-    f,
-    withoutComments(read(f)),
-  ])
+  [
+    ...NEW_MODULES,
+    ...READ_PATH,
+    ...READ_PATH_CONSUMERS,
+    ...UNCHANGED_RUNTIME,
+    "components/template/TemplateTextCell.js",
+    "lib/templateModel.js",
+  ].map((f) => [f, withoutComments(read(f))])
 );
 
 /* ==================== 36-41. nothing switched over ==================== */
 
-describe("36-41. no runtime path reads or writes the modern document yet", () => {
+describe("36-41. no runtime path reads or writes the modern document for itself", () => {
   test("no rendering, export, Quick Add, Refine or editor file mentions sectionDoc at all", () => {
-    for (const file of UNCHANGED_RUNTIME) {
-      expect({ file, mentions: /sectionDoc/i.test(SOURCE[file]) }).toEqual({
-        file,
-        mentions: false,
+    // The READ-PATH consumers are held to the same rule, and this is the point
+    // of the authority design: they ask the reader, so not one of them tests
+    // `instance.sectionDoc[rowId]` or knows the map exists.
+    for (const file of [
+      ...UNCHANGED_RUNTIME,
+      ...READ_PATH_CONSUMERS,
+      "components/template/TemplateSectionDocView.js",
+    ]) {
+      // `\bsectionDoc\b` is the STORED MAP itself. (A distinct identifier such
+      // as `isSectionDocumentBody` — asking the reader what it decided — is not
+      // the map and is exactly what these files are supposed to use.)
+      const mentions =
+        /\bsectionDoc\b/.test(SOURCE[file]) ||
+        /sectionDoc(ForRow|NodesForRow|ReferencesAsset|AssetIds|HtmlFromNodes)/.test(
+          SOURCE[file]
+        );
+      expect({ file, mentions }).toEqual({ file, mentions: false });
+    }
+  });
+
+  test("the layout projection reads the NODE MODEL, never the stored map", () => {
+    // It names `SECTION_DOC_NODE` because segments are made of document nodes.
+    // It must never reach the stored value, the row lookup or the validity rule
+    // — those are the reader's, and asking them twice is how two opinions about
+    // authority start.
+    const segments = SOURCE["lib/templateSectionDocSegments.js"];
+    expect(segments).toContain("SECTION_DOC_NODE");
+    for (const forbidden of [
+      "sectionDocForRow",
+      "sectionDocNodesForRow",
+      "isSectionDocValue",
+      "instance",
+      "SECTION_DOC_FORMAT",
+    ]) {
+      expect({ forbidden, hit: segments.includes(forbidden) }).toEqual({
+        forbidden,
+        hit: false,
       });
     }
   });
 
-  test("nothing imports the new modules except each other and the deletion gate", () => {
+  test("nothing imports the new modules except each other, the read path and the deletion gate", () => {
     const allowed = new Set([...NEW_MODULES, "lib/templateModel.js"]);
+    // What the read path is allowed to reach for, file by file. The adapter and
+    // the raw document module are reachable ONLY through the reader.
+    const READ_PATH_ALLOWED = {
+      "components/template/NoteTemplateDoc.js": ["templateSectionBody"],
+      // The table imports the reader ONLY for its source vocabulary — which
+      // representation a body came from decides whether the legacy per-item
+      // interaction can take that row over. It never calls the reader.
+      "components/template/ResizableTwoColTable.js": [
+        "templateSectionDocSegments",
+        "templateSectionBody",
+      ],
+      "lib/templateRowContent.js": ["templateSectionDocSegments"],
+      "lib/templateSectionDocSegments.js": ["templateSectionDoc"],
+      "components/template/TemplateSectionDocView.js": ["templateSectionDocSegments"],
+    };
     for (const [file, source] of Object.entries(SOURCE)) {
       if (allowed.has(file)) continue;
+      const permitted = READ_PATH_ALLOWED[file] || [];
       for (const specifier of [
-        "templateSectionDoc",
         "templateSectionDocAdapter",
         "templateSectionBody",
+        "templateSectionDocSegments",
       ]) {
+        if (permitted.includes(specifier)) continue;
         expect({ file, specifier, imported: source.includes(specifier) }).toEqual({
           file,
           specifier,
@@ -123,12 +205,50 @@ describe("36-41. no runtime path reads or writes the modern document yet", () =>
     }
   });
 
-  test("36. the canonical reader has no production caller yet", () => {
+  test("36. the canonical reader has EXACTLY ONE production caller", () => {
+    // One place resolves every Section body on the form, and hands the result
+    // down. A second caller would be a second opinion about authority.
     for (const [file, source] of Object.entries(SOURCE)) {
       if (file === "lib/templateSectionBody.js") continue;
+      const expected = file === "components/template/NoteTemplateDoc.js";
       expect({ file, calls: source.includes("resolveSectionBody") }).toEqual({
         file,
-        calls: false,
+        calls: expected,
+      });
+    }
+  });
+
+  test("nothing persists a document: F3 renders one, and writes nothing", () => {
+    for (const [file, source] of Object.entries(SOURCE)) {
+      for (const forbidden of [
+        "persistSectionDoc",
+        "makeSectionDocValue",
+        "SECTION_DOC_FORMAT",
+      ]) {
+        if (file === "lib/templateSectionDoc.js") continue;
+        expect({ file, forbidden, hit: source.includes(forbidden) }).toEqual({
+          file,
+          forbidden,
+          hit: false,
+        });
+      }
+    }
+  });
+
+  test("no Section editor exists yet — the read path constructs none", () => {
+    for (const file of [...READ_PATH, "lib/templateRowContent.js"]) {
+      const source = SOURCE[file];
+      expect({ file, hit: /@tiptap/.test(source) }).toEqual({ file, hit: false });
+      expect({ file, hit: /\bnew Editor\b|useEditor|EditorContent/.test(source) }).toEqual({
+        file,
+        hit: false,
+      });
+    }
+    // The one place a Section editor would be constructed is still unconsumed.
+    for (const [file, source] of Object.entries(SOURCE)) {
+      expect({ file, hit: source.includes("sectionEditorExtensions") }).toEqual({
+        file,
+        hit: false,
       });
     }
   });
@@ -145,11 +265,17 @@ describe("36-41. no runtime path reads or writes the modern document yet", () =>
     }
   });
 
-  test("the Template planner still plans from sectionContent alone", () => {
+  test("the Template planner plans BOTH ways and decides authority neither way", () => {
     const planner = SOURCE["lib/templateRowContent.js"];
+    // The legacy per-item plan is intact — it is what an ACTIVE Section still
+    // renders, and every legacy interaction still addresses.
     expect(planner).toContain("sectionItemsForRow");
+    expect(planner).toContain("ROW_BLOCK_KIND.SECTION_ITEM");
+    // The document plan is driven entirely by what the caller hands down.
+    expect(planner).toContain("sectionSegments");
+    // It never resolves a body itself, and never touches a raw document.
     expect(planner).not.toContain("resolveSectionBody");
-    expect(planner).not.toContain("nodes");
+    expect(planner).not.toContain("adaptSectionItemsToNodes");
   });
 
   test("the exporter still expands section items, not documents", () => {
@@ -163,7 +289,7 @@ describe("36-41. no runtime path reads or writes the modern document yet", () =>
 
 describe("the new modules are pure, storage-free and surface-agnostic", () => {
   test("no React, no components, no MainArea", () => {
-    for (const file of NEW_MODULES) {
+    for (const file of [...NEW_MODULES, "lib/templateSectionDocSegments.js"]) {
       const source = SOURCE[file];
       expect({ file, hit: /from "react"|from 'react'/.test(source) }).toEqual({
         file,
@@ -175,7 +301,7 @@ describe("the new modules are pure, storage-free and surface-agnostic", () => {
   });
 
   test("18. no storage and no asset operation can happen during adaptation", () => {
-    for (const file of NEW_MODULES) {
+    for (const file of [...NEW_MODULES, "lib/templateSectionDocSegments.js"]) {
       const source = SOURCE[file];
       for (const forbidden of [
         "localStorage",
@@ -198,7 +324,7 @@ describe("the new modules are pure, storage-free and surface-agnostic", () => {
   });
 
   test("the adapter mints no ids and reads no clock, so adapting twice is identical", () => {
-    for (const file of NEW_MODULES) {
+    for (const file of [...NEW_MODULES, "lib/templateSectionDocSegments.js"]) {
       const source = SOURCE[file];
       expect({ file, hit: /\bnewId\b/.test(source) }).toEqual({ file, hit: false });
       expect({ file, hit: /Date\.now|new Date\(/.test(source) }).toEqual({ file, hit: false });

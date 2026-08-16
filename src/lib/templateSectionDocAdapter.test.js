@@ -16,15 +16,17 @@ import {
   parseSectionDocHtml,
   sectionDocHtmlFromNodes,
 } from "./templateSectionDoc";
-import { SECTION_TEXT_JOIN } from "./templateSectionContent";
+import { SECTION_ITEM_KIND, SECTION_TEXT_JOIN } from "./templateSectionContent";
 import { MEDIA_LAYOUT_MODE } from "./editorMediaLayout";
 
 const IMAGE_ID = "img-asset-0001";
 const FILE_ID = "file-asset-0001";
+const PHOTO_ITEM_ID = "item-photo";
+const FILE_ITEM_ID = "item-file";
 
 const text = (id, value) => ({ id, kind: "text", value });
 const photo = (over = {}) => ({
-  id: "item-photo",
+  id: PHOTO_ITEM_ID,
   kind: "photo",
   assetId: IMAGE_ID,
   name: "site.jpg",
@@ -37,7 +39,7 @@ const photo = (over = {}) => ({
   ...over,
 });
 const file = (over = {}) => ({
-  id: "item-file",
+  id: FILE_ITEM_ID,
   kind: "file",
   assetId: FILE_ID,
   name: "Report.pdf",
@@ -94,8 +96,16 @@ describe("ordered section content becomes one ordered document", () => {
   });
 
   test("a non-list, an empty list and unrenderable entries produce no document", () => {
-    expect(adaptSectionItemsToNodes(null)).toEqual({ nodes: [], skipped: [] });
-    expect(adaptSectionItemsToNodes([])).toEqual({ nodes: [], skipped: [] });
+    expect(adaptSectionItemsToNodes(null)).toEqual({
+      nodes: [],
+      sources: [],
+      skipped: [],
+    });
+    expect(adaptSectionItemsToNodes([])).toEqual({
+      nodes: [],
+      sources: [],
+      skipped: [],
+    });
     // Invisible today (unknown kind, id-less text) => invisible in the document.
     const { nodes, skipped } = adaptSectionItemsToNodes([
       { id: "x", kind: "sketch", assetId: "a" },
@@ -286,7 +296,13 @@ describe("photo conversion", () => {
     const { nodes, skipped } = adaptSectionItemsToNodes([photo({ assetId: 'bad"id' })]);
     expect(nodes).toEqual([]);
     expect(skipped).toEqual([
-      { reason: SECTION_DOC_SKIP_REASON.IMAGE, index: 0, entry: expect.any(Object) },
+      {
+        reason: SECTION_DOC_SKIP_REASON.IMAGE,
+        index: 0,
+        id: PHOTO_ITEM_ID,
+        kind: SECTION_ITEM_KIND.PHOTO,
+        entry: expect.any(Object),
+      },
     ]);
   });
 });
@@ -328,7 +344,13 @@ describe("file conversion", () => {
     const { nodes, skipped } = adaptSectionItemsToNodes([file({ assetId: "short" })]);
     expect(nodes).toEqual([]);
     expect(skipped).toEqual([
-      { reason: SECTION_DOC_SKIP_REASON.FILE, index: 0, entry: expect.any(Object) },
+      {
+        reason: SECTION_DOC_SKIP_REASON.FILE,
+        index: 0,
+        id: FILE_ITEM_ID,
+        kind: SECTION_ITEM_KIND.FILE,
+        entry: expect.any(Object),
+      },
     ]);
   });
 });

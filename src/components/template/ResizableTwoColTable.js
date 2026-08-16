@@ -29,7 +29,15 @@ import {
   ROW_BLOCK_KIND,
   planRowBlocks,
   sectionItemMinHeight,
+  sectionSegmentMinHeight,
 } from "../../lib/templateRowContent";
+import {
+  SECTION_SEGMENT_KIND,
+  compatSegmentItemKind,
+  sectionDocSegments,
+} from "../../lib/templateSectionDocSegments";
+import { SECTION_BODY_SOURCE } from "../../lib/templateSectionBody";
+import TemplateSectionDocView from "./TemplateSectionDocView";
 import {
   SECTION_ITEM_KIND,
   normalizeSectionContent,
@@ -281,6 +289,20 @@ export default function ResizableTwoColTable({
   // REMOVED individually (onRemoveSectionItem), and a PHOTO may be moved by its
   // body and resized by its corners (onResizeSectionPhoto).
   sectionContent = {},
+  // THE UNIFIED SECTION BODIES (note mode): `{ [rowId]: resolvedBody }`, each
+  // one produced by the CANONICAL body reader (src/lib/templateSectionBody.js)
+  // — the single place that decides which stored representation a Section's
+  // body comes from. A row present here renders its body as ONE ordered
+  // document through the static Section view, one block per segment, WHENEVER
+  // the legacy per-item interaction is not currently on it.
+  //
+  // This component never asks which representation won, and never reads
+  // `sectionDoc` for itself: the reader answered that, and the answer arrives
+  // here already resolved.
+  //
+  // Absent (the Template Builder, and any row without a document body) leaves
+  // the row planning and rendering exactly as it always has.
+  sectionBodies = null,
   // Remove ONE ordered section photo/file item, addressed by the row id and the
   // item's own stable id — never by a position, and never by index into another
   // collection. Omit it and no item Remove is offered at all (the Template
@@ -536,6 +558,96 @@ export default function ResizableTwoColTable({
     () => new Set(Object.keys(normalizedSectionContent)),
     [normalizedSectionContent]
   );
+
+  // The rows whose body the CANONICAL reader resolved to a unified Section
+  // DOCUMENT — the modern stored document, or the ordered item list adapted
+  // into one. Nothing here re-derives that; the reader decided and this is
+  // simply the index of what it said.
+  const documentBodySegments = useMemo(() => {
+    const map = new Map();
+    if (!showRightEditor || !sectionBodies || typeof sectionBodies !== "object") {
+      return map;
+    }
+    for (const [rowId, body] of Object.entries(sectionBodies)) {
+      if (!body) continue;
+      map.set(rowId, {
+        segments: sectionDocSegments(body),
+        // CAN this row hand itself back to the legacy per-item interaction?
+        //
+        // Only a body ADAPTED from the ordered item list can: the legacy
+        // interaction addresses stored items, and its plan renders them. A row
+        // whose body is a MODERN stored document has no items behind it, so
+        // handing it over would silently show a different document — the frozen
+        // legacy answer, or nothing. Such a row therefore stays read-only until
+        // the Section editor lands (Phase F4); no Template writer produces one
+        // yet, so no stored note reaches this branch today.
+        editable: body.source === SECTION_BODY_SOURCE.SECTION_CONTENT,
+      });
+    }
+    return map;
+  }, [showRightEditor, sectionBodies]);
+
+  /**
+   * The point the caret should land on when a STATIC Section text segment hands
+   * the row back to the legacy editor.
+   *
+   * Clicking static text activates the row, which re-plans it onto the legacy
+   * per-item blocks — so the cell that finally carries the editor is a NEW
+   * component instance and cannot have recorded the click itself. This ref
+   * carries the point across that one render, stamped with the editor identity
+   * the activation resolved, so a point can only ever be consumed by the exact
+   * target it was aimed at.
+   */
+  const pendingSectionCaret = useRef(null);
+
+  /**
+   * The unified Section document segments this row renders STATICALLY, or null.
+   *
+   * Null means "plan and render this row exactly as it always has": either it
+   * has no document body at all, or the legacy per-item interaction currently
+   * owns it (the user is editing this Section, or has opened its leading
+   * caret) and must keep its own blocks, its editor, its image drag and its
+   * resize handles. Phase F3 switches the READ path; the WRITE path is
+   * unchanged and still owns the row while it is active.
+   */
+  function sectionStaticSegments(row) {
+    if (!row) return null;
+    const entry = documentBodySegments.get(row.id);
+    if (!entry || !entry.segments.length) return null;
+    if (richText && (richText.activeRowId === row.id || richText.leadingRowId === row.id)) {
+      return null;
+    }
+    return entry.segments;
+  }
+
+  /** May the legacy per-item interaction take this row's body over? */
+  function sectionCanHandBackToLegacy(row) {
+    const entry = row ? documentBodySegments.get(row.id) : null;
+    return !!(entry && entry.editable);
+  }
+
+  /**
+   * Is this the segment that carries the ROW'S PROMPT?
+   *
+   * The row's invitation to type belongs to its FIRST run of prose, wherever
+   * that is: normally the head, but a Section whose first content is an image
+   * has a picture as its head and its prose below — and without this such a
+   * Section would offer no visible invitation at all. Exactly the rule the
+   * legacy per-item rendering applies to the first TEXT item.
+   */
+  function isPromptSegment(row, segment) {
+    const entry = row ? documentBodySegments.get(row.id) : null;
+    if (!entry || !segment) return false;
+    const first = entry.segments.find((s) => s.kind === SECTION_SEGMENT_KIND.TEXT);
+    return !!first && first.key === segment.key;
+  }
+
+  /** The legacy stored item a segment was adapted from, or null. */
+  function segmentLegacyItem(row, segment) {
+    if (!row || !segment || !segment.itemId) return null;
+    const items = normalizedSectionContent[row.id] || [];
+    return items.find((i) => i.id === segment.itemId) || null;
+  }
 
   // ---------- WORD-LIKE IMAGE PLACEMENT WITHIN A SECTION ----------
   // A section behaves like a word-processor document body: text is typed, and an
@@ -1109,7 +1221,8 @@ export default function ResizableTwoColTable({
       showRightEditor &&
       !!row &&
       isRefinableRowType(row.type) &&
-      !sectionContentRowIds.has(row.id)
+      !sectionContentRowIds.has(row.id) &&
+      !documentBodySegments.has(row.id)
     );
   }
 
@@ -1479,8 +1592,20 @@ export default function ResizableTwoColTable({
       : "";
   }
 
-  function renderRowBlock(row, sectionHeadItem = null, ctx = null, section = null) {
+  function renderRowBlock(
+    row,
+    sectionHeadItem = null,
+    ctx = null,
+    section = null,
+    headSegment = null
+  ) {
     const type = normalizeType(row.type);
+    // The row-level text target, whichever plan produced the head. A static
+    // document head names the stored item it was adapted from, so the row's
+    // familiar Refine affordance keeps addressing exactly the same text.
+    const headTarget = headSegment
+      ? segmentLegacyItem(row, headSegment)
+      : sectionHeadItem;
     const rawList = showRightEditor ? attachments[row.id] || [] : [];
     const legacyItems = [];
     rawList.forEach((e, index) => {
@@ -1508,7 +1633,9 @@ export default function ResizableTwoColTable({
     // same number rather than two guesses that can drift apart. It is a real
     // `min-height` on a real box: the content genuinely grows it, and nothing is
     // faked with negative margins or absolute positioning.
-    const baseMin = sectionHeadItem
+    const baseMin = headSegment
+      ? sectionSegmentMinHeight(headSegment)
+      : sectionHeadItem
       ? sectionItemMinHeight(sectionHeadItem)
       : row.px || 120;
     // The legacy base64 compatibility strip needs room for its images whatever
@@ -1614,10 +1741,10 @@ export default function ResizableTwoColTable({
               leading caret being TYPED INTO keeps the same cell in slot 1 while
               slot 2 empties. In both cases the live editor keeps its focus, its
               caret and its undo history. */}
-          {renderAnswerSlot(row, sectionHeadItem)}
-          {renderHeadMediaSlot(row, sectionHeadItem)}
+          {renderAnswerSlot(row, sectionHeadItem, headSegment)}
+          {renderHeadMediaSlot(row, sectionHeadItem, headSegment)}
 
-          {showRightEditor && renderRowRefineStatus(row, headRefineItem(sectionHeadItem))}
+          {showRightEditor && renderRowRefineStatus(row, headRefineItem(headTarget))}
 
           {enableFieldTypeEditor &&
             (type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE) && (
@@ -1635,7 +1762,7 @@ export default function ResizableTwoColTable({
           {isSectionTail && renderSectionTail(row, sectionExtraPx)}
         </div>
 
-        {renderRowActions(row, sectionHeadItem)}
+        {renderRowActions(row, headTarget)}
         {renderColumnDivider()}
 
         {/* The insertion line, while an image is being dragged over this item.
@@ -1647,7 +1774,7 @@ export default function ResizableTwoColTable({
             control only. A flexible section is sized by its content plus the
             optional extra above, and its handle lives at the END of the whole
             section, which for a multi-item section is a later block entirely. */}
-        {!sectionHeadItem && (
+        {!sectionHeadItem && !headSegment && (
           <div
             className="twocol-resize-handle"
             onMouseDown={(e) => startRowDrag(row, e)}
@@ -1994,7 +2121,23 @@ export default function ResizableTwoColTable({
 
   // SLOT 1 of the answer area (see renderRowBlock): whatever can hold the one
   // live editor.
-  function renderAnswerSlot(row, sectionHeadItem) {
+  function renderAnswerSlot(row, sectionHeadItem, headSegment = null) {
+    if (headSegment) {
+      // The static Section document's own head. Prose renders in slot 1 exactly
+      // as a head text item does; a head IMAGE or FILE keeps the leading
+      // insertion point above it, so "type above the first picture" still works
+      // and still writes nothing until the user types.
+      if (headSegment.kind === SECTION_SEGMENT_KIND.TEXT) {
+        return renderSectionDocText(row, headSegment, {
+          isPrompt: isPromptSegment(row, headSegment),
+        });
+      }
+      // The leading caret is a LEGACY writer: it opens the legacy editor against
+      // a virtual item of the stored list. A row whose body is a modern
+      // document has no such list, so it is not offered one.
+      if (!sectionCanHandBackToLegacy(row)) return null;
+      return renderSectionLeadingInsertionPoint(row);
+    }
     if (!sectionHeadItem) return showRightEditor && renderAnswerControl(row);
     if (sectionHeadItem.kind === SECTION_ITEM_KIND.TEXT) {
       return renderSectionItemBody(row, sectionHeadItem, { isRowHead: true });
@@ -2007,7 +2150,11 @@ export default function ResizableTwoColTable({
   // SLOT 2: the head item when it is an image or a file. It is a sibling BELOW
   // slot 1, so text typed above it pushes it down through ordinary document
   // flow — nothing is absolutely positioned and no height is reserved.
-  function renderHeadMediaSlot(row, sectionHeadItem) {
+  function renderHeadMediaSlot(row, sectionHeadItem, headSegment = null) {
+    if (headSegment) {
+      if (headSegment.kind === SECTION_SEGMENT_KIND.TEXT) return null;
+      return renderSectionDocSegmentBody(row, headSegment);
+    }
     if (!sectionHeadItem || sectionHeadItem.kind === SECTION_ITEM_KIND.TEXT) {
       return null;
     }
@@ -2108,14 +2255,21 @@ export default function ResizableTwoColTable({
       if (richText) {
         const active =
           richText.activeRowId === row.id && richText.activeItemId === item.id;
+        const identity = active ? richText.activeIdentity : null;
         return (
           <TemplateTextCell
-            identity={active ? richText.activeIdentity : null}
+            identity={identity}
             rowId={row.id}
             itemId={item.id}
             label={row.label}
             ariaLabel={sectionTextItemLabel(row, item)}
             value={item.value}
+            // This cell may be REPLACING a static Section document segment the
+            // user just pressed — a different component instance, which could
+            // not have recorded the press. When it is, it seeds its caret from
+            // the point that activation carried across.
+            focusOnActivate={isSectionCaretPending(identity)}
+            caretPoint={pendingCaretFor(identity)}
             // Only the section's FIRST text item stands in for the row's own
             // answer control, so only it carries the row's prompt. A later item
             // is a paragraph the user added: an empty one keeps its blank line
@@ -2168,6 +2322,181 @@ export default function ResizableTwoColTable({
         }
       />
     );
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* THE STATIC (INACTIVE) SECTION DOCUMENT                              */
+  /* ------------------------------------------------------------------ */
+
+  // Does this run of prose render as nothing at all?
+  //
+  // Only used to decide whether the row's PROMPT is shown, which is the same
+  // question `isEmptyAnswerValue` answers for a legacy text target: a section
+  // with nothing in it must still invite the user to type into it. A blank
+  // paragraph the user genuinely typed keeps its height either way — this
+  // decides a placeholder, never a box.
+  function isEmptySegmentText(blocks) {
+    const list = Array.isArray(blocks) ? blocks : [];
+    if (!list.length) return true;
+    return list.every(
+      (block) =>
+        block &&
+        block.type === "paragraph" &&
+        !(block.content || []).some(
+          (node) => node && (node.type === "break" || (node.text || "").trim())
+        )
+    );
+  }
+
+  // Hand this Section back to the legacy per-item interaction, at the point the
+  // user pressed.
+  //
+  // The static view is a READ rendering; every edit still belongs to the
+  // existing editor, its split/heal writers and its Quick Add path. Pressing
+  // static text therefore does exactly what pressing an inactive text cell has
+  // always done — activate that stored text item — and the press point is
+  // carried across the one render that re-plans the row so the caret lands
+  // where the user clicked rather than at the end.
+  //
+  // A segment that names no stored item (a modern stored document, which no
+  // Template writer produces yet) has nothing for the legacy editor to open
+  // against, so it stays read-only until the Section editor lands in F4.
+  function activateSectionTextSegment(row, segment, event) {
+    if (!richText || typeof richText.onActivate !== "function") return;
+    if (!sectionCanHandBackToLegacy(row)) return;
+    const item = segmentLegacyItem(row, segment);
+    if (!item) return;
+    const identity = richText.onActivate(row.id, item.id) || null;
+    if (!identity) return;
+    pendingSectionCaret.current = event
+      ? { identity, left: event.clientX, top: event.clientY }
+      : { identity, left: null, top: null };
+  }
+
+  // The caret hand-off for a cell that is being created ALREADY ACTIVE by the
+  // activation above. Matched on the editor IDENTITY the activation resolved,
+  // so a recorded point can only ever be consumed by the exact target it was
+  // aimed at.
+  function pendingCaretFor(identity) {
+    const pending = pendingSectionCaret.current;
+    if (!pending || !identity || pending.identity !== identity) return null;
+    return pending.left == null ? null : { left: pending.left, top: pending.top };
+  }
+
+  function isSectionCaretPending(identity) {
+    const pending = pendingSectionCaret.current;
+    return !!(pending && identity && pending.identity === identity);
+  }
+
+  // ONE prose segment of a static Section document.
+  //
+  // The document rendering is the static Section view's; the SHELL around it is
+  // this component's, because in a completed note that shell is also the
+  // activation target of the legacy editor — the same `.twocol-rich--static`
+  // box, the same role, the same focus behaviour an inactive text cell has
+  // always had, so activating a Section neither moves nor resizes it.
+  function renderSectionDocText(row, segment, { isPrompt = false } = {}) {
+    const item = segmentLegacyItem(row, segment);
+    const ariaLabel = item
+      ? sectionTextItemLabel(row, item)
+      : `${(row.label || "").trim() || "Section"} — answer`;
+    const empty = isEmptySegmentText(segment.blocks);
+    const body =
+      empty && isPrompt ? (
+        <span className="twocol-rich-placeholder">Enter details for this field...</span>
+      ) : (
+        <TemplateSectionDocView segment={segment} />
+      );
+
+    if (!richText || !item || !sectionCanHandBackToLegacy(row)) {
+      return <div className="twocol-rich">{body}</div>;
+    }
+    return (
+      <div
+        className="twocol-rich twocol-rich--static"
+        tabIndex={0}
+        role="textbox"
+        aria-multiline="true"
+        aria-label={ariaLabel}
+        onMouseDown={(event) => {
+          // Taking the press ourselves is what lets the caret open where the
+          // user clicked — the browser would otherwise focus this div a moment
+          // before the editor that replaces it exists.
+          event.preventDefault();
+          activateSectionTextSegment(row, segment, event);
+        }}
+        onFocus={() => activateSectionTextSegment(row, segment, null)}
+      >
+        {body}
+      </div>
+    );
+  }
+
+  // The body of ONE segment of a static Section document.
+  //
+  // Everything the unified document can represent goes through the static
+  // Section view. Everything it CANNOT — a stored item the shared serializers
+  // refuse, reported by the canonical reader — keeps rendering through the
+  // compatibility renderer it already uses, in its own stored position, so no
+  // historical content becomes invisible by being read through the document.
+  function renderSectionDocSegmentBody(row, segment) {
+    if (segment.kind === SECTION_SEGMENT_KIND.TEXT) {
+      return renderSectionDocText(row, segment, {
+        isPrompt: isPromptSegment(row, segment),
+      });
+    }
+    if (segment.kind === SECTION_SEGMENT_KIND.COMPAT) {
+      return renderCompatSegmentBody(row, segment);
+    }
+    return (
+      <TemplateSectionDocView
+        segment={segment}
+        onError={(msg) => onFieldError && onFieldError(row.id, msg)}
+      />
+    );
+  }
+
+  // A stored item the unified document cannot represent, rendered exactly as it
+  // is rendered today — the SAME components, the same asset policy, the same
+  // open/download behaviour. Read-only: the legacy per-item Remove belongs to
+  // the legacy plan, and this row is not on it.
+  function renderCompatSegmentBody(row, segment) {
+    const item = segmentLegacyItem(row, segment);
+    const entry = item || segment.entry;
+    if (!entry || typeof entry !== "object") return null;
+    if (compatSegmentItemKind(segment) === SECTION_ITEM_KIND.FILE) {
+      return (
+        <FileAttachmentRow
+          attachment={entry}
+          onError={(msg) => onFieldError && onFieldError(row.id, msg)}
+        />
+      );
+    }
+    return <PhotoAttachment attachment={entry} readOnly />;
+  }
+
+  // One segment of a static Section document AFTER the row head: the same
+  // atomic segment shell the ordered items use, so it inherits the merged-cell
+  // look, the branded colours, page continuation and print behaviour. It is
+  // deliberately NOT a movable item — a static view has no drag, no drop zone
+  // and no insertion line.
+  function renderSectionDocSegment(row, segment, ctx, section = null) {
+    const isSectionTail = !!(section && section.isTail);
+    const item = segmentLegacyItem(row, segment);
+    const canAiRefine =
+      segment.kind === SECTION_SEGMENT_KIND.TEXT &&
+      sectionItemAcceptsAiRefine(row, item);
+    return renderSegmentShell(row, ctx, {
+      extraClass: "twocol-seg--section",
+      actions: canAiRefine ? renderRefineAction(row, item) : null,
+      body: (
+        <>
+          {renderSectionDocSegmentBody(row, segment)}
+          {canAiRefine && renderRowRefineStatus(row, item)}
+          {isSectionTail && renderSectionTail(row, section.extraPx)}
+        </>
+      ),
+    });
   }
 
   // One ordered section item AFTER the row head: the same atomic segment shell
@@ -2256,6 +2585,11 @@ export default function ResizableTwoColTable({
       // note's content.
       evidence: showRightEditor ? evidence : null,
       sectionContent: showRightEditor ? sectionContent : null,
+      // The unified body, when this row is not currently owned by the legacy
+      // per-item interaction. Present -> the row plans one block per document
+      // segment and renders statically; absent -> it plans and renders exactly
+      // as it always has.
+      sectionSegments: sectionStaticSegments(row),
       sectionExtraHeight: showRightEditor ? sectionExtraHeight : null,
     });
 
@@ -2266,6 +2600,7 @@ export default function ResizableTwoColTable({
         kind,
         item,
         sectionItem,
+        sectionSegment,
         isRowHead,
         isSectionTail,
         sectionExtraPx,
@@ -2296,6 +2631,14 @@ export default function ResizableTwoColTable({
           render = isRowHead
             ? (ctx) => renderRowBlock(row, sectionItem, ctx, sectionTail)
             : (ctx) => renderSectionSegment(row, sectionItem, ctx, sectionTail);
+          break;
+        case ROW_BLOCK_KIND.SECTION_SEGMENT:
+          // The same two positions, from the unified Section document: the head
+          // segment IS the row, every segment after it is an atomic
+          // continuation segment. Read-only — no drag, no resize, no Remove.
+          render = isRowHead
+            ? (ctx) => renderRowBlock(row, null, ctx, sectionTail, sectionSegment)
+            : (ctx) => renderSectionDocSegment(row, sectionSegment, ctx, sectionTail);
           break;
         default:
           render = (ctx) => renderRowBlock(row, null, ctx);

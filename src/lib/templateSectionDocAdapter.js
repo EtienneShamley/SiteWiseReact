@@ -76,6 +76,31 @@
 // Entries that do not render today either (an unknown `kind`, an id-less text
 // item) are simply not part of the body, exactly as now.
 //
+// Each skipped entry names the stored item it belongs to — `index` (its
+// position in the list this adapter walked) and `id` (its stable item id where
+// it has one) — so a caller can put it back exactly where it was rather than
+// appending it somewhere plausible.
+//
+// ---------------------------------------------------------------------------
+// PROVENANCE — a PARALLEL array, never part of the document
+// ---------------------------------------------------------------------------
+//
+// `sources` is returned alongside `nodes` and is exactly as long as it:
+//
+//   sources[i] = [ { index, id, blocks }, … ]   the legacy items node i came
+//                                               from, in order; `blocks` is how
+//                                               many model blocks that item
+//                                               contributed (0 for media)
+//
+// It exists because a run of prose between two media items is ONE text node
+// even when it was assembled from two independent stored TextItems, and a
+// read-time projection (pagination, and the bridge to the legacy per-item
+// interaction that still owns editing) has to be able to put those boundaries
+// back. It is deliberately NOT a node field: the node model is what gets
+// stored, and adding a field to it would change what `parseSectionDocHtml`
+// must round-trip. A parsed stored document simply has no provenance — which
+// is correct, because it has no legacy items either.
+//
 // Pure: no React, no DOM beyond the shared parsers, no storage.
 
 import { carryableEvidenceItems } from "./templateSectionEditing";
@@ -99,15 +124,26 @@ export const SECTION_DOC_SKIP_REASON = {
   LEGACY_EVIDENCE: "legacy-evidence-not-carryable",
 };
 
-/** Push a text node, or extend the previous one — one node per run of prose. */
-function pushBlocks(nodes, blocks) {
+/**
+ * Push a text node, or extend the previous one — one node per run of prose.
+ *
+ * `sources` is the PARALLEL provenance array (see the module note): it never
+ * touches the node model, so an adapted document and a stored one stay
+ * byte-identical in shape. `part` names the legacy item these blocks came from,
+ * and the count of blocks it contributed, which is what lets a later read-time
+ * projection put a run back on the item boundaries it was assembled from.
+ */
+function pushBlocks(nodes, sources, blocks, part) {
   if (!Array.isArray(blocks) || !blocks.length) return;
+  const entry = part ? { ...part, blocks: blocks.length } : null;
   const last = nodes[nodes.length - 1];
   if (last && last.type === SECTION_DOC_NODE.TEXT) {
     last.blocks = [...last.blocks, ...blocks];
+    if (entry) sources[sources.length - 1].push(entry);
     return;
   }
   nodes.push({ type: SECTION_DOC_NODE.TEXT, blocks });
+  sources.push(entry ? [entry] : []);
 }
 
 /**
@@ -147,40 +183,58 @@ function fileNodeFor(item) {
 }
 
 /** Append one normalized section item to the node list, or record it skipped. */
-function appendItem(nodes, skipped, item, index, entry) {
+function appendItem(nodes, sources, skipped, item, index, entry) {
+  const part = { index, id: item.id || null };
   if (item.kind === SECTION_ITEM_KIND.TEXT) {
-    pushBlocks(nodes, answerToModel(item.value));
+    pushBlocks(nodes, sources, answerToModel(item.value), part);
     return;
   }
   if (item.kind === SECTION_ITEM_KIND.FILE) {
     const attrs = fileNodeFor(item);
     if (!attrs) {
-      skipped.push({ reason: SECTION_DOC_SKIP_REASON.FILE, index, entry });
+      skipped.push({
+        reason: SECTION_DOC_SKIP_REASON.FILE,
+        index,
+        id: part.id,
+        kind: SECTION_ITEM_KIND.FILE,
+        entry,
+      });
       return;
     }
     nodes.push({ type: SECTION_DOC_NODE.FILE, attrs });
+    sources.push([{ ...part, blocks: 0 }]);
     return;
   }
   const attrs = imageNodeFor(item);
   if (!attrs) {
-    skipped.push({ reason: SECTION_DOC_SKIP_REASON.IMAGE, index, entry });
+    skipped.push({
+      reason: SECTION_DOC_SKIP_REASON.IMAGE,
+      index,
+      id: part.id,
+      kind: SECTION_ITEM_KIND.PHOTO,
+      entry,
+    });
     return;
   }
   nodes.push({ type: SECTION_DOC_NODE.IMAGE, attrs });
+  sources.push([{ ...part, blocks: 0 }]);
 }
 
 /**
- * A row's RAW stored `sectionContent` list → `{ nodes, skipped }`.
+ * A row's RAW stored `sectionContent` list → `{ nodes, sources, skipped }`.
  *
  * Reads through the existing render model (`normalizeSectionItem`), so exactly
  * what renders today is what the document contains: strict kind dispatch, an
  * unknown kind skipped rather than guessed at, an empty text item KEPT (a blank
  * paragraph is legitimate content).
+ *
+ * `sources` is parallel to `nodes` (see the module note on provenance).
  */
 export function adaptSectionItemsToNodes(rawList) {
   const nodes = [];
+  const sources = [];
   const skipped = [];
-  if (!Array.isArray(rawList)) return { nodes, skipped };
+  if (!Array.isArray(rawList)) return { nodes, sources, skipped };
 
   // In memory only. `healSectionSplitText` returns null for "nothing to heal".
   const healed = healSectionSplitText(rawList);
@@ -189,14 +243,14 @@ export function adaptSectionItemsToNodes(rawList) {
   list.forEach((entry, index) => {
     const item = normalizeSectionItem(entry);
     if (item === null) return; // invisible today, invisible in the document
-    appendItem(nodes, skipped, item, index, entry);
+    appendItem(nodes, sources, skipped, item, index, entry);
   });
 
-  return { nodes, skipped };
+  return { nodes, sources, skipped };
 }
 
 /**
- * The pre-`sectionContent` sources → `{ nodes, skipped }`.
+ * The pre-`sectionContent` sources → `{ nodes, sources, skipped }`.
  *
  * @param answer        the row's legacy answer value (`answers[rowId]`, or a
  *                      custom row's own `answer`). Included ONLY when the
@@ -212,12 +266,15 @@ export function adaptSectionItemsToNodes(rawList) {
  */
 export function adaptLegacyBodyToNodes({ answer, evidence, includeAnswer = true } = {}) {
   const nodes = [];
+  const sources = [];
   const skipped = [];
 
   if (includeAnswer) {
     // An empty answer yields one empty paragraph, which is what an empty
     // Section renders (and is typeable into) today.
-    pushBlocks(nodes, answerToModel(answer));
+    // The answer is not an ordered item, so its provenance part carries no
+    // stable id and the index that precedes every evidence entry.
+    pushBlocks(nodes, sources, answerToModel(answer), { index: -1, id: null });
   }
 
   const rawEvidence = Array.isArray(evidence) ? evidence : [];
@@ -235,6 +292,8 @@ export function adaptLegacyBodyToNodes({ answer, evidence, includeAnswer = true 
         skipped.push({
           reason: SECTION_DOC_SKIP_REASON.LEGACY_EVIDENCE,
           index,
+          id: entry && typeof entry === "object" ? entry.id || null : null,
+          kind: null,
           entry,
         });
       }
@@ -242,10 +301,10 @@ export function adaptLegacyBodyToNodes({ answer, evidence, includeAnswer = true 
     }
     const item = normalizeSectionItem(copy);
     if (item === null) return;
-    appendItem(nodes, skipped, item, index, entry);
+    appendItem(nodes, sources, skipped, item, index, entry);
   });
 
-  return { nodes, skipped };
+  return { nodes, sources, skipped };
 }
 
 /**

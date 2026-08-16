@@ -220,7 +220,7 @@ describe("the blocks of one row compose into a single visible section", () => {
     );
     // The row head, the attachment head and every continuation segment.
     expect(table).toMatch(
-      /function renderRowBlock\(row, sectionHeadItem = null, ctx = null, section = null\)/
+      /function renderRowBlock\(\s*row,\s*sectionHeadItem = null,\s*ctx = null,\s*section = null,\s*headSegment = null\s*\)/
     );
     expect(table).toMatch(/function renderAttachmentHead\(row, type, count, ctx = null\)/);
     expect((table.match(/composingClass\(/g) || []).length).toBeGreaterThanOrEqual(4);
@@ -275,18 +275,18 @@ describe("a flexible section's BOX is content-driven, not row-height driven", ()
     // The reported defect: a short paragraph reserved the whole legacy row
     // height, so the photo beneath it began far below the text.
     expect(rowBlock).toMatch(
-      /const baseMin = sectionHeadItem\s*\n?\s*\? sectionItemMinHeight\(sectionHeadItem\)\s*\n?\s*: row\.px \|\| 120;/
+      /const baseMin = headSegment\s*\n?\s*\? sectionSegmentMinHeight\(headSegment\)\s*\n?\s*: sectionHeadItem\s*\n?\s*\? sectionItemMinHeight\(sectionHeadItem\)\s*\n?\s*: row\.px \|\| 120;/
     );
   });
 
   test("the DOM box and the pagination estimate are the SAME number", () => {
     // Two independent guesses would drift: the block would either overflow its
     // page or leave a gap. Both sites call the planner's own helper.
-    expect(table).toMatch(/sectionItemMinHeight,?\s*\n?\}? from "\.\.\/\.\.\/lib\/templateRowContent"/);
+    expect(table).toMatch(/sectionItemMinHeight,\s*\n?\s*sectionSegmentMinHeight,?\s*\n?\}? from "\.\.\/\.\.\/lib\/templateRowContent"/);
     const planner = withoutComments(read("lib/templateRowContent.js"));
     expect(planner).toMatch(/export function sectionItemMinHeight\(item\)/);
     expect(planner).toMatch(
-      /minHeight:\s*\n?\s*sectionItemMinHeight\(item\) \+ \(isSectionTail \? sectionExtraPx : 0\),/
+      /minHeight:\s*\n?\s*\(segment \? sectionSegmentMinHeight\(segment\) : sectionItemMinHeight\(item\)\) \+\s*\n?\s*\(isSectionTail \? sectionExtraPx : 0\),/
     );
     // The head no longer takes the legacy row height.
     expect(planner).not.toMatch(/minHeight: isRowHead \? row\.px/);
@@ -366,7 +366,7 @@ describe("a flexible section has one resize handle, at its logical end", () => {
     // A multi-item section's HEAD must not keep the legacy handle: the
     // affordance belongs at the end of the whole section.
     expect(rowBlock).toMatch(/\{isSectionTail && renderSectionTail\(row, sectionExtraPx\)\}/);
-    expect(rowBlock).toMatch(/\{!sectionHeadItem && \(\s*<div\s*className="twocol-resize-handle"/);
+    expect(rowBlock).toMatch(/\{!sectionHeadItem && !headSegment && \(\s*<div\s*className="twocol-resize-handle"/);
     const segment = between(table, "function renderSectionSegment", "const blocks = []");
     expect(segment).toMatch(/\{isSectionTail && renderSectionTail\(row, section\.extraPx\)\}/);
     // Every other segment renderer (primary attachment, evidence) has none.
@@ -378,7 +378,7 @@ describe("a flexible section has one resize handle, at its logical end", () => {
     // Only ONE block of the section is the tail, so a section split across
     // pages exposes the handle on its final page only.
     const planner = withoutComments(read("lib/templateRowContent.js"));
-    expect(planner).toMatch(/const sectionTailIndex = sectionItems\.length - 1/);
+    expect(planner).toMatch(/const sectionTailIndex = sectionUnits\.length - 1/);
     expect(planner).toMatch(/isSectionTail \? sectionExtraPx : 0/);
   });
 

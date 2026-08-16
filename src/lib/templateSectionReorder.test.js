@@ -1108,7 +1108,7 @@ describe("the three interactions stay distinct", () => {
 
   test("53. the extra space and its handle are placed by the planner, from array order", () => {
     const planner = read("lib/templateRowContent.js");
-    expect(planner).toMatch(/const sectionTailIndex = sectionItems\.length - 1;/);
+    expect(planner).toMatch(/const sectionTailIndex = sectionUnits\.length - 1;/);
     expect(planner).toMatch(/position === sectionTailIndex/);
     // No tail item id is persisted anywhere.
     expect(planner).not.toMatch(/tailItemId|sectionTailId/);

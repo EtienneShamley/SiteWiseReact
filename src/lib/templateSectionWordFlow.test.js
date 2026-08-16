@@ -364,7 +364,7 @@ describe("36/37/38/39. section height and the tail are unaffected", () => {
   });
 
   test("37. which block owns the tail is still DERIVED from array order", () => {
-    expect(planner).toMatch(/const sectionTailIndex = sectionItems\.length - 1;/);
+    expect(planner).toMatch(/const sectionTailIndex = sectionUnits\.length - 1;/);
     expect(planner).toMatch(/position === sectionTailIndex/);
     expect(planner).not.toMatch(/tailItemId|persistedTail/);
   });
@@ -377,7 +377,7 @@ describe("36/37/38/39. section height and the tail are unaffected", () => {
 
   test("38/39. item heights are still content-driven — no 120px reserve returns", () => {
     expect(table).toMatch(
-      /const baseMin = sectionHeadItem\s*\?\s*sectionItemMinHeight\(sectionHeadItem\)\s*:\s*row\.px \|\| 120;/
+      /const baseMin = headSegment\s*\?\s*sectionSegmentMinHeight\(headSegment\)\s*:\s*sectionHeadItem\s*\?\s*sectionItemMinHeight\(sectionHeadItem\)\s*:\s*row\.px \|\| 120;/
     );
     expect(planner).toMatch(/export function sectionItemMinHeight/);
   });

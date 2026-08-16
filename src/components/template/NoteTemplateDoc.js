@@ -74,6 +74,10 @@ import {
 } from "../../lib/templateSectionTextSplit";
 import { healSectionSplitText } from "../../lib/templateSectionTextHeal";
 import {
+  isSectionDocumentBody,
+  resolveSectionBody,
+} from "../../lib/templateSectionBody";
+import {
   sectionListWithLeadingText,
   sectionStartsWithMedia,
 } from "../../lib/templateSectionLeadingText";
@@ -626,6 +630,44 @@ export default function NoteTemplateDoc({
       ),
     [orderedRows, pendingHeights]
   );
+
+  /**
+   * THE UNIFIED SECTION BODIES, one per row that has one.
+   *
+   * Read through the ONE canonical reader (src/lib/templateSectionBody.js),
+   * which decides — for every flexible body on the form — which stored
+   * representation is authoritative: a valid modern `sectionDoc`, else the
+   * ordered `sectionContent` adapted on read, else the legacy answer/evidence.
+   * Nothing else in the render tree asks that question, and nothing anywhere
+   * tests `instance.sectionDoc[rowId]` for itself.
+   *
+   * Only the two DOCUMENT sources are published. A row still living on its
+   * legacy answer/evidence keeps its own answer control and its legacy evidence
+   * blocks: Phase F3 switches the READ path of a Section body, and such a row
+   * has no Section body yet — it gains one when a genuine edit materialises it
+   * (Phase F4).
+   *
+   * READING WRITES NOTHING. `resolveSectionBody` is pure: it adapts on every
+   * render, mints no ids, reads no clock and never touches storage, which is
+   * precisely what lets every historical note render through the modern body
+   * model without a migration.
+   */
+  const sectionBodies = useMemo(() => {
+    const bodies = {};
+    for (const row of displayRows) {
+      if (!row || !row.id) continue;
+      const type = normalizeType(row.type);
+      const body = resolveSectionBody({
+        instance,
+        rowId: row.id,
+        rowType: row.type,
+        isCustomRow: customRowIds.has(row.id),
+        isAttachmentField: type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE,
+      });
+      if (isSectionDocumentBody(body)) bodies[row.id] = body;
+    }
+    return bodies;
+  }, [displayRows, instance, customRowIds]);
 
   // What a flexible section's extra space looks like RIGHT NOW: the stored map,
   // with any in-flight drag showing on top of it.
@@ -3019,6 +3061,10 @@ export default function NoteTemplateDoc({
         // display property that can change is `widthPct` — no alignment control
         // and no size presets are offered, and no height is ever stored.
         sectionContent={sectionContent}
+        // The unified Section bodies, resolved once by the canonical reader.
+        // An INACTIVE Section renders from these; the legacy per-item
+        // interaction keeps its own blocks while it owns a row.
+        sectionBodies={sectionBodies}
         onRemoveSectionItem={removeComposedAttachment}
         onReorderSectionItem={reorderSectionContentItem}
         onDropSectionItemIntoText={dropSectionItemIntoText}

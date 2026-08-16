@@ -297,7 +297,9 @@ describe("37–39. section height and pagination", () => {
     // The extra is added to the TAIL block's minimum, so growing an item grows
     // the content and the same extra space still sits after it.
     expect(planner).toMatch(/isSectionTail/);
-    expect(planner).toMatch(/sectionItemMinHeight\(item\) \+ \(isSectionTail \? sectionExtraPx : 0\)/);
+    expect(planner).toMatch(
+      /\(segment \? sectionSegmentMinHeight\(segment\) : sectionItemMinHeight\(item\)\) \+\s*\(isSectionTail \? sectionExtraPx : 0\)/
+    );
   });
 
   test("39. a photo block stays ATOMIC, so a tall image moves whole", () => {
@@ -321,7 +323,7 @@ describe("37–39. section height and pagination", () => {
 describe("40–45. absences", () => {
   test("40. the legacy 120px row reserve does not return for a section", () => {
     expect(table).toMatch(
-      /const baseMin = sectionHeadItem\s*\? sectionItemMinHeight\(sectionHeadItem\)\s*: row\.px \|\| 120;/
+      /const baseMin = headSegment\s*\? sectionSegmentMinHeight\(headSegment\)\s*: sectionHeadItem\s*\? sectionItemMinHeight\(sectionHeadItem\)\s*: row\.px \|\| 120;/
     );
   });
 

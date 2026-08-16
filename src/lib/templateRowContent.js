@@ -9,7 +9,8 @@
 //                           (`sectionReplacesRowAnswer`)
 //   2. BLOCK PLANNING     — the ordered, atomic, pageable blocks of one row
 //                           (`planRowBlocks`) and their height hints
-//   3. SECTION ITEM PLAN  — one block per ordered `sectionContent` item, the
+//   3. SECTION BODY PLAN  — one block per ordered `sectionContent` item, or one
+//                           per segment of the unified Section document; the
 //                           first standing in for the row itself
 //   4. LEGACY ORDERING    — a structured primary value, or a legacy Photo/File
 //                           primary, first; legacy `evidence` last
@@ -70,12 +71,38 @@
 //
 // A row with no valid section content plans EXACTLY the blocks it always did.
 //
+// ---------------------------------------------------------------------------
+// TWO PLANS FOR ONE FLEXIBLE BODY, AND WHY THEY MATCH
+// ---------------------------------------------------------------------------
+//
+// A flexible body can be planned two ways, and the caller chooses by handing
+// down a `sectionBody` resolved by the canonical reader
+// (src/lib/templateSectionBody.js) or not:
+//
+//   SECTION_ITEM     one block per raw `sectionContent` item — what the legacy
+//                    per-item interaction (its editor, its image drag, its
+//                    resize) renders and addresses while it owns the row.
+//   SECTION_SEGMENT  one block per SEGMENT of the unified Section document —
+//                    what the static Section view renders when nobody is
+//                    editing the row.
+//
+// They are two renderings of ONE body, not two bodies. For a body adapted from
+// stored items the segment projection puts the boundaries back on the items
+// (src/lib/templateSectionDocSegments.js), so the two plans agree block for
+// block: same order, same count, same block ids, same height hints, same
+// `group`, same head, same tail. That is what lets a row switch between them
+// without the page moving under the user.
+//
 // Pure: no React, no DOM, no storage.
 
 import { normalizeAttachment, ATTACHMENT_KIND } from "./noteAttachments";
 import { SECTION_ITEM_KIND, sectionItemsForRow } from "./templateSectionContent";
 import { sectionExtraHeightFor } from "./templateSectionHeight";
 import { FIELD_TYPE, normalizeType } from "./templateFields";
+import {
+  SECTION_SEGMENT_KIND,
+  compatSegmentItemKind,
+} from "./templateSectionDocSegments";
 
 export const ROW_BLOCK_KIND = {
   // An ordinary row: label + the type-appropriate answer control.
@@ -89,6 +116,12 @@ export const ROW_BLOCK_KIND = {
   // One block per ordered `sectionContent` item. The first one carries the row
   // label (`isRowHead`) when the row has no primary block of its own.
   SECTION_ITEM: "section-item",
+  // One block per SEGMENT of a row's unified Section DOCUMENT body — the same
+  // position `SECTION_ITEM` holds, planned from the canonical body reader
+  // instead of from the raw item list. It is what an INACTIVE (static) flexible
+  // Section renders; the legacy per-item interaction still plans SECTION_ITEM
+  // blocks while it owns the row. See planRowBlocks.
+  SECTION_SEGMENT: "section-segment",
 };
 
 // Preferred/minimum heights for an atomic attachment block. These are hints for
@@ -245,6 +278,35 @@ export function sectionItemMinHeight(item) {
 }
 
 /**
+ * The first-paint height HINT for one SEGMENT of a unified Section document.
+ *
+ * Deliberately the same three numbers `sectionItemMinHeight` uses, chosen by
+ * what the segment renders: a run of prose is a text item's height, an image is
+ * a photo's, a file is a file's, and a compatibility segment is whatever the
+ * stored item it stands in for would have been. That is what makes a Section
+ * read through the document path reserve exactly the space it reserves today.
+ *
+ * A WRAPPED image carries the prose beside it in the same segment; its hint
+ * stays the image's, which is the taller of the two and, like every hint here,
+ * only ever a floor that measurement replaces.
+ */
+export function sectionSegmentMinHeight(segment) {
+  if (!segment) return SECTION_TEXT_BLOCK_MIN_PX;
+  switch (segment.kind) {
+    case SECTION_SEGMENT_KIND.IMAGE:
+      return ATTACHMENT_BLOCK_MIN_PX.photo;
+    case SECTION_SEGMENT_KIND.FILE:
+      return ATTACHMENT_BLOCK_MIN_PX.file;
+    case SECTION_SEGMENT_KIND.COMPAT:
+      return compatSegmentItemKind(segment) === SECTION_ITEM_KIND.FILE
+        ? ATTACHMENT_BLOCK_MIN_PX.file
+        : ATTACHMENT_BLOCK_MIN_PX.photo;
+    default:
+      return SECTION_TEXT_BLOCK_MIN_PX;
+  }
+}
+
+/**
  * Plan the ordered document blocks for ONE row.
  *
  * Five shapes come out of this, and the first is the one that matters most for
@@ -284,6 +346,11 @@ export function sectionItemMinHeight(item) {
  * @param attachments       the instance's raw attachments map
  * @param evidence          the instance's raw evidence map
  * @param sectionContent    the instance's raw sectionContent map
+ * @param sectionSegments   the LAYOUT SEGMENTS of this row's unified Section
+ *                          document body, when the caller wants the row planned
+ *                          that way (the inactive/static case). Null leaves the
+ *                          row planning from the raw ordered list exactly as it
+ *                          always has.
  * @param sectionExtraHeight the instance's raw sectionExtraHeight map — the
  *                          OPTIONAL extra working space the user has dragged
  *                          onto the bottom of a flexible section. Absent for
@@ -297,12 +364,36 @@ export function planRowBlocks({
   evidence = null,
   sectionContent = null,
   sectionExtraHeight = null,
+  sectionSegments = null,
 } = {}) {
   if (!row || !row.id) return [];
 
   const rowId = row.id;
-  const sectionItems = rowSectionItems(sectionContent, rowId);
-  const hasSection = sectionItems.length > 0;
+  // WHICH body plan this row gets.
+  //
+  // `sectionSegments` are the segments of a body already resolved by the
+  // canonical reader (src/lib/templateSectionBody.js) and projected for layout
+  // (src/lib/templateSectionDocSegments.js), handed down BECAUSE the caller
+  // wants this row planned as a unified Section DOCUMENT — one block per
+  // segment, rendered by the static Section view. That is the inactive/read
+  // case, and for a body adapted from stored items the projection puts the
+  // boundaries back on the stored items, so it produces the same blocks, in the
+  // same order, with the same ids as the item plan below — which is exactly why
+  // activation can hand the row back to the legacy per-item interaction without
+  // the page moving.
+  //
+  // With no `sectionSegments` the row plans from the raw ordered list exactly as
+  // it always has. Nothing about which representation is authoritative is
+  // decided here: that question belongs to the reader, and this parameter is
+  // the caller's answer to it.
+  const sectionSegs = Array.isArray(sectionSegments) ? sectionSegments : null;
+  const useSegments = !!(sectionSegs && sectionSegs.length);
+  const sectionItems = useSegments ? [] : rowSectionItems(sectionContent, rowId);
+  // The row's ordered body units, whichever plan is in force. Every count,
+  // every `keepWithNext` and the tail rule below read THIS, so the two plans
+  // cannot drift apart.
+  const sectionUnits = useSegments ? sectionSegs : sectionItems;
+  const hasSection = sectionUnits.length > 0;
   // AUTHORITY: ordered section content replaces the row's legacy evidence, so
   // material a later phase materialises into the ordered list can never appear
   // twice. Nothing is deleted — `evidence[rowId]` stays in storage untouched.
@@ -320,7 +411,7 @@ export function planRowBlocks({
   // A row is compound when it emits more than one block.
   const blockCount =
     (isAttachmentField ? 1 + attachmentItems.length : sectionOwnsRowHead ? 0 : 1) +
-    sectionItems.length +
+    sectionUnits.length +
     evidenceItems.length;
   const isCompound = isAttachmentField || blockCount > 1;
   const group = isCompound ? rowId : null;
@@ -337,7 +428,7 @@ export function planRowBlocks({
       // with the first section item or evidence item — a heading is never left
       // alone.
       keepWithNext:
-        attachmentItems.length + sectionItems.length + evidenceItems.length > 0,
+        attachmentItems.length + sectionUnits.length + evidenceItems.length > 0,
       minHeight: Math.max(56, row.px || 56),
       splittable: false,
       attachmentCount: attachmentItems.length,
@@ -363,7 +454,7 @@ export function planRowBlocks({
       id: rowId,
       rowId,
       group,
-      keepWithNext: evidenceItems.length + sectionItems.length > 0,
+      keepWithNext: evidenceItems.length + sectionUnits.length > 0,
       minHeight: row.px || 120,
       // The editable Text answer is deliberately not sliced across pages in
       // this phase — unchanged behaviour.
@@ -390,9 +481,12 @@ export function planRowBlocks({
   const sectionExtraPx = sectionOwnsRowHead
     ? sectionExtraHeightFor(sectionExtraHeight, rowId)
     : 0;
-  const sectionTailIndex = sectionItems.length - 1;
+  const sectionTailIndex = sectionUnits.length - 1;
 
-  sectionItems.forEach((item, position) => {
+  sectionUnits.forEach((unit, position) => {
+    // ONE unit, planned identically whichever representation produced it.
+    const item = useSegments ? null : unit;
+    const segment = useSegments ? unit : null;
     // The head item stands in for the row block: it is the block that renders
     // the label and the row actions. It does NOT inherit the row's preferred
     // height — see the minHeight note below.
@@ -402,7 +496,9 @@ export function planRowBlocks({
     // itself.
     const isSectionTail = sectionOwnsRowHead && position === sectionTailIndex;
     blocks.push({
-      kind: ROW_BLOCK_KIND.SECTION_ITEM,
+      kind: useSegments
+        ? ROW_BLOCK_KIND.SECTION_SEGMENT
+        : ROW_BLOCK_KIND.SECTION_ITEM,
       // The HEAD item keeps the ROW's own block id, because it IS the row block
       // — it renders the label, the actions and the height handle, and it is
       // what the plain `ROW` block was a moment before the row materialised.
@@ -416,12 +512,12 @@ export function planRowBlocks({
       // an ordered item can never collide with a primary attachment or an
       // evidence item (they would otherwise share one measurement entry and one
       // React key).
-      id: isRowHead ? rowId : `${rowId}::sec-${item.id}`,
+      id: isRowHead ? rowId : `${rowId}::sec-${segment ? segment.key : item.id}`,
       rowId,
       group,
       // A head is never orphaned from the item that follows it; every ordered
       // item after that is atomic and stands on its own.
-      keepWithNext: isRowHead && sectionItems.length > 1,
+      keepWithNext: isRowHead && sectionUnits.length > 1,
       // CONTENT-DRIVEN, head included. The row's own `px` is deliberately NOT a
       // floor here: once a row's body is authoritative section content, the
       // legacy whole-row height would reserve a blank area above the first
@@ -430,11 +526,13 @@ export function planRowBlocks({
       // answer control — a legacy Text row, a structured row, a Photo/File
       // field — which is where the user actually dragged it.
       minHeight:
-        sectionItemMinHeight(item) + (isSectionTail ? sectionExtraPx : 0),
+        (segment ? sectionSegmentMinHeight(segment) : sectionItemMinHeight(item)) +
+        (isSectionTail ? sectionExtraPx : 0),
       // A photo or a file moves whole to the next page. A text item is not
       // sliced either — the same restraint the editable Text answer already has.
       splittable: false,
       sectionItem: item,
+      sectionSegment: segment,
       isRowHead,
       isSectionTail,
       // Descriptive, for the render site: how much blank working space to draw

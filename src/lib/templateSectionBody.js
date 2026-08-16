@@ -70,8 +70,29 @@ export const SECTION_BODY_SOURCE = {
 const EMPTY_BODY = Object.freeze({
   source: SECTION_BODY_SOURCE.EMPTY,
   nodes: Object.freeze([]),
+  sources: Object.freeze([]),
   skipped: Object.freeze([]),
 });
+
+/**
+ * Does this resolved body come from an ORDERED DOCUMENT representation?
+ *
+ * True for the modern document and for the adapted item list — the two sources
+ * that describe a row's whole flexible body as one ordered thing, and the two
+ * the static Section view renders. A row still living on its legacy answer /
+ * evidence has no document body yet: it keeps its own answer control and its
+ * legacy evidence blocks until a genuine edit materialises one (Phase F4).
+ *
+ * Asked here rather than re-derived at a render site, so nothing outside this
+ * module ever tests `instance.sectionDoc[rowId]` for itself.
+ */
+export function isSectionDocumentBody(body) {
+  if (!body) return false;
+  return (
+    body.source === SECTION_BODY_SOURCE.SECTION_DOC ||
+    body.source === SECTION_BODY_SOURCE.SECTION_CONTENT
+  );
+}
 
 /** One row's RAW stored ordered list, defensively. */
 function rawSectionList(map, rowId) {
@@ -111,8 +132,10 @@ function legacyAnswerFor(instance, rowId, isCustomRow) {
  * @param isAttachmentField whether this is a legacy Photo/File field whose
  *                          primary attachments are being rendered
  *
- * @returns { source, nodes, skipped }
+ * @returns { source, nodes, sources, skipped }
  *   nodes   the normalized document (src/lib/templateSectionDoc.js node model)
+ *   sources parallel to `nodes`: which legacy item(s) each node was adapted
+ *           from, empty for a stored modern document (see the adapter)
  *   skipped items that render today but could not enter the document, so the
  *           caller can go on rendering them through the path they already use
  */
@@ -132,7 +155,17 @@ export function resolveSectionBody({
     return {
       source: SECTION_BODY_SOURCE.SECTION_DOC,
       nodes: docNodes,
-      skipped: [],
+      // A modern document has no legacy items behind it, so nothing here names
+      // one. Provenance is a property of ADAPTATION, not of a stored document.
+      sources: [],
+      // A MODERN document being authoritative is not permission to forget the
+      // frozen list underneath it. What that list holds and the document can
+      // also hold is already IN the document — rendering it again would double
+      // it. What it holds and the document CANNOT hold — an asset reference
+      // outside the shape the shared serializers accept — is by construction
+      // absent from the document, so it can be carried forward with no risk of
+      // duplication at all. That, and only that, is what comes through here.
+      skipped: frozenCompatibilityFor(source, rowId),
     };
   }
 
@@ -145,6 +178,7 @@ export function resolveSectionBody({
     return {
       source: SECTION_BODY_SOURCE.SECTION_CONTENT,
       nodes: adapted.nodes,
+      sources: adapted.sources,
       skipped: adapted.skipped,
     };
   }
@@ -166,6 +200,30 @@ export function resolveSectionBody({
   return {
     source: adapted.nodes.length ? SECTION_BODY_SOURCE.LEGACY : SECTION_BODY_SOURCE.EMPTY,
     nodes: adapted.nodes,
+    sources: adapted.sources,
     skipped: adapted.skipped,
   };
+}
+
+/**
+ * The frozen ordered list's UNREPRESENTABLE material, for a row whose modern
+ * document is authoritative.
+ *
+ * Only the `skipped` half of the adaptation is taken. Everything the adapter
+ * CAN represent is, by definition, the same material the modern document was
+ * written from and already shows; only what it cannot represent is invisible
+ * there, and that is the only thing a caller must keep showing.
+ *
+ * POSITION IS NOT RECOVERABLE HERE, and this is stated rather than faked: the
+ * indices below address the frozen list, and a modern document has no
+ * correspondence to them (it is a document, not that list). A caller therefore
+ * renders these AFTER the document — visible, never duplicated, never dropped —
+ * and the migration that first writes a document for such a row (Phase F4) is
+ * where the ordering has to be settled, because that is the only moment both
+ * representations exist side by side.
+ */
+function frozenCompatibilityFor(instance, rowId) {
+  const raw = rawSectionList(instance && instance.sectionContent, rowId);
+  if (!raw || !raw.length) return [];
+  return adaptSectionItemsToNodes(raw).skipped;
 }

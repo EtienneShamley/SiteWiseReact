@@ -38,11 +38,17 @@ export default function TemplateTextCell({
   // items needs each one named distinctly, or they all read as "Label — answer".
   ariaLabel,
   active,
-  // This cell is created ALREADY ACTIVE — it is the leading insertion point a
-  // user clicked above a section's first image, so there was no static view to
-  // have recorded where the caret should go. It seeds its own caret hint, or
-  // the click would produce an editor the user cannot type into.
+  // This cell is created ALREADY ACTIVE — the leading insertion point a user
+  // clicked above a section's first image, or the cell that replaces a STATIC
+  // Section document segment the user pressed. Either way this component
+  // instance did not exist when the press happened, so it could not have
+  // recorded where the caret should go. It seeds its own caret hint, or the
+  // click would produce an editor the user cannot type into.
   focusOnActivate = false,
+  // WHERE that seeded caret goes: the viewport point of the press that caused
+  // the activation, or null for the end of the text. Only ever read alongside
+  // `focusOnActivate`, and only once per mounted cell.
+  caretPoint = null,
   reloadToken,
   onActivate,
   onChange,
@@ -57,7 +63,12 @@ export default function TemplateTextCell({
   const seededCaretRef = useRef(false);
   if (focusOnActivate && active && identity && !seededCaretRef.current) {
     seededCaretRef.current = true;
-    if (!caretHintRef.current) caretHintRef.current = { mode: "end", identity };
+    if (!caretHintRef.current) {
+      caretHintRef.current =
+        caretPoint && typeof caretPoint.left === "number"
+          ? { mode: "point", left: caretPoint.left, top: caretPoint.top, identity }
+          : { mode: "end", identity };
+    }
   }
 
   const answerLabel =
