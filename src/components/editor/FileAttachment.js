@@ -1,8 +1,15 @@
 // src/components/editor/FileAttachment.js
 //
-// The Free-form note's file-attachment node: a selectable atom block that
-// renders as a compact document card (filename, readable type, size, a safe
-// Open/Download action and Remove).
+// THE SHARED FILE-ATTACHMENT NODE: a selectable atom block that renders as a
+// compact document card (filename, readable type, size, a safe Open/Download
+// action and Remove). Used by the Free-form editor and by the flexible Template
+// Section editor alike, configured only by which asset KIND(S) it may open.
+//
+// The card itself — the asset load, the display metadata, the safe open policy,
+// the notice, the markup — lives in ./fileAttachmentPresentation.js and is
+// SHARED with the static Section document view, so an inactive Section's files
+// and an active Section's files are the same card and activation cannot resize
+// or restyle them. Everything ProseMirror-specific stays here.
 //
 // The document holds a REFERENCE and nothing else. Every attribute is
 // serialized through one pure function (fileAttachmentAttrsToHTML), so stored
@@ -34,70 +41,23 @@
 // type and Blob size) replaces the serialized display metadata on the card. The
 // serialized values are used only to label the unavailable state when the asset
 // cannot be retrieved at all.
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback } from "react";
 import { Node, mergeAttributes } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
-import { getAsset } from "../../lib/assetStorage";
-import useTransientMessage from "../../hooks/useTransientMessage";
 import {
   DEFAULT_FILE_ATTACHMENT_ASSET_KINDS,
   FILE_ATTACHMENT_ASSET_ATTR,
   FILE_ATTACHMENT_CLASS,
-  FILE_ATTACHMENT_LOADING_TEXT,
   FILE_ATTACHMENT_NAME_ATTR,
   FILE_ATTACHMENT_NODE_NAME,
   FILE_ATTACHMENT_SIZE_ATTR,
   FILE_ATTACHMENT_TYPE_ATTR,
   FILE_ATTACHMENT_UNAVAILABLE_TEXT,
-  PRINT_ATTACHMENT_NOTE,
   fileAttachmentAttrsFromElement,
   fileAttachmentAttrsToHTML,
-  fileAttachmentLabel,
   fileAttachmentMetaText,
-  isAcceptedFileAssetKind,
 } from "../../lib/editorFileAttachments";
-import {
-  ATTACHMENT_DOWNLOAD_FAILED_MESSAGE,
-  ATTACHMENT_OPEN_FAILED_MESSAGE,
-  ATTACHMENT_PREVIEW_DENIED_MESSAGE,
-  ATTACHMENT_UNAVAILABLE_MESSAGE,
-  NAVIGATION_URL_REVOKE_MS,
-  OPEN_RESULT,
-  RENDER_MODE,
-  createManagedObjectUrl,
-  isInlineRenderable,
-  openAttachmentSafely,
-  reserveNavigationTab,
-  resolveOpenPolicy,
-  safeDownloadFilename,
-} from "../../lib/safeAttachmentOpen";
-import TextPreviewDialog from "../template/TextPreviewDialog";
-
-const STATUS = { LOADING: "loading", READY: "ready", MISSING: "missing" };
-
-/**
- * Retrieve the asset and confirm it is genuinely a file attachment THIS CARD
- * is configured to open. Returns null for a missing asset, an unreadable one,
- * or one of a kind this card was not configured to accept — all three present
- * identically to the user, because in every case this note cannot open this
- * file.
- *
- * `acceptedKinds` defaults to the Free-form default (see
- * DEFAULT_FILE_ATTACHMENT_ASSET_KINDS), so a card with no explicit
- * `.configure()` behaves exactly as it always has.
- */
-async function loadAttachmentAsset(assetId, acceptedKinds) {
-  if (!assetId) return null;
-  let asset;
-  try {
-    asset = await getAsset(assetId);
-  } catch {
-    return null;
-  }
-  if (!asset || !asset.blob) return null;
-  if (!isAcceptedFileAssetKind(asset.kind, acceptedKinds)) return null;
-  return asset;
-}
+import { useFileAttachmentCard } from "./fileAttachmentPresentation";
 
 function FileAttachmentView({ node, selected, deleteNode, editor, extension }) {
   const { assetId, name, mimeType, size } = node.attrs;
@@ -108,303 +68,32 @@ function FileAttachmentView({ node, selected, deleteNode, editor, extension }) {
     (extension && extension.options && extension.options.acceptedAssetKinds) ||
     DEFAULT_FILE_ATTACHMENT_ASSET_KINDS;
 
-  // Serialized display metadata — used to draw the card before the asset
-  // arrives, and to label the unavailable state if it never does.
-  const fallbackName = safeDownloadFilename(name);
-
-  // { status, policy, meta } where meta is the AUTHORITATIVE metadata read back
-  // from the asset record once it resolves.
-  const [state, setState] = useState({
-    status: assetId ? STATUS.LOADING : STATUS.MISSING,
-    policy: null,
-    meta: null,
-  });
-  const [preview, setPreview] = useState(null);
-  const notice = useTransientMessage();
-  const { showError: showNoticeError, clear: clearNotice } = notice;
-
-  // Duplicate-action protection: a second click while an open or download is
-  // still resolving is ignored rather than starting a second operation.
-  const busyRef = useRef(false);
-  const [busy, setBusy] = useState(false);
-
-  // Every object URL this card ever creates, so none can outlive the card.
-  const managedUrlsRef = useRef([]);
-  const trackUrl = useCallback((managed) => {
-    managedUrlsRef.current.push(managed);
-    return managed;
-  }, []);
-
-  const previewRef = useRef(null);
-  previewRef.current = preview;
-
-  useEffect(() => {
-    const urls = managedUrlsRef;
-    return () => {
-      if (previewRef.current && previewRef.current.revoke) {
-        previewRef.current.revoke();
-      }
-      for (const managed of urls.current) {
-        try {
-          managed.revoke();
-        } catch {
-          /* already revoked */
-        }
-      }
-      urls.current = [];
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    setState({
-      status: assetId ? STATUS.LOADING : STATUS.MISSING,
-      policy: null,
-      meta: null,
-    });
-    if (!assetId) return undefined;
-
-    loadAttachmentAsset(assetId, acceptedAssetKinds).then((asset) => {
-      if (cancelled) return;
-      if (!asset) {
-        setState({ status: STATUS.MISSING, policy: null, meta: null });
-        return;
-      }
-      setState({
-        status: STATUS.READY,
-        // Decided from the Blob's own type; the node's type is a consistency
-        // check only, exactly as for Template-form File evidence.
-        policy: resolveOpenPolicy(asset.blob.type, mimeType),
-        meta: {
-          name: safeDownloadFilename(asset.name || name),
-          mimeType: asset.blob.type || null,
-          size: asset.blob.size,
-        },
-      });
-    });
-
-    return () => {
-      cancelled = true;
-    };
-    // `acceptedAssetKinds` is stable for the life of this node instance (it
-    // comes from the extension's own resolved `.configure()` options, set at
-    // editor-construction time, never per-render), so it is listed but never
-    // actually changes the effect's cadence.
-  }, [assetId, mimeType, name, acceptedAssetKinds]);
-
-  const displayName = state.meta?.name || fallbackName;
-  const displayMime = state.meta ? state.meta.mimeType : mimeType;
-  const displaySize = state.meta ? state.meta.size : size;
-  const missing = state.status === STATUS.MISSING;
-  const loading = state.status === STATUS.LOADING;
-  const typeLabel = fileAttachmentLabel(displayMime, displayName);
-  const metaText = fileAttachmentMetaText(displayMime, displayName, displaySize);
-  const canOpen = !missing && !loading && isInlineRenderable(state.policy);
-  const openLabel = state.policy?.mode === RENDER_MODE.PDF ? "Open" : "Preview";
-
-  function beginAction() {
-    if (busyRef.current) return false;
-    busyRef.current = true;
-    setBusy(true);
-    clearNotice();
-    return true;
-  }
-
-  function endAction() {
-    busyRef.current = false;
-    setBusy(false);
-  }
-
-  function closePreview() {
-    if (preview && preview.revoke) preview.revoke();
-    setPreview(null);
-  }
-
-  // A PDF opens in a new tab, but the Blob is retrieved asynchronously — so the
-  // tab is reserved HERE, synchronously, while the click's user activation is
-  // still valid. Anything else is an in-app dialog and needs no tab.
-  function handleOpenClick() {
-    if (busyRef.current) return;
-    const needsTab = state.policy?.mode === RENDER_MODE.PDF;
-    const reservedTab = needsTab ? reserveNavigationTab() : null;
-    if (needsTab && !reservedTab) {
-      showNoticeError(ATTACHMENT_OPEN_FAILED_MESSAGE);
-      return;
-    }
-    if (!beginAction()) return;
-    handleOpen(reservedTab).finally(endAction);
-  }
-
-  async function handleOpen(reservedTab) {
-    const result = await openAttachmentSafely({
-      reservedTab,
-      metadataMimeType: mimeType,
-      getBlob: async () => {
-        const asset = await loadAttachmentAsset(assetId, acceptedAssetKinds);
-        return asset ? asset.blob : null;
-      },
-      createUrl: (blob, options) => trackUrl(createManagedObjectUrl(blob, options)),
-    });
-
-    if (result.policy) {
-      setState((prev) => ({ ...prev, status: STATUS.READY, policy: result.policy }));
-    }
-
-    switch (result.status) {
-      case OPEN_RESULT.MISSING:
-        setState({ status: STATUS.MISSING, policy: null, meta: null });
-        showNoticeError(ATTACHMENT_UNAVAILABLE_MESSAGE);
-        return;
-      case OPEN_RESULT.READ_ERROR:
-      case OPEN_RESULT.BLOCKED:
-        showNoticeError(ATTACHMENT_OPEN_FAILED_MESSAGE);
-        return;
-      case OPEN_RESULT.DENIED:
-        // Denial never mutates or removes the attachment — it stays downloadable.
-        showNoticeError(ATTACHMENT_PREVIEW_DENIED_MESSAGE);
-        return;
-      case OPEN_RESULT.TEXT_PREVIEW:
-        // Read with blob.text() and rendered as escaped React text — no object
-        // URL, no navigation.
-        setPreview({ kind: "text", blob: result.blob });
-        return;
-      case OPEN_RESULT.IMAGE_PREVIEW:
-        // Unreachable in practice: an image cannot be attached through this
-        // path. Handled anyway so the shared policy gaining an image result can
-        // never leave a created object URL alive with nothing shown.
-        if (result.revoke) result.revoke();
-        showNoticeError(ATTACHMENT_PREVIEW_DENIED_MESSAGE);
-        return;
-      default:
-        // The PDF opened; its URL is tracked and auto-revoked. Nothing to show.
-        return;
-    }
-  }
-
-  async function handleDownload() {
-    if (!beginAction()) return;
-    try {
-      const asset = await loadAttachmentAsset(assetId, acceptedAssetKinds);
-      if (!asset) {
-        setState({ status: STATUS.MISSING, policy: null, meta: null });
-        showNoticeError(ATTACHMENT_UNAVAILABLE_MESSAGE);
-        return;
-      }
-      // `download` saves the file rather than rendering it, so this is safe for
-      // every accepted type — including those refused inline above.
-      const managed = trackUrl(
-        createManagedObjectUrl(asset.blob, { revokeAfterMs: NAVIGATION_URL_REVOKE_MS })
-      );
-      const a = document.createElement("a");
-      a.href = managed.url;
-      a.download = safeDownloadFilename(asset.name || name);
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    } catch {
-      showNoticeError(ATTACHMENT_DOWNLOAD_FAILED_MESSAGE);
-    } finally {
-      endAction();
-    }
-  }
-
   // Removing the node is an ordinary editor transaction: it persists through
   // the normal autosave path and Undo restores the reference. The stored Blob
   // is deliberately NOT deleted here — see docs/ARCHITECTURE.md.
-  function handleRemove() {
-    if (typeof deleteNode === "function") deleteNode();
-  }
-
   const editable = editor ? editor.isEditable : true;
+  const handleRemove = useCallback(() => {
+    if (typeof deleteNode === "function") deleteNode();
+  }, [deleteNode]);
 
-  const accessibleLabel = missing
-    ? `Attached file ${displayName}. ${FILE_ATTACHMENT_UNAVAILABLE_TEXT}`
-    : `Attached file ${displayName}. ${typeLabel}. ${metaText}.`;
+  // Everything a card IS — the asset load, the display metadata, the safe
+  // open/download policy, the notice and the markup — comes from the shared
+  // presentation, so the static Section document view renders an identical
+  // card (see fileAttachmentPresentation.js). Only the two things that are
+  // genuinely ProseMirror's are added here: the NodeViewWrapper and Remove.
+  const { className, ariaLabel, content } = useFileAttachmentCard({
+    assetId,
+    name,
+    mimeType,
+    size,
+    acceptedAssetKinds,
+    selected,
+    onRemove: editable ? handleRemove : null,
+  });
 
   return (
-    <NodeViewWrapper
-      as="div"
-      className={[
-        FILE_ATTACHMENT_CLASS,
-        missing ? `${FILE_ATTACHMENT_CLASS}--missing` : "",
-        selected ? `${FILE_ATTACHMENT_CLASS}--selected` : "",
-      ]
-        .filter(Boolean)
-        .join(" ")}
-      role="group"
-      aria-label={accessibleLabel}
-    >
-      <div className={`${FILE_ATTACHMENT_CLASS}__body`}>
-        <span className={`${FILE_ATTACHMENT_CLASS}__name`} title={displayName}>
-          {displayName}
-        </span>
-        <span className={`${FILE_ATTACHMENT_CLASS}__meta`}>
-          {loading ? FILE_ATTACHMENT_LOADING_TEXT : metaText}
-        </span>
-        {missing && (
-          <span className={`${FILE_ATTACHMENT_CLASS}__unavailable`}>
-            {FILE_ATTACHMENT_UNAVAILABLE_TEXT}
-          </span>
-        )}
-        {/* Print only: an exported or printed page cannot carry the binary, and
-            must not imply that it does. */}
-        <span className={`${FILE_ATTACHMENT_CLASS}__print-note`}>
-          {PRINT_ATTACHMENT_NOTE}
-        </span>
-      </div>
-
-      <div className={`${FILE_ATTACHMENT_CLASS}__actions`} contentEditable={false}>
-        {canOpen && (
-          <button
-            type="button"
-            className={`${FILE_ATTACHMENT_CLASS}__btn`}
-            onClick={handleOpenClick}
-            disabled={busy}
-            title={`${openLabel} ${displayName}`}
-            aria-label={`${openLabel} ${displayName}`}
-          >
-            {openLabel}
-          </button>
-        )}
-        <button
-          type="button"
-          className={`${FILE_ATTACHMENT_CLASS}__btn`}
-          onClick={handleDownload}
-          disabled={busy || missing || loading}
-          title={`Download ${displayName}`}
-          aria-label={`Download ${displayName}`}
-        >
-          Download
-        </button>
-        {editable && (
-          <button
-            type="button"
-            className={`${FILE_ATTACHMENT_CLASS}__btn ${FILE_ATTACHMENT_CLASS}__btn--danger`}
-            onClick={handleRemove}
-            title={`Remove attached file ${displayName}`}
-            aria-label={`Remove attached file ${displayName}`}
-          >
-            Remove
-          </button>
-        )}
-      </div>
-
-      {/* One restrained live region per card. The message auto-dismisses after
-          five seconds, a new attempt supersedes it, and its timer is cleared on
-          unmount (see useTransientMessage). It never carries exception text. */}
-      {!!notice.message && (
-        <p className={`${FILE_ATTACHMENT_CLASS}__error`} role="alert">
-          {notice.message}
-        </p>
-      )}
-
-      {preview?.kind === "text" && (
-        <TextPreviewDialog
-          blob={preview.blob}
-          name={displayName}
-          onClose={closePreview}
-        />
-      )}
+    <NodeViewWrapper as="div" className={className} role="group" aria-label={ariaLabel}>
+      {content}
     </NodeViewWrapper>
   );
 }

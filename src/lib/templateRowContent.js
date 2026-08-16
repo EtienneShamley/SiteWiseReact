@@ -293,6 +293,16 @@ export function sectionItemMinHeight(item) {
 export function sectionSegmentMinHeight(segment) {
   if (!segment) return SECTION_TEXT_BLOCK_MIN_PX;
   switch (segment.kind) {
+    // The whole body as one live editor. Its height is entirely what the user
+    // has typed, so the floor is a single line of prose exactly as it is for a
+    // text run — PagedDocument measures the rest. The one exception is a row
+    // still on its LEGACY answer, which keeps the height the user dragged for
+    // it (the caller supplies it) so that activating the Section cannot make
+    // the row jump.
+    case SECTION_SEGMENT_KIND.EDITOR:
+      return Number(segment.minHeightPx) > 0
+        ? Math.max(SECTION_TEXT_BLOCK_MIN_PX, Math.round(Number(segment.minHeightPx)))
+        : SECTION_TEXT_BLOCK_MIN_PX;
     case SECTION_SEGMENT_KIND.IMAGE:
       return ATTACHMENT_BLOCK_MIN_PX.photo;
     case SECTION_SEGMENT_KIND.FILE:

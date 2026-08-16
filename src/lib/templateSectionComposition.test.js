@@ -366,7 +366,16 @@ describe("a flexible section has one resize handle, at its logical end", () => {
     // A multi-item section's HEAD must not keep the legacy handle: the
     // affordance belongs at the end of the whole section.
     expect(rowBlock).toMatch(/\{isSectionTail && renderSectionTail\(row, sectionExtraPx\)\}/);
-    expect(rowBlock).toMatch(/\{!sectionHeadItem && !headSegment && \(\s*<div\s*className="twocol-resize-handle"/);
+    // …and it stays on a row whose body is still its LEGACY answer, including
+    // while that row's shared Section editor is open on it (Phase F4): such a
+    // row has no flexible section yet, so it keeps the row height the user
+    // dragged and is offered no trailing working-space handle.
+    expect(rowBlock).toMatch(
+      /\{!sectionHeadItem && \(!headSegment \|\| \(editorHead && !hasDocumentBody\)\) && \(\s*<div\s*className="twocol-resize-handle"/
+    );
+    expect(rowBlock).toMatch(
+      /const isSectionTail = !!\(section && section\.isTail\) && \(!editorHead \|\| hasDocumentBody\)/
+    );
     const segment = between(table, "function renderSectionSegment", "const blocks = []");
     expect(segment).toMatch(/\{isSectionTail && renderSectionTail\(row, section\.extraPx\)\}/);
     // Every other segment renderer (primary attachment, evidence) has none.

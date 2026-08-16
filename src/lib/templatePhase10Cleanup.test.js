@@ -525,7 +525,11 @@ describe("custom row deletion removes all of that row's state", () => {
 
   test("30. assets are considered only AFTER the save, de-duplicated, and still gated", () => {
     const afterSave = deleteRow.slice(deleteRow.indexOf("saveInstanceConfirmed("));
-    expect(afterSave).toMatch(/const removedAssetIds = new Set\(removedSectionAssetIds\)/);
+    // The candidate set now unions the ordered list's assets with the MODERN
+    // document's (Phase F4) — one Blob is still one deletion decision.
+    expect(afterSave).toMatch(/const removedAssetIds = new Set\(\[/);
+    expect(afterSave).toMatch(/\.\.\.removedSectionAssetIds/);
+    expect(afterSave).toMatch(/\.\.\.removedDocAssetIds/);
     expect(afterSave).toMatch(/if \(!canDeleteAttachmentAsset\(assetId\)\) continue;/);
   });
 

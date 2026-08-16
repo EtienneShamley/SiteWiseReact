@@ -33,11 +33,13 @@ import {
 } from "../../lib/templateRowContent";
 import {
   SECTION_SEGMENT_KIND,
+  sectionEditorSegment,
   compatSegmentItemKind,
   sectionDocSegments,
 } from "../../lib/templateSectionDocSegments";
 import { SECTION_BODY_SOURCE } from "../../lib/templateSectionBody";
 import TemplateSectionDocView from "./TemplateSectionDocView";
+import TemplateSectionEditor from "./TemplateSectionEditor";
 import {
   SECTION_ITEM_KIND,
   normalizeSectionContent,
@@ -55,7 +57,7 @@ import {
   exceedsMoveThreshold,
   imageDragPreviewGeometry,
 } from "../../lib/templateSectionImageMove";
-import { answerToModel } from "../../lib/templateRichText";
+import { answerToModel, isEmptyAnswerValue } from "../../lib/templateRichText";
 import TemplateRichTextView from "./TemplateRichTextView";
 import PhotoAttachment from "./PhotoAttachment";
 import FileAttachmentRow from "./FileAttachmentRow";
@@ -303,6 +305,10 @@ export default function ResizableTwoColTable({
   // Absent (the Template Builder, and any row without a document body) leaves
   // the row planning and rendering exactly as it always has.
   sectionBodies = null,
+  // THE SHARED SECTION EDITOR (Phase F4). Absent in the Template Builder and
+  // anywhere else that renders no note content, in which case a Section is
+  // never activated and every one of the branches below is inert.
+  sectionEditor = null,
   // Remove ONE ordered section photo/file item, addressed by the row id and the
   // item's own stable id — never by a position, and never by index into another
   // collection. Omit it and no item Remove is offered at all (the Template
@@ -601,17 +607,65 @@ export default function ResizableTwoColTable({
   const pendingSectionCaret = useRef(null);
 
   /**
-   * The unified Section document segments this row renders STATICALLY, or null.
+   * Where the caret should land once the SHARED Section editor's view is
+   * attached — the same hand-off `pendingSectionCaret` performs for the legacy
+   * editor, and for the same reason: the component that finally carries the
+   * editor is a different one from the static box the user pressed, so it
+   * cannot have recorded the press itself. Stamped with the editor identity the
+   * activation resolved, so a point can only ever be consumed by the exact
+   * Section it was aimed at.
+   */
+  const sectionEditorCaret = useRef(null);
+
+  /**
+   * MAY the shared Section editor own this row's flexible body?
    *
-   * Null means "plan and render this row exactly as it always has": either it
-   * has no document body at all, or the legacy per-item interaction currently
-   * owns it (the user is editing this Section, or has opened its leading
-   * caret) and must keep its own blocks, its editor, its image drag and its
-   * resize handles. Phase F3 switches the READ path; the WRITE path is
-   * unchanged and still owns the row while it is active.
+   * The answer is the parent's, not this component's: a body carrying material
+   * the modern document cannot represent is absent from `editableRows` and
+   * therefore keeps whichever path it already has (see NoteTemplateDoc).
+   */
+  function sectionEditorOwnsRow(row) {
+    if (!row || !sectionEditor || !sectionEditor.editableRows) return false;
+    return !!sectionEditor.editableRows[row.id];
+  }
+
+  /** Is this row's shared Section editor mounted right now? */
+  function isSectionEditorActive(row) {
+    return !!(
+      row &&
+      sectionEditor &&
+      sectionEditor.activeRowId === row.id &&
+      sectionEditor.identity &&
+      sectionEditor.editor
+    );
+  }
+
+  /**
+   * The unified Section document segments this row renders, or null.
+   *
+   * Three answers:
+   *   - ONE editor segment while the shared Section editor owns this row. An
+   *     EditorView needs a single contiguous DOM root, so an ACTIVE Section is
+   *     one block. The segment's key is constant, so the block keeps one React
+   *     key for the whole editing session and the first genuine edit — which
+   *     changes which stored representation the body comes from — cannot
+   *     unmount the editor underneath the user.
+   *   - the STATIC segments when nobody is editing it (Phase F3).
+   *   - null, meaning "plan and render this row exactly as it always has":
+   *     it has no document body, or the LEGACY per-item interaction currently
+   *     owns it (a Section this build refuses to modernize, being edited or
+   *     showing its leading caret) and must keep its own blocks, its editor,
+   *     its image drag and its resize handles.
    */
   function sectionStaticSegments(row) {
     if (!row) return null;
+    if (isSectionEditorActive(row)) {
+      return [
+        sectionEditorSegment({
+          minHeightPx: sectionEditor.editableRows[row.id].minHeightPx,
+        }),
+      ];
+    }
     const entry = documentBodySegments.get(row.id);
     if (!entry || !entry.segments.length) return null;
     if (richText && (richText.activeRowId === row.id || richText.leadingRowId === row.id)) {
@@ -620,10 +674,50 @@ export default function ResizableTwoColTable({
     return entry.segments;
   }
 
-  /** May the legacy per-item interaction take this row's body over? */
+  /**
+   * May the legacy per-item interaction take this row's body over?
+   *
+   * Only for a body adapted from the ordered item list that the shared Section
+   * editor is NOT allowed to own. Once the shared editor may own a Section, the
+   * legacy interaction must never also be reachable on it — running both over
+   * one body is exactly the state this phase exists to end.
+   */
   function sectionCanHandBackToLegacy(row) {
+    if (sectionEditorOwnsRow(row)) return false;
     const entry = row ? documentBodySegments.get(row.id) : null;
     return !!(entry && entry.editable);
+  }
+
+  /**
+   * ACTIVATE this row's shared Section editor at the point the user pressed.
+   *
+   * Returns true when the press was taken, so a caller can leave the legacy
+   * activation alone.
+   */
+  function activateSectionEditor(row, event) {
+    if (!sectionEditor || typeof sectionEditor.onActivate !== "function") return false;
+    if (!sectionEditorOwnsRow(row)) return false;
+    const identity = sectionEditor.onActivate(row.id) || null;
+    if (!identity) return false;
+    sectionEditorCaret.current = event
+      ? { mode: "point", left: event.clientX, top: event.clientY, identity }
+      : { mode: "end", identity };
+    return true;
+  }
+
+  /** The mounted Section editor for this row. */
+  function renderSectionEditor(row) {
+    const entry = sectionEditor.editableRows[row.id];
+    return (
+      <TemplateSectionEditor
+        editor={sectionEditor.editor}
+        identity={sectionEditor.identity}
+        ariaLabel={entry ? entry.ariaLabel : row.label}
+        editable={sectionEditor.editable !== false}
+        caretHintRef={sectionEditorCaret}
+        onRegisterEditor={sectionEditor.onRegisterEditor}
+      />
+    );
   }
 
   /**
@@ -1063,6 +1157,16 @@ export default function ResizableTwoColTable({
     // editor. The raw stored value is passed through (a plain string or a
     // tagged rich value); only a STRING is put through the internal-id guard,
     // because a rich value can never be an option id.
+    // A row whose flexible body the SHARED Section editor owns — a legacy
+    // answer-only Text or custom row this build may modernize. Inactive it is
+    // the same static box it has always been; pressing it opens the Section's
+    // real document, and the first genuine edit writes `sectionDoc[rowId]`
+    // (leaving `answers[rowId]` frozen underneath).
+    if (richText && sectionEditorOwnsRow(row)) {
+      if (isSectionEditorActive(row)) return renderSectionEditor(row);
+      return renderSectionStaticAnswer(row, typeof raw === "string" ? safeStr : raw);
+    }
+
     if (richText) {
       // The row's OWN answer, so it is active only while the editor addresses
       // the row rather than one of its ordered section text items.
@@ -1645,7 +1749,16 @@ export default function ResizableTwoColTable({
 
     // Does the LOGICAL section end at this block? True only for a single-item
     // flexible section, where the head is also the tail.
-    const isSectionTail = !!(section && section.isTail);
+    //
+    // A row whose body is still its LEGACY answer has no flexible section yet,
+    // even while its shared editor is open on it: it keeps the row-height
+    // handle the user has always dragged, and it is offered no trailing
+    // working-space handle — dragging one would store a `sectionExtraHeight`
+    // entry for a row that has no section to apply it to.
+    const hasDocumentBody = documentBodySegments.has(row.id);
+    const editorHead =
+      !!headSegment && headSegment.kind === SECTION_SEGMENT_KIND.EDITOR;
+    const isSectionTail = !!(section && section.isTail) && (!editorHead || hasDocumentBody);
     const sectionExtraPx = isSectionTail ? section.extraPx || 0 : 0;
 
     const isTarget = !!targetRowId && row.id === targetRowId;
@@ -1773,8 +1886,11 @@ export default function ResizableTwoColTable({
         {/* LEGACY ROW HEIGHT HANDLE — a row whose body is its own answer
             control only. A flexible section is sized by its content plus the
             optional extra above, and its handle lives at the END of the whole
-            section, which for a multi-item section is a later block entirely. */}
-        {!sectionHeadItem && !headSegment && (
+            section, which for a multi-item section is a later block entirely.
+            A row still on its legacy answer keeps this handle while its shared
+            Section editor is open, and loses it the moment its first genuine
+            edit makes its body a document. */}
+        {!sectionHeadItem && (!headSegment || (editorHead && !hasDocumentBody)) && (
           <div
             className="twocol-resize-handle"
             onMouseDown={(e) => startRowDrag(row, e)}
@@ -2092,6 +2208,36 @@ export default function ResizableTwoColTable({
     );
   }
 
+  /**
+   * The press target ABOVE a media-headed Section the shared editor owns.
+   *
+   * It costs no layout (the same zero-height affordance the legacy leading
+   * insertion point uses) and writes nothing: pressing it activates the
+   * Section's real document, and ProseMirror's own gap cursor puts the caret
+   * before the first block. A press that types nothing leaves the Section
+   * exactly as it was.
+   */
+  function renderSectionEditorLeadIn(row) {
+    return (
+      <div
+        className="twocol-section-lead"
+        role="button"
+        tabIndex={0}
+        title="Click to type above this image"
+        aria-label={`Add text above the first image in ${row.label || "this section"}`}
+        onMouseDown={(e) => {
+          e.preventDefault();
+          activateSectionEditor(row, e);
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          e.preventDefault();
+          activateSectionEditor(row, null);
+        }}
+      />
+    );
+  }
+
   // The leading caret itself, once opened: the same TemplateTextCell every other
   // text target uses, created ALREADY ACTIVE against the virtual item id. It
   // becomes the section's real head item on the first keystroke, at this same
@@ -2119,10 +2265,57 @@ export default function ResizableTwoColTable({
     );
   }
 
+  /**
+   * The INACTIVE rendering of a legacy answer-only Section the shared editor
+   * owns.
+   *
+   * Byte-for-byte the box an inactive Template Text answer has always been —
+   * the same `.twocol-rich twocol-rich--static` shell, the same role, the same
+   * placeholder, the same validated React rendering of the stored value — so
+   * nothing about how such a row LOOKS changes in this phase. The only
+   * difference is where a press goes: to the Section's own document rather than
+   * to the legacy roving row editor.
+   */
+  function renderSectionStaticAnswer(row, value) {
+    const entry = sectionEditor.editableRows[row.id];
+    const empty = isEmptyAnswerValue(value);
+    return (
+      <div
+        className="twocol-rich twocol-rich--static"
+        tabIndex={0}
+        role="textbox"
+        aria-multiline="true"
+        aria-label={
+          entry ? entry.ariaLabel : `${(row.label || "").trim() || "Answer"} — answer`
+        }
+        onMouseDown={(event) => {
+          // Taking the press ourselves is what lets the caret open where the
+          // user clicked — the browser would otherwise focus this div a moment
+          // before the editor that replaces it exists.
+          event.preventDefault();
+          activateSectionEditor(row, event);
+        }}
+        onFocus={() => activateSectionEditor(row, null)}
+      >
+        {empty ? (
+          <span className="twocol-rich-placeholder">
+            Enter details for this field...
+          </span>
+        ) : (
+          <TemplateRichTextView model={answerToModel(value)} />
+        )}
+      </div>
+    );
+  }
+
   // SLOT 1 of the answer area (see renderRowBlock): whatever can hold the one
   // live editor.
   function renderAnswerSlot(row, sectionHeadItem, headSegment = null) {
     if (headSegment) {
+      // The ACTIVE Section: one live editor, in slot 1, for the whole body.
+      if (headSegment.kind === SECTION_SEGMENT_KIND.EDITOR) {
+        return renderSectionEditor(row);
+      }
       // The static Section document's own head. Prose renders in slot 1 exactly
       // as a head text item does; a head IMAGE or FILE keeps the leading
       // insertion point above it, so "type above the first picture" still works
@@ -2131,6 +2324,14 @@ export default function ResizableTwoColTable({
         return renderSectionDocText(row, headSegment, {
           isPrompt: isPromptSegment(row, headSegment),
         });
+      }
+      // A Section the shared editor may own needs no leading-caret machinery at
+      // all: pressing above its first picture activates the real document and
+      // ProseMirror's own gap cursor puts the caret there. Nothing is stored
+      // until the user types, exactly as before, but now for the ordinary
+      // reason that nothing has changed rather than through a virtual item.
+      if (sectionEditorOwnsRow(row)) {
+        return renderSectionEditorLeadIn(row);
       }
       // The leading caret is a LEGACY writer: it opens the legacy editor against
       // a virtual item of the stored list. A row whose body is a modern
@@ -2152,6 +2353,8 @@ export default function ResizableTwoColTable({
   // flow — nothing is absolutely positioned and no height is reserved.
   function renderHeadMediaSlot(row, sectionHeadItem, headSegment = null) {
     if (headSegment) {
+      // The live editor already IS the whole body — it has no second slot.
+      if (headSegment.kind === SECTION_SEGMENT_KIND.EDITOR) return null;
       if (headSegment.kind === SECTION_SEGMENT_KIND.TEXT) return null;
       return renderSectionDocSegmentBody(row, headSegment);
     }
@@ -2362,6 +2565,10 @@ export default function ResizableTwoColTable({
   // Template writer produces yet) has nothing for the legacy editor to open
   // against, so it stays read-only until the Section editor lands in F4.
   function activateSectionTextSegment(row, segment, event) {
+    // The shared Section editor first: a Section this build may modernize opens
+    // as ONE document at the point the user pressed, and the legacy per-item
+    // interaction is never reachable on it.
+    if (activateSectionEditor(row, event)) return;
     if (!richText || typeof richText.onActivate !== "function") return;
     if (!sectionCanHandBackToLegacy(row)) return;
     const item = segmentLegacyItem(row, segment);
@@ -2408,7 +2615,10 @@ export default function ResizableTwoColTable({
         <TemplateSectionDocView segment={segment} />
       );
 
-    if (!richText || !item || !sectionCanHandBackToLegacy(row)) {
+    const pressable = sectionEditorOwnsRow(row)
+      ? !!richText
+      : !!richText && !!item && sectionCanHandBackToLegacy(row);
+    if (!pressable) {
       return <div className="twocol-rich">{body}</div>;
     }
     return (
@@ -2440,6 +2650,9 @@ export default function ResizableTwoColTable({
   // compatibility renderer it already uses, in its own stored position, so no
   // historical content becomes invisible by being read through the document.
   function renderSectionDocSegmentBody(row, segment) {
+    if (segment.kind === SECTION_SEGMENT_KIND.EDITOR) {
+      return renderSectionEditor(row);
+    }
     if (segment.kind === SECTION_SEGMENT_KIND.TEXT) {
       return renderSectionDocText(row, segment, {
         isPrompt: isPromptSegment(row, segment),
@@ -2448,12 +2661,10 @@ export default function ResizableTwoColTable({
     if (segment.kind === SECTION_SEGMENT_KIND.COMPAT) {
       return renderCompatSegmentBody(row, segment);
     }
-    return (
-      <TemplateSectionDocView
-        segment={segment}
-        onError={(msg) => onFieldError && onFieldError(row.id, msg)}
-      />
-    );
+    // A file card reports its own action failures in its own live region,
+    // exactly as it does in a Free-form note; the row's field-error surface is
+    // for this Section's own save failures.
+    return <TemplateSectionDocView segment={segment} />;
   }
 
   // A stored item the unified document cannot represent, rendered exactly as it

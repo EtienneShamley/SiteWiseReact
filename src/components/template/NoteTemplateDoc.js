@@ -74,9 +74,24 @@ import {
 } from "../../lib/templateSectionTextSplit";
 import { healSectionSplitText } from "../../lib/templateSectionTextHeal";
 import {
+  canEditSectionBody,
+  isPlainLegacyTextBody,
   isSectionDocumentBody,
   resolveSectionBody,
+  sectionBodyHtml,
 } from "../../lib/templateSectionBody";
+import {
+  SECTION_DOC_FORMAT,
+  removeRowSectionDoc,
+  sectionDocForRow,
+  sectionDocRowAssetIds,
+  setRowSectionDoc,
+} from "../../lib/templateSectionDoc";
+import {
+  createSectionEditorRegistry,
+  sectionEditorIdentity,
+} from "../../lib/sectionEditorRegistry";
+import { createSectionEditor } from "./sectionEditorFactory";
 import {
   sectionListWithLeadingText,
   sectionStartsWithMedia,
@@ -88,10 +103,15 @@ import {
 import { newId } from "../../lib/id";
 import { normalizeBranding } from "../../lib/templateBranding";
 import {
+  answerToModel,
   answersEqual,
+  isAnswerValue,
   isEmptyAnswerValue,
+  modelToHtml,
   serializeAnswerFromHtml,
 } from "../../lib/templateRichText";
+import { insertLocalImageAsset } from "../../lib/editorImageInsert";
+import { insertFreeformFileAttachment } from "../../lib/editorFileInsert";
 import {
   TEMPLATE_FOCUS,
   applyRowEditorRegistration,
@@ -414,6 +434,52 @@ export default function NoteTemplateDoc({
   const [leadingCaret, setLeadingCaret] = useState(null);
   const leadingCaretRef = useRef(null);
   leadingCaretRef.current = leadingCaret;
+  // THE ROW WHOSE SHARED SECTION EDITOR IS MOUNTED, or null.
+  //
+  // A parallel, deliberately SEPARATE activation concept from `activeTextRowId`
+  // + `activeSectionItemId` above, which address the LEGACY per-item roving
+  // editor. The two interaction systems must never own one row at the same
+  // time, so activating either clears the other; keeping them apart in state is
+  // what makes that impossible to get wrong rather than merely unlikely.
+  const [activeSectionRowId, setActiveSectionRowId] = useState(null);
+  const activeSectionRowIdRef = useRef(null);
+  activeSectionRowIdRef.current = activeSectionRowId;
+
+  // The retained Section editors of THIS note's form (src/lib/sectionEditorRegistry.js).
+  // Created lazily, one per TOUCHED Section, kept alive (detached) while their
+  // Section is inactive so undo history survives switching between Sections,
+  // and disposed with the form or when the note is re-pinned.
+  const sectionRegistryRef = useRef(null);
+  // Assigned once `handleSectionDocUpdate` exists below; read through the ref so
+  // an editor constructed at any time always calls the CURRENT handler.
+  const sectionDocUpdateRef = useRef(null);
+  // The Template view being the live surface decides editability, and a handler
+  // constructed inside the registry must read it as it is NOW.
+  const viewActiveRef = useRef(viewActive);
+  viewActiveRef.current = viewActive;
+  // The per-row document + accessible name a Section editor is opened with,
+  // published by the body resolver below.
+  const sectionEditableRef = useRef({});
+
+  const getSectionRegistry = useCallback(() => {
+    if (!sectionRegistryRef.current) {
+      sectionRegistryRef.current = createSectionEditorRegistry({
+        // The ONLY place a Section editor is constructed. The document is read
+        // here, once, at construction — which is why activating a Section emits
+        // no update, creates no history entry and writes nothing.
+        createEditor: (identity, context) =>
+          createSectionEditor({
+            html: context?.html,
+            editable: viewActiveRef.current !== false,
+            ariaLabel: context?.ariaLabel,
+            onUpdate: ({ editor }) =>
+              sectionDocUpdateRef.current?.(identity, context?.rowId, editor),
+          }),
+      });
+    }
+    return sectionRegistryRef.current;
+  }, []);
+
   // The one registered editor, held as { identity, editor } so a cleanup
   // belonging to a replaced editor cannot unregister its replacement.
   const rowEditorRegistrationRef = useRef(null);
@@ -652,8 +718,9 @@ export default function NoteTemplateDoc({
    * precisely what lets every historical note render through the modern body
    * model without a migration.
    */
-  const sectionBodies = useMemo(() => {
+  const sectionState = useMemo(() => {
     const bodies = {};
+    const editable = {};
     for (const row of displayRows) {
       if (!row || !row.id) continue;
       const type = normalizeType(row.type);
@@ -664,10 +731,46 @@ export default function NoteTemplateDoc({
         isCustomRow: customRowIds.has(row.id),
         isAttachmentField: type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE,
       });
-      if (isSectionDocumentBody(body)) bodies[row.id] = body;
+      const isDocument = isSectionDocumentBody(body);
+      if (isDocument) bodies[row.id] = body;
+
+      // MAY THIS SECTION BE OPENED IN THE SHARED EDITOR?
+      //
+      // Two conditions, and the first is the compatibility gate that matters:
+      // `canEditSectionBody` refuses any body carrying material that renders
+      // today but CANNOT be represented in the document — a historical asset id
+      // the shared serializers will not emit, a legacy evidence entry that was
+      // never carryable, a malformed stored entry. Such a Section keeps its
+      // existing read and interaction path exactly as it is, because the only
+      // alternatives would be to drop that material, silently move it, truncate
+      // an asset id or persist a partial document, and none of those is
+      // acceptable. Nothing about the row is rewritten by the refusal.
+      //
+      // The second condition is which SOURCES may be opened at all: a document
+      // body (modern or adapted from the ordered item list), or a legacy body
+      // that is nothing but prose (see isPlainLegacyTextBody — a legacy row
+      // carrying evidence keeps its own evidence blocks and its existing path).
+      if (
+        canEditSectionBody(body) &&
+        (isDocument || isPlainLegacyTextBody(body))
+      ) {
+        editable[row.id] = {
+          html: sectionBodyHtml(body),
+          ariaLabel: `${(row.label || "").trim() || "Section"} — answer`,
+          // The block floor an ACTIVE Section keeps. A row still on its legacy
+          // answer keeps the height the user dragged for it (`row.px`), so
+          // clicking into it cannot make it jump; a row whose body is already a
+          // document is content-driven, exactly as its static rendering is.
+          minHeightPx: isDocument ? 0 : row.px || 0,
+          isDocument,
+        };
+      }
     }
-    return bodies;
+    return { bodies, editable };
   }, [displayRows, instance, customRowIds]);
+
+  const sectionBodies = sectionState.bodies;
+  sectionEditableRef.current = sectionState.editable;
 
   // What a flexible section's extra space looks like RIGHT NOW: the stored map,
   // with any in-flight drag showing on top of it.
@@ -893,8 +996,52 @@ export default function NoteTemplateDoc({
     setLeadingCaret(null);
   }, []);
 
+  /**
+   * Unmount the shared Section editor, WITHOUT destroying it.
+   *
+   * The instance stays in the registry, detached, so its document, its
+   * selection and its undo history are all still there when the user comes
+   * back. Nothing is flushed: every genuine change was already persisted by the
+   * editor's own update handler, so leaving a Section is a pure change of what
+   * is on screen.
+   */
+  const deactivateSectionEditor = useCallback(() => {
+    if (!activeSectionRowIdRef.current) return;
+    activeSectionRowIdRef.current = null;
+    setActiveSectionRowId(null);
+  }, []);
+
+  /**
+   * DESTROY one row's retained Section editor, because its stored body has just
+   * been replaced UNDERNEATH it by something that is not an editor transaction.
+   *
+   * Only AI Refine and Revert do that today: they write a legacy slot
+   * (`answers[rowId]`, `customRows[].answer`, or one `sectionContent` text
+   * item), and a retained editor built from the pre-refinement document would
+   * otherwise still be holding the OLD text — so the user's next keystroke in
+   * that Section would persist it as the modern document and silently discard
+   * the refinement they just accepted.
+   *
+   * Destroying the instance loses that Section's undo history, which is the
+   * honest cost of a programmatic replacement this phase does not yet apply as
+   * a transaction (Phase F6 owns the proper text-range bridge, and applies it
+   * as one undoable transaction instead). Refine's own Revert is the undo that
+   * exists for it in the meantime.
+   */
+  const discardSectionEditorFor = useCallback(
+    (rowId) => {
+      if (!rowId || !sectionRegistryRef.current) return;
+      if (activeSectionRowIdRef.current === rowId) deactivateSectionEditor();
+      sectionRegistryRef.current.disposeRow(rowId);
+    },
+    [deactivateSectionEditor]
+  );
+
   const handleAnswerFocus = useCallback(
     (rowId, itemId = null) => {
+      // The legacy per-item editor and the shared Section editor never own a
+      // row at the same time.
+      deactivateSectionEditor();
       // Moving the caret anywhere else abandons an unwritten leading caret. The
       // leading cell's own editor never comes through here (it is created
       // already active), so this cannot cancel the caret it just opened.
@@ -937,11 +1084,13 @@ export default function NoteTemplateDoc({
       clearMaterializedSection,
       clearLeadingCaret,
       isOpenLeadingCaret,
+      deactivateSectionEditor,
     ]
   );
 
   const handleStructuredFocus = useCallback(
     (rowId) => {
+      deactivateSectionEditor();
       // A structured control (number/date/dropdown/Photo/File upload) is still
       // a Quick Add destination — a Photo or File field is in fact the ONLY
       // destination that can accept an image or a document.
@@ -954,13 +1103,20 @@ export default function NoteTemplateDoc({
         nextActiveTextRow({ target: TEMPLATE_FOCUS.STRUCTURED, rowId, isTextRow: false })
       );
     },
-    [onSelectRow, rowMetaFor, clearMaterializedSection, clearLeadingCaret]
+    [
+      onSelectRow,
+      rowMetaFor,
+      clearMaterializedSection,
+      clearLeadingCaret,
+      deactivateSectionEditor,
+    ]
   );
 
   // A row label is plain text and is never a rich-text target. It deliberately
   // does not change the BottomBar's selected row either — only which editor,
   // if any, the toolbar owns.
   const handleLabelFocus = useCallback(() => {
+    deactivateSectionEditor();
     activeSectionItemIdRef.current = null;
     setActiveSectionItemId(null);
     clearMaterializedSection();
@@ -968,7 +1124,78 @@ export default function NoteTemplateDoc({
     setActiveTextRowId(
       nextActiveTextRow({ target: TEMPLATE_FOCUS.LABEL, rowId: null, isTextRow: false })
     );
-  }, [clearMaterializedSection, clearLeadingCaret]);
+  }, [clearMaterializedSection, clearLeadingCaret, deactivateSectionEditor]);
+
+  /** The Section-editor identity for one row under this note's current pinning. */
+  const sectionIdentityFor = useCallback(
+    (rowId) =>
+      sectionEditorIdentity({
+        noteId,
+        templateId: instanceRef.current?.templateId ?? null,
+        templateVersionId: instanceRef.current?.templateVersionId ?? null,
+        rowId,
+        isCustomRow: customRowIds.has(rowId),
+      }),
+    [noteId, customRowIds]
+  );
+
+  /**
+   * ACTIVATE one flexible Section's shared editor.
+   *
+   * The FIRST activation of a Section creates its editor from the document the
+   * canonical body reader resolved; every later one reuses the SAME instance,
+   * with the document, selection and undo history it already had. Creating an
+   * editor is not a change: the content is supplied at construction, so nothing
+   * is emitted and nothing is written.
+   *
+   * A row the reader refused (unrepresentable material, see the body memo) is
+   * simply not in `sectionEditableRef` and cannot be activated here at all — it
+   * keeps its existing path.
+   *
+   * @returns the editor identity that was activated, so the caller can stamp
+   *          its caret intent with it, or null when nothing was activated.
+   */
+  const activateSectionEditor = useCallback(
+    (rowId) => {
+      if (!rowId || !rowIsPresent(rowId)) return null;
+      const entry = sectionEditableRef.current[rowId];
+      if (!entry) return null;
+      const identity = sectionIdentityFor(rowId);
+      if (!identity) return null;
+      const editor = getSectionRegistry().getOrCreate(identity, {
+        rowId,
+        html: entry.html,
+        ariaLabel: entry.ariaLabel,
+      });
+      if (!editor) return null;
+
+      // Leaving the LEGACY interaction entirely — it may not keep a row the
+      // shared editor now owns.
+      setActiveTextRowId(null);
+      activeSectionItemIdRef.current = null;
+      setActiveSectionItemId(null);
+      clearMaterializedSection();
+      clearLeadingCaret();
+
+      // Selecting the Quick Add destination, exactly as clicking any other
+      // answer does. Focus is not moved by this — the caret stays where the
+      // user pressed.
+      if (onSelectRow) onSelectRow(rowId, rowMetaFor(rowId));
+
+      activeSectionRowIdRef.current = rowId;
+      setActiveSectionRowId(rowId);
+      return identity;
+    },
+    [
+      rowIsPresent,
+      sectionIdentityFor,
+      getSectionRegistry,
+      clearMaterializedSection,
+      clearLeadingCaret,
+      onSelectRow,
+      rowMetaFor,
+    ]
+  );
 
   /**
    * The identity of the editor that should exist right now — recomputed from
@@ -1120,6 +1347,93 @@ export default function NoteTemplateDoc({
       setInstance(nextInstance);
     },
     [saveInstanceConfirmed]
+  );
+
+  /**
+   * Persist ONE Section's MODERN DOCUMENT through the confirmed instance save.
+   *
+   * The first genuine edit of a Section is what creates `sectionDoc[rowId]`;
+   * every later one replaces it. Every other collection is carried through from
+   * its ref, which is exactly what FREEZES the older representations: the row's
+   * `sectionContent`, its `answers` / `customRows[].answer` and its `evidence`
+   * keep their pre-edit values, are never cleared, and go on protecting their
+   * assets through the deletion gate. Nothing about the pinned TemplateVersion
+   * is touched, and no bulk migration happens: exactly one row is written.
+   */
+  const persistSectionDoc = useCallback((rowId, html) => {
+    const nextInstance = {
+      ...instanceRef.current,
+      answers: rowTextRef.current,
+      attachments: rowAttachmentsRef.current,
+      evidence: rowEvidenceRef.current,
+      sectionDoc: setRowSectionDoc(instanceRef.current?.sectionDoc, rowId, html),
+    };
+    saveInstanceConfirmed(nextInstance);
+    instanceRef.current = nextInstance;
+    setInstance(nextInstance);
+  }, [saveInstanceConfirmed]);
+
+  /**
+   * The Section editor's own change handler — the ONE route by which a modern
+   * Section document is written.
+   *
+   * It is called ONLY for a genuine document change: Tiptap emits `update` only
+   * when a transaction reports `docChanged` AND the resulting document actually
+   * differs, so opening a Section, moving the caret, selecting text, focusing or
+   * blurring, toggling editability, and the media drag indicator's meta-only
+   * transactions all reach here never. Typing, an image move, a wrap change, a
+   * resize commit, a Remove and a file insertion all do — one transaction each,
+   * therefore one undo step and one save each.
+   *
+   * Two refusals guard the write:
+   *   - a callback from an editor the registry no longer holds under this
+   *     identity may not write anywhere (a note re-pin, or a disposed row);
+   *   - a serialization identical to what is already stored writes nothing, so
+   *     a change that round-trips to the same document cannot produce a save.
+   */
+  const handleSectionDocUpdate = useCallback(
+    (identity, rowId, editor) => {
+      if (!identity || !rowId || !editor || editor.isDestroyed) return;
+      if (getSectionRegistry().get(identity) !== editor) return;
+
+      let html;
+      try {
+        html = editor.getHTML();
+      } catch {
+        return;
+      }
+      if (typeof html !== "string") return;
+
+      const stored = instanceRef.current?.sectionDoc?.[rowId];
+      if (stored && stored.format === SECTION_DOC_FORMAT && stored.html === html) {
+        return;
+      }
+
+      try {
+        persistSectionDoc(rowId, html);
+        clearFieldError(rowId);
+      } catch (err) {
+        setFieldError(
+          rowId,
+          `This section could not be saved (${err?.message || err}). The last change was not kept.`
+        );
+      }
+    },
+    [getSectionRegistry, persistSectionDoc, clearFieldError, setFieldError]
+  );
+
+  sectionDocUpdateRef.current = handleSectionDocUpdate;
+
+  /**
+   * Does this row's body come from a MODERN document right now?
+   *
+   * Asked of the LIVE instance rather than of a render memo, because the
+   * transitional writers below (Quick Add) must decide against what is stored
+   * at the moment they run, not against what was on screen when they started.
+   */
+  const rowHasModernSectionDoc = useCallback(
+    (rowId) => !!sectionDocForRow(instanceRef.current?.sectionDoc, rowId),
+    []
   );
 
   // The raw stored list for a row, straight from the live instance — the shape
@@ -1369,6 +1683,93 @@ export default function NoteTemplateDoc({
    * against the note-file policy of the collection it is actually going into —
    * the destination's rules, not the capture bar's early check.
    */
+  /**
+   * TRANSITIONAL QUICK ADD SAFETY (Phase F4; Phase F5 owns Quick Add properly).
+   *
+   * Quick Add still writes `sectionContent`. Once a Section has a MODERN
+   * document that map is frozen underneath it, so a capture written there would
+   * be invisible — a user's photograph or dictated note simply gone from the
+   * screen. That must not be possible, so this decides, for one row, where a
+   * capture actually goes:
+   *
+   *   null            this row is still legacy AND has no live editor — the
+   *                   unchanged `sectionContent` path, exactly as today.
+   *   { editor }      this row's body is a modern document, OR a Section editor
+   *                   for it is already live (whose next transaction would
+   *                   otherwise persist a document that never contained the
+   *                   capture). The capture goes into the DOCUMENT, through the
+   *                   same shared insertion pipeline the Free-form note uses,
+   *                   and the editor's own update handler persists it.
+   *   { refuse }      this row's body is a modern document the shared editor may
+   *                   not open (unrepresentable material — see the body memo).
+   *                   Neither destination is safe, so the capture is REFUSED
+   *                   with a visible message rather than written somewhere the
+   *                   user cannot see it.
+   *
+   * Deliberately NOT a Quick Add redesign: there is no caret placement and no
+   * insertion-point capture here. A capture lands at the END of the Section,
+   * which is Quick Add v1's existing rule, unchanged.
+   */
+  const sectionDocQuickAddTarget = useCallback(
+    (rowId) => {
+      if (!rowId || !rowIsPresent(rowId)) return null;
+      const identity = sectionIdentityFor(rowId);
+      if (!identity) return null;
+      const registry = getSectionRegistry();
+      const isModern = rowHasModernSectionDoc(rowId);
+      if (!isModern && !registry.has(identity)) return null;
+
+      const entry = sectionEditableRef.current[rowId];
+      if (!entry) {
+        return {
+          refuse:
+            "This section holds content this version cannot edit, so the capture was not added. Nothing was changed.",
+        };
+      }
+      const editor = registry.getOrCreate(identity, {
+        rowId,
+        html: entry.html,
+        ariaLabel: entry.ariaLabel,
+      });
+      if (!editor || editor.isDestroyed) {
+        return {
+          refuse:
+            "This section could not be opened, so the capture was not added. Nothing was changed.",
+        };
+      }
+      return { editor };
+    },
+    [rowIsPresent, sectionIdentityFor, getSectionRegistry, rowHasModernSectionDoc]
+  );
+
+  /**
+   * The Template file policy, plus the DISPLAY type the shared node serializes.
+   *
+   * `validateNoteFile` decides ACCEPTANCE and nothing else — it reports no MIME
+   * type, because the collection it was written for stores one on the reference
+   * itself. The shared insertion pipeline expects the validator to name the
+   * type it accepted, so it is passed through here.
+   *
+   * It is DISPLAY metadata only, and stays so: `insertFileAttachment` filters it
+   * through the shared allowlist before writing it, and the retrieved Blob's own
+   * type remains the sole authority for whether a card may open anything.
+   */
+  const validateSectionFile = useCallback((file) => {
+    const check = validateNoteFile(file);
+    if (!check.ok) return check;
+    return { ...check, mimeType: (file && file.type) || null };
+  }, []);
+
+  /** Put the caret at the very end of a Section document, before an insertion. */
+  const placeSectionCaretAtEnd = useCallback((editor) => {
+    try {
+      editor.commands.setTextSelection(editor.state.doc.content.size);
+    } catch {
+      // The insertion still lands at the editor's current selection, which is
+      // where the user last was — never nowhere.
+    }
+  }, []);
+
   const appendComposedAttachment = useCallback(
     async (rowId, { kind, file } = {}) => {
       if (!rowId || !rowIsPresent(rowId)) {
@@ -1379,6 +1780,75 @@ export default function NoteTemplateDoc({
       }
       const isPhoto = kind === ATTACHMENT_KIND.PHOTO;
       clearFieldError(rowId);
+
+      // Transitional routing — see sectionDocQuickAddTarget.
+      const target = sectionDocQuickAddTarget(rowId);
+      if (target && target.refuse) {
+        setFieldError(rowId, target.refuse);
+        return { ok: false, error: target.refuse };
+      }
+      if (target && target.editor) {
+        setFieldBusy((prev) => ({ ...prev, [rowId]: true }));
+        try {
+          const editor = target.editor;
+          // The SHARED insertion pipeline, with the Template's own validators
+          // and its own asset kinds injected — the same ordering rule as
+          // everywhere else: validate, store the Blob, and only then insert the
+          // reference; a failed insertion deletes the bytes nothing references.
+          // The insertion is a document change, so the editor's update handler
+          // persists it through the confirmed instance save.
+          const result = isPhoto
+            ? await insertLocalImageAsset(
+                {
+                  sourceFile: file,
+                  blob: file,
+                  editor,
+                  name: file?.name,
+                  beforeInsert: () => placeSectionCaretAtEnd(editor),
+                },
+                {
+                  validate: validateComposedPhoto,
+                  normalize: (source) => normalizeImageFile(source),
+                  createAsset: (blob, options) =>
+                    createPhotoAsset(blob, options?.metadata, options?.name),
+                  removeAsset: deleteAsset,
+                }
+              )
+            : await insertFreeformFileAttachment(
+                {
+                  file,
+                  editor,
+                  isCurrentTarget: () => rowIsPresent(rowId),
+                  beforeInsert: () => placeSectionCaretAtEnd(editor),
+                },
+                {
+                  validate: validateSectionFile,
+                  createAsset: (blob, options) =>
+                    createNoteFileAsset(blob, options?.metadata),
+                  removeAsset: deleteAsset,
+                }
+              );
+          if (!result.ok) {
+            // A STALE result means the user moved away mid-write: the bytes
+            // were already deleted, nothing was inserted, and the composer's
+            // own "the destination changed" reporting owns the message — so it
+            // is forwarded rather than reported as a per-field failure.
+            if (result.stale) return { ok: false, stale: true };
+            const message =
+              result.error || "That could not be added to this section.";
+            setFieldError(rowId, message);
+            return { ok: false, error: message };
+          }
+          return { ok: true, assetId: result.assetId };
+        } finally {
+          setFieldBusy((prev) => {
+            const next = { ...prev };
+            delete next[rowId];
+            return next;
+          });
+        }
+      }
+
       setFieldBusy((prev) => ({ ...prev, [rowId]: true }));
       try {
         const result = await appendSectionAttachment({
@@ -1423,6 +1893,9 @@ export default function NoteTemplateDoc({
       handleSectionStructuralChange,
       clearFieldError,
       setFieldError,
+      sectionDocQuickAddTarget,
+      placeSectionCaretAtEnd,
+      validateSectionFile,
     ]
   );
 
@@ -1445,6 +1918,43 @@ export default function NoteTemplateDoc({
         };
       }
       clearFieldError(rowId);
+
+      // Transitional routing — see sectionDocQuickAddTarget.
+      const target = sectionDocQuickAddTarget(rowId);
+      if (target && target.refuse) {
+        setFieldError(rowId, target.refuse);
+        return { ok: false, error: target.refuse };
+      }
+      if (target && target.editor) {
+        if (!isAnswerValue(value) || isEmptyAnswerValue(value)) {
+          const message = "That text could not be added to this section.";
+          setFieldError(rowId, message);
+          return { ok: false, error: message };
+        }
+        const editor = target.editor;
+        // Through the EXISTING answer boundary, so a Quick Add capture is
+        // sanitized exactly as it is on the legacy path: a plain string stays
+        // literal text, and rich text keeps only the vocabulary a Section
+        // supports. No HTML is passed through untouched.
+        const html = modelToHtml(answerToModel(value));
+        let inserted = false;
+        try {
+          inserted =
+            editor
+              .chain()
+              .insertContentAt(editor.state.doc.content.size, html)
+              .run() !== false;
+        } catch {
+          inserted = false;
+        }
+        if (!inserted) {
+          const message = "That text could not be added to this section.";
+          setFieldError(rowId, message);
+          return { ok: false, error: message };
+        }
+        return { ok: true };
+      }
+
       const result = appendSectionText({
         rowId,
         value,
@@ -1471,6 +1981,7 @@ export default function NoteTemplateDoc({
       handleSectionStructuralChange,
       clearFieldError,
       setFieldError,
+      sectionDocQuickAddTarget,
     ]
   );
 
@@ -1883,9 +2394,46 @@ export default function NoteTemplateDoc({
 
   // Leaving the Template form gives up rich-text ownership: the editor unmounts
   // (which clears the registration) and no hidden row keeps the toolbar.
+  //
+  // The Section editor is UNMOUNTED, not destroyed — its instance stays in the
+  // registry, so coming back to this note's form finds the same document, the
+  // same selection and the same undo history.
   useEffect(() => {
-    if (!viewActive) setActiveTextRowId(null);
-  }, [viewActive]);
+    if (!viewActive) {
+      setActiveTextRowId(null);
+      deactivateSectionEditor();
+    }
+  }, [viewActive, deactivateSectionEditor]);
+
+  // A Section whose row is no longer part of what this note is pinned to has no
+  // editor: the row cannot be rendered, so nothing could mount or write it.
+  useEffect(() => {
+    const rowId = activeSectionRowId;
+    if (!rowId) return;
+    if (!sectionState.editable[rowId]) deactivateSectionEditor();
+  }, [activeSectionRowId, sectionState, deactivateSectionEditor]);
+
+  /**
+   * THE REGISTRY'S LIFETIME.
+   *
+   * Every retained editor addresses ONE note, ONE template and ONE pinned
+   * version (its identity carries all three). Re-pinning the note makes every
+   * instance in here an editor of a document the rows no longer show, so the
+   * whole registry is disposed and the next activation builds afresh from what
+   * the newly pinned version's rows actually resolve to.
+   *
+   * The cleanup also runs on unmount — this component is keyed by note id in
+   * MainArea, so switching notes disposes the registry and, with it, every
+   * Section's undo history. That is deliberately the same lifetime a Free-form
+   * note's editor and history have.
+   */
+  useEffect(() => {
+    return () => {
+      if (sectionRegistryRef.current) sectionRegistryRef.current.disposeAll();
+      sectionRegistryRef.current = null;
+      activeSectionRowIdRef.current = null;
+    };
+  }, [noteId, instance?.templateId, instance?.templateVersionId]);
 
   // Switching notes destroys this component; make sure the toolbar is not left
   // holding an editor that no longer exists.
@@ -2000,6 +2548,20 @@ export default function NoteTemplateDoc({
         rowId
       );
 
+      // …and its MODERN document, for exactly the same reason: the row is gone,
+      // so an entry keyed by its id could never be rendered or reached again.
+      // Its asset ids join the deletion candidates, still gated on being
+      // referenced nowhere — a migrated row commonly names one Blob from both
+      // this document and the frozen ordered list, and one Blob is one decision.
+      const removedDocAssetIds = sectionDocRowAssetIds(
+        instanceRef.current?.sectionDoc,
+        rowId
+      );
+      const nextSectionDoc = removeRowSectionDoc(
+        instanceRef.current?.sectionDoc,
+        rowId
+      );
+
       // One confirmed save removes the custom row AND prunes its evidence and
       // its ordered content together, so the instance is never left
       // half-updated. deleteCustomRow re-anchors any row anchored to this one,
@@ -2011,6 +2573,7 @@ export default function NoteTemplateDoc({
         attachments: rowAttachmentsRef.current,
         evidence: nextEvidence,
         sectionContent: nextSectionContent,
+        sectionDoc: nextSectionDoc,
         // …and any extra working space that was dragged onto it. The row is
         // gone, so a height keyed by its id could never be reached again.
         sectionExtraHeight: removeSectionExtraHeight(
@@ -2075,6 +2638,11 @@ export default function NoteTemplateDoc({
       if (materializedSectionRef.current?.rowId === rowId) {
         clearMaterializedSection();
       }
+      // The row's retained Section editor, with its history. The row it edited
+      // no longer exists, so there is nothing for that history to be applied
+      // to; this is the ONE place a Section editor is destroyed individually.
+      if (activeSectionRowIdRef.current === rowId) deactivateSectionEditor();
+      if (sectionRegistryRef.current) sectionRegistryRef.current.disposeRow(rowId);
       // …and the un-committed drag values for the row's height and its section's
       // extra working space. Both are keyed by row id and would otherwise
       // outlive the row they describe.
@@ -2097,7 +2665,10 @@ export default function NoteTemplateDoc({
       // asset survives). A materialised row names the same asset from both
       // collections, so the candidates are de-duplicated before the gate — one
       // Blob is one deletion decision.
-      const removedAssetIds = new Set(removedSectionAssetIds);
+      const removedAssetIds = new Set([
+        ...removedSectionAssetIds,
+        ...removedDocAssetIds,
+      ]);
       for (const entry of removedEvidence) {
         const assetId =
           entry && typeof entry === "object" ? entry.assetId : null;
@@ -2121,6 +2692,7 @@ export default function NoteTemplateDoc({
       noteId,
       onClearRowRefineBackup,
       clearMaterializedSection,
+      deactivateSectionEditor,
     ]
   );
 
@@ -2579,6 +3151,16 @@ export default function NoteTemplateDoc({
       if (rowRefineInFlightRef.current.has(targetKey)) return;
 
       // Eligibility is re-checked here, not trusted from the click.
+      //
+      // TRANSITIONAL REFINE SAFETY (Phase F4; Phase F6 owns the proper
+      // text-range bridge). Refine writes a legacy slot — `answers[rowId]`,
+      // `customRows[].answer`, or ONE `sectionContent` TEXT item. Once a
+      // Section has a MODERN document every one of those is frozen underneath
+      // it, so a successful-looking refinement would be invisible. Refine is
+      // therefore not offered for such a row (no trigger is rendered) and is
+      // refused here as well, so an in-flight request cannot land on a row that
+      // became modern while it was running.
+      if (rowHasModernSectionDoc(rowId)) return;
       const isCustomRow = !!findCustomRow(rowId);
       if (itemId) {
         // A section TEXT item is prose whatever its row's field type is — a
@@ -2694,6 +3276,14 @@ export default function NoteTemplateDoc({
       // appended while the request ran cannot re-address it, while an edit or a
       // split — both of which change the value — stops it.
       const target = readLiveInstance(request.noteId);
+      // The row may have become a modern document while the request was in
+      // flight (a Quick Add into it, or the user editing it in another view).
+      // Its legacy slots are frozen now, so applying would write text nobody
+      // can see: discard silently, exactly as for a deleted target.
+      if (sectionDocForRow(target?.sectionDoc, rowId)) {
+        dismiss();
+        return;
+      }
       const check = canApplyRowRefineResponse(request, target);
       if (!check.ok) {
         if (check.reason === ROW_REFINE_REJECTION.ANSWER_CHANGED) {
@@ -2725,6 +3315,10 @@ export default function NoteTemplateDoc({
         settle(ROW_REFINE_STATUS.FAILURE, ROW_REFINE_SAVE_FAILED_MESSAGE);
         return;
       }
+
+      // The refined text replaced a legacy slot outside any editor, so a
+      // retained Section editor for this row is now holding a stale document.
+      discardSectionEditorFor(rowId);
 
       // The backup is recorded ONLY here — after a valid result has actually
       // been written. It is owned by MainArea, so it is recorded for the
@@ -2781,6 +3375,8 @@ export default function NoteTemplateDoc({
       showRowRefineMessage,
       onSetRowRefineBackup,
       saveInstanceConfirmed,
+      rowHasModernSectionDoc,
+      discardSectionEditorFor,
     ]
   );
 
@@ -2805,6 +3401,11 @@ export default function NoteTemplateDoc({
 
       const isCustomRow = !!findCustomRow(rowId);
       const live = readLiveInstance(current.noteId);
+
+      // Same transitional rule as the apply path: a row whose body is now a
+      // MODERN document has frozen legacy slots, and restoring one would be
+      // invisible. The backup is left in place; nothing is written.
+      if (sectionDocForRow(live?.sectionDoc, rowId)) return;
 
       // The target must still be there. A text item that has gone is a refusal,
       // exactly as it is on the apply path — never a write to its neighbour.
@@ -2833,6 +3434,10 @@ export default function NoteTemplateDoc({
       rowTextRef.current = next.answers;
       setInstance(next);
       setRowText(next.answers);
+      // Same reason as the apply path: the restored value replaced a legacy
+      // slot outside any editor, so a retained Section editor for this row is
+      // now holding a stale document.
+      discardSectionEditorFor(rowId);
       // Restoring the complete previous value — formatting included — must also
       // reach the editor, but only when the editor open right now is genuinely
       // this row (and this item) under this template and version.
@@ -2867,6 +3472,7 @@ export default function NoteTemplateDoc({
       saveInstanceConfirmed,
       rowIdentityFor,
       sectionItemIdentityFor,
+      discardSectionEditorFor,
     ]
   );
 
@@ -2916,6 +3522,17 @@ export default function NoteTemplateDoc({
       (rows || []).some((r) => r && r.id === quickAddTargetRowId);
     if (!stillExists) onSelectRowRef.current?.(null, null);
   }, [quickAddTargetRowId, customRowIds, rows]);
+
+  // The mounted Section editor, resolved from the registry on every render so a
+  // row that has stopped being editable — re-pinned away, deleted, or holding
+  // material this build refuses — simply has none.
+  const activeSectionIdentity = activeSectionRowId
+    ? sectionIdentityFor(activeSectionRowId)
+    : null;
+  const activeSectionEditor =
+    activeSectionIdentity && sectionState.editable[activeSectionRowId]
+      ? getSectionRegistry().get(activeSectionIdentity)
+      : null;
 
   return (
     <div className="p-2 text-black dark:text-white">
@@ -3065,6 +3682,20 @@ export default function NoteTemplateDoc({
         // An INACTIVE Section renders from these; the legacy per-item
         // interaction keeps its own blocks while it owns a row.
         sectionBodies={sectionBodies}
+        // THE SHARED SECTION EDITOR — one real Tiptap/ProseMirror document per
+        // flexible Section, retained per note (src/lib/sectionEditorRegistry.js).
+        // `editableRows` names the Sections this build may open at all: a
+        // Section holding material the document cannot represent is absent from
+        // it and keeps the interaction path it already has, unchanged.
+        sectionEditor={{
+          activeRowId: activeSectionRowId,
+          identity: activeSectionIdentity,
+          editor: activeSectionEditor,
+          editable: !!viewActive,
+          editableRows: sectionState.editable,
+          onActivate: activateSectionEditor,
+          onRegisterEditor: handleRegisterRowEditor,
+        }}
         onRemoveSectionItem={removeComposedAttachment}
         onReorderSectionItem={reorderSectionContentItem}
         onDropSectionItemIntoText={dropSectionItemIntoText}

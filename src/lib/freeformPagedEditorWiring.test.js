@@ -68,6 +68,10 @@ describe("one continuous editor, not one per page", () => {
     expect(renderers.sort()).toEqual([
       path.join("editor", "FreeformPagedEditor.js"),
       path.join("template", "TemplateRowEditor.js"),
+      // The flexible Template Section's own editor (Phase F4): ONE per
+      // Section, mounted only while that Section is active — never one per
+      // page, and never one per stored item.
+      path.join("template", "TemplateSectionEditor.js"),
     ]);
   });
 

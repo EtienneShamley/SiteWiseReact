@@ -45,11 +45,17 @@ describe("20/21/22. the extension factory exports a valid, complete Section exte
     expect(SECTION_EXT).toContain("export const SECTION_FILE_ASSET_KINDS");
   });
 
-  test("21. the shared AssetImage extension is included, unconfigured — same as Free-form", () => {
+  test("21. the shared AssetImage extension is included, configured with ONE thing", () => {
     expect(SECTION_EXT).toContain('import { AssetImage } from "./AssetImage"');
-    expect(SECTION_EXT).toMatch(/\n\s*AssetImage,\n/);
-    // Unconfigured: no `.configure(` call is ever chained onto AssetImage here.
-    expect(SECTION_EXT).not.toMatch(/AssetImage\.configure/);
+    // The ONLY configuration is the surface's display-height cap — presentation
+    // only, never a stored value, and absent (so unchanged) in Free-form. The
+    // node, its NodeView, its serializer and every gesture are the shared ones.
+    expect(SECTION_EXT).toContain(
+      "AssetImage.configure({ maxDisplayHeightPx: imageCap })"
+    );
+    const configured = SECTION_EXT.match(/AssetImage\.configure\(\{([^}]*)\}\)/);
+    expect(configured).toBeTruthy();
+    expect(configured[1].split(":")).toHaveLength(2);
   });
 
   test("22. the shared FileAttachment extension is configured with the Section's OWN file kind(s)", () => {
@@ -65,9 +71,26 @@ describe("20/21/22. the extension factory exports a valid, complete Section exte
 describe("23. the Section text extensions mirror TemplateRowEditor's exactly", () => {
   test("the SAME StarterKit restriction (heading/blockquote/hr/codeBlock/code/link off)", () => {
     const starterKitConfig =
-      /StarterKit\.configure\(\{\s*heading:\s*false,\s*blockquote:\s*false,\s*horizontalRule:\s*false,\s*codeBlock:\s*false,\s*code:\s*false,[\s\S]*?link:\s*false,?\s*\}\)/;
+      /StarterKit\.configure\(\{\s*heading:\s*false,\s*blockquote:\s*false,\s*horizontalRule:\s*false,\s*codeBlock:\s*false,\s*code:\s*false,[\s\S]*?link:\s*false,?[\s\S]*?\}\)/;
     expect(SECTION_EXT).toMatch(starterKitConfig);
     expect(TEMPLATE_ROW_EDITOR).toMatch(starterKitConfig);
+  });
+
+  test("ONE deliberate divergence: the Section editor turns TrailingNode off", () => {
+    // StarterKit's TrailingNode appends a paragraph when the document's last
+    // child is a block node, and it acts on the FIRST transaction of any kind —
+    // including a selection-only one. On a Section that would make merely
+    // CLICKING into a picture-ending Section change the document, emit an
+    // update and persist a `sectionDoc` for a Section nobody edited. Opening a
+    // Section must write nothing, so it is off; Gapcursor (still on) is what
+    // lets a user type above or below a leading/trailing image, as a genuine
+    // edit that genuinely should be saved.
+    expect(SECTION_EXT).toMatch(/trailingNode,/);
+    expect(SECTION_EXT).toMatch(/sectionEditorTextExtensions\(\{ trailingNode: false \}\)/);
+    // The default is TEMPLATE_TEXT_EXTENSIONS verbatim, so the shared vocabulary
+    // proof above still compares like with like.
+    expect(SECTION_EXT).toMatch(/sectionEditorTextExtensions\(\{ trailingNode = true \} = \{\}\)/);
+    expect(TEMPLATE_ROW_EDITOR).not.toContain("trailingNode");
   });
 
   test("the same additional extensions, in the same set: Link, Highlight, TextStyle, Color, TextAlign, ListIndentKeymap", () => {
@@ -226,23 +249,28 @@ describe("27-33. this factory is prepared, not consumed", () => {
     expect(SECTION_EXT).not.toContain("ReactNodeViewRenderer");
   });
 
-  test("32/33. no production file constructs an editor from this factory, and no rendering switch exists yet", () => {
-    for (const file of [MAIN_AREA, NOTE_TEMPLATE_DOC]) {
-      expect(file).not.toContain("sectionEditorExtensions");
-    }
+  test("32/33. Free-form never reaches this factory, and NoteTemplateDoc never builds an editor from it directly", () => {
+    // Free-form keeps its own extension list; the Template form owns activation
+    // and persistence but delegates CONSTRUCTION to the one factory below.
+    expect(MAIN_AREA).not.toContain("sectionEditorExtensions");
+    expect(NOTE_TEMPLATE_DOC).not.toContain("sectionEditorExtensions");
   });
 
-  test("no application file other than this one's own test calls sectionEditorExtensions()", () => {
-    // A broader confirmation than the two named files above: nothing in the
-    // component tree has wired this factory into a live editor yet.
+  test("exactly ONE component file constructs an editor from this factory", () => {
+    // The whole point of a single factory: if a second surface ever starts
+    // assembling its own Section editor, this fails immediately.
     const templateDir = path.join(SRC, "components", "template");
     const files = fs.readdirSync(templateDir).filter((f) => f.endsWith(".js") && !f.endsWith(".test.js"));
-    for (const f of files) {
-      const source = read(path.join("components", "template", f));
-      expect({ file: f, hit: source.includes("sectionEditorExtensions") }).toEqual({
-        file: f,
-        hit: false,
-      });
-    }
+    const consumers = files.filter((f) =>
+      /\bsectionEditorExtensions\(/.test(read(path.join("components", "template", f)))
+    );
+    expect(consumers.sort()).toEqual(["sectionEditorFactory.js"]);
+
+    // The static Section document view reads the module's ASSET-KIND constant
+    // and nothing else — it configures the shared file card with the same kind
+    // the live editor does, which is exactly why the two cards match.
+    const docView = read(path.join("components", "template", "TemplateSectionDocView.js"));
+    expect(docView).toContain("SECTION_FILE_ASSET_KINDS");
+    expect(docView).not.toMatch(/\bsectionEditorExtensions\(/);
   });
 });

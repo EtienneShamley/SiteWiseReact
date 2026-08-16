@@ -48,7 +48,11 @@
 
 import { normalizeCustomRow } from "./noteCustomRows";
 import { sectionReplacesRowAnswer } from "./templateRowContent";
-import { sectionDocNodesForRow } from "./templateSectionDoc";
+import {
+  SECTION_DOC_NODE,
+  sectionDocHtmlFromNodes,
+  sectionDocNodesForRow,
+} from "./templateSectionDoc";
 import {
   adaptLegacyBodyToNodes,
   adaptSectionItemsToNodes,
@@ -92,6 +96,103 @@ export function isSectionDocumentBody(body) {
     body.source === SECTION_BODY_SOURCE.SECTION_DOC ||
     body.source === SECTION_BODY_SOURCE.SECTION_CONTENT
   );
+}
+
+/**
+ * Why a body may NOT be opened in — and therefore may not become — a modern
+ * Section document.
+ *
+ * Stated as reasons rather than a bare boolean because the answer is a
+ * COMPATIBILITY decision about somebody's stored note, and a refusal has to be
+ * explainable: the row goes on rendering and editing through the path it
+ * already uses, and nothing about it is rewritten.
+ */
+export const SECTION_EDITOR_REFUSAL = {
+  /** No body was resolved at all (an unknown row, or nothing stored). */
+  NO_BODY: "no-body",
+  /**
+   * The body carries material that RENDERS TODAY but cannot be represented in
+   * the document — an asset reference outside the shape the shared serializers
+   * accept, or a legacy evidence entry that was never carryable.
+   *
+   * This is the load-bearing refusal. Opening such a body in the Section editor
+   * would produce a document that is MISSING that material, and the first
+   * genuine edit would persist that document as authoritative — which is
+   * exactly how a user's photograph disappears. The row therefore keeps its
+   * existing read and interaction path, unchanged, and nothing is dropped,
+   * repositioned, truncated, re-minted or rewritten to make an edit possible.
+   */
+  UNREPRESENTABLE: "unrepresentable-material",
+  /** The body resolved to no nodes, so there is no document to open. */
+  EMPTY_DOCUMENT: "empty-document",
+};
+
+/**
+ * May this resolved body become (or already be) a live Section document?
+ *
+ * @returns { ok: true } | { ok: false, reason }
+ */
+export function sectionEditorEligibility(body) {
+  if (!body || body.source === SECTION_BODY_SOURCE.EMPTY) {
+    return { ok: false, reason: SECTION_EDITOR_REFUSAL.NO_BODY };
+  }
+  const skipped = Array.isArray(body.skipped) ? body.skipped : [];
+  if (skipped.length > 0) {
+    return { ok: false, reason: SECTION_EDITOR_REFUSAL.UNREPRESENTABLE };
+  }
+  const nodes = Array.isArray(body.nodes) ? body.nodes : [];
+  if (!nodes.length) {
+    return { ok: false, reason: SECTION_EDITOR_REFUSAL.EMPTY_DOCUMENT };
+  }
+  return { ok: true };
+}
+
+/**
+ * Is this a body that is STILL on its legacy answer and holds nothing but
+ * prose?
+ *
+ * The one legacy shape the shared Section editor may open in Phase F4, and the
+ * reason is a READ-path one: such a body renders today as exactly the same
+ * paragraphs the adapted document holds, so opening it in the Section editor
+ * changes nothing a user can see, and its first genuine edit simply writes the
+ * document rather than materialising an ordered item list on the way.
+ *
+ * A legacy body carrying MEDIA — a row whose `evidence[rowId]` is carryable
+ * into a document — is deliberately NOT included: that material renders today
+ * as the row's own legacy EVIDENCE blocks, with their own display and removal
+ * controls, and folding it into a document is a change to the read path rather
+ * than to editing. Such a row keeps the path it has (its first edit
+ * materialises `sectionContent`, exactly as today) and becomes editable as a
+ * document from then on.
+ */
+export function isPlainLegacyTextBody(body) {
+  if (!body || body.source !== SECTION_BODY_SOURCE.LEGACY) return false;
+  const nodes = Array.isArray(body.nodes) ? body.nodes : [];
+  if (!nodes.length) return false;
+  return nodes.every((node) => node && node.type === SECTION_DOC_NODE.TEXT);
+}
+
+/** Convenience: `sectionEditorEligibility(body).ok`. */
+export function canEditSectionBody(body) {
+  return sectionEditorEligibility(body).ok;
+}
+
+/**
+ * The HTML a Section editor is opened with for this body.
+ *
+ * One serializer for every source: a stored modern document is re-serialized
+ * from the nodes it parsed to (byte-stable by construction — F1 asserts
+ * `parseSectionDocHtml(sectionDocHtmlFromNodes(nodes)) === nodes`), and a
+ * legacy body is serialized from the SAME adapted nodes the static view
+ * renders. That is what makes the live editor and the static view show the
+ * same document rather than two readings of one.
+ *
+ * Returns "" for a body that must not be opened, so a caller that ignores the
+ * eligibility above still cannot open a document with material missing from it.
+ */
+export function sectionBodyHtml(body) {
+  if (!canEditSectionBody(body)) return "";
+  return sectionDocHtmlFromNodes(body.nodes);
 }
 
 /** One row's RAW stored ordered list, defensively. */

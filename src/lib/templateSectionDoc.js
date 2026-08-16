@@ -151,6 +151,62 @@ export function makeSectionDocValue(html) {
   return { format: SECTION_DOC_FORMAT, html };
 }
 
+/**
+ * The `sectionDoc` map with ONE row's modern document written into it.
+ *
+ * Additive by construction: every other row's entry is carried through by
+ * reference, and no other collection is touched — `sectionContent`, `answers`,
+ * `attachments` and `evidence` stay exactly as they are, frozen underneath the
+ * document rather than cleared (see src/lib/templateSectionBody.js).
+ *
+ * An unusable html value writes NOTHING and returns the map unchanged, so a
+ * failed serialization can never persist a partial document over a good one.
+ */
+export function setRowSectionDoc(map, rowId, html) {
+  const base = map && typeof map === "object" && !Array.isArray(map) ? map : {};
+  if (typeof rowId !== "string" || !rowId) return base;
+  const value = makeSectionDocValue(html);
+  if (!value) return base;
+  return { ...base, [rowId]: value };
+}
+
+/**
+ * The `sectionDoc` map WITHOUT one row's entry — used when the row itself is
+ * deleted from the note, never to "clean up" a document a row still has.
+ */
+export function removeRowSectionDoc(map, rowId) {
+  if (!map || typeof map !== "object" || Array.isArray(map)) return {};
+  if (typeof rowId !== "string" || !rowId) return map;
+  if (!Object.prototype.hasOwnProperty.call(map, rowId)) return map;
+  const next = { ...map };
+  delete next[rowId];
+  return next;
+}
+
+/**
+ * Every asset id ONE row's stored document names, whatever its format claims.
+ *
+ * Deliberately tolerant, exactly like `sectionDocReferencesAsset`: this feeds
+ * the deletion CANDIDATE list when a custom row is deleted, and the candidates
+ * are still gated by `isAttachmentAssetReferenced` afterwards.
+ */
+export function sectionDocRowAssetIds(map, rowId) {
+  if (!map || typeof map !== "object" || Array.isArray(map)) return [];
+  if (typeof rowId !== "string" || !rowId) return [];
+  const entry = map[rowId];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+  if (typeof entry.html !== "string") return [];
+  const { imageIds, fileIds } = sectionDocAssetIds(entry.html);
+  const seen = new Set();
+  const ids = [];
+  for (const id of [...imageIds, ...fileIds]) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Serialization: nodes -> HTML                                               */
 /* -------------------------------------------------------------------------- */

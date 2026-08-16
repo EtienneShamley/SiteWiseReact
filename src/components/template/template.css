@@ -982,11 +982,27 @@
   margin: 0;
 }
 
-.nw-tpl-section-doc .nw-media img {
+.nw-tpl-section-doc .nw-media img,
+.nw-tpl-section-editor .nw-media img {
   border-radius: 2px;
   max-height: var(--nw-tpl-photo-max-h);
   object-fit: contain;
 }
+
+/* ---------- The ACTIVE flexible Section (the live shared editor) ----------
+   Everything media-related — selection ring, four corners, Remove, drop
+   indicator, wrap floats, widths, the float-containing formatting context —
+   comes from the shared `.nw-editor-root` rules in
+   src/components/editor/editor.css and is deliberately NOT restated here. The
+   only Template-specific rule is the one-page photo display cap above, which
+   the static Section view applies through the same shared helper and the same
+   constant so activating a Section cannot resize its pictures.
+
+   NOTE the one rule that is deliberately ABSENT: the static view zeroes a
+   block image's margin (`.nw-tpl-section-doc .nw-media--block`) because there
+   each image is already its own padded document block. Inside the editor every
+   element shares ONE block, so an image keeps the shared margin that separates
+   it from the prose around it. */
 
 /* ---------- Photo attachment (in-flow document image) ---------- */
 .photo-att {

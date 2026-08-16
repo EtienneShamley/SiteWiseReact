@@ -72,7 +72,46 @@ export const SECTION_SEGMENT_KIND = {
    * node — only from the reader's `skipped` list.
    */
   COMPAT: "compat",
+  /**
+   * THE WHOLE BODY, as one live editor.
+   *
+   * An EditorView needs a single contiguous DOM root, so an ACTIVE Section is
+   * one block rather than one block per segment. This segment is never produced
+   * from a document node — it is the caller's statement that this row's body is
+   * currently being edited (see `sectionEditorSegment`), and it is what lets the
+   * existing block planner lay an active Section out through exactly the same
+   * path an inactive one takes.
+   */
+  EDITOR: "editor",
 };
+
+/**
+ * The single segment an ACTIVE Section plans as.
+ *
+ * It carries no blocks and no attrs: the live document is the editor's, not a
+ * projection of it. `key` is a constant, so the active block keeps ONE React
+ * key for the whole editing session — which is what stops the editor being
+ * unmounted and remounted (losing its focus and caret) at the moment its first
+ * genuine edit changes which stored representation the row's body comes from.
+ */
+export function sectionEditorSegment({ minHeightPx = 0 } = {}) {
+  return {
+    kind: SECTION_SEGMENT_KIND.EDITOR,
+    key: "editor",
+    index: 0,
+    blocks: null,
+    attrs: null,
+    itemId: null,
+    itemIndex: null,
+    order: 0,
+    wrapped: false,
+    // The block floor an ACTIVE Section keeps, when the caller wants one. A row
+    // still on its LEGACY answer keeps the height the user dragged for it, so
+    // clicking into it cannot make the row jump; a row whose body is already a
+    // document is content-driven and passes nothing.
+    minHeightPx: Number(minHeightPx) > 0 ? Math.round(Number(minHeightPx)) : 0,
+  };
+}
 
 /** Is this image node placed as a float (and therefore fused with its text)? */
 function isWrapped(attrs) {

@@ -176,9 +176,38 @@ describe("11. print rules for the shared media chrome remain correct", () => {
     expect(printBlock).toContain("display: none !important;");
   });
 
-  test("the file-attachment print block is untouched (out of F2's explicit CSS scope — see finding)", () => {
-    expect(CSS).toContain(".note-editor .note-file-attachment {");
-    expect(CSS).toContain(".note-editor .note-file-attachment__actions,");
+  test("the file-attachment card is now scoped to BOTH shared roots (Phase F4)", () => {
+    // F2 deliberately left this out of scope; F4 renders the shared card in a
+    // Template Section — both live (the editor's NodeView) and static (the
+    // Section document view) — so its LIGHT/base rules follow the same
+    // re-scoping rule the media chrome already did.
+    expect(CSS).toContain(".nw-editor-root .note-file-attachment {");
+    expect(CSS).toContain(".nw-doc-root .note-file-attachment,");
+    expect(CSS).toContain(".nw-editor-root .note-file-attachment__actions,");
+    expect(CSS).toContain(".nw-doc-root .note-file-attachment__actions,");
+    // No base rule is left qualified by `.note-editor`.
+    const baseFileLines = CSS.split("\n").filter((line) => {
+      const t = line.trim();
+      return t.startsWith(".note-editor .note-file-attachment");
+    });
+    expect(baseFileLines).toEqual([]);
+  });
+
+  test("the file-attachment DARK overrides stay .note-editor-only", () => {
+    // The same load-bearing rule the media chrome follows: a Section editor
+    // root carries `.nw-editor-root` and never `.note-editor`, so it can never
+    // match a dark override and always renders the light card its white
+    // Template paper needs.
+    const darkFileLines = CSS.split("\n").filter((line) =>
+      line.trim().startsWith(".dark ") && line.includes(".note-file-attachment")
+    );
+    expect(darkFileLines.length).toBeGreaterThan(0);
+    for (const line of darkFileLines) {
+      expect({ line, hasNoteEditor: line.includes(".note-editor") }).toEqual({
+        line,
+        hasNoteEditor: true,
+      });
+    }
   });
 });
 

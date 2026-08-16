@@ -43,17 +43,24 @@
 // context, so a wrapped image extends its own segment's height rather than
 // spilling out of it.
 //
-// FILES render through the Template's existing file card (FileAttachmentRow) —
-// the same card the row shows today, with no Remove, so the static and the
-// legacy interactive rendering of a Section's files are identical. See
-// .claude/NOTEWISE_HANDOFF.md §31 for why the shared Free-form file card is not
-// used here yet.
+// FILES render through the SHARED file-attachment card
+// (src/components/editor/fileAttachmentPresentation.js) — the very card the
+// Section EDITOR's `fileAttachment` NodeView renders, with no Remove. Phase F3
+// deliberately used the Template's own `FileAttachmentRow` here because the
+// active Section was still the legacy per-item interaction and the two could
+// not move together; F4 moves BOTH sides in one step, which is what makes
+// activating a Section leave every file exactly where and as it was. The card
+// is configured with the Section's own accepted asset kind (`note-file`), so it
+// can open exactly the Blobs a Template Section has always stored and nothing
+// else.
 
 import React from "react";
 import TemplateRichTextView from "./TemplateRichTextView";
-import FileAttachmentRow from "./FileAttachmentRow";
 import { PHOTO_MAX_HEIGHT_PX } from "./PhotoAttachment";
+import { useFileAttachmentCard } from "../editor/fileAttachmentPresentation";
+import { SECTION_FILE_ASSET_KINDS } from "../editor/sectionEditorExtensions";
 import {
+  mediaImageCapStyle,
   mediaImageWrapperClassNames,
   useMediaImagePresentation,
 } from "../editor/mediaImagePresentation";
@@ -71,7 +78,8 @@ export const SECTION_DOC_VIEW_CLASS = "nw-tpl-section-doc";
  *
  * The width cap is exact when the image's intrinsic dimensions are known (no
  * letterboxing); a stylesheet `max-height` covers the case where they are not.
- * It is the SAME rule and the SAME constant the legacy Section photo uses.
+ * It is the SAME rule, the SAME shared helper and the SAME constant the legacy
+ * Section photo and the live Section editor all use.
  */
 function SectionDocImage({ attrs }) {
   const { body } = useMediaImagePresentation({
@@ -83,15 +91,16 @@ function SectionDocImage({ attrs }) {
     height: attrs.height,
   });
 
-  const ratio =
-    Number(attrs.width) > 0 && Number(attrs.height) > 0
-      ? Number(attrs.width) / Number(attrs.height)
-      : null;
-  const maxWidthPx = ratio ? Math.floor(PHOTO_MAX_HEIGHT_PX * ratio) : null;
-
+  // The one-page display cap, through the SAME shared helper the Section
+  // editor's NodeView applies (mediaImageCapStyle) — one rule, so an image
+  // occupies the same box whether its Section is being edited or not.
   const style = {
     ...(mediaWidthStyle(attrs.widthPct) || {}),
-    maxWidth: maxWidthPx ? `min(100%, ${maxWidthPx}px)` : "100%",
+    ...(mediaImageCapStyle({
+      width: attrs.width,
+      height: attrs.height,
+      maxHeightPx: PHOTO_MAX_HEIGHT_PX,
+    }) || {}),
   };
 
   return (
@@ -109,6 +118,32 @@ function SectionDocImage({ attrs }) {
 }
 
 /**
+ * ONE file of a Section document, read-only.
+ *
+ * The SAME card the Section editor's shared `fileAttachment` NodeView renders —
+ * same asset policy, same Open/Preview/Download behaviour, same markup, same
+ * classes. `onRemove` is deliberately absent, which is the entire difference:
+ * a static Section is a reading of the document, and removal is an editor
+ * transaction that belongs to the editor.
+ */
+function SectionDocFile({ attrs }) {
+  const { className, ariaLabel, content } = useFileAttachmentCard({
+    assetId: attrs.assetId || null,
+    name: attrs.name || null,
+    mimeType: attrs.mimeType || null,
+    size: attrs.size,
+    acceptedAssetKinds: SECTION_FILE_ASSET_KINDS,
+  });
+  return (
+    <div className={`${SECTION_DOC_VIEW_CLASS} ${MEDIA_DOC_ROOT_CLASS}`}>
+      <div className={className} role="group" aria-label={ariaLabel}>
+        {content}
+      </div>
+    </div>
+  );
+}
+
+/**
  * The body of ONE segment of a Section document.
  *
  * A TEXT segment renders bare — the caller owns the shell around it, because in
@@ -121,9 +156,13 @@ function SectionDocImage({ attrs }) {
  * which lives with the row's other legacy rendering.
  *
  * @param segment one segment from sectionDocSegments()
- * @param onError (message) => void, for a file card's own action failures
+ *
+ * There is no error callback: a file card reports its own action failures in
+ * its own restrained live region (the shared card's `__error`), exactly as it
+ * does in a Free-form note, rather than raising them into the row's field-error
+ * surface where a Section's own save failures live.
  */
-export default function TemplateSectionDocView({ segment, onError }) {
+export default function TemplateSectionDocView({ segment }) {
   if (!segment) return null;
 
   if (segment.kind === SECTION_SEGMENT_KIND.TEXT) {
@@ -131,18 +170,7 @@ export default function TemplateSectionDocView({ segment, onError }) {
   }
 
   if (segment.kind === SECTION_SEGMENT_KIND.FILE) {
-    const attrs = segment.attrs || {};
-    return (
-      <FileAttachmentRow
-        attachment={{
-          assetId: attrs.assetId,
-          name: attrs.name,
-          mimeType: attrs.mimeType,
-          size: attrs.size,
-        }}
-        onError={onError}
-      />
-    );
+    return <SectionDocFile attrs={segment.attrs || {}} />;
   }
 
   if (segment.kind === SECTION_SEGMENT_KIND.IMAGE) {

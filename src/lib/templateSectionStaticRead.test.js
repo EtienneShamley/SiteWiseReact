@@ -433,10 +433,14 @@ describe("5/34-37. a row still on its legacy answer/evidence is not published as
     expect(isSectionDocumentBody(body)).toBe(false);
   });
 
-  test("only document bodies are published to the render tree", () => {
-    // The one gate, stated once: NoteTemplateDoc publishes a body only when the
-    // reader called it a document.
-    expect(NOTE_DOC_CODE).toContain("if (isSectionDocumentBody(body)) bodies[row.id] = body;");
+  test("only document bodies are published for STATIC rendering", () => {
+    // The one gate, stated once: NoteTemplateDoc publishes a body for static
+    // rendering only when the reader called it a document. (Phase F4 resolves
+    // each body once and derives two things from it — what renders statically,
+    // and which Sections the shared editor may open — but the static gate is
+    // unchanged.)
+    expect(NOTE_DOC_CODE).toContain("const isDocument = isSectionDocumentBody(body);");
+    expect(NOTE_DOC_CODE).toContain("if (isDocument) bodies[row.id] = body;");
   });
 });
 
@@ -469,10 +473,15 @@ describe("48-50. rendering a note writes nothing at all", () => {
 
   test("50. the body memo is a pure derivation: it saves nothing and schedules nothing", () => {
     const memo = NOTE_DOC_CODE.slice(
-      NOTE_DOC_CODE.indexOf("const sectionBodies = useMemo("),
+      NOTE_DOC_CODE.indexOf("const sectionState = useMemo("),
       NOTE_DOC_CODE.indexOf("const displaySectionExtraHeight")
     );
     expect(memo).toContain("resolveSectionBody");
+    // It decides which Sections may be EDITED as well, and that decision is a
+    // pure read too: it creates no editor and touches no registry.
+    expect(memo).toContain("canEditSectionBody");
+    expect(memo).not.toContain("getOrCreate");
+    expect(memo).not.toContain("createSectionEditor");
     for (const forbidden of [
       "saveInstanceConfirmed",
       "setInstance",
@@ -640,20 +649,43 @@ describe("the row's prompt follows the same rule it always has", () => {
   });
 });
 
-describe("3. files use the Template's existing card, read-only", () => {
-  test("no second file card is built", () => {
-    expect(DOC_VIEW_CODE).toContain("FileAttachmentRow");
-    expect(DOC_VIEW_CODE).not.toContain("file-att-row");
-    expect(DOC_VIEW_CODE).not.toContain("note-file-attachment");
+describe("3. files use the SHARED file card, read-only (Phase F4)", () => {
+  test("no second file card is built — it is the editor's own card, unmodified", () => {
+    // Phase F3 used the Template's own compact row because the ACTIVE Section
+    // was still the legacy interaction and the two could not move together.
+    // F4 moves both sides in one step: the live Section renders the shared
+    // `fileAttachment` NodeView, so the static view must render the SAME card
+    // or activating a Section would resize every file in it.
+    expect(DOC_VIEW_CODE).toContain("useFileAttachmentCard");
+    expect(DOC_VIEW_CODE).not.toContain("FileAttachmentRow");
+    // No markup, no class list and no asset policy is restated here.
+    expect(DOC_VIEW_CODE).not.toContain("note-file-attachment__");
+    expect(DOC_VIEW_CODE).not.toContain("safeAttachmentOpen");
+    expect(DOC_VIEW_CODE).not.toContain("getAsset");
   });
 
   test("21. it keeps its open/download behaviour, and offers no Remove", () => {
     const card = DOC_VIEW_CODE.slice(
-      DOC_VIEW_CODE.indexOf("<FileAttachmentRow"),
-      DOC_VIEW_CODE.indexOf("SECTION_SEGMENT_KIND.IMAGE")
+      DOC_VIEW_CODE.indexOf("function SectionDocFile"),
+      DOC_VIEW_CODE.indexOf("The body of ONE segment")
     );
-    expect(card).toContain("onError");
+    // The card's own Open/Preview/Download come from the shared hook; the one
+    // difference from the NodeView is that no remover is supplied at all.
+    expect(card).toContain("useFileAttachmentCard");
+    expect(card).toContain("SECTION_FILE_ASSET_KINDS");
     expect(card).not.toContain("onRemove");
+  });
+
+  test("the shared card renders Remove only when a remover is supplied", () => {
+    const shared = stripComments(read("components/editor/fileAttachmentPresentation.js"));
+    expect(shared).toContain('typeof onRemove === "function" && (');
+    // Nothing ProseMirror-specific leaked into the shared card.
+    for (const forbidden of ["@tiptap", "NodeViewWrapper", "deleteNode", "getPos"]) {
+      expect({ forbidden, hit: shared.includes(forbidden) }).toEqual({
+        forbidden,
+        hit: false,
+      });
+    }
   });
 });
 
@@ -769,14 +801,19 @@ describe("51-55. the legacy interaction still owns editing, and everything else 
     );
   });
 
-  test("54. export still expands the ordered item list — no document reaches it", () => {
+  test("54. export expands a DOCUMENT when a row has one, and the ordered list otherwise", () => {
     const exporter = stripComments(read("lib/templateExportModel.js"));
+    // Transitional (Phase F4): an edited Section must never export content
+    // that differs from what is on screen. The unit shapes are unchanged, so
+    // no renderer, splitter or paginator was touched.
     expect(exporter).toContain("sectionUnitsFor");
+    expect(exporter).toContain("sectionDocUnitsFor");
+    expect(exporter).toContain("const hasDoc = !!(docNodes && docNodes.length)");
+    // It never reaches for the render-path modules or re-derives validity.
     for (const forbidden of [
       "templateSectionBody",
       "templateSectionDocSegments",
       "resolveSectionBody",
-      "sectionDocUnits",
     ]) {
       expect({ forbidden, hit: exporter.includes(forbidden) }).toEqual({
         forbidden,

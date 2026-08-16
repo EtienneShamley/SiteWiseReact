@@ -1,9 +1,11 @@
 // src/components/editor/sectionEditorExtensions.js
 //
-// THE FUTURE FLEXIBLE TEMPLATE SECTION EDITOR'S EXTENSION SET (Phase F2,
-// shared editor core). Prepared, NOT consumed: no production code constructs
-// an editor from this module yet, and nothing here changes what a Template
-// Section renders, edits, or how it is written to `sectionDoc`.
+// THE FLEXIBLE TEMPLATE SECTION EDITOR'S EXTENSION SET (shared editor core).
+//
+// Prepared in Phase F2 and CONSUMED from Phase F4: it is the extension array
+// src/components/template/sectionEditorFactory.js builds every live Section
+// editor from, and the schema authority src/lib/templateSectionDoc.js validates
+// a stored Section document against.
 //
 // It exists now so the SCHEMA AUTHORITY a future Section editor and Section
 // document must agree on — which two real node identities a document may
@@ -41,7 +43,27 @@
 //     `sectionDoc` persistence, no NoteTemplateDoc import, no React lifecycle
 //     beyond what the extension definitions themselves require, and no
 //     localStorage. Building an editor from this array — an actual
-//     `new Editor({...})` — is explicitly Phase F4's job, not this file's.
+//     `new Editor({...})` — belongs to sectionEditorFactory.js, not here.
+//
+// ---------------------------------------------------------------------------
+// TRAILING NODE — OFF, AND WHY
+// ---------------------------------------------------------------------------
+//
+// StarterKit bundles `TrailingNode`, which appends an empty paragraph whenever
+// the document's last child is a block node (an image, a file card). Its plugin
+// decides that from the INITIAL document and then acts on the FIRST transaction
+// of any kind — including a selection-only one. On a Free-form note that is
+// harmless. On a Section it is not: merely clicking into a Section whose last
+// block is a picture would change the document, which would emit an update,
+// which would persist a `sectionDoc` for a Section the user only LOOKED at.
+// "Opening a Section writes nothing" is a hard rule of this phase, so the
+// extension is off.
+//
+// Nothing is lost. StarterKit's `Gapcursor` is on, so a click below a trailing
+// image places a real cursor after it and typing there creates a paragraph —
+// the ordinary word-processor behaviour, and a genuine edit that SHOULD be
+// saved. The same is true above a leading image, which is what replaces the
+// legacy "leading caret" machinery entirely.
 //
 // ---------------------------------------------------------------------------
 // FILE ASSET KINDS
@@ -142,7 +164,7 @@ export const SECTION_FILE_ASSET_KINDS = Object.freeze([ASSET_KIND_NOTE_FILE]);
  * verbatim, so a Section's supported formatting never diverges from what
  * templateRichText.js already sanitizes to.
  */
-export function sectionEditorTextExtensions() {
+export function sectionEditorTextExtensions({ trailingNode = true } = {}) {
   return [
     StarterKit.configure({
       heading: false,
@@ -153,6 +175,9 @@ export function sectionEditorTextExtensions() {
       // Registered below so the link never navigates while it is being
       // edited — same reasoning as TemplateRowEditor.js.
       link: false,
+      // See TRAILING NODE below. `true` (the default) is TEMPLATE_TEXT_EXTENSIONS
+      // verbatim; the Section editor is the one caller that turns it off.
+      trailingNode,
     }),
     Link.configure({ openOnClick: false }),
     Highlight.configure({ multicolor: true }),
@@ -167,26 +192,38 @@ export function sectionEditorTextExtensions() {
  * The complete extension set a future flexible Template Section editor will
  * use: the restrained rich-text set above, plus the shared media nodes.
  *
+ * @param maxImageDisplayHeightPx the tallest an image may RENDER in a Section
+ *        (presentation only — never a stored value). Absent means no cap.
  * @param acceptedFileAssetKinds optional override of SECTION_FILE_ASSET_KINDS
  *        (falls back to it when absent, empty, or not an array) — present so
  *        a future caller can widen accepted kinds explicitly (e.g. once
  *        ingestion from Free-form content is a real feature) without this
  *        module's own default silently changing.
  *
- * NOT CALLED BY ANY PRODUCTION CODE YET. No Editor, no EditorContent, no
- * NodeView is constructed from this — it returns plain extension definitions,
- * the same shape `TEMPLATE_TEXT_EXTENSIONS` and MainArea's Free-form list
- * already are.
+ * No Editor, no EditorContent and no NodeView is constructed here — this
+ * returns plain extension definitions, the same shape
+ * `TEMPLATE_TEXT_EXTENSIONS` and MainArea's Free-form list already are. The one
+ * caller that turns them into a live editor is sectionEditorFactory.js.
  */
-export function sectionEditorExtensions({ acceptedFileAssetKinds } = {}) {
+export function sectionEditorExtensions({
+  acceptedFileAssetKinds,
+  maxImageDisplayHeightPx = null,
+} = {}) {
   const fileKinds =
     Array.isArray(acceptedFileAssetKinds) && acceptedFileAssetKinds.length
       ? acceptedFileAssetKinds
       : SECTION_FILE_ASSET_KINDS;
+  const imageCap =
+    Number(maxImageDisplayHeightPx) > 0 ? Math.round(Number(maxImageDisplayHeightPx)) : null;
 
   return [
-    ...sectionEditorTextExtensions(),
-    AssetImage,
+    // TRAILING NODE OFF — see the module note. This is the ONE deliberate
+    // divergence from TEMPLATE_TEXT_EXTENSIONS, and it exists to keep
+    // "activating a Section writes nothing" true.
+    ...sectionEditorTextExtensions({ trailingNode: false }),
+    // Configured with the Section's one-page display cap and nothing else —
+    // same node, same NodeView, same serializer, same gestures as Free-form.
+    AssetImage.configure({ maxDisplayHeightPx: imageCap }),
     FileAttachment.configure({ acceptedAssetKinds: fileKinds }),
   ];
 }

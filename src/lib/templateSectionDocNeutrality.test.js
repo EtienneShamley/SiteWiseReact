@@ -114,15 +114,26 @@ const SOURCE = Object.fromEntries(
 /* ==================== 36-41. nothing switched over ==================== */
 
 describe("36-41. no runtime path reads or writes the modern document for itself", () => {
-  test("no rendering, export, Quick Add, Refine or editor file mentions sectionDoc at all", () => {
-    // The READ-PATH consumers are held to the same rule, and this is the point
-    // of the authority design: they ask the reader, so not one of them tests
-    // `instance.sectionDoc[rowId]` or knows the map exists.
+  test("only the document owner, the reader, the deletion gate, the ONE writer and the export adapter know the map exists", () => {
+    // The authority design's point: every render site asks the reader, so not
+    // one of them tests `instance.sectionDoc[rowId]` or knows the map exists.
+    //
+    // Phase F4 adds exactly TWO knowing files to F1's set, and both are named
+    // here rather than left to drift:
+    //   NoteTemplateDoc.js    the ONE writer (persistSectionDoc) and the row
+    //                         deletion prune
+    //   templateExportModel.js the transitional export adapter — an edited
+    //                         Section must never export stale content
+    const KNOWS_THE_MAP = new Set([
+      "components/template/NoteTemplateDoc.js",
+      "lib/templateExportModel.js",
+    ]);
     for (const file of [
       ...UNCHANGED_RUNTIME,
       ...READ_PATH_CONSUMERS,
       "components/template/TemplateSectionDocView.js",
     ]) {
+      if (KNOWS_THE_MAP.has(file)) continue;
       // `\bsectionDoc\b` is the STORED MAP itself. (A distinct identifier such
       // as `isSectionDocumentBody` — asking the reader what it decided — is not
       // the map and is exactly what these files are supposed to use.)
@@ -218,24 +229,34 @@ describe("36-41. no runtime path reads or writes the modern document for itself"
     }
   });
 
-  test("nothing persists a document: F3 renders one, and writes nothing", () => {
+  test("EXACTLY ONE file persists a document, and the format string is still minted in one place", () => {
+    // A modern document is created only by a genuine edit, through one writer.
+    // `makeSectionDocValue` — the only place the format string exists — stays
+    // inside the document module: the writer goes through `setRowSectionDoc`,
+    // so no caller can mint a value with a format of its own.
     for (const [file, source] of Object.entries(SOURCE)) {
-      for (const forbidden of [
-        "persistSectionDoc",
-        "makeSectionDocValue",
-        "SECTION_DOC_FORMAT",
-      ]) {
-        if (file === "lib/templateSectionDoc.js") continue;
-        expect({ file, forbidden, hit: source.includes(forbidden) }).toEqual({
-          file,
-          forbidden,
-          hit: false,
-        });
-      }
+      if (file === "lib/templateSectionDoc.js") continue;
+      const isWriter = file === "components/template/NoteTemplateDoc.js";
+      expect({ file, hit: source.includes("makeSectionDocValue") }).toEqual({
+        file,
+        hit: false,
+      });
+      expect({ file, hit: source.includes("persistSectionDoc") }).toEqual({
+        file,
+        hit: isWriter,
+      });
+      // The writer compares against the stored format constant (never a
+      // literal) to refuse a write that would change nothing.
+      expect({ file, hit: source.includes("SECTION_DOC_FORMAT") }).toEqual({
+        file,
+        hit: isWriter,
+      });
     }
   });
 
-  test("no Section editor exists yet — the read path constructs none", () => {
+  test("the READ path still constructs no editor — the live one is somewhere else entirely", () => {
+    // The static Section view, the layout projection and the planner are pure
+    // rendering: a Section that nobody is editing costs no ProseMirror at all.
     for (const file of [...READ_PATH, "lib/templateRowContent.js"]) {
       const source = SOURCE[file];
       expect({ file, hit: /@tiptap/.test(source) }).toEqual({ file, hit: false });
@@ -244,9 +265,11 @@ describe("36-41. no runtime path reads or writes the modern document for itself"
         hit: false,
       });
     }
-    // The one place a Section editor would be constructed is still unconsumed.
+    // Not one of the files this suite watches assembles a Section extension set
+    // of its own: construction lives in sectionEditorFactory.js, which is
+    // asserted to be the single consumer in sectionEditorExtensions.test.js.
     for (const [file, source] of Object.entries(SOURCE)) {
-      expect({ file, hit: source.includes("sectionEditorExtensions") }).toEqual({
+      expect({ file, hit: /\bsectionEditorExtensions\(/.test(source) }).toEqual({
         file,
         hit: false,
       });
@@ -278,10 +301,16 @@ describe("36-41. no runtime path reads or writes the modern document for itself"
     expect(planner).not.toContain("adaptSectionItemsToNodes");
   });
 
-  test("the exporter still expands section items, not documents", () => {
+  test("the exporter reads the document through the SAME reader, and still expands items underneath it", () => {
     const exporter = SOURCE["lib/templateExportModel.js"];
+    // Both paths exist, and the document outranks the item list exactly as it
+    // does on screen — an un-migrated note exports byte-for-byte as before.
     expect(exporter).toContain("sectionUnitsFor");
-    expect(exporter).not.toContain("sectionDoc");
+    expect(exporter).toContain("sectionDocUnitsFor");
+    expect(exporter).toContain("sectionDocNodesForRow");
+    // It never re-derives validity: the shared reader decides, once.
+    expect(exporter).not.toContain("isSectionDocValue");
+    expect(exporter).not.toContain("parseSectionDocHtml");
   });
 });
 

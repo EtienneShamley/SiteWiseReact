@@ -46,6 +46,30 @@ import { MEDIA_CLASS, mediaLayoutClassNames } from "../../lib/editorMediaLayout"
  * classes (selected/resizing/dragging) without this function knowing they
  * exist.
  */
+/**
+ * The optional DISPLAY-HEIGHT CAP a surface may put on an image, expressed as a
+ * wrapper max-width so the image scales PROPORTIONALLY into it rather than
+ * letterboxing inside a box that is too wide.
+ *
+ * It exists for the Template, where an image lives in an atomic, pageable block
+ * and so may never render taller than one usable page — but it lives HERE,
+ * beside the presentation itself, because the static Section view and the live
+ * Section editor must apply the identical rule or activating a Section would
+ * resize its pictures. Free-form passes nothing and is completely unaffected.
+ *
+ * @returns a style object, or null when this surface has no cap.
+ */
+export function mediaImageCapStyle({ width, height, maxHeightPx } = {}) {
+  const cap = Number(maxHeightPx);
+  if (!(cap > 0)) return null;
+  const w = Number(width);
+  const h = Number(height);
+  // Without intrinsic dimensions the ratio is unknown, so the stylesheet's own
+  // `max-height` is the only cap that can apply.
+  if (!(w > 0) || !(h > 0)) return { maxWidth: "100%" };
+  return { maxWidth: `min(100%, ${Math.floor(cap * (w / h))}px)` };
+}
+
 export function mediaImageWrapperClassNames({
   layoutMode,
   layoutSide,

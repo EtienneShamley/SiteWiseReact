@@ -44,7 +44,11 @@ import {
 } from "./templateFields";
 import { customRowsForTemplate, resolveCustomRowOrder } from "./noteCustomRows";
 import { normalizeBranding } from "./templateBranding";
-import { answerToModel, isEmptyAnswerValue } from "./templateRichText";
+import {
+  answerToModel,
+  isEmptyAnswerValue,
+  modelToPlainString,
+} from "./templateRichText";
 import {
   ATTACHMENT_KIND,
   fileKindLabel,
@@ -65,6 +69,11 @@ import {
 } from "./templateSectionContent";
 import { sectionExtraHeightFor } from "./templateSectionHeight";
 import { sectionReplacesRowAnswer } from "./templateRowContent";
+import {
+  SECTION_DOC_NODE,
+  sectionDocAssetIds,
+  sectionDocNodesForRow,
+} from "./templateSectionDoc";
 
 /* ------------------------------------------------------------------------ */
 /* Failure reasons                                                           */
@@ -268,6 +277,28 @@ export function collectTemplateExportAssetRefs(instance, version) {
     }
   }
 
+  // A row whose body is the MODERN Section document names its assets from a
+  // FOURTH collection. Scanned raw and tolerantly, for exactly the reason the
+  // ordered-list pass above is: an entry this build cannot render as a document
+  // may still name a live Blob, and the cost of over-collecting is one wasted
+  // read while the cost of under-collecting is a missing photo in somebody's
+  // report. Nothing is normalized, rewritten or removed — only ids are read.
+  const sectionDoc =
+    instance?.sectionDoc &&
+    typeof instance.sectionDoc === "object" &&
+    !Array.isArray(instance.sectionDoc)
+      ? instance.sectionDoc
+      : {};
+
+  for (const rowId of Object.keys(sectionDoc)) {
+    const entry = sectionDoc[rowId];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    if (typeof entry.html !== "string") continue;
+    const { imageIds, fileIds } = sectionDocAssetIds(entry.html);
+    for (const id of imageIds) claim(id, false);
+    for (const id of fileIds) claim(id, true);
+  }
+
   return {
     logoAssetId: version?.logoAssetId ?? null,
     legacyLogoSrc: typeof version?.logoSrc === "string" ? version.logoSrc : null,
@@ -446,6 +477,83 @@ function sectionUnitsFor(items, assets) {
   return units;
 }
 
+/**
+ * One MODERN Section document's nodes as export units, IN DOCUMENT ORDER.
+ *
+ * TRANSITIONAL (Phase F4). Phase F6 owns the proper `sectionDoc` export
+ * adapter; this exists because the alternative is unacceptable: once a Section
+ * has been edited, its document is what the user sees, and an exporter still
+ * reading only the frozen `sectionContent` would export STALE content — a
+ * report that silently disagrees with the screen. It is deliberately the
+ * SMALLEST such adapter: it produces exactly the units `sectionUnitsFor`
+ * already produces for the ordered list, so every renderer, splitter and
+ * paginator is untouched.
+ *
+ *   text node  -> the same BLOCK units a text ITEM produces (per model block).
+ *                 A run that reads as nothing produces none, exactly as
+ *                 `sectionTextUnits` suppresses the branded empty state per
+ *                 item — the ROW still decides once whether it is empty.
+ *   image node -> the same PHOTO unit a photo item produces, resolved through
+ *                 the same asset map. `layoutMode`/`layoutSide` are NOT carried:
+ *                 v1 exports every placement as BLOCK in every format, which is
+ *                 deterministic and honest (recorded follow-up).
+ *   file node  -> the same FILE unit a file item produces.
+ */
+function sectionDocUnitsFor(nodes, assets) {
+  const units = [];
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (!node || typeof node !== "object") continue;
+
+    if (node.type === SECTION_DOC_NODE.TEXT) {
+      const blocks = Array.isArray(node.blocks) ? node.blocks : [];
+      if (!blocks.length) continue;
+      // A run of blank paragraphs is not content, and must not print a stray
+      // blank line above or between real content.
+      if (!modelToPlainString(blocks).trim()) continue;
+      for (const block of blocks) units.push({ type: EXPORT_UNIT.BLOCK, block });
+      continue;
+    }
+
+    const attrs = node.attrs || {};
+    if (node.type === SECTION_DOC_NODE.IMAGE) {
+      if (!attrs.assetId && isSafeImageDataUrl(attrs.src)) {
+        units.push(legacyPhotoUnit(attrs.src, units.length));
+        continue;
+      }
+      // The SAME unit builder a photo item uses, so an exported document image
+      // and an exported section photo can never differ in shape.
+      units.push(
+        photoUnit(
+          {
+            assetId: attrs.assetId,
+            name: attrs.alt,
+            display: { widthPct: attrs.widthPct, alignment: "left" },
+            intrinsicWidth: attrs.width,
+            intrinsicHeight: attrs.height,
+          },
+          assets
+        )
+      );
+      continue;
+    }
+
+    if (node.type === SECTION_DOC_NODE.FILE) {
+      units.push(
+        fileUnit(
+          {
+            assetId: attrs.assetId,
+            name: attrs.name,
+            mimeType: attrs.mimeType,
+            size: attrs.size,
+          },
+          assets
+        )
+      );
+    }
+  }
+  return units;
+}
+
 function attachmentUnitsFor(row, rawList, assets) {
   const type = normalizeType(row.type);
   const isAttachmentRow = type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE;
@@ -513,6 +621,8 @@ export function buildTemplateExportModel({
   // Read raw and passed straight to the shared read model. Nothing here
   // normalizes the stored map, writes it back, or creates a row in it.
   const sectionContent = instance.sectionContent ?? null;
+  // Read raw; validity is decided once, by the shared reader, per row.
+  const sectionDoc = instance.sectionDoc ?? null;
   const sectionExtraHeight = instance.sectionExtraHeight ?? null;
 
   // Option ids belonging to THIS pinned version only. A value that is one of
@@ -540,11 +650,23 @@ export function buildTemplateExportModel({
     // `sectionReplacesRowAnswer` and read here through the same read model the
     // renderer uses. A row with no valid section content takes the untouched
     // legacy path below and exports exactly as it always did.
-    const sectionItems = sectionItemsForRow(sectionContent, row.id);
-    const hasSection = sectionItems.length > 0;
+    //
+    // The MODERN Section document outranks the ordered item list exactly as it
+    // does on screen (src/lib/templateSectionBody.js): a valid `sectionDoc`
+    // entry is the row's body, and the frozen `sectionContent` underneath it is
+    // neither exported as well nor cleared. An invalid or absent entry falls
+    // through to the unchanged legacy path.
+    const docNodes = sectionDocNodesForRow(sectionDoc, row.id);
+    const hasDoc = !!(docNodes && docNodes.length);
+    const sectionItems = hasDoc ? [] : sectionItemsForRow(sectionContent, row.id);
+    const hasSection = hasDoc || sectionItems.length > 0;
     const sectionOwnsBody =
       hasSection && sectionReplacesRowAnswer(type, isAttachmentRow);
-    const sectionUnits = hasSection ? sectionUnitsFor(sectionItems, assets) : [];
+    const sectionUnits = hasDoc
+      ? sectionDocUnitsFor(docNodes, assets)
+      : hasSection
+      ? sectionUnitsFor(sectionItems, assets)
+      : [];
 
     if (isAttachmentRow) {
       // A legacy Photo/File field keeps its PRIMARY attachments first and fixed;

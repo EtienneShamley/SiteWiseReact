@@ -63,6 +63,7 @@ import {
   normalizeMediaWidthPct,
 } from "../../lib/editorMediaLayout";
 import {
+  mediaImageCapStyle,
   mediaImageWrapperClassNames,
   useMediaImagePresentation,
 } from "./mediaImagePresentation";
@@ -142,7 +143,7 @@ const stopDrag = (e) => {
   e.stopPropagation();
 };
 
-function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
+function AssetImageView({ node, editor, getPos, selected, deleteNode, extension }) {
   const { assetId, src, alt, title, width, height } = node.attrs;
 
   // The live resize preview: inline width only, NEVER the document. Null when
@@ -424,12 +425,23 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
     ],
   });
 
+  // The surface's optional display-height cap (Template Sections have one, so a
+  // picture always fits inside its own atomic page block; Free-form has none).
+  // Expressed through the SHARED helper the static Section view uses, so an
+  // image occupies the same box whether its Section is being edited or not.
+  const capStyle = mediaImageCapStyle({
+    width,
+    height,
+    maxHeightPx: extension && extension.options && extension.options.maxDisplayHeightPx,
+  });
+  const wrapperStyle = { ...(mediaWidthStyle(effectivePct) || {}), ...(capStyle || {}) };
+
   return (
     <NodeViewWrapper
       ref={wrapperRef}
       as="div"
       className={classNames}
-      style={mediaWidthStyle(effectivePct) || undefined}
+      style={Object.keys(wrapperStyle).length ? wrapperStyle : undefined}
       onDragStart={stopDrag}
     >
       {body}
@@ -478,10 +490,18 @@ export const AssetImage = Image.extend({
   draggable: false,
 
   // Legacy notes hold data: images; refusing to parse them would delete them.
+  //
+  // `maxDisplayHeightPx` is the ONE thing a consuming surface configures: the
+  // tallest an image may RENDER on that surface. Free-form never calls
+  // `.configure()` and so has no cap, exactly as before; a Template Section
+  // passes the existing one-page constant, because a Section image lives in an
+  // atomic, pageable block. It is presentation only — it never changes a
+  // stored attribute, a serialized value or what a resize persists.
   addOptions() {
     return {
       ...this.parent?.(),
       allowBase64: true,
+      maxDisplayHeightPx: null,
     };
   },
 
