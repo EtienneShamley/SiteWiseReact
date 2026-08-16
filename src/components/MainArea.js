@@ -41,6 +41,7 @@ import { refinedTextToParagraphHtml } from "../lib/refineClient";
 import {
   DEFAULT_REFINE_STYLE,
   REFINE_OUTCOME,
+  isAllowedRefineStyle,
   refineMessageFor,
 } from "../lib/refineContract";
 import {
@@ -1389,6 +1390,27 @@ export default function MainArea() {
   const refineBackupHtml = getRefineBackup(refineBackups, noteKey);
 
   /**
+   * The AI WRITING STYLE the user has selected in the bottom bar.
+   *
+   * The control is a general one ("AI writing style"), but the note-level
+   * Refine lives here and previously had no way to see it: it always sent
+   * DEFAULT_REFINE_STYLE, so choosing Formal report, Summary or Casual memo and
+   * pressing Refine silently produced a concise-professional rewrite and three
+   * of the four modes never reached the provider at all.
+   *
+   * Held in a ref because it is read at CLICK time, not rendered: a style
+   * change must not re-render this component or invalidate the refine handler.
+   * The value is re-checked against the shared allowlist before it is used, so
+   * a stale or malformed report can never become an instruction.
+   */
+  const selectedRefineStyleRef = useRef(DEFAULT_REFINE_STYLE);
+  const handleRefineStyleChange = useCallback((style) => {
+    selectedRefineStyleRef.current = isAllowedRefineStyle(style)
+      ? style
+      : DEFAULT_REFINE_STYLE;
+  }, []);
+
+  /**
    * Refine the ACTIVE Free-form note.
    *
    * Applies to that note and nothing else: not the Template form, not its
@@ -1421,7 +1443,12 @@ export default function MainArea() {
     refineInFlightRef.current = true;
     setRefineState((prev) => beginRefine(prev, { noteId: originNoteId, requestId }));
 
-    const result = await refineText({ text: plain, style: DEFAULT_REFINE_STYLE });
+    // The style the user actually chose. Re-validated here rather than trusted:
+    // this is the value that selects the backend's transformation mode.
+    const style = isAllowedRefineStyle(selectedRefineStyleRef.current)
+      ? selectedRefineStyleRef.current
+      : DEFAULT_REFINE_STYLE;
+    const result = await refineText({ text: plain, style });
 
     refineInFlightRef.current = false;
     // A superseded request may neither write content nor clear the loading
@@ -1965,6 +1992,9 @@ export default function MainArea() {
               onInsertFile={handleInsertFileAtCursor}
               onFileError={handleInsertError}
               disabled={!noteTitle || !editor}
+              // The note-level Refine above reads this; see
+              // handleRefineStyleChange.
+              onStyleChange={handleRefineStyleChange}
               // Quick Add destination. The bar names it, gates capture on it,
               // and stamps asynchronous captures with it — it never decides it.
               target={quickAddTarget}

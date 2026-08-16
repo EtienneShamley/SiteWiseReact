@@ -148,6 +148,17 @@ export default function BottomBar({
   //   ({ text, attachments }) => Promise<{ ok, deliveredIds, textDelivered, stale }>
   // The composer clears only what `deliveredIds` says actually landed.
   onSendComposer,
+  // The AI WRITING STYLE the user has selected, reported upward whenever it
+  // changes (and on note restore).
+  //
+  // The control is presented as "AI writing style" — a general choice, not a
+  // composer-only one — but the note-level Refine lives in MainArea and had no
+  // way to see it, so it always sent the default preset. Selecting "Summary"
+  // and pressing Refine therefore produced a concise-professional rewrite, and
+  // three of the four modes never reached the provider at all.
+  //
+  //   (style) => void
+  onStyleChange,
 }) {
   const { currentNoteId } = useAppState();
 
@@ -361,6 +372,15 @@ export default function BottomBar({
     styleMap[currentNoteId] = stylePreset || "concise, professional";
     saveMap(STYLE_MEM_KEY, styleMap);
   }, [currentNoteId, stylePreset]);
+
+  // The selected style, reported to the owner of the note-level Refine. Held in
+  // a ref so a parent that hands down a fresh callback on every render cannot
+  // turn this into a render loop; the effect reacts to the STYLE changing.
+  const onStyleChangeRef = useRef(onStyleChange);
+  onStyleChangeRef.current = onStyleChange;
+  useEffect(() => {
+    onStyleChangeRef.current?.(stylePreset);
+  }, [stylePreset]);
 
   useEffect(() => {
     if (!currentNoteId) return;
