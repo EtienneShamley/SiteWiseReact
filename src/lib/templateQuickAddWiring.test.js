@@ -251,8 +251,13 @@ describe("the Template composition is delivered to one captured destination", ()
 
   test("the ONE composer contract is reused, not reimplemented", () => {
     expect(templateSend).toMatch(/await deliverQuickAddComposer\(\{/);
-    // A section has no caret: nothing is placed and no block is opened.
-    expect(templateSend).not.toMatch(/placeCaret|openBlockAfterAttachment|restoreFreeformInsertPoint/);
+    // Phase F5: a modern Section DOES have a caret, so the same separator
+    // Free-form uses between staged attachments is forwarded too — but it is
+    // NoteTemplateDoc's decision (openSectionQuickAddSeparator) whether it
+    // does anything; this file only reuses the composer contract, never
+    // Free-form's OWN caret-capture machinery.
+    expect(templateSend).toMatch(/openBlockAfterAttachment: \(\) => compose\.openBlockAfterAttachment\?\.\(rowId\)/);
+    expect(templateSend).not.toMatch(/placeCaret|restoreFreeformInsertPoint/);
     expect(templateSend).not.toMatch(/insertLocalImageAsset|insertFreeformFileAttachment/);
   });
 

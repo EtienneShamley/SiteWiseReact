@@ -927,14 +927,22 @@ export default function MainArea() {
    *
    * The SAME composer contract as the Free-form path, deliberately: the same
    * ordering (attachments in staged order, then the text as one item), the same
-   * `deliveredIds` partial-success semantics, and the same rule that text is
-   * sent only once every attachment has landed, so a section never gets a
-   * description for evidence that is not there. There is one composition
+   * `deliveredIds` partial-success semantics, the same rule that text is sent
+   * only once every attachment has landed (so a section never gets a
+   * description for evidence that is not there), and — Phase F5 — the SAME
+   * `openBlockAfterAttachment` separator between staged items, so a second
+   * attachment or the trailing text cannot land inside the NODE SELECTION the
+   * previous insertion left behind and overwrite it. There is one composition
    * semantic in this application, not two.
    *
-   * What differs is the destination model. A section has no caret: Quick Add v1
-   * appends the completed composition to the END of the row's content, so no
-   * position is placed and no block is opened between items.
+   * The destination MODEL differs, and is entirely NoteTemplateDoc's decision
+   * (`sectionDocQuickAddTarget` — see NoteTemplateDoc.js): a row on the legacy
+   * `sectionContent` route still appends at the end, with no position placed
+   * and no block opened between items, exactly as before. A row on the modern
+   * document route inserts at the ACTIVE Section's current cursor, or at the
+   * END of an inactive one's document — this file has no opinion on which;
+   * it only forwards the composer's own separator, unconditionally, exactly
+   * as it does for Free-form below.
    *
    * THE DESTINATION IS CAPTURED ONCE, HERE. `activeTemplateRowId` (via the
    * resolved target) remains the only authority for which row that is — there is
@@ -984,6 +992,11 @@ export default function MainArea() {
     const result = await deliverQuickAddComposer({
       text,
       attachments,
+      // The SAME separator Free-form uses below, forwarded to the section
+      // composer unconditionally. It is a no-op for a row on the legacy
+      // append-at-end route (see NoteTemplateDoc.js's openSectionQuickAddSeparator)
+      // — this file does not need to know which route the row is on.
+      openBlockAfterAttachment: () => compose.openBlockAfterAttachment?.(rowId),
       insertAttachment: async (item) => {
         if (!isCurrentTarget()) {
           staleReported = true;

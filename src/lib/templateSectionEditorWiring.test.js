@@ -477,24 +477,70 @@ describe("50. Quick Add cannot create hidden content", () => {
   const target = between(
     NOTE_DOC,
     "const sectionDocQuickAddTarget = useCallback(",
-    "const placeSectionCaretAtEnd = useCallback("
+    "const openSectionQuickAddSeparator = useCallback("
+  );
+  const separator = between(
+    NOTE_DOC,
+    "const openSectionQuickAddSeparator = useCallback(",
+    "const validateSectionFile = useCallback("
   );
 
-  test("a capture is routed to the DOCUMENT whenever a document exists", () => {
+  test("routing is delegated to the ONE pure rule, not re-decided here", () => {
     expect(target).toContain("const isModern = rowHasModernSectionDoc(rowId);");
-    expect(target).toContain("if (!isModern && !registry.has(identity)) return null;");
+    expect(target).toContain("const entry = sectionEditableRef.current[rowId];");
+    expect(target).toContain("resolveSectionQuickAddRoute({");
+    expect(target).toContain("isModern,");
+    expect(target).toContain("hasLiveEditor: registry.has(identity),");
+    expect(target).toContain("eligible: !!entry,");
+    expect(NOTE_DOC).toContain("resolveSectionQuickAddRoute,");
+    expect(NOTE_DOC).toContain("SECTION_QUICK_ADD_ROUTE,");
+    expect(NOTE_DOC).toContain('} from "../../lib/templateSectionBody";');
+  });
+
+  test("LEGACY route (F5): not modern, no live editor, not eligible — unchanged sectionContent path", () => {
+    expect(target).toContain(
+      "if (route === SECTION_QUICK_ADD_ROUTE.LEGACY) return null;"
+    );
   });
 
   test("…and also whenever a LIVE editor exists, whose next transaction would erase it", () => {
     // A legacy write into `sectionContent` while an editor is open would be
     // overwritten by the first keystroke that persists the document.
-    expect(target).toContain("registry.has(identity)");
+    expect(target).toContain("hasLiveEditor: registry.has(identity),");
+  });
+
+  test("F5: an UNTOUCHED but eligible row is now routed to the document too", () => {
+    // Before F5 this branch required `isModern || registry.has(identity)`;
+    // the gate now also opens for a row that has simply never been touched
+    // but is safely eligible (`entry` truthy) — its first capture becomes
+    // the row's first modern write instead of one more sectionContent append.
+    expect(target).not.toContain(
+      "if (!isModern && !registry.has(identity)) return null;"
+    );
+    expect(target).toContain("eligible: !!entry,");
   });
 
   test("a capture is REFUSED, visibly, when neither destination is safe", () => {
+    expect(target).toContain("route === SECTION_QUICK_ADD_ROUTE.REFUSE");
     expect(target).toContain("refuse:");
     expect(NOTE_DOC).toContain("if (target && target.refuse) {");
     expect(NOTE_DOC).toContain("setFieldError(rowId, target.refuse);");
+  });
+
+  test("creating the editor for an eligible route writes nothing by itself", () => {
+    // getOrCreate is the ONLY construction call in the DOCUMENT branch, and
+    // nothing after it before the return is a write — the capture's own
+    // transaction (outside this function) is what may eventually save.
+    const documentBranch = target.slice(target.indexOf("registry.getOrCreate("));
+    expect(documentBranch).toContain("registry.getOrCreate(");
+    expect(documentBranch).not.toContain("persistSectionDoc");
+    expect(documentBranch).not.toContain("saveInstanceConfirmed");
+  });
+
+  test("the ACTIVE flag names the ONE mounted Section, never a retained-but-inactive one", () => {
+    expect(target).toContain(
+      "return { editor, active: activeSectionRowIdRef.current === rowId };"
+    );
   });
 
   test("the document route uses the SHARED insertion pipeline, with Template policy", () => {
@@ -512,8 +558,20 @@ describe("50. Quick Add cannot create hidden content", () => {
     expect(NOTE_DOC).toContain("const check = validateNoteFile(file);");
     expect(attach).toContain("createPhotoAsset(");
     expect(attach).toContain("createNoteFileAsset(");
-    // Quick Add v1's rule is unchanged: a capture lands at the END.
-    expect(attach).toContain("placeSectionCaretAtEnd(editor)");
+  });
+
+  test("F5: ACTIVE inserts at the current selection, INACTIVE still lands at the END", () => {
+    const attach = between(
+      NOTE_DOC,
+      "const appendComposedAttachment = useCallback(",
+      "const appendComposedText = useCallback("
+    );
+    expect(attach).toContain(
+      "const beforeInsert = target.active\n            ? undefined\n            : () => placeSectionCaretAtEnd(editor);"
+    );
+    expect(attach).toContain("beforeInsert,");
+    // The inactive rule is unchanged, not reimplemented — same helper.
+    expect(attach).not.toContain("beforeInsert: () => placeSectionCaretAtEnd(editor)");
   });
 
   test("text goes through the EXISTING answer sanitization boundary", () => {
@@ -523,7 +581,33 @@ describe("50. Quick Add cannot create hidden content", () => {
       "const templateComposeApi = useMemo("
     );
     expect(textPath).toContain("modelToHtml(answerToModel(value))");
+    // INACTIVE: unchanged end-of-document insertion.
     expect(textPath).toContain("insertContentAt(editor.state.doc.content.size, html)");
+    // F5 ACTIVE: the SAME `insertContent` shape Free-form's own caret
+    // insertion uses (src/components/MainArea.js insertFreeformTextAtCaret),
+    // never a second text-insertion implementation.
+    expect(textPath).toContain("editor.chain().insertContent(html).run()");
+    expect(textPath).toContain("target.active");
+  });
+
+  test("F5: the multi-item separator only ever touches the ACTIVE row's editor", () => {
+    expect(separator).toContain(
+      "if (!rowId || activeSectionRowIdRef.current !== rowId) return;"
+    );
+    // The SAME node kind, and the SAME `.to`-of-selection anchor, Free-form's
+    // openBlockAfterAttachment uses (src/components/MainArea.js) — reused in
+    // shape, not reimplemented independently.
+    expect(separator).toContain('{ type: "paragraph" }');
+    expect(separator).toContain("editor.state.selection.to");
+  });
+
+  test("the separator is wired into the ONE composer contract, not a second one", () => {
+    expect(NOTE_DOC).toContain(
+      "openBlockAfterAttachment: openSectionQuickAddSeparator,"
+    );
+    expect(MAIN_AREA).toContain(
+      "openBlockAfterAttachment: () => compose.openBlockAfterAttachment?.(rowId),"
+    );
   });
 
   test("a legacy row's Quick Add path is completely unchanged", () => {

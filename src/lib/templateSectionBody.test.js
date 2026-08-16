@@ -9,7 +9,12 @@
 //     older representation renders exactly as it did before; and
 //   - a structured row's typed value and a legacy Photo/File field's primary
 //     attachments are never turned into document content.
-import { SECTION_BODY_SOURCE, resolveSectionBody } from "./templateSectionBody";
+import {
+  SECTION_BODY_SOURCE,
+  resolveSectionBody,
+  resolveSectionQuickAddRoute,
+  SECTION_QUICK_ADD_ROUTE,
+} from "./templateSectionBody";
 import { SECTION_DOC_FORMAT, SECTION_DOC_NODE, sectionDocHtmlFromNodes } from "./templateSectionDoc";
 
 const IMAGE_ID = "img-asset-0001";
@@ -402,5 +407,44 @@ describe("22. an ordinary Section row with nothing but an answer", () => {
     expect(types(body)).toEqual([SECTION_DOC_NODE.TEXT, SECTION_DOC_NODE.IMAGE]);
     expect(body.skipped).toHaveLength(1);
     expect(body.skipped[0].entry).toBe("data:image/png;base64,AAAA");
+  });
+});
+
+describe("Phase F5 — resolveSectionQuickAddRoute: where does ONE capture go", () => {
+  test("not modern, no live editor, not eligible -> LEGACY (unchanged sectionContent path)", () => {
+    expect(
+      resolveSectionQuickAddRoute({ isModern: false, hasLiveEditor: false, eligible: false })
+    ).toBe(SECTION_QUICK_ADD_ROUTE.LEGACY);
+  });
+
+  test("F5: untouched but eligible -> DOCUMENT (first capture becomes the first modern write)", () => {
+    expect(
+      resolveSectionQuickAddRoute({ isModern: false, hasLiveEditor: false, eligible: true })
+    ).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+  });
+
+  test("already modern -> DOCUMENT when eligible, REFUSE when not (unrepresentable material)", () => {
+    expect(
+      resolveSectionQuickAddRoute({ isModern: true, hasLiveEditor: false, eligible: true })
+    ).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+    expect(
+      resolveSectionQuickAddRoute({ isModern: true, hasLiveEditor: false, eligible: false })
+    ).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
+  });
+
+  test("a LIVE editor already holds this row's undo history -> DOCUMENT when eligible, REFUSE when not", () => {
+    // A legacy write into sectionContent while an editor is open would be
+    // overwritten by the first keystroke that persists the document, so a
+    // live editor routes into the document exactly like an already-modern row.
+    expect(
+      resolveSectionQuickAddRoute({ isModern: false, hasLiveEditor: true, eligible: true })
+    ).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+    expect(
+      resolveSectionQuickAddRoute({ isModern: false, hasLiveEditor: true, eligible: false })
+    ).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
+  });
+
+  test("defaults to LEGACY when called with nothing", () => {
+    expect(resolveSectionQuickAddRoute()).toBe(SECTION_QUICK_ADD_ROUTE.LEGACY);
   });
 });

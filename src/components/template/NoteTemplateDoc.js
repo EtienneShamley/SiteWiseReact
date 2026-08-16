@@ -78,7 +78,9 @@ import {
   isPlainLegacyTextBody,
   isSectionDocumentBody,
   resolveSectionBody,
+  resolveSectionQuickAddRoute,
   sectionBodyHtml,
+  SECTION_QUICK_ADD_ROUTE,
 } from "../../lib/templateSectionBody";
 import {
   SECTION_DOC_FORMAT,
@@ -1684,31 +1686,46 @@ export default function NoteTemplateDoc({
    * the destination's rules, not the capture bar's early check.
    */
   /**
-   * TRANSITIONAL QUICK ADD SAFETY (Phase F4; Phase F5 owns Quick Add properly).
+   * QUICK ADD ROUTING AND POSITIONING — Phase F5.
    *
-   * Quick Add still writes `sectionContent`. Once a Section has a MODERN
-   * document that map is frozen underneath it, so a capture written there would
-   * be invisible — a user's photograph or dictated note simply gone from the
-   * screen. That must not be possible, so this decides, for one row, where a
-   * capture actually goes:
+   * Quick Add is one more ingestion surface into a Section's editor, not a
+   * second insertion system: this decides ONLY where one row's capture goes
+   * and, when it goes into the document, whether it lands at the user's
+   * cursor or at the end. Everything downstream — asset validation, the Blob
+   * write, the node insertion, the undo entry, the confirmed save — is the
+   * SAME shared pipeline every other Section edit already uses.
    *
-   *   null            this row is still legacy AND has no live editor — the
-   *                   unchanged `sectionContent` path, exactly as today.
-   *   { editor }      this row's body is a modern document, OR a Section editor
-   *                   for it is already live (whose next transaction would
-   *                   otherwise persist a document that never contained the
-   *                   capture). The capture goes into the DOCUMENT, through the
-   *                   same shared insertion pipeline the Free-form note uses,
-   *                   and the editor's own update handler persists it.
-   *   { refuse }      this row's body is a modern document the shared editor may
-   *                   not open (unrepresentable material — see the body memo).
-   *                   Neither destination is safe, so the capture is REFUSED
-   *                   with a visible message rather than written somewhere the
-   *                   user cannot see it.
+   * `resolveSectionQuickAddRoute` (src/lib/templateSectionBody.js) states the
+   * three-way rule once, purely; this wraps it with the live registry and
+   * returns:
    *
-   * Deliberately NOT a Quick Add redesign: there is no caret placement and no
-   * insertion-point capture here. A capture lands at the END of the Section,
-   * which is Quick Add v1's existing rule, unchanged.
+   *   null              LEGACY route — this row is not modern, has no live
+   *                      editor, and is not eligible to open one. The
+   *                      unchanged `sectionContent` path, exactly as before.
+   *   { editor, active } DOCUMENT route — this row's body is a modern
+   *                      document, OR a Section editor for it is already
+   *                      live (whose next transaction would otherwise
+   *                      persist a document that never contained the
+   *                      capture), OR the row is untouched but SAFELY
+   *                      ELIGIBLE to open one — in which case this call
+   *                      creates that editor now, and the capture that
+   *                      follows becomes the row's FIRST modern write.
+   *                      Creating the editor here writes nothing by itself
+   *                      (the document is supplied at construction, exactly
+   *                      as activation already relies on) — only the
+   *                      capture's own transaction, through the editor's
+   *                      existing `onUpdate` → `persistSectionDoc` path,
+   *                      ever saves anything. `active` is whether this row
+   *                      is the ONE Section currently mounted with a live
+   *                      cursor (`activeSectionRowIdRef`) — the caller uses
+   *                      it to choose the cursor vs. the end, never a
+   *                      retained-but-stale selection from an earlier visit.
+   *   { refuse }        REFUSE route — this row's body is a modern document
+   *                      the shared editor may not open (unrepresentable
+   *                      material — see the body memo). Neither destination
+   *                      is safe, so the capture is refused with a visible
+   *                      message rather than written somewhere the user
+   *                      cannot see it.
    */
   const sectionDocQuickAddTarget = useCallback(
     (rowId) => {
@@ -1717,15 +1734,25 @@ export default function NoteTemplateDoc({
       if (!identity) return null;
       const registry = getSectionRegistry();
       const isModern = rowHasModernSectionDoc(rowId);
-      if (!isModern && !registry.has(identity)) return null;
-
       const entry = sectionEditableRef.current[rowId];
-      if (!entry) {
+
+      const route = resolveSectionQuickAddRoute({
+        isModern,
+        hasLiveEditor: registry.has(identity),
+        eligible: !!entry,
+      });
+
+      if (route === SECTION_QUICK_ADD_ROUTE.LEGACY) return null;
+
+      if (route === SECTION_QUICK_ADD_ROUTE.REFUSE) {
         return {
           refuse:
             "This section holds content this version cannot edit, so the capture was not added. Nothing was changed.",
         };
       }
+
+      // DOCUMENT route. `entry` is guaranteed present here — REFUSE is the
+      // only outcome for a missing one (see resolveSectionQuickAddRoute).
       const editor = registry.getOrCreate(identity, {
         rowId,
         html: entry.html,
@@ -1737,9 +1764,45 @@ export default function NoteTemplateDoc({
             "This section could not be opened, so the capture was not added. Nothing was changed.",
         };
       }
-      return { editor };
+      return { editor, active: activeSectionRowIdRef.current === rowId };
     },
     [rowIsPresent, sectionIdentityFor, getSectionRegistry, rowHasModernSectionDoc]
+  );
+
+  /**
+   * Open a fresh empty block right after the CURRENT selection of one row's
+   * active Section editor — the exact separator Free-form's Quick Add
+   * composer already uses between staged attachments
+   * (`openBlockAfterAttachment` in src/components/MainArea.js), reused here
+   * rather than reimplemented.
+   *
+   * It exists for ONE reason: a newly inserted image or file node is left as
+   * a NODE SELECTION covering itself, and the shared insertion commands
+   * insert at (and therefore replace) the current selection. Without this,
+   * the second staged item in one Send would replace the first rather than
+   * follow it — only reachable when the Section is ACTIVE, because the
+   * inactive route always recomputes a fresh end-of-document position
+   * before every item (see `placeSectionCaretAtEnd`), so nothing there can
+   * ever be overwritten. A no-op for an inactive row, or a row with no live
+   * editor, by design.
+   */
+  const openSectionQuickAddSeparator = useCallback(
+    (rowId) => {
+      if (!rowId || activeSectionRowIdRef.current !== rowId) return;
+      const identity = sectionIdentityFor(rowId);
+      if (!identity) return;
+      const editor = getSectionRegistry().get(identity);
+      if (!editor || editor.isDestroyed) return;
+      try {
+        const pos = editor.state.selection.to;
+        editor.chain().insertContentAt(pos, { type: "paragraph" }).run();
+      } catch {
+        // Best-effort only: a missed separator risks the NEXT item replacing
+        // this one, which is no worse than not attempting it, and must not
+        // fail the delivery already in flight.
+      }
+    },
+    [sectionIdentityFor, getSectionRegistry]
   );
 
   /**
@@ -1781,7 +1844,7 @@ export default function NoteTemplateDoc({
       const isPhoto = kind === ATTACHMENT_KIND.PHOTO;
       clearFieldError(rowId);
 
-      // Transitional routing — see sectionDocQuickAddTarget.
+      // Quick Add routing — see sectionDocQuickAddTarget.
       const target = sectionDocQuickAddTarget(rowId);
       if (target && target.refuse) {
         setFieldError(rowId, target.refuse);
@@ -1791,6 +1854,13 @@ export default function NoteTemplateDoc({
         setFieldBusy((prev) => ({ ...prev, [rowId]: true }));
         try {
           const editor = target.editor;
+          // ACTIVE Section (the one the user's cursor is actually in): omit
+          // `beforeInsert` entirely, so the shared pipeline lands the node at
+          // the editor's CURRENT selection — never a stale retained one.
+          // INACTIVE: the existing, unchanged end-of-document rule.
+          const beforeInsert = target.active
+            ? undefined
+            : () => placeSectionCaretAtEnd(editor);
           // The SHARED insertion pipeline, with the Template's own validators
           // and its own asset kinds injected — the same ordering rule as
           // everywhere else: validate, store the Blob, and only then insert the
@@ -1804,7 +1874,7 @@ export default function NoteTemplateDoc({
                   blob: file,
                   editor,
                   name: file?.name,
-                  beforeInsert: () => placeSectionCaretAtEnd(editor),
+                  beforeInsert,
                 },
                 {
                   validate: validateComposedPhoto,
@@ -1819,7 +1889,7 @@ export default function NoteTemplateDoc({
                   file,
                   editor,
                   isCurrentTarget: () => rowIsPresent(rowId),
-                  beforeInsert: () => placeSectionCaretAtEnd(editor),
+                  beforeInsert,
                 },
                 {
                   validate: validateSectionFile,
@@ -1900,14 +1970,20 @@ export default function NoteTemplateDoc({
   );
 
   /**
-   * Append ONE Quick Add text item to a row's ordered section content.
+   * Append ONE Quick Add text item to a row.
    *
-   * Synchronous, because it writes a reference-free value through the same
-   * confirmed instance save and nothing else. It is appended at the END of the
-   * section — Quick Add v1 never inserts at a caret — and it NEVER touches
-   * `answers[rowId]` or `customRows[].answer`, whatever the row's field type is.
-   * A structured row's typed value is untouched by construction: this writer has
-   * no access to it.
+   * For a row on the LEGACY route this is unchanged: synchronous, appended at
+   * the END of the ordered section content (Quick Add's `sectionContent`
+   * writer never inserts at a caret), and it NEVER touches `answers[rowId]`
+   * or `customRows[].answer`, whatever the row's field type is. A structured
+   * row's typed value is untouched by construction: this writer has no
+   * access to it.
+   *
+   * For a row on the DOCUMENT route (see sectionDocQuickAddTarget), the text
+   * is sanitized through the existing answer boundary and inserted as one
+   * editor transaction — at the ACTIVE Section's current selection, or at the
+   * END of an inactive one's document. Never both, and never a retained
+   * cursor from an earlier visit for the inactive case.
    */
   const appendComposedText = useCallback(
     (rowId, value) => {
@@ -1919,7 +1995,7 @@ export default function NoteTemplateDoc({
       }
       clearFieldError(rowId);
 
-      // Transitional routing — see sectionDocQuickAddTarget.
+      // Quick Add routing — see sectionDocQuickAddTarget.
       const target = sectionDocQuickAddTarget(rowId);
       if (target && target.refuse) {
         setFieldError(rowId, target.refuse);
@@ -1939,11 +2015,15 @@ export default function NoteTemplateDoc({
         const html = modelToHtml(answerToModel(value));
         let inserted = false;
         try {
-          inserted =
-            editor
-              .chain()
-              .insertContentAt(editor.state.doc.content.size, html)
-              .run() !== false;
+          // ACTIVE: insert at the editor's CURRENT selection — the position
+          // the user can see. INACTIVE: the existing, unchanged rule, at the
+          // END of the document.
+          inserted = target.active
+            ? editor.chain().insertContent(html).run() !== false
+            : editor
+                .chain()
+                .insertContentAt(editor.state.doc.content.size, html)
+                .run() !== false;
         } catch {
           inserted = false;
         }
@@ -1989,8 +2069,9 @@ export default function NoteTemplateDoc({
     () => ({
       appendAttachment: appendComposedAttachment,
       appendText: appendComposedText,
+      openBlockAfterAttachment: openSectionQuickAddSeparator,
     }),
-    [appendComposedAttachment, appendComposedText]
+    [appendComposedAttachment, appendComposedText, openSectionQuickAddSeparator]
   );
 
   /**

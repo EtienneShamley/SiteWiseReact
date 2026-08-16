@@ -178,6 +178,55 @@ export function canEditSectionBody(body) {
 }
 
 /**
+ * Where should ONE Quick Add capture for a row actually go — Phase F5.
+ *
+ * Three destinations, and exactly one of them is ever right for a given row
+ * at a given moment:
+ *
+ *   DOCUMENT  the modern Section document — because it is already
+ *             authoritative, OR because a live editor already holds this
+ *             row's undo history (whose next transaction would otherwise
+ *             persist a document that never contained the capture), OR
+ *             because this row's body is safely eligible to become one and
+ *             has simply never been opened yet. That last case is new in
+ *             F5: an untouched-but-eligible row's FIRST Quick Add is now the
+ *             row's first genuine modern write, instead of one more legacy
+ *             `sectionContent` append that a later click would eclipse.
+ *   LEGACY    the row is not modern, has no live editor, and is not eligible
+ *             to open one — its existing `sectionContent` writer stays the
+ *             destination, exactly as before F5. This is a SAFE fallback,
+ *             not a degraded one: that path is still visibly rendered
+ *             (adapted) by the static Section view.
+ *   REFUSE    the row IS modern (or has a live editor) but this build may
+ *             not open it — unrepresentable material underneath. Neither the
+ *             document (would silently drop it) nor `sectionContent` (would
+ *             be frozen and invisible) is safe, so the capture must be
+ *             refused rather than written somewhere nobody can see it.
+ *
+ * Pure: the caller resolves `isModern`, `hasLiveEditor` and `eligible` from
+ * the live instance and the registry; this function only orders the three
+ * outcomes so the rule is stated once and is unit-testable without a DOM, an
+ * editor or a stored note.
+ */
+export const SECTION_QUICK_ADD_ROUTE = {
+  DOCUMENT: "document",
+  LEGACY: "legacy",
+  REFUSE: "refuse",
+};
+
+export function resolveSectionQuickAddRoute({
+  isModern = false,
+  hasLiveEditor = false,
+  eligible = false,
+} = {}) {
+  if (!isModern && !hasLiveEditor && !eligible) {
+    return SECTION_QUICK_ADD_ROUTE.LEGACY;
+  }
+  if (!eligible) return SECTION_QUICK_ADD_ROUTE.REFUSE;
+  return SECTION_QUICK_ADD_ROUTE.DOCUMENT;
+}
+
+/**
  * The HTML a Section editor is opened with for this body.
  *
  * One serializer for every source: a stored modern document is re-serialized
