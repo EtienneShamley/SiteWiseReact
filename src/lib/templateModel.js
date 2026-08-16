@@ -10,6 +10,7 @@ import {
 import { newId } from "./id";
 import { normalizeBranding } from "./templateBranding";
 import { sectionContentReferencesAsset } from "./templateSectionContent";
+import { sectionDocReferencesAsset } from "./templateSectionDoc";
 
 export const TEMPLATES_KEY = "sitewise-templates-v1";
 export const TEMPLATE_VERSIONS_KEY = "sitewise-template-versions-v1";
@@ -61,7 +62,15 @@ export const saveTemplates = (map) => saveMap(TEMPLATES_KEY, map);
 export const getTemplateVersions = () => loadMap(TEMPLATE_VERSIONS_KEY);
 export const saveTemplateVersions = (map) => saveMap(TEMPLATE_VERSIONS_KEY, map);
 
-// NoteTemplateInstances: { [noteId]: { noteId, templateId, templateVersionId, answers, attachments, evidence, sectionContent, sectionExtraHeight, customRows, createdAt } }
+// NoteTemplateInstances: { [noteId]: { noteId, templateId, templateVersionId, answers, attachments, evidence, sectionContent, sectionDoc, sectionExtraHeight, customRows, createdAt } }
+// `sectionDoc` holds the MODERN body of a flexible section: one complete
+// rich document per row — text, images and files in one order, edited by one
+// shared-core editor — as `{ format: "sectiondoc/1", html }` (see
+// src/lib/templateSectionDoc.js). It is additive and optional exactly like
+// `sectionContent`, which it does not replace in storage: the older collections
+// stay readable forever and a row moves to the modern document only when its
+// user genuinely edits it. Which representation wins is decided in ONE place
+// (src/lib/templateSectionBody.js), never re-derived by a caller.
 // `sectionContent` holds the ORDERED content of a flexible section — text,
 // photos and files interleaved in the order the user built them — keyed by the
 // same stable row id (see src/lib/templateSectionContent.js). It is additive and
@@ -323,20 +332,26 @@ function mapReferencesAsset(map, assetId) {
   return false;
 }
 
-// True if ANY note instance references this asset id from ANY of the three
+// True if ANY note instance references this asset id from ANY of the four
 // collections that can hold one: a Photo/File field's primary `attachments`, a
-// row's supporting `evidence`, or a flexible section's ordered `sectionContent`.
-// All three must be scanned: they share ONE asset store (kinds note-photo /
-// note-file), so an asset referenced through only one of them must still count
-// as referenced or removal cleanup would destroy a live asset. Attachment,
-// evidence and section-item removal — and upload-failure cleanup — delete an
-// asset only when this is false, so an asset shared by multiple references is
-// never destroyed.
+// row's supporting `evidence`, a flexible section's ordered `sectionContent`, or
+// a flexible section's modern document `sectionDoc`. All four must be scanned:
+// they share ONE asset store (kinds note-photo / note-file), so an asset
+// referenced through only one of them must still count as referenced or removal
+// cleanup would destroy a live asset. Attachment, evidence and section-item
+// removal — and upload-failure cleanup — delete an asset only when this is
+// false, so an asset shared by multiple references is never destroyed.
 //
-// `sectionContent` is scanned through its own helper rather than the generic
-// `mapReferencesAsset` walk above, because a section item's KIND decides whether
-// it is an asset reference at all: a TEXT item has no Blob and must never keep
-// one alive.
+// A row that has moved to the modern document names the SAME Blob from two or
+// three collections at once (the frozen `sectionContent` / `evidence` copies are
+// never cleared), and each of those frozen references keeps protecting it. That
+// redundancy is deliberate compatibility safety, not an oversight.
+//
+// `sectionContent` and `sectionDoc` are scanned through their own helpers rather
+// than the generic `mapReferencesAsset` walk above, because each stores its
+// references differently: a section item's KIND decides whether it is an asset
+// reference at all (a TEXT item has no Blob and must never keep one alive), and
+// a document's references live inside an HTML string.
 export function isAttachmentAssetReferenced(assetId) {
   if (!assetId) return false;
   const instances = getNoteTemplateInstances();
@@ -345,6 +360,7 @@ export function isAttachmentAssetReferenced(assetId) {
     if (mapReferencesAsset(instance?.attachments, assetId)) return true;
     if (mapReferencesAsset(instance?.evidence, assetId)) return true;
     if (sectionContentReferencesAsset(instance?.sectionContent, assetId)) return true;
+    if (sectionDocReferencesAsset(instance?.sectionDoc, assetId)) return true;
   }
   return false;
 }
@@ -399,6 +415,13 @@ export function getOrCreateInstanceForNote(noteId) {
     // section architecture is built out. Nothing is materialized into it here:
     // an existing note's answers and evidence stay exactly where they are.
     sectionContent: {},
+    // The modern per-Section document (see src/lib/templateSectionDoc.js),
+    // seeded empty exactly like `sectionContent` above. Additive and optional:
+    // an instance saved before it existed reads as "no modern document" and
+    // renders from whichever older representation it already has, so no note is
+    // migrated, on load or otherwise. A row gains an entry here only when its
+    // user genuinely edits it.
+    sectionDoc: {},
     // The OPTIONAL extra working space a user has dragged onto the bottom of a
     // flexible section, keyed by the same stable row id. Additive and optional
     // exactly like `sectionContent`: an instance saved before it existed reads

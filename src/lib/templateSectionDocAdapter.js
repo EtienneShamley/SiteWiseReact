@@ -1,0 +1,262 @@
+// src/lib/templateSectionDocAdapter.js
+//
+// LEGACY SECTION SOURCES → the modern Section document (src/lib/templateSectionDoc.js).
+//
+// Every representation a Section body has ever had is read through here and
+// presented as ONE ordered document, so the rest of the product can be written
+// against a single body model while nothing stored is rewritten:
+//
+//   sectionContent[rowId]        the ordered item list (text/photo/file)
+//   answers[rowId] / a custom     the legacy single answer, plus that row's
+//     row's own `answer`          carryable `evidence[rowId]`
+//   evidence[rowId] alone         a structured row's or a legacy Photo/File
+//                                 field's supplementary material
+//
+//     [ TextItem A, PhotoItem B, TextItem C, FileItem D ]
+//         ->  text A · image B · text C · file D      (same order, one document)
+//
+// PURE, DETERMINISTIC AND IDEMPOTENT. It mints no ids, reads no clock, touches
+// no storage and persists nothing: adapting the same stored data twice produces
+// the same document, which is what lets a legacy row be adapted on every read
+// without ever writing. Migration happens only when a user genuinely edits
+// (Phase F4), and it persists the document this module produced.
+//
+// ---------------------------------------------------------------------------
+// WHAT IS PRESERVED, AND HOW
+// ---------------------------------------------------------------------------
+//
+// Order — items are emitted in stored order, full stop.
+//
+// Text — through the EXISTING answer boundary (`answerToModel`), so the
+// whitelist rebuild, the plain/rich distinction and the sanitization all apply
+// unchanged: a legacy plain string containing `<b>` stays literal characters,
+// and paragraphs, marks, lists, alignment and links survive as model blocks.
+// HTML is never concatenated by hand.
+//
+// Images and files — through the shared serializer authorities (the same ones
+// the Free-form editor writes with), carrying `assetId`, name, intrinsic
+// dimensions, `widthPct`, MIME type and size. No Blob is read, written, copied
+// or deleted, and no new asset id is minted: the document names the asset that
+// already exists.
+//
+// ---------------------------------------------------------------------------
+// ADJACENT TEXT: WHAT MERGES AND WHAT NEVER DOES
+// ---------------------------------------------------------------------------
+//
+// `continuesFrom` split provenance is COMPATIBILITY-ONLY and ends here. It
+// records one fact — "these two text items were one paragraph until an image
+// was dropped between them" — which a single document does not need: an image
+// between two paragraphs is simply an image between two paragraphs, and joining
+// them afterwards is an ordinary Backspace.
+//
+// So the existing healing rule (src/lib/templateSectionTextHeal.js) runs IN
+// MEMORY over the stored items before conversion. It merges a pair only when
+// the right half names the left half AND they are genuinely adjacent on screen
+// — exactly the merge the live product would have performed. Two independent
+// Quick Add captures carry no provenance and are NEVER merged, however adjacent
+// they are: they become consecutive blocks in one document, with their own
+// paragraph boundaries intact. Nothing is written back; the stored list is left
+// exactly as it is.
+//
+// Adjacent text items that do not merge are emitted as ONE text node holding
+// BOTH of their block lists in order — their content is never joined, only
+// their runs. That is what a stretch of prose between two media nodes is in a
+// document, and it is what a stored document parses back to, so an adapted body
+// and a persisted one are the same shape.
+//
+// ---------------------------------------------------------------------------
+// WHAT CANNOT BE REPRESENTED IS REPORTED, NEVER SILENTLY DROPPED
+// ---------------------------------------------------------------------------
+//
+// `skipped` lists everything that RENDERS TODAY but cannot appear in the
+// document — an asset id outside the shape the shared file serializer accepts,
+// or a legacy evidence entry that was never carryable (a base64 string, an
+// unknown kind). The caller keeps rendering those through the path they already
+// use, so no note loses visible content by being read through this module.
+// Entries that do not render today either (an unknown `kind`, an id-less text
+// item) are simply not part of the body, exactly as now.
+//
+// Pure: no React, no DOM beyond the shared parsers, no storage.
+
+import { carryableEvidenceItems } from "./templateSectionEditing";
+import {
+  SECTION_DOC_NODE,
+  sectionDocFileAttrs,
+  sectionDocImageAttrs,
+} from "./templateSectionDoc";
+import { SECTION_ITEM_KIND, normalizeSectionItem } from "./templateSectionContent";
+import { healSectionSplitText } from "./templateSectionTextHeal";
+import { MEDIA_LAYOUT_MODE } from "./editorMediaLayout";
+import { answerToModel } from "./templateRichText";
+
+/** Why something that renders today is not in the adapted document. */
+export const SECTION_DOC_SKIP_REASON = {
+  /** The shared image serializer could not carry this reference. */
+  IMAGE: "image-not-representable",
+  /** The shared file serializer refused this reference (id shape). */
+  FILE: "file-not-representable",
+  /** A legacy evidence entry that was never carryable into ordered content. */
+  LEGACY_EVIDENCE: "legacy-evidence-not-carryable",
+};
+
+/** Push a text node, or extend the previous one — one node per run of prose. */
+function pushBlocks(nodes, blocks) {
+  if (!Array.isArray(blocks) || !blocks.length) return;
+  const last = nodes[nodes.length - 1];
+  if (last && last.type === SECTION_DOC_NODE.TEXT) {
+    last.blocks = [...last.blocks, ...blocks];
+    return;
+  }
+  nodes.push({ type: SECTION_DOC_NODE.TEXT, blocks });
+}
+
+/**
+ * ONE normalized photo item → an image node, or null.
+ *
+ * A Section image has never carried a layout: the stacked item model could not
+ * express one. So every adapted image is `block` placement with no side — the
+ * placement every document already understands, and the one the item list
+ * actually rendered. `display.alignment` has no counterpart in the shared media
+ * vocabulary and is deliberately not carried; the frozen legacy copy keeps it.
+ */
+function imageNodeFor(item) {
+  const display = item.display || {};
+  return sectionDocImageAttrs({
+    assetId: item.assetId,
+    src: null,
+    alt: item.name || null,
+    width: item.intrinsicWidth || null,
+    height: item.intrinsicHeight || null,
+    widthPct: display.widthPct,
+    layoutMode: MEDIA_LAYOUT_MODE.BLOCK,
+    layoutSide: null,
+  });
+}
+
+/** ONE normalized file item → a file node, or null. */
+function fileNodeFor(item) {
+  // `createdAt` has no place in the shared FileAttachment node contract
+  // (assetId/name/mimeType/size), so it is not carried. The asset record and
+  // the frozen legacy reference both still hold it.
+  return sectionDocFileAttrs({
+    assetId: item.assetId,
+    name: item.name,
+    mimeType: item.mimeType,
+    size: item.size,
+  });
+}
+
+/** Append one normalized section item to the node list, or record it skipped. */
+function appendItem(nodes, skipped, item, index, entry) {
+  if (item.kind === SECTION_ITEM_KIND.TEXT) {
+    pushBlocks(nodes, answerToModel(item.value));
+    return;
+  }
+  if (item.kind === SECTION_ITEM_KIND.FILE) {
+    const attrs = fileNodeFor(item);
+    if (!attrs) {
+      skipped.push({ reason: SECTION_DOC_SKIP_REASON.FILE, index, entry });
+      return;
+    }
+    nodes.push({ type: SECTION_DOC_NODE.FILE, attrs });
+    return;
+  }
+  const attrs = imageNodeFor(item);
+  if (!attrs) {
+    skipped.push({ reason: SECTION_DOC_SKIP_REASON.IMAGE, index, entry });
+    return;
+  }
+  nodes.push({ type: SECTION_DOC_NODE.IMAGE, attrs });
+}
+
+/**
+ * A row's RAW stored `sectionContent` list → `{ nodes, skipped }`.
+ *
+ * Reads through the existing render model (`normalizeSectionItem`), so exactly
+ * what renders today is what the document contains: strict kind dispatch, an
+ * unknown kind skipped rather than guessed at, an empty text item KEPT (a blank
+ * paragraph is legitimate content).
+ */
+export function adaptSectionItemsToNodes(rawList) {
+  const nodes = [];
+  const skipped = [];
+  if (!Array.isArray(rawList)) return { nodes, skipped };
+
+  // In memory only. `healSectionSplitText` returns null for "nothing to heal".
+  const healed = healSectionSplitText(rawList);
+  const list = healed ? healed.items : rawList;
+
+  list.forEach((entry, index) => {
+    const item = normalizeSectionItem(entry);
+    if (item === null) return; // invisible today, invisible in the document
+    appendItem(nodes, skipped, item, index, entry);
+  });
+
+  return { nodes, skipped };
+}
+
+/**
+ * The pre-`sectionContent` sources → `{ nodes, skipped }`.
+ *
+ * @param answer        the row's legacy answer value (`answers[rowId]`, or a
+ *                      custom row's own `answer`). Included ONLY when the
+ *                      caller says this row's body replaces its answer — a
+ *                      structured row's typed value and a legacy Photo/File
+ *                      field's primary attachments are never document content.
+ * @param evidence      the row's RAW `evidence[rowId]` list.
+ * @param includeAnswer whether the answer is part of the body.
+ *
+ * The composition mirrors what materialisation already writes today —
+ * `[ the text, ...carryable evidence in order ]` — so a row adapted here and a
+ * row that materialised through the older path hold the same body.
+ */
+export function adaptLegacyBodyToNodes({ answer, evidence, includeAnswer = true } = {}) {
+  const nodes = [];
+  const skipped = [];
+
+  if (includeAnswer) {
+    // An empty answer yields one empty paragraph, which is what an empty
+    // Section renders (and is typeable into) today.
+    pushBlocks(nodes, answerToModel(answer));
+  }
+
+  const rawEvidence = Array.isArray(evidence) ? evidence : [];
+
+  rawEvidence.forEach((entry, index) => {
+    // The EXISTING carry gate, asked one entry at a time — the same rule
+    // materialisation uses, so an adapted row and a materialised row carry
+    // exactly the same evidence.
+    const [copy] = carryableEvidenceItems([entry]);
+    if (!copy) {
+      // Renders today through the more tolerant legacy evidence path, but
+      // cannot enter the document (a base64 string, an unknown kind, an entry
+      // claiming kind "text"). Reported so the caller keeps showing it.
+      if (isLegacyRenderableEvidence(entry)) {
+        skipped.push({
+          reason: SECTION_DOC_SKIP_REASON.LEGACY_EVIDENCE,
+          index,
+          entry,
+        });
+      }
+      return;
+    }
+    const item = normalizeSectionItem(copy);
+    if (item === null) return;
+    appendItem(nodes, skipped, item, index, entry);
+  });
+
+  return { nodes, skipped };
+}
+
+/**
+ * Does the legacy evidence path render this entry today?
+ *
+ * That path is deliberately more tolerant than ordered section content: it
+ * normalizes through `normalizeAttachment`, which keeps a legacy base64 string
+ * and treats a missing kind as a photo. Anything it shows must be reported when
+ * it cannot enter the document, so the caller can keep showing it.
+ */
+function isLegacyRenderableEvidence(entry) {
+  if (typeof entry === "string") return !!entry;
+  return !!(entry && typeof entry === "object" && typeof entry.assetId === "string" && entry.assetId);
+}

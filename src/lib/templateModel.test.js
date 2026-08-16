@@ -821,6 +821,131 @@ describe("flexible-section content on instances", () => {
       expect(isAttachmentAssetReferenced("asset-absent")).toBe(false);
     });
   });
+
+  /* --------------------- the modern Section document --------------------- */
+  // Phase F1 adds the `sectionDoc` collection and the FOURTH scan of the
+  // deletion gate. Nothing renders or writes it yet: these prove the model
+  // foundation and, above all, that a Blob stays protected while ANY
+  // representation still names it — including the frozen legacy copies a
+  // migrated row leaves behind.
+
+  describe("isAttachmentAssetReferenced also scans sectionDoc", () => {
+    const docWithImage = (assetId) => ({
+      format: "sectiondoc/1",
+      html: `<p>Body</p><img data-asset-id="${assetId}">`,
+    });
+    const docWithFile = (assetId) => ({
+      format: "sectiondoc/1",
+      html: `<div class="note-file-attachment" data-file-asset-id="${assetId}" data-file-name="d.pdf" data-file-size="20" data-file-type="application/pdf"></div>`,
+    });
+
+    test("a new instance is seeded with an empty sectionDoc map", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-sd-seed");
+      expect(inst.sectionDoc).toEqual({});
+      // ...alongside, never instead of, the older collections.
+      expect(inst.sectionContent).toEqual({});
+      expect(inst.evidence).toEqual({});
+    });
+
+    test("an instance saved before sectionDoc existed still reads safely", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      const inst = getOrCreateInstanceForNote("note-sd-legacy");
+      const { sectionDoc, ...withoutSectionDoc } = inst;
+      saveNoteTemplateInstance(withoutSectionDoc);
+
+      const back = getNoteTemplateInstance("note-sd-legacy");
+      expect(back.sectionDoc).toBeUndefined();
+      expect(isAttachmentAssetReferenced("anything")).toBe(false);
+    });
+
+    test("29. referenced through a sectionDoc IMAGE only", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sd-a"),
+        sectionDoc: { f_text: docWithImage("asset-doc-photo") },
+      });
+      expect(isAttachmentAssetReferenced("asset-doc-photo")).toBe(true);
+      expect(isAttachmentAssetReferenced("asset-doc-absent")).toBe(false);
+    });
+
+    test("30. referenced through a sectionDoc FILE only", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sd-b"),
+        sectionDoc: { f_text: docWithFile("asset-doc-file") },
+      });
+      expect(isAttachmentAssetReferenced("asset-doc-file")).toBe(true);
+    });
+
+    test("35. an INVALID sectionDoc still protects its own assets and hides no legacy ones", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sd-c"),
+        // A future format this build refuses to render...
+        sectionDoc: {
+          f_text: { format: "sectiondoc/2", html: `<img data-asset-id="asset-future">` },
+        },
+        // ...over a frozen legacy copy that is what actually renders today.
+        sectionContent: { f_text: [sectionPhoto("p1", "asset-frozen")] },
+      });
+      expect(isAttachmentAssetReferenced("asset-future")).toBe(true);
+      expect(isAttachmentAssetReferenced("asset-frozen")).toBe(true);
+    });
+
+    test("31/32/33. a migrated row's frozen copies keep protecting the SAME Blob", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sd-d"),
+        sectionDoc: { f_text: docWithImage("asset-shared") },
+        sectionContent: { f_text: [sectionPhoto("p1", "asset-shared")] },
+        evidence: { f_text: [sectionPhoto("p2", "asset-shared")] },
+      });
+      expect(isAttachmentAssetReferenced("asset-shared")).toBe(true);
+
+      // Drop the modern document: the frozen copies still name the Blob.
+      saveNoteTemplateInstance({
+        ...getNoteTemplateInstance("note-sd-d"),
+        sectionDoc: {},
+      });
+      expect(isAttachmentAssetReferenced("asset-shared")).toBe(true);
+
+      saveNoteTemplateInstance({
+        ...getNoteTemplateInstance("note-sd-d"),
+        sectionContent: {},
+      });
+      expect(isAttachmentAssetReferenced("asset-shared")).toBe(true);
+
+      saveNoteTemplateInstance({
+        ...getNoteTemplateInstance("note-sd-d"),
+        evidence: {},
+      });
+      expect(isAttachmentAssetReferenced("asset-shared")).toBe(false);
+    });
+
+    test("34. a malformed sectionDoc map cannot break the scan of anything else", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sd-e"),
+        sectionDoc: "not-a-map",
+        sectionContent: { f_text: [{ id: "odd", kind: "who-knows", assetId: "asset-odd" }] },
+        attachments: { f_photo: [sectionPhoto("p1", "asset-still-found-2")] },
+      });
+      // The conservative raw scan of malformed sectionContent is unchanged.
+      expect(isAttachmentAssetReferenced("asset-odd")).toBe(true);
+      expect(isAttachmentAssetReferenced("asset-still-found-2")).toBe(true);
+      expect(isAttachmentAssetReferenced("asset-absent")).toBe(false);
+    });
+
+    test("a sectionDoc that mentions no asset protects nothing", () => {
+      createTemplate("A", { leftPct: 18, rows: rows() });
+      saveNoteTemplateInstance({
+        ...getOrCreateInstanceForNote("note-sd-f"),
+        sectionDoc: { f_text: { format: "sectiondoc/1", html: "<p>Just text</p>" } },
+      });
+      expect(isAttachmentAssetReferenced("asset-doc-photo")).toBe(false);
+    });
+  });
 });
 
 /* ---------------- note-specific custom rows on the instance --------------- */
