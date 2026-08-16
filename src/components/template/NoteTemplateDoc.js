@@ -80,8 +80,31 @@ import {
   resolveSectionBody,
   resolveSectionQuickAddRoute,
   sectionBodyHtml,
+  SECTION_BODY_SOURCE,
   SECTION_QUICK_ADD_ROUTE,
 } from "../../lib/templateSectionBody";
+import {
+  SECTION_REFINE_NO_TARGET_MESSAGE,
+  SECTION_REFINE_OWNER,
+  SECTION_REFINE_REJECTION,
+  SECTION_REFINE_UNREADABLE_MESSAGE,
+  applySectionRefineContent,
+  createSectionRefineTracker,
+  getSectionRefineBackup,
+  isSectionRefineKeyForRow,
+  makeSectionRefineBackup,
+  makeSectionRefineRequest,
+  resolveSectionRefineOwner,
+  resolveSectionRefineTarget,
+  sectionRefineRevertIndex,
+  sectionRefineRevertKeysForRow,
+  sectionRefineTargetAt,
+  sectionRefineTargetAtSelection,
+  sectionRefineTargetKey,
+  sectionRefineTargets,
+  sectionRefineTextRuns,
+  sectionRefineRunValue,
+} from "../../lib/templateSectionRefine";
 import {
   SECTION_DOC_FORMAT,
   removeRowSectionDoc,
@@ -124,7 +147,7 @@ import {
 } from "../../lib/editorToolbarState";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import { useRefine } from "../../hooks/useRefine";
-import { REFINE_OUTCOME } from "../../lib/refineContract";
+import { REFINE_OUTCOME, isAllowedRefineStyle } from "../../lib/refineContract";
 import {
   ROW_REFINE_CHANGED_MESSAGE,
   ROW_REFINE_EMPTY_MESSAGE,
@@ -288,6 +311,14 @@ export default function NoteTemplateDoc({
   rowRefineBackups = {},
   onSetRowRefineBackup, // (noteId, rowId, previousAnswer) => void
   onClearRowRefineBackup, // (noteId, rowId) => void
+  // The MODERN Section refine backups, owned by MainArea for exactly the same
+  // reason and pruned with the same notes. Deliberately a SEPARATE map: a
+  // modern backup is a PAIR — the run's previous value and the text the
+  // refinement wrote — because a document run has no stored id and the refined
+  // text itself is what Revert addresses it by (src/lib/templateSectionRefine.js).
+  sectionRefineBackups = {},
+  onSetSectionRefineBackup, // (noteId, targetKey, { previous, applied }) => void
+  onClearSectionRefineBackup, // (noteId, targetKey) => void
 }) {
   // The instance pins this note to a specific template version; created
   // against the default template on first use. This component is remounted
@@ -387,6 +418,12 @@ export default function NoteTemplateDoc({
   // paragraph of a section against another paragraph of the same section.
   const [rowRefineStatus, setRowRefineStatus] = useState(createRowRefineState);
 
+  // The modern refine target each row last acted on: `{ [rowId]: targetKey }`.
+  // An ACTIVE Section is ONE editor block with no per-run affordances, so its
+  // row-level status message and Revert control need to know which run they are
+  // about. Purely presentational — nothing is addressed by it.
+  const [sectionRefineRowKey, setSectionRefineRowKey] = useState({});
+
   // The ONE Text answer currently being edited with rich text, and the token
   // that forces its editor to be rebuilt after a PROGRAMMATIC content change
   // (an AI refinement or a Revert landing in the row being edited). Rebuilding
@@ -444,6 +481,15 @@ export default function NoteTemplateDoc({
   // time, so activating either clears the other; keeping them apart in state is
   // what makes that impossible to get wrong rather than merely unlikely.
   const [activeSectionRowId, setActiveSectionRowId] = useState(null);
+
+  // WHICH rows currently hold a live Section editor — active or retained.
+  //
+  // The registry itself is a ref (an imperative store, deliberately: creating an
+  // editor must not re-render), but "does this row have a live editor" decides
+  // which Refine path OWNS the row, and that is a rendering question. This is
+  // the reactive mirror of `registry.has(identity)`, written wherever an
+  // instance is created and cleared wherever one is disposed.
+  const [sectionLiveRows, setSectionLiveRows] = useState({});
   const activeSectionRowIdRef = useRef(null);
   activeSectionRowIdRef.current = activeSectionRowId;
 
@@ -482,6 +528,27 @@ export default function NoteTemplateDoc({
     return sectionRegistryRef.current;
   }, []);
 
+  /**
+   * Record that a row now holds (or no longer holds) a live Section editor.
+   *
+   * Called at every construction and every disposal, so `sectionLiveRows` and
+   * the registry can never disagree about which rows the shared editor owns.
+   * Writing the same value returns the same object, so this cannot drive a
+   * render loop.
+   */
+  const setSectionEditorLive = useCallback((rowId, live) => {
+    if (!rowId) return;
+    setSectionLiveRows((prev) => {
+      if (!!prev[rowId] === !!live) return prev;
+      if (!live) {
+        const next = { ...prev };
+        delete next[rowId];
+        return next;
+      }
+      return { ...prev, [rowId]: true };
+    });
+  }, []);
+
   // The one registered editor, held as { identity, editor } so a cleanup
   // belonging to a replaced editor cannot unregister its replacement.
   const rowEditorRegistrationRef = useRef(null);
@@ -504,6 +571,11 @@ export default function NoteTemplateDoc({
   // every refine.
   const rowRefineBackupsRef = useRef(rowRefineBackups);
   rowRefineBackupsRef.current = rowRefineBackups;
+
+  // The same, for the modern map: read inside callbacks that must see the
+  // CURRENT backups rather than the ones captured when they were created.
+  const sectionRefineBackupsRef = useRef(sectionRefineBackups);
+  sectionRefineBackupsRef.current = sectionRefineBackups;
 
   // Is this note's form still on screen? A refine response can arrive after the
   // user has switched notes, which unmounts this component (it is keyed by note
@@ -1032,11 +1104,14 @@ export default function NoteTemplateDoc({
    */
   const discardSectionEditorFor = useCallback(
     (rowId) => {
-      if (!rowId || !sectionRegistryRef.current) return;
+      if (!rowId) return;
       if (activeSectionRowIdRef.current === rowId) deactivateSectionEditor();
-      sectionRegistryRef.current.disposeRow(rowId);
+      // Cleared even when there was no registry: the row must never be reported
+      // as holding an editor it does not hold.
+      setSectionEditorLive(rowId, false);
+      if (sectionRegistryRef.current) sectionRegistryRef.current.disposeRow(rowId);
     },
-    [deactivateSectionEditor]
+    [deactivateSectionEditor, setSectionEditorLive]
   );
 
   const handleAnswerFocus = useCallback(
@@ -1170,6 +1245,7 @@ export default function NoteTemplateDoc({
         ariaLabel: entry.ariaLabel,
       });
       if (!editor) return null;
+      setSectionEditorLive(rowId, true);
 
       // Leaving the LEGACY interaction entirely — it may not keep a row the
       // shared editor now owns.
@@ -1192,6 +1268,7 @@ export default function NoteTemplateDoc({
       rowIsPresent,
       sectionIdentityFor,
       getSectionRegistry,
+      setSectionEditorLive,
       clearMaterializedSection,
       clearLeadingCaret,
       onSelectRow,
@@ -1764,9 +1841,16 @@ export default function NoteTemplateDoc({
             "This section could not be opened, so the capture was not added. Nothing was changed.",
         };
       }
+      setSectionEditorLive(rowId, true);
       return { editor, active: activeSectionRowIdRef.current === rowId };
     },
-    [rowIsPresent, sectionIdentityFor, getSectionRegistry, rowHasModernSectionDoc]
+    [
+      rowIsPresent,
+      sectionIdentityFor,
+      getSectionRegistry,
+      setSectionEditorLive,
+      rowHasModernSectionDoc,
+    ]
   );
 
   /**
@@ -2513,6 +2597,9 @@ export default function NoteTemplateDoc({
       if (sectionRegistryRef.current) sectionRegistryRef.current.disposeAll();
       sectionRegistryRef.current = null;
       activeSectionRowIdRef.current = null;
+      // Every row's editor has gone with the registry, so no row may go on
+      // being reported as holding one.
+      setSectionLiveRows({});
     };
   }, [noteId, instance?.templateId, instance?.templateVersionId]);
 
@@ -2696,10 +2783,27 @@ export default function NoteTemplateDoc({
       if (onClearRowRefineBackup) {
         for (const key of removedTargetKeys) onClearRowRefineBackup(noteId, key);
       }
+      // …and the MODERN keys of the same row (`rowId::seg::<n>`), which live in
+      // their own map and would otherwise outlive the row exactly as the
+      // per-item keys used to.
+      if (onClearSectionRefineBackup) {
+        const forNote = (sectionRefineBackupsRef.current || {})[noteId] || {};
+        for (const key of Object.keys(forNote)) {
+          if (isSectionRefineKeyForRow(key, rowId)) {
+            onClearSectionRefineBackup(noteId, key);
+          }
+        }
+      }
+      setSectionRefineRowKey((prev) => {
+        if (!(rowId in prev)) return prev;
+        const next = { ...prev };
+        delete next[rowId];
+        return next;
+      });
       setRowRefineStatus((prev) => {
         let next = prev;
         for (const key of Object.keys(prev || {})) {
-          if (isRefineTargetKeyForRow(key, rowId)) {
+          if (isRefineTargetKeyForRow(key, rowId) || isSectionRefineKeyForRow(key, rowId)) {
             next = clearRowRefineStatus(next, key);
           }
         }
@@ -2724,6 +2828,7 @@ export default function NoteTemplateDoc({
       // to; this is the ONE place a Section editor is destroyed individually.
       if (activeSectionRowIdRef.current === rowId) deactivateSectionEditor();
       if (sectionRegistryRef.current) sectionRegistryRef.current.disposeRow(rowId);
+      setSectionEditorLive(rowId, false);
       // …and the un-committed drag values for the row's height and its section's
       // extra working space. Both are keyed by row id and would otherwise
       // outlive the row they describe.
@@ -2772,8 +2877,10 @@ export default function NoteTemplateDoc({
       canDeleteAttachmentAsset,
       noteId,
       onClearRowRefineBackup,
+      onClearSectionRefineBackup,
       clearMaterializedSection,
       deactivateSectionEditor,
+      setSectionEditorLive,
     ]
   );
 
@@ -3564,6 +3671,390 @@ export default function NoteTemplateDoc({
     [rowRefineBackups, noteId]
   );
 
+  /* ------------------ MODERN Section AI refinement (F6a) ------------------ */
+  //
+  // The successor to F4's blanket refusal. A row whose body is an authoritative
+  // MODERN document cannot use the legacy writer — `answers[rowId]`,
+  // `customRows[].answer` and `sectionContent[rowId]` are all frozen underneath
+  // it — so its prose is refined IN the document instead: one text run in, one
+  // editor transaction out, every image and file card untouched because they
+  // were never part of the range. The legacy path above is unchanged and still
+  // owns every row that is not modern.
+
+  /**
+   * The live Section editor a modern refinement must act on, or null.
+   *
+   * Three gates, and each refuses rather than degrades:
+   *   - the row must still be part of this note's template;
+   *   - this build must be allowed to open that document at all — a Section
+   *     carrying material the shared serializers cannot represent is absent
+   *     from `sectionEditableRef`, keeps the path it already has, and is never
+   *     partially migrated;
+   *   - the modern path must OWN the row (`resolveSectionRefineOwner`): its
+   *     body is already the authoritative document, OR a live editor already
+   *     holds it. An eligible row nobody has opened keeps its legacy Refine —
+   *     nothing is migrated merely because Refine was pressed.
+   *
+   * Creating the editor here writes NOTHING: the document is supplied at
+   * construction, exactly as activation and Quick Add already rely on, which is
+   * what lets an INACTIVE Section be refined without first being opened.
+   */
+  const modernSectionRefineEditor = useCallback(
+    (rowId) => {
+      if (!rowId || !rowIsPresent(rowId)) return null;
+      const entry = sectionEditableRef.current[rowId];
+      if (!entry) return null;
+      const identity = sectionIdentityFor(rowId);
+      if (!identity) return null;
+      const registry = getSectionRegistry();
+      const owner = resolveSectionRefineOwner({
+        isModern: rowHasModernSectionDoc(rowId),
+        // Asked of the REGISTRY, not of the render mirror: this decides whether
+        // a request may be spent at all, and must see the truth at the moment
+        // it runs.
+        hasLiveEditor: registry.has(identity),
+        eligible: true,
+      });
+      if (owner !== SECTION_REFINE_OWNER.MODERN) return null;
+      const editor = registry.getOrCreate(identity, {
+        rowId,
+        html: entry.html,
+        ariaLabel: entry.ariaLabel,
+      });
+      if (!editor || editor.isDestroyed) return null;
+      setSectionEditorLive(rowId, true);
+      return { editor, identity };
+    },
+    [
+      rowIsPresent,
+      rowHasModernSectionDoc,
+      sectionIdentityFor,
+      getSectionRegistry,
+      setSectionEditorLive,
+    ]
+  );
+
+  /**
+   * Refine ONE text run of ONE modern Section with AI.
+   *
+   * `segmentIndex` is the run's ordinal when a static segment's own trigger was
+   * used, and NULL when the row-level trigger of an ACTIVE Section was — in
+   * which case the target is the run the caret is actually in. A caret sitting
+   * on a picture has no textual target and is refused with a message rather
+   * than redirected to the prose above it.
+   *
+   * Exactly one provider request per user action, no automatic retry, and the
+   * result is applied only if the SAME editor still holds the SAME range with
+   * the SAME text. Everything else — the images, the file cards, the other
+   * runs, the other rows, the structured typed values, the primary attachments,
+   * the other notes and the immutable TemplateVersion — is untouched in every
+   * path, including every failure path.
+   */
+  const handleRefineSectionSegment = useCallback(
+    async (rowId, segmentIndex, style) => {
+      const current = instanceRef.current;
+      if (!rowId || !current?.noteId) return;
+
+      const resolved = modernSectionRefineEditor(rowId);
+      if (!resolved) return;
+      const { editor, identity } = resolved;
+
+      const targets = sectionRefineTargets(editor);
+      if (!targets) {
+        setFieldError(rowId, SECTION_REFINE_UNREADABLE_MESSAGE);
+        return;
+      }
+      const target =
+        segmentIndex === null || segmentIndex === undefined
+          ? sectionRefineTargetAtSelection(editor, targets)
+          : sectionRefineTargetAt(targets, segmentIndex);
+      if (!target) {
+        setFieldError(rowId, SECTION_REFINE_NO_TARGET_MESSAGE);
+        return;
+      }
+
+      const targetKey = sectionRefineTargetKey({
+        rowId,
+        segmentIndex: target.index,
+      });
+      if (!targetKey) return;
+      // Synchronous duplicate guard, keyed by TARGET: refining one run does not
+      // block another run of the same Section.
+      if (rowRefineInFlightRef.current.has(targetKey)) return;
+      clearFieldError(rowId);
+      // Which target this row's ACTIVE row-level status and Revert refer to.
+      setSectionRefineRowKey((prev) => ({ ...prev, [rowId]: targetKey }));
+
+      // An empty or whitespace-only run never spends a request.
+      if (!hasRefinableText(target.value)) {
+        showRowRefineMessage(targetKey, ROW_REFINE_STATUS.IDLE, ROW_REFINE_EMPTY_MESSAGE);
+        return;
+      }
+
+      const requestId = rowRefineRequestRef.current + 1;
+      rowRefineRequestRef.current = requestId;
+      const request = makeSectionRefineRequest({
+        requestId,
+        noteId: current.noteId,
+        templateId: current.templateId,
+        templateVersionId: current.templateVersionId,
+        rowId,
+        isCustomRow: customRowIds.has(rowId),
+        identity,
+        segmentIndex: target.index,
+        from: target.from,
+        to: target.to,
+        style,
+        // The run's COMPLETE representation. The provider receives only its
+        // plain-text projection — never markup, never an asset id, never a
+        // neighbouring run — and the representation itself is what the apply
+        // gate compares, so a formatting-only edit counts as an edit.
+        sentValue: target.value,
+        isAllowedStyle: isAllowedRefineStyle,
+      });
+      if (!request) {
+        showRowRefineMessage(
+          targetKey,
+          ROW_REFINE_STATUS.FAILURE,
+          rowRefineMessageFor(REFINE_OUTCOME.FAILURE)
+        );
+        return;
+      }
+
+      const settle = (status, message) => {
+        if (!mountedRef.current) return;
+        setRowRefineStatus((prev) =>
+          settleRowRefine(prev, targetKey, { requestId, status, message })
+        );
+      };
+      const dismiss = () => {
+        if (!mountedRef.current) return;
+        setRowRefineStatus((prev) =>
+          isRowRefineCurrent(prev, targetKey, requestId)
+            ? clearRowRefineStatus(prev, targetKey)
+            : prev
+        );
+      };
+
+      // Follow the range through every edit made while the request is out. Raw
+      // positions are never trusted afterwards.
+      const tracker = createSectionRefineTracker(editor, {
+        from: target.from,
+        to: target.to,
+      });
+      rowRefineInFlightRef.current.add(targetKey);
+      setRowRefineStatus((prev) => beginRowRefine(prev, targetKey, requestId));
+
+      let result = null;
+      try {
+        result = await refineText({ text: request.sentText, style: request.style });
+      } catch {
+        result = null;
+      } finally {
+        rowRefineInFlightRef.current.delete(targetKey);
+      }
+
+      try {
+        // Failure, unavailable, malformed or empty output: the document is left
+        // exactly as it was and NO backup is created, so Revert is never offered
+        // for a state that was never left.
+        if (!result || !result.ok) {
+          settle(
+            result && result.outcome === REFINE_OUTCOME.UNAVAILABLE
+              ? ROW_REFINE_STATUS.UNAVAILABLE
+              : ROW_REFINE_STATUS.FAILURE,
+            rowRefineMessageFor(result && result.outcome)
+          );
+          return;
+        }
+        if (typeof result.refined !== "string" || !result.refined.trim()) {
+          settle(ROW_REFINE_STATUS.FAILURE, rowRefineMessageFor(REFINE_OUTCOME.FAILURE));
+          return;
+        }
+
+        // The apply gate: the row still resolves to the SAME Section identity,
+        // the registry still holds the SAME instance under it, the request's
+        // range — mapped forward through everything that has happened since —
+        // is still exactly one whole run, and that run's text is still what was
+        // sent. Anything else discards the response without touching anything.
+        const check = resolveSectionRefineTarget(request, {
+          identity: sectionIdentityFor(rowId),
+          editor,
+          liveEditor: getSectionRegistry().get(request.identity),
+          targets: sectionRefineTargets(editor),
+          mapped: tracker.resolve(),
+        });
+        if (!check.ok) {
+          if (check.reason === SECTION_REFINE_REJECTION.TEXT_CHANGED) {
+            // The user kept typing. Their newer text wins and stays untouched.
+            settle(ROW_REFINE_STATUS.FAILURE, ROW_REFINE_CHANGED_MESSAGE);
+          } else {
+            dismiss();
+          }
+          return;
+        }
+
+        // ONE transaction, on the range and nothing else. Persistence is the
+        // editor's own update handler — there is deliberately no second write.
+        if (!applySectionRefineContent(editor, check, result.refined)) {
+          settle(ROW_REFINE_STATUS.FAILURE, ROW_REFINE_SAVE_FAILED_MESSAGE);
+          return;
+        }
+
+        // The backup is recorded ONLY here, after the document genuinely
+        // changed, and it is target-specific: the run's previous value, plus
+        // what the refinement actually wrote (read back from the document
+        // rather than assumed), which is how Revert finds its target later
+        // without any persisted id.
+        const after = sectionRefineTargets(editor);
+        const written = after && sectionRefineTargetAt(after, check.index);
+        const backup = makeSectionRefineBackup(
+          request.sentValue,
+          written ? written.value : result.refined
+        );
+        if (backup && onSetSectionRefineBackup) {
+          onSetSectionRefineBackup(request.noteId, targetKey, backup);
+        }
+        settle(ROW_REFINE_STATUS.SUCCESS, ROW_REFINE_SUCCESS_MESSAGE);
+      } finally {
+        tracker.dispose();
+      }
+    },
+    [
+      refineText,
+      customRowIds,
+      modernSectionRefineEditor,
+      sectionIdentityFor,
+      getSectionRegistry,
+      showRowRefineMessage,
+      onSetSectionRefineBackup,
+      clearFieldError,
+      setFieldError,
+    ]
+  );
+
+  /**
+   * Restore ONE modern text run's pre-refinement prose.
+   *
+   * The target is found by CONTENT — the run that still holds exactly what the
+   * refinement wrote — never by the ordinal the key was minted from, which
+   * moves the moment a picture is dropped above it. No unique match means the
+   * refinement is no longer intact, and nothing is written: the run is not
+   * guessed at, and no whole-Section snapshot is ever restored.
+   */
+  const handleRevertSectionRefine = useCallback(
+    (rowId, targetKey) => {
+      const current = instanceRef.current;
+      if (!rowId || !targetKey || !current?.noteId) return;
+      const backup = getSectionRefineBackup(
+        sectionRefineBackups,
+        current.noteId,
+        targetKey
+      );
+      if (!backup) return;
+
+      const resolved = modernSectionRefineEditor(rowId);
+      if (!resolved) return;
+      const targets = sectionRefineTargets(resolved.editor);
+      if (!targets) return;
+
+      const index = sectionRefineRevertIndex(targets.values, backup.applied);
+      if (index === -1) return;
+      const target = sectionRefineTargetAt(targets, index);
+      if (!target) return;
+
+      // ONE transaction, undoable, persisted by the editor's own update
+      // handler — the same single path the apply uses.
+      if (!applySectionRefineContent(resolved.editor, target, backup.previous)) {
+        showRowRefineMessage(
+          targetKey,
+          ROW_REFINE_STATUS.FAILURE,
+          ROW_REFINE_REVERT_FAILED_MESSAGE
+        );
+        return;
+      }
+
+      if (onClearSectionRefineBackup) {
+        onClearSectionRefineBackup(current.noteId, targetKey);
+      }
+      showRowRefineMessage(
+        targetKey,
+        ROW_REFINE_STATUS.SUCCESS,
+        ROW_REFINE_REVERTED_MESSAGE
+      );
+    },
+    [
+      sectionRefineBackups,
+      modernSectionRefineEditor,
+      showRowRefineMessage,
+      onClearSectionRefineBackup,
+    ]
+  );
+
+  /**
+   * WHICH rows may use modern Refine, and WHERE their Revert controls belong.
+   *
+   * `rows` is the eligibility answer, asked once: an authoritative modern
+   * document this build may open. `revertKeys` re-anchors every backup on the
+   * run that still holds its refined text, so the control sits beside the prose
+   * it would actually restore and disappears entirely when that prose is gone.
+   * `rowKeys` is the ACTIVE Section's row-level target — the one it last
+   * refined — because an active Section renders as ONE editor block and has no
+   * per-run affordances to hang a message on.
+   */
+  const sectionRefine = useMemo(() => {
+    const rows = {};
+    const revertKeys = {};
+    const backupsForNote =
+      (sectionRefineBackups && noteId && sectionRefineBackups[noteId]) || null;
+
+    for (const rowId of Object.keys(sectionState.editable)) {
+      const body = sectionBodies[rowId];
+      const owner = resolveSectionRefineOwner({
+        isModern: !!body && body.source === SECTION_BODY_SOURCE.SECTION_DOC,
+        // A row whose editor is open — or retained from an earlier visit — is
+        // owned by the modern path even before its first `sectionDoc` exists:
+        // that editor holds the row's history, and its next transaction is what
+        // would persist the document anyway.
+        hasLiveEditor: !!sectionLiveRows[rowId],
+        eligible: true,
+      });
+      if (owner !== SECTION_REFINE_OWNER.MODERN) continue;
+      rows[rowId] = true;
+      // Revert affordances exist only where a backup does, and a backup exists
+      // only after a successful apply — which has made the row modern by then,
+      // so its stored document is the right thing to anchor against.
+      if (!backupsForNote || !body) continue;
+      const values = sectionRefineTextRuns(body.nodes).map(sectionRefineRunValue);
+      const keys = sectionRefineRevertKeysForRow(backupsForNote, rowId, values);
+      if (Object.keys(keys).length) revertKeys[rowId] = keys;
+    }
+
+    const rowKeys = {};
+    for (const [rowId, key] of Object.entries(sectionRefineRowKey)) {
+      if (!rows[rowId] || !key) continue;
+      rowKeys[rowId] = key;
+    }
+
+    return {
+      rows,
+      revertKeys,
+      rowKeys,
+      revertableKeys: backupsForNote ? new Set(Object.keys(backupsForNote)) : new Set(),
+      onRefine: handleRefineSectionSegment,
+      onRevert: handleRevertSectionRefine,
+    };
+  }, [
+    sectionState,
+    sectionBodies,
+    sectionLiveRows,
+    sectionRefineBackups,
+    sectionRefineRowKey,
+    noteId,
+    handleRefineSectionSegment,
+    handleRevertSectionRefine,
+  ]);
+
   /* ----------------------- Quick Add registration ------------------------- */
 
   // Register the SECTION composer — where a whole Quick Add composition lands.
@@ -3707,6 +4198,12 @@ export default function NoteTemplateDoc({
         onRevertRowRefine={handleRevertRowRefine}
         rowRefineStatus={rowRefineStatus}
         refineRevertableTargetKeys={refineRevertableTargetKeys}
+        // MODERN Section AI (Phase F6a): the successor for a row whose body is
+        // an authoritative document, where the legacy per-item target no longer
+        // exists. One target per TEXT RUN, applied as one editor transaction.
+        // The two paths are mutually exclusive by construction — a row is
+        // either modern or it is not.
+        sectionRefine={sectionRefine}
         lockTemplateLabels={true}
         // Structured controls (number/date/time/checkbox/yes-no/dropdown and
         // the Photo/File upload controls) select the row for BottomBar

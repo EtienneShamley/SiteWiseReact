@@ -66,13 +66,16 @@ describe("1-6. the retained registry is owned by the note's form", () => {
     expect(SECTION_EDITOR).not.toContain("new Editor");
   });
 
-  test("an editor is created ONLY on activation or a capture, never on render", () => {
-    // The two call sites, and no others: activation, and a Quick Add capture
-    // that must not be written where the user cannot see it.
+  test("an editor is created ONLY on a user action, never on render", () => {
+    // The three call sites, and no others: activation, a Quick Add capture that
+    // must not be written where the user cannot see it, and (Phase F6a) a
+    // modern Refine, which reads and rewrites the document THROUGH the editor.
+    // All three are user actions, and none of them writes by constructing.
     const calls = NOTE_DOC.match(/\.getOrCreate\(identity, \{/g) || [];
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
     expect(NOTE_DOC).toContain("const activateSectionEditor = useCallback(");
     expect(NOTE_DOC).toContain("const sectionDocQuickAddTarget = useCallback(");
+    expect(NOTE_DOC).toContain("const modernSectionRefineEditor = useCallback(");
     // The body memo — which runs on every render — resolves and serializes, and
     // creates nothing.
     const memo = between(NOTE_DOC, "const sectionState = useMemo(", "const sectionBodies = sectionState.bodies");

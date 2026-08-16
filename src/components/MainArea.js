@@ -70,6 +70,7 @@ import {
   pruneRowRefineBackups,
   setRowRefineBackup,
 } from "../lib/templateRowRefine";
+import { setSectionRefineBackup } from "../lib/templateSectionRefine";
 import { insertLocalImageAsset } from "../lib/editorImageInsert";
 import { insertFreeformFileAttachment } from "../lib/editorFileInsert";
 import {
@@ -199,6 +200,13 @@ export default function MainArea() {
   // Note A's row backup is recorded and still offered when the user returns.
   // Session-only, like every other history in this component.
   const [rowRefineBackups, setRowRefineBackups] = useState({});
+  // The same store, for a MODERN Section's document-range refinements. It is a
+  // separate map because its value is a PAIR — the run's previous value and the
+  // text the refinement wrote — not a bare answer: a document run has no stored
+  // id, so the refined text itself is what Revert addresses it by (see
+  // src/lib/templateSectionRefine.js). The note keying, the lifetime and the
+  // pruning are identical, so both are pruned by the same helper below.
+  const [sectionRefineBackups, setSectionRefineBackups] = useState({});
   // Monotonic request id, read synchronously so two clicks in one tick cannot
   // both start a request before React re-renders the disabled button.
   const refineRequestRef = useRef(0);
@@ -1341,6 +1349,7 @@ export default function MainArea() {
     pruneSaveStatuses(liveNoteIds);
     setRefineBackups((prev) => pruneRefineBackups(prev, liveNoteIds));
     setRowRefineBackups((prev) => pruneRowRefineBackups(prev, liveNoteIds));
+    setSectionRefineBackups((prev) => pruneRowRefineBackups(prev, liveNoteIds));
   }, [liveNoteIds, pruneSaveStatuses]);
 
   // Template Refine backup writers handed to NoteTemplateDoc. Both are stable,
@@ -1358,6 +1367,20 @@ export default function MainArea() {
 
   const handleClearRowRefineBackup = useCallback((targetNoteId, targetKey) => {
     setRowRefineBackups((prev) => clearRowRefineBackup(prev, targetNoteId, targetKey));
+  }, []);
+
+  // The MODERN Section equivalents (Phase F6a). `targetKey` is
+  // `rowId::seg::<runIndex>`, a different key space from the legacy `::item::`
+  // one, and the two maps are never mixed: one row is served by exactly one of
+  // the two Refine paths.
+  const handleSetSectionRefineBackup = useCallback((targetNoteId, targetKey, backup) => {
+    setSectionRefineBackups((prev) =>
+      setSectionRefineBackup(prev, targetNoteId, targetKey, backup)
+    );
+  }, []);
+
+  const handleClearSectionRefineBackup = useCallback((targetNoteId, targetKey) => {
+    setSectionRefineBackups((prev) => clearRowRefineBackup(prev, targetNoteId, targetKey));
   }, []);
 
   /* ============================== AI Refine =============================== */
@@ -1826,6 +1849,9 @@ export default function MainArea() {
                     rowRefineBackups={rowRefineBackups}
                     onSetRowRefineBackup={handleSetRowRefineBackup}
                     onClearRowRefineBackup={handleClearRowRefineBackup}
+                    sectionRefineBackups={sectionRefineBackups}
+                    onSetSectionRefineBackup={handleSetSectionRefineBackup}
+                    onClearSectionRefineBackup={handleClearSectionRefineBackup}
                   />
                 </div>
               </>

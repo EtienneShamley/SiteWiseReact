@@ -68,6 +68,7 @@ import {
   isRefinableRowType,
   rowRefineTargetKey,
 } from "../../lib/templateRowRefine";
+import { sectionRefineTargetKey } from "../../lib/templateSectionRefine";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import useOutsideClose from "../../hooks/useOutsideClose";
 import ThreeDotMenu from "../ThreeDotMenu";
@@ -364,6 +365,26 @@ export default function ResizableTwoColTable({
   onRevertRowRefine, // (rowId, itemId|null) => void
   rowRefineStatus = {}, // { [targetKey]: { status, message } }
   refineRevertableTargetKeys = null, // Set<targetKey> with a session Revert backup
+  // MODERN SECTION AI (note mode only, Phase F6a). Inert when absent, exactly
+  // like the four above. A row whose body is an authoritative document has no
+  // legacy per-item target to refine, so its prose is addressed as TEXT RUNS of
+  // that document instead:
+  //
+  //   rows        { [rowId]: true }  — the rows this path serves, decided by
+  //                                    the parent (modern AND openable)
+  //   revertKeys  { [rowId]: { [runIndex]: targetKey } } — re-anchored by the
+  //                                    parent on the run that still holds each
+  //                                    backup's refined text
+  //   rowKeys     { [rowId]: targetKey } — the target an ACTIVE Section's
+  //                                    row-level message and Revert refer to
+  //   onRefine    (rowId, runIndex|null, styleValue) => void — null runIndex
+  //                                    means "the run the caret is in"
+  //   onRevert    (rowId, targetKey) => void
+  //
+  // Status messages share `rowRefineStatus` above: the two paths use disjoint
+  // key spaces (`rowId::seg::n` vs `rowId` / `rowId::item::id`), so one map
+  // carries both without either being able to read the other's entry.
+  sectionRefine = null,
   // Row actions: "builder" (master template rows) | "note" (note-specific
   // custom rows) | "none". See the block comment above.
   rowActionsMode = "none",
@@ -571,13 +592,72 @@ export default function ResizableTwoColTable({
   // simply the index of what it said.
   const documentBodySegments = useMemo(() => {
     const map = new Map();
+    /**
+     * Which TEXT RUN of the live document each segment OPENS: `key -> index`.
+     *
+     * A run is the document's unit of refineable prose — a maximal stretch of
+     * blocks between media nodes — and it is NOT one segment. Two things pull
+     * them apart, and both are handled here so this map means the same thing
+     * for a modern body and for one adapted from stored items:
+     *
+     *   - an adapted body splits one text node back onto the ITEM boundaries it
+     *     was assembled from, so several consecutive TEXT segments can belong to
+     *     ONE run. Only the FIRST of them gets an entry, so a run is offered
+     *     exactly one trigger;
+     *   - a WRAPPED image is fused with the prose that flows beside it, so its
+     *     segment is BOTH a run boundary and the carrier of the run that
+     *     follows it.
+     *
+     * Anything else — an unwrapped image, a file card, compatibility material —
+     * simply ends the current run.
+     */
+    const runIndexByKey = (segments) => {
+      const out = new Map();
+      let run = -1;
+      let open = false;
+      for (const segment of segments) {
+        if (segment.kind === SECTION_SEGMENT_KIND.IMAGE) {
+          if (segment.wrapped && Array.isArray(segment.blocks)) {
+            run += 1;
+            open = true;
+            out.set(segment.key, run);
+          } else {
+            open = false;
+          }
+          continue;
+        }
+        if (segment.kind === SECTION_SEGMENT_KIND.TEXT) {
+          if (!open) {
+            run += 1;
+            open = true;
+            out.set(segment.key, run);
+          }
+          continue;
+        }
+        open = false;
+      }
+      return out;
+    };
     if (!showRightEditor || !sectionBodies || typeof sectionBodies !== "object") {
       return map;
     }
     for (const [rowId, body] of Object.entries(sectionBodies)) {
       if (!body) continue;
+      const segments = sectionDocSegments(body);
       map.set(rowId, {
-        segments: sectionDocSegments(body),
+        segments,
+        // Is this row's body the MODERN stored document (rather than the
+        // ordered item list adapted on read)? It is what decides which Refine
+        // path the row is served by, and the reader already answered it.
+        modern: body.source === SECTION_BODY_SOURCE.SECTION_DOC,
+        // Which TEXT RUN each segment carries, by the segment's own key.
+        //
+        // A run is the document's unit of refineable prose, and it is NOT the
+        // same as a segment: a WRAPPED image and the text flowing beside it are
+        // fused into one layout segment (see sectionDocSegments), and that
+        // segment carries the run. Counting in segment order therefore
+        // reproduces exactly the run ordinals the document itself has.
+        runIndexByKey: runIndexByKey(segments),
         // CAN this row hand itself back to the legacy per-item interaction?
         //
         // Only a body ADAPTED from the ordered item list can: the legacy
@@ -1326,7 +1406,11 @@ export default function ResizableTwoColTable({
       !!row &&
       isRefinableRowType(row.type) &&
       !sectionContentRowIds.has(row.id) &&
-      !documentBodySegments.has(row.id)
+      !documentBodySegments.has(row.id) &&
+      // …and a row the MODERN path owns is not this path's, even when its body
+      // is still its legacy answer: its live editor holds the row's history and
+      // is where a refinement must land.
+      !modernRefineOwnsRow(row)
     );
   }
 
@@ -1343,7 +1427,10 @@ export default function ResizableTwoColTable({
       showRightEditor &&
       !!row &&
       !!item &&
-      item.kind === SECTION_ITEM_KIND.TEXT
+      item.kind === SECTION_ITEM_KIND.TEXT &&
+      // The per-ITEM trigger addresses a stored `sectionContent` entry. Once the
+      // modern path owns the row, that entry is no longer where an edit goes.
+      !modernRefineOwnsRow(row)
     );
   }
 
@@ -1370,6 +1457,89 @@ export default function ResizableTwoColTable({
     return sectionTextItemLabel(row, item);
   }
 
+  /**
+   * Is this row served by the MODERN Refine path?
+   *
+   * The parent's answer, never re-derived here: a row whose body is the
+   * authoritative document, OR one whose live Section editor already holds it
+   * (`resolveSectionRefineOwner`). It is what makes the two paths mutually
+   * exclusive — a row this returns true for shows no legacy trigger anywhere.
+   */
+  function modernRefineOwnsRow(row) {
+    return !!(row && sectionRefine && sectionRefine.rows && sectionRefine.rows[row.id]);
+  }
+
+  /**
+   * The MODERN refine target one static segment OPENS, or null.
+   *
+   * Two conditions: the parent must serve this row on the modern path, and the
+   * segment must open a text run. A pure image or file segment opens none and
+   * is offered nothing — there is no image Refine — and neither is a segment
+   * that merely continues a run another segment already opened.
+   */
+  function modernRefineTarget(row, segment) {
+    if (!modernRefineOwnsRow(row) || !segment) return null;
+    const entry = documentBodySegments.get(row.id);
+    if (!entry) return null;
+    const runIndex = entry.runIndexByKey.get(segment.key);
+    if (runIndex === undefined) return null;
+    return {
+      runIndex,
+      key: sectionRefineTargetKey({ rowId: row.id, segmentIndex: runIndex }),
+    };
+  }
+
+  /**
+   * The MODERN refine target a ROW-LEVEL trigger acts on, or null.
+   *
+   * Three shapes, one control, so the affordance never disappears as a Section
+   * changes state:
+   *
+   *   ACTIVE            one editor block with no per-run affordances, so the
+   *                     trigger names NO run and the parent resolves the run the
+   *                     CARET is in when the style is chosen. `key` is the
+   *                     target it last acted on, so the message and the Revert
+   *                     control have something to be about.
+   *   STATIC document   the run its HEAD segment opens.
+   *   NO document yet   an eligible LEGACY prose body whose retained editor
+   *                     holds the row's history. Its live document is all prose,
+   *                     so it has exactly one run; the retained cursor is
+   *                     deliberately not consulted for an unmounted Section.
+   */
+  function rowModernRefineTarget(row, headSegment) {
+    if (!modernRefineOwnsRow(row)) return null;
+    if (headSegment && headSegment.kind === SECTION_SEGMENT_KIND.EDITOR) {
+      return {
+        runIndex: null,
+        key: (sectionRefine.rowKeys && sectionRefine.rowKeys[row.id]) || null,
+      };
+    }
+    if (headSegment) return modernRefineTarget(row, headSegment);
+    if (documentBodySegments.has(row.id)) return null;
+    return {
+      runIndex: 0,
+      key: sectionRefineTargetKey({ rowId: row.id, segmentIndex: 0 }),
+    };
+  }
+
+  // The MODERN Refine trigger — the SAME control, in the same action areas, with
+  // the same preset menu and the same loading language as the legacy one.
+  function renderSectionRefineAction(row, target) {
+    return (
+      <RowRefineAction
+        rowId={row.id}
+        rowLabel={row.label}
+        loading={
+          (target.key ? rowRefineStatus[target.key] || {} : {}).status ===
+          ROW_REFINE_STATUS.LOADING
+        }
+        onRefine={(rowId, styleValue) =>
+          sectionRefine.onRefine(rowId, target.runIndex, styleValue)
+        }
+      />
+    );
+  }
+
   // The Refine trigger for one target, in whichever action area it belongs to.
   function renderRefineAction(row, item) {
     return (
@@ -1394,12 +1564,15 @@ export default function ResizableTwoColTable({
   // item is text it is the row-level Refine control's target, so a flexible
   // section keeps ONE simple affordance in the familiar place while addressing
   // the item by id underneath.
-  function renderRowActions(row, sectionHeadItem = null) {
+  function renderRowActions(row, sectionHeadItem = null, modernTarget = null) {
     const refineItem = headRefineItem(sectionHeadItem);
     const canAiRefine = refineItem
       ? sectionItemAcceptsAiRefine(row, refineItem)
       : rowAcceptsAiRefine(row);
-    if (!showRowActions && !canAiRefine) return null;
+    // A modern head target and a legacy one are mutually exclusive: a row whose
+    // body is the modern document has no legacy item behind it at all.
+    const modern = !canAiRefine && modernTarget ? modernTarget : null;
+    if (!showRowActions && !canAiRefine && !modern) return null;
     const name = row.label || (row.isCustom ? "custom section" : "this field");
     const options = [
       {
@@ -1422,6 +1595,7 @@ export default function ResizableTwoColTable({
     return (
       <div className="twocol-row-actions">
         {canAiRefine && renderRefineAction(row, refineItem)}
+        {modern && renderSectionRefineAction(row, modern)}
         {showRowActions && (
           <>
             <button
@@ -1472,20 +1646,61 @@ export default function ResizableTwoColTable({
       : rowAcceptsAiRefine(row);
     if (!eligible) return null;
     const targetKey = rowRefineTargetKey({ rowId: row.id, itemId: item?.id });
-    const entry = rowRefineStatus[targetKey] || null;
     const canRevert = !!(
       onRevertRowRefine &&
       refineRevertableTargetKeys &&
       refineRevertableTargetKeys.has(targetKey)
     );
-    if (!entry && !canRevert) return null;
+    return renderRefineStatusBox({
+      entry: rowRefineStatus[targetKey] || null,
+      name: (refineTargetLabel(row, item) || "").trim() || "this field",
+      onRevert: canRevert ? () => onRevertRowRefine(row.id, item ? item.id : null) : null,
+    });
+  }
 
+  /**
+   * The same restrained feedback for ONE MODERN text run.
+   *
+   * Its message is keyed by the run's own target key. Its Revert control is
+   * anchored by the parent on the run that still holds that backup's refined
+   * text — so it sits beside the prose it would actually restore, and simply
+   * is not there once that prose has been edited away.
+   */
+  function renderSectionRefineStatus(row, target) {
+    if (!sectionRefine) return null;
+    const revertKey =
+      target.runIndex === null
+        ? // An ACTIVE Section: the target it last refined, if that backup is
+          // still held.
+          (sectionRefine.revertableKeys &&
+            target.key &&
+            sectionRefine.revertableKeys.has(target.key) &&
+            target.key) ||
+          null
+        : (sectionRefine.revertKeys &&
+            sectionRefine.revertKeys[row.id] &&
+            sectionRefine.revertKeys[row.id][target.runIndex]) ||
+          null;
+    return renderRefineStatusBox({
+      entry: (target.key && rowRefineStatus[target.key]) || null,
+      name: (row.label || "").trim() || "this field",
+      onRevert:
+        revertKey && sectionRefine.onRevert
+          ? () => sectionRefine.onRevert(row.id, revertKey)
+          : null,
+    });
+  }
+
+  // ONE feedback box, shared by both Refine paths, so a modern Section and a
+  // legacy row speak with exactly the same voice and chrome. It renders only
+  // when there is something to say, so an untouched form carries no extra
+  // height.
+  function renderRefineStatusBox({ entry, name, onRevert }) {
+    if (!entry && !onRevert) return null;
     const isError =
       entry &&
       (entry.status === ROW_REFINE_STATUS.UNAVAILABLE ||
         entry.status === ROW_REFINE_STATUS.FAILURE);
-    const name = (refineTargetLabel(row, item) || "").trim() || "this field";
-
     return (
       <div className="twocol-row-ai-status">
         {entry && entry.message && (
@@ -1497,11 +1712,11 @@ export default function ResizableTwoColTable({
             {entry.message}
           </span>
         )}
-        {canRevert && (
+        {onRevert && (
           <button
             type="button"
             className="twocol-row-ai-revert"
-            onClick={() => onRevertRowRefine(row.id, item ? item.id : null)}
+            onClick={onRevert}
             aria-label={`Revert the AI refinement of ${name}`}
             title={`Restore ${name} to its text from before the last AI refinement`}
           >
@@ -1710,6 +1925,10 @@ export default function ResizableTwoColTable({
     const headTarget = headSegment
       ? segmentLegacyItem(row, headSegment)
       : sectionHeadItem;
+    // The MODERN row-level target. Null for every row the modern path does not
+    // serve; otherwise the run this block's trigger acts on — see
+    // rowModernRefineTarget for the three shapes it covers.
+    const headModernTarget = rowModernRefineTarget(row, headSegment);
     const rawList = showRightEditor ? attachments[row.id] || [] : [];
     const legacyItems = [];
     rawList.forEach((e, index) => {
@@ -1858,6 +2077,9 @@ export default function ResizableTwoColTable({
           {renderHeadMediaSlot(row, sectionHeadItem, headSegment)}
 
           {showRightEditor && renderRowRefineStatus(row, headRefineItem(headTarget))}
+          {showRightEditor &&
+            headModernTarget &&
+            renderSectionRefineStatus(row, headModernTarget)}
 
           {enableFieldTypeEditor &&
             (type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE) && (
@@ -1875,7 +2097,7 @@ export default function ResizableTwoColTable({
           {isSectionTail && renderSectionTail(row, sectionExtraPx)}
         </div>
 
-        {renderRowActions(row, headTarget)}
+        {renderRowActions(row, headTarget, headModernTarget)}
         {renderColumnDivider()}
 
         {/* The insertion line, while an image is being dragged over this item.
@@ -2697,13 +2919,24 @@ export default function ResizableTwoColTable({
     const canAiRefine =
       segment.kind === SECTION_SEGMENT_KIND.TEXT &&
       sectionItemAcceptsAiRefine(row, item);
+    // The modern target this segment opens, when the row is served by the
+    // modern path. A wrapped image's segment carries the run that flows beside
+    // it, which is why this is not restricted to TEXT segments. `canAiRefine`
+    // is false for every owned row (see sectionItemAcceptsAiRefine), so the two
+    // can never both be rendered.
+    const modern = canAiRefine ? null : modernRefineTarget(row, segment);
     return renderSegmentShell(row, ctx, {
       extraClass: "twocol-seg--section",
-      actions: canAiRefine ? renderRefineAction(row, item) : null,
+      actions: canAiRefine
+        ? renderRefineAction(row, item)
+        : modern
+        ? renderSectionRefineAction(row, modern)
+        : null,
       body: (
         <>
           {renderSectionDocSegmentBody(row, segment)}
           {canAiRefine && renderRowRefineStatus(row, item)}
+          {modern && renderSectionRefineStatus(row, modern)}
           {isSectionTail && renderSectionTail(row, section.extraPx)}
         </>
       ),
