@@ -30,11 +30,13 @@
 import { USABLE_WIDTH_MM } from "./templateExportCapture";
 import {
   FILE_CARD_CLASS,
+  FREEFORM_WRAP_GROUP_CLASS,
   IMAGE_PLACEHOLDER_CLASS,
   createInertDocument,
 } from "./freeformExportBlocks";
 import {
   MEDIA_WIDTH_PCT_ATTR,
+  mediaWrapExportCss,
   normalizeMediaWidthPct,
 } from "./editorMediaLayout";
 
@@ -258,6 +260,8 @@ export function freeformPdfCss() {
     .nw-ff-doc h3 { font-size: 1.25em; font-weight: 700; padding-bottom: 3px; }
     .nw-ff-doc h4, .nw-ff-doc h5, .nw-ff-doc h6 { font-size: 1.1em; font-weight: 700; padding-bottom: 3px; }
     .nw-ff-doc img { display: inline-block; object-fit: contain; }
+    .nw-ff-doc .${FREEFORM_WRAP_GROUP_CLASS} { display: flow-root; }
+    ${mediaWrapExportCss(".nw-ff-doc")}
     .nw-ff-doc ul, .nw-ff-doc ol { padding-left: 24px; }
     .nw-ff-doc li + li { padding-top: 4px; }
     .nw-ff-doc li > p + p { padding-top: 6px; }

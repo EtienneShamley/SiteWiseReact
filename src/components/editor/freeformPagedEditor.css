@@ -193,6 +193,12 @@
   position: relative;
   pointer-events: none;
   user-select: none;
+  /* A sheet boundary starts below any wrapped (floated) image still in
+     flight: the workspace gap must read as a hole in the paper, never as a
+     band drawn across an image. Inert for a float-free document, and the
+     boundary position itself already sits past the float (the measurement
+     merges overlapping blocks), so clearance adds no unplanned distance. */
+  clear: both;
 }
 
 /* The visible workspace gap: the ONE place a filled, full-width gap is honest,

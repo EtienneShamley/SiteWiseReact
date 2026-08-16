@@ -47,7 +47,13 @@ const attributesOf = (state) => plugin(state).props.attributes.call(plugin(state
 describe("plugin state", () => {
   test("idle by default: no decoration, no drag class", () => {
     const state = makeState();
-    expect(mediaDropIndicatorKey.getState(state)).toEqual({ active: false, pos: null });
+    expect(mediaDropIndicatorKey.getState(state)).toEqual({
+      active: false,
+      pos: null,
+      mode: "block",
+      side: null,
+      widthPct: null,
+    });
     expect(decorationsOf(state)).toBeNull();
     expect(attributesOf(state)).toBeNull();
   });
@@ -69,7 +75,13 @@ describe("plugin state", () => {
 
   test("a position outside the document is refused rather than clamped", () => {
     const state = applyMeta(makeState(), { active: true, pos: 999 });
-    expect(mediaDropIndicatorKey.getState(state)).toEqual({ active: true, pos: null });
+    expect(mediaDropIndicatorKey.getState(state)).toEqual({
+      active: true,
+      pos: null,
+      mode: "block",
+      side: null,
+      widthPct: null,
+    });
     expect(decorationsOf(state)).toBeNull();
   });
 
@@ -85,7 +97,13 @@ describe("plugin state", () => {
     // Insert text at the very start of the first paragraph: every later
     // position shifts by 2.
     state = state.apply(state.tr.insertText("xy", 1));
-    expect(mediaDropIndicatorKey.getState(state)).toEqual({ active: true, pos: 7 });
+    expect(mediaDropIndicatorKey.getState(state)).toEqual({
+      active: true,
+      pos: 7,
+      mode: "block",
+      side: null,
+      widthPct: null,
+    });
   });
 });
 
@@ -97,6 +115,73 @@ describe("the indicator element", () => {
     expect(el.getAttribute("contenteditable")).toBe("false");
     expect(el.querySelector(`.${MEDIA_DROP_INDICATOR_CLASS}__line`)).not.toBeNull();
   });
+
+  test("a wrap-left candidate draws the side outline at the image's own width, not the line", () => {
+    const el = createMediaDropIndicatorElement({ mode: "wrap", side: "left", widthPct: 45 });
+    expect(el.className).toBe(
+      `${MEDIA_DROP_INDICATOR_CLASS} ${MEDIA_DROP_INDICATOR_CLASS}--wrap ${MEDIA_DROP_INDICATOR_CLASS}--wrap-left`
+    );
+    const box = el.querySelector(`.${MEDIA_DROP_INDICATOR_CLASS}__box`);
+    expect(box).not.toBeNull();
+    expect(box.style.width).toBe("45%");
+    expect(el.querySelector(`.${MEDIA_DROP_INDICATOR_CLASS}__line`)).toBeNull();
+  });
+
+  test("a wrap-right candidate carries the right-side class", () => {
+    const el = createMediaDropIndicatorElement({ mode: "wrap", side: "right", widthPct: 30 });
+    expect(el.className).toContain(`${MEDIA_DROP_INDICATOR_CLASS}--wrap-right`);
+  });
+
+  test("a wrap candidate with no known width uses the default outline width", () => {
+    const el = createMediaDropIndicatorElement({ mode: "wrap", side: "left", widthPct: null });
+    const box = el.querySelector(`.${MEDIA_DROP_INDICATOR_CLASS}__box`);
+    expect(box.style.width).toBe("50%");
+  });
+
+  test("an unusable layout degrades to the block line — mode and side normalized as one unit", () => {
+    const el = createMediaDropIndicatorElement({ mode: "wrap", side: null });
+    expect(el.className).toBe(MEDIA_DROP_INDICATOR_CLASS);
+    expect(el.querySelector(`.${MEDIA_DROP_INDICATOR_CLASS}__line`)).not.toBeNull();
+  });
+});
+
+describe("wrap candidates through the plugin state", () => {
+  test("a wrap candidate round-trips through setMediaDragState and the plugin", () => {
+    const state = makeState();
+    const dispatched = [];
+    setMediaDragState(
+      { state, dispatch: (tr) => dispatched.push(tr) },
+      { active: true, pos: 5, layout: { mode: "wrap", side: "right" }, widthPct: 45 }
+    );
+    const next = state.apply(dispatched[0]);
+    expect(mediaDropIndicatorKey.getState(next)).toEqual({
+      active: true,
+      pos: 5,
+      mode: "wrap",
+      side: "right",
+      widthPct: 45,
+    });
+    const found = decorationsOf(next).find();
+    expect(found).toHaveLength(1);
+    expect(found[0].from).toBe(5);
+  });
+
+  test("an invalid layout in the meta is normalized to block, never stored raw", () => {
+    const state = applyMeta(makeState(), {
+      active: true,
+      pos: 5,
+      mode: "wrap",
+      side: "sideways",
+      widthPct: "nonsense",
+    });
+    expect(mediaDropIndicatorKey.getState(state)).toEqual({
+      active: true,
+      pos: 5,
+      mode: "block",
+      side: null,
+      widthPct: null,
+    });
+  });
 });
 
 describe("setMediaDragState", () => {
@@ -107,7 +192,13 @@ describe("setMediaDragState", () => {
     expect(dispatched).toHaveLength(1);
     const tr = dispatched[0];
     expect(tr.steps).toHaveLength(0);
-    expect(tr.getMeta(mediaDropIndicatorKey)).toEqual({ active: true, pos: 5 });
+    expect(tr.getMeta(mediaDropIndicatorKey)).toEqual({
+      active: true,
+      pos: 5,
+      mode: "block",
+      side: null,
+      widthPct: null,
+    });
     expect(tr.getMeta("addToHistory")).toBe(false);
     expect(tr.getMeta("preventUpdate")).toBe(true);
   });
@@ -116,7 +207,13 @@ describe("setMediaDragState", () => {
     const state = makeState();
     const dispatched = [];
     setMediaDragState({ state, dispatch: (tr) => dispatched.push(tr) }, { active: true, pos: 1.5 });
-    expect(dispatched[0].getMeta(mediaDropIndicatorKey)).toEqual({ active: true, pos: null });
+    expect(dispatched[0].getMeta(mediaDropIndicatorKey)).toEqual({
+      active: true,
+      pos: null,
+      mode: "block",
+      side: null,
+      widthPct: null,
+    });
   });
 
   test("a destroyed or missing view is a safe no-op", () => {

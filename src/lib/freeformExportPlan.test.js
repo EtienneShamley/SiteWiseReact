@@ -386,3 +386,50 @@ describe("planned pages become the rendered document", () => {
     }
   });
 });
+
+/* ------------------------------------------------------------------------ */
+/* Wrap groups through the whole plan (Phase C3)                             */
+/* ------------------------------------------------------------------------ */
+
+describe("wrapped media through planFreeformPdf", () => {
+  const wrappedImg =
+    '<img src="https://x.test/a.png" data-layout-mode="wrap" data-layout-side="right">';
+
+  test("a wrapped image and its beside-text plan as ONE atomic wrap group", () => {
+    const result = plan(`${wrappedImg}<p>beside</p>${paragraphs(3)}`);
+    expect(result.ok).toBe(true);
+    const blocks = flattenPlannedBlocks(result.pages);
+    const groups = blocks.filter((b) => b.html.includes("nw-ff-wrapgroup"));
+    expect(groups).toHaveLength(1);
+    const g = parse(groups[0].html);
+    expect(g.querySelectorAll("img")).toHaveLength(1);
+    expect(g.textContent).toContain("beside");
+    expect(groups[0].splittable).toBe(false);
+  });
+
+  test("a page break can never slice a wrap group: it lands whole on one page", () => {
+    // Fill most of page 1, then the wrap group: it must move whole to page 2.
+    const perPage = Math.floor(CAPACITY / BLOCK_PX);
+    const filler = paragraphs(perPage - 1, "fill");
+    const result = plan(`${filler}${wrappedImg}<p>beside the image</p>${paragraphs(2)}`);
+    expect(result.ok).toBe(true);
+    for (const page of result.pages) {
+      const joined = page.map((b) => b.html).join("");
+      const groupCount = (joined.match(/nw-ff-wrapgroup/g) || []).length;
+      if (groupCount > 0) {
+        // Wherever the group landed, the image and its text are together.
+        expect(joined).toContain("<img");
+        expect(joined).toContain("beside the image");
+      }
+    }
+    // The group exists exactly once across the whole document.
+    const all = flattenPlannedBlocks(result.pages).map((b) => b.html).join("");
+    expect(all.match(/nw-ff-wrapgroup/g)).toHaveLength(1);
+  });
+
+  test("a block image plans exactly as it always did — no group is minted", () => {
+    const result = plan(`<img src="https://x.test/a.png"><p>below</p>`);
+    const all = flattenPlannedBlocks(result.pages).map((b) => b.html).join("");
+    expect(all).not.toContain("nw-ff-wrapgroup");
+  });
+});

@@ -33,6 +33,7 @@ const CORE_LIB_FILES = [
   "lib/editorMediaDrag.js",
   "lib/editorMediaDragGesture.js",
   "lib/editorMediaDragGhost.js",
+  "lib/editorMediaPlacement.js",
   "lib/editorImageAssets.js",
   "lib/editorCommands.js",
 ];
@@ -237,15 +238,59 @@ describe("the C2 body drag is the ONE image-move system", () => {
     expect(DROP_INDICATOR_PLUGIN).toMatch(/"preventUpdate", true/);
   });
 
-  test("the Template surface is untouched: no Template component consumes the C2 drag modules", () => {
+  test("the Template surface is untouched: no Template component consumes the C2/C3 drag modules", () => {
     const templateDir = path.join(SRC, "components/template");
     for (const file of fs.readdirSync(templateDir)) {
       if (!file.endsWith(".js")) continue;
       const source = withoutComments(read(path.join("components/template", file)));
       expect({
         file,
-        hit: /editorMediaDrag|mediaDropIndicatorPlugin/.test(source),
+        hit: /editorMediaDrag|editorMediaPlacement|mediaDropIndicatorPlugin/.test(source),
       }).toEqual({ file, hit: false });
     }
+  });
+});
+
+/* ============== C3: sideways placement rides the same drag ================ */
+
+describe("the C3 placement is pointer geometry over the C2 drag, never a second system", () => {
+  const EDITOR_CSS = read("components/editor/editor.css");
+  const EXPORT_UTILS = withoutComments(read("lib/exportUtils.js"));
+  const PDF_HTML = withoutComments(read("lib/freeformExportPdfHtml.js"));
+
+  test("the NodeView derives the horizontal candidate from the shared geometry", () => {
+    expect(ASSET_IMAGE).toMatch(/mediaPlacementCandidate/);
+    expect(ASSET_IMAGE).toMatch(/mediaPlacementContentBox/);
+  });
+
+  test("the drop commits position AND layout through the one moveMediaNode transaction", () => {
+    expect(ASSET_IMAGE).toMatch(/moveMediaNode\(view, \{ from, to: dest\.pos, layout: dest\.layout \}\)/);
+    // Still no second write path in the NodeView.
+    expect(ASSET_IMAGE).not.toMatch(/updateAttributes|setNodeMarkup|insertContent/);
+  });
+
+  test("vertical destinations still come from ProseMirror; the placement module holds no position logic", () => {
+    expect(CORE_LIB["lib/editorMediaDrag.js"]).toMatch(/posAtCoords/);
+    expect(CORE_LIB["lib/editorMediaPlacement.js"]).not.toMatch(/posAtCoords|dropPoint/);
+  });
+
+  test("the editor stylesheet floats the shared wrap classes and contains its floats", () => {
+    expect(EDITOR_CSS).toMatch(/\.note-editor \.nw-media--wrap-left \{\n  float: left;/);
+    expect(EDITOR_CSS).toMatch(/\.note-editor \.nw-media--wrap-right \{\n  float: right;/);
+    expect(EDITOR_CSS).toMatch(/\.note-editor \{\n  display: flow-root;/);
+    expect(EDITOR_CSS).toMatch(/\.note-editor \.nw-media--block \{\n  clear: both;/);
+  });
+
+  test("both export stylesheets read the ONE shared wrap-CSS derivation", () => {
+    expect(EXPORT_UTILS).toMatch(/mediaWrapExportCss\("\.tiptap-content"\)/);
+    expect(PDF_HTML).toMatch(/mediaWrapExportCss\("\.nw-ff-doc"\)/);
+  });
+
+  test("drag/selection chrome — wrap indicator included — never reaches print", () => {
+    const printBlock = EDITOR_CSS.match(/@media print \{[\s\S]*?\n\}/);
+    expect(printBlock).not.toBeNull();
+    expect(printBlock[0]).toContain(".nw-media-drop-indicator");
+    expect(printBlock[0]).toContain(".nw-media-controls");
+    expect(printBlock[0]).toContain(".nw-media-drag-ghost");
   });
 });

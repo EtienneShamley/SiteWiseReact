@@ -303,7 +303,11 @@ describe("DOCX preview is a labelled approximation; the real file is downloaded"
   });
 
   test("the preview uses the EXACT html-to-docx input, never a second recreated approximation", () => {
-    expect(EXPORT_UTILS).toMatch(/const previewHtml = buildHTMLDoc\(resolved\);/);
+    // wrapMedia: false — the DOCX input carries no float rules (block
+    // degradation, Phase C3), and the preview renders that same string.
+    expect(EXPORT_UTILS).toMatch(
+      /const previewHtml = buildHTMLDoc\(resolved, \{ wrapMedia: false \}\);/
+    );
     expect(EXPORT_UTILS).toMatch(/const converted = await htmlToDocx\(previewHtml, null,/);
     expect(PREVIEW).toMatch(/previewHtml: file\.previewHtml,/);
   });

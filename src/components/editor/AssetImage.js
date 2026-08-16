@@ -77,6 +77,10 @@ import {
   resolveMediaDragDestination,
 } from "../../lib/editorMediaDrag";
 import {
+  mediaPlacementCandidate,
+  mediaPlacementContentBox,
+} from "../../lib/editorMediaPlacement";
+import {
   beginMediaBodyDragGesture,
   suppressMediaGestureTrailingClick,
 } from "../../lib/editorMediaDragGesture";
@@ -251,12 +255,17 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
    * One press on the image BODY begins one candidate move, synchronously — no
    * preventDefault at pointerdown, because below the ~4px threshold this press
    * is an ordinary click and ProseMirror's own selection must keep working.
-   * Crossing the threshold arms the drag: ghost + insertion indicator +
+   * Crossing the threshold arms the drag: ghost + drop indicator +
    * trailing-click suppression. Movement only ever previews (ghost position,
    * candidate destination via the shared resolver — real posAtCoords document
-   * positions); release commits through moveMediaNode exactly once, and every
-   * abandoning exit (Escape, pointercancel, stale gesture, unmount) commits
-   * nothing and tears the presentation down through the one settle path.
+   * positions for the VERTICAL anchor, plus the pointer's position across the
+   * editor content box for the HORIZONTAL placement: left band → wrap-left,
+   * centre → block, right band → wrap-right, with hysteresis so a boundary
+   * hover cannot flicker — see editorMediaPlacement.js); release commits
+   * through moveMediaNode exactly once (position AND layout in the one
+   * transaction), and every abandoning exit (Escape, pointercancel, stale
+   * gesture, unmount) commits nothing and tears the presentation down through
+   * the one settle path.
    *
    * The corner handles and the Remove control are separate elements whose own
    * handlers never reach this one, so resize and Remove can never begin a move.
@@ -291,7 +300,32 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
         grabY: event.clientY,
         ownerDoc: img && img.ownerDocument ? img.ownerDocument : null,
         ghost: null,
-        lastPos: null,
+        // The last published destination (position + layout), so unchanged
+        // resolutions publish nothing.
+        lastKey: null,
+        // The held placement candidate — the hysteresis memory.
+        placement: null,
+        // Sizes the wrap outline: the image's stored width, else the width it
+        // renders at right now.
+        widthPct: storedPct !== null ? storedPct : measuredWidthPctOf(wrapperRef.current),
+      };
+
+      // One shared derivation for move preview and drop: pointer → horizontal
+      // placement candidate (sticky) → real document destination.
+      const resolveDestination = (e, from) => {
+        const contentBox = mediaPlacementContentBox(view.dom);
+        runtime.placement = mediaPlacementCandidate({
+          x: e.clientX,
+          contentLeft: contentBox ? contentBox.left : NaN,
+          contentWidth: contentBox ? contentBox.width : NaN,
+          previous: runtime.placement,
+        });
+        return resolveMediaDragDestination(view, {
+          x: e.clientX,
+          y: e.clientY,
+          srcPos: from,
+          layout: runtime.placement,
+        });
       };
 
       const srcPosOf = () => {
@@ -324,29 +358,25 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
         onDragMove: (e) => {
           if (runtime.ghost) runtime.ghost.moveTo(e.clientX, e.clientY);
           const from = srcPosOf();
-          const dest =
-            from === null
-              ? null
-              : resolveMediaDragDestination(view, {
-                  x: e.clientX,
-                  y: e.clientY,
-                  srcPos: from,
-                });
-          const pos = dest ? dest.pos : null;
-          if (pos !== runtime.lastPos) {
-            runtime.lastPos = pos;
-            setMediaDragState(view, { active: true, pos });
+          const dest = from === null ? null : resolveDestination(e, from);
+          const key = dest
+            ? `${dest.pos}:${dest.layout.mode}:${dest.layout.side}`
+            : null;
+          if (key !== runtime.lastKey) {
+            runtime.lastKey = key;
+            setMediaDragState(view, {
+              active: true,
+              pos: dest ? dest.pos : null,
+              layout: dest ? dest.layout : null,
+              widthPct: runtime.widthPct,
+            });
           }
         },
         onDrop: (e) => {
           const from = srcPosOf();
           if (from === null) return;
-          const dest = resolveMediaDragDestination(view, {
-            x: e.clientX,
-            y: e.clientY,
-            srcPos: from,
-          });
-          if (dest) moveMediaNode(view, { from, to: dest.pos });
+          const dest = resolveDestination(e, from);
+          if (dest) moveMediaNode(view, { from, to: dest.pos, layout: dest.layout });
         },
         onSettle: ({ armed }) => {
           bodyDragRef.current = null;
@@ -363,7 +393,7 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode }) {
       if (!gesture) return;
       bodyDragRef.current = gesture;
     },
-    [editable, editor, getPos]
+    [editable, editor, getPos, storedPct]
   );
 
   const label = alt || "Image";

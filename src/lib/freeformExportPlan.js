@@ -35,6 +35,7 @@ import {
   FREEFORM_FRAGMENT_FAILURE,
   extractFreeformBlocks,
   fitFreeformBlocks,
+  groupWrappedImageBlocks,
   splitFreeformBlockHtml,
 } from "./freeformExportBlocks";
 import {
@@ -82,7 +83,16 @@ export function planFreeformPdf(html, measure) {
   const footerHeight = measure(buildFreeformPageFooterHtml(1, 1));
   const capacityPx = pageCapacityPx(footerHeight);
 
-  const blocks = extractFreeformBlocks(html);
+  // Wrapped images (Phase C3) are fused with the text flowing beside them
+  // into single atomic wrap groups BEFORE any fitting — a page break can then
+  // never slice through a float; a group that cannot fit a whole page has
+  // already degraded its image to block placement deterministically. See
+  // groupWrappedImageBlocks.
+  const blocks = groupWrappedImageBlocks(
+    extractFreeformBlocks(html),
+    capacityPx,
+    measureBlock
+  );
   if (blocks.length === 0) {
     return { ok: true, pages: [[]], capacityPx };
   }

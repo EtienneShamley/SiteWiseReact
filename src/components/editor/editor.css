@@ -139,6 +139,14 @@
   height: auto;
 }
 
+/* The editor root is a float-containing formatting context: a wrapped image
+   floated near the end of the document must extend the editor's own height,
+   never spill under the paged shell or the page-guide measurement. flow-root
+   changes nothing for a document with no floats. */
+.note-editor {
+  display: flow-root;
+}
+
 /* An image node rendered by the asset NodeView. The wrapper is a block so an
    image behaves exactly as it did before the NodeView existed. It hugs its
    content (fit-content) so the selection ring and the corner handles sit on
@@ -151,6 +159,29 @@
   position: relative;
   width: fit-content;
   max-width: 100%;
+}
+
+/* Wrapped placement (shared media core, layoutMode "wrap"): the wrapper
+   floats and the following paragraph text flows beside it — resizing the
+   image reflows the text live, and moving the image away lets the text
+   reclaim the space, all from these rules alone. The classes are derived by
+   the ONE shared mapping (mediaLayoutClassNames), so the editor and every
+   export agree on what a stored layout means. Margins keep a readable gutter
+   between image and text on the wrapped side only. */
+.note-editor .nw-media--wrap-left {
+  float: left;
+  margin: 0.25rem 1rem 0.5rem 0;
+}
+.note-editor .nw-media--wrap-right {
+  float: right;
+  margin: 0.25rem 0 0.5rem 1rem;
+}
+
+/* Block placement starts below any wrapped image above it — two images can
+   never end up side by side by accident, and dragging a wrapped image back to
+   the centre restores genuine stacked flow. No-op in a float-free document. */
+.note-editor .nw-media--block {
+  clear: both;
 }
 
 /* A stored width sizes the WRAPPER; the image fills it and its height stays
@@ -283,9 +314,12 @@
   overflow: hidden;
 }
 
-/* The insertion indicator: a zero-height widget decoration anchored at the
-   candidate ProseMirror position, with the visible line drawn absolutely —
-   showing it can never alter layout or intercept a pointer. */
+/* The drop indicator: a zero-height widget decoration anchored at the
+   candidate ProseMirror position, with everything visible drawn absolutely —
+   showing it can never alter layout or intercept a pointer. A block
+   destination draws the full-width insertion line; a wrap destination draws
+   the dashed placement outline instead, hugging the chosen side at the
+   dragged image's own width (inline %, written by the indicator plugin). */
 .note-editor .nw-media-drop-indicator {
   position: relative;
   height: 0;
@@ -302,6 +336,24 @@
 }
 .dark .note-editor .nw-media-drop-indicator__line {
   background: #60a5fa;
+}
+.note-editor .nw-media-drop-indicator__box {
+  position: absolute;
+  top: 0;
+  height: 4.5em;
+  border: 2px dashed #3b82f6;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.12);
+}
+.note-editor .nw-media-drop-indicator--wrap-left .nw-media-drop-indicator__box {
+  left: 0;
+}
+.note-editor .nw-media-drop-indicator--wrap-right .nw-media-drop-indicator__box {
+  right: 0;
+}
+.dark .note-editor .nw-media-drop-indicator__box {
+  border-color: #60a5fa;
+  background: rgba(96, 165, 250, 0.16);
 }
 
 /* Resizing, removing and dragging are editing affordances; the resulting

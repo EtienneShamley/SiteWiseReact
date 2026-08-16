@@ -40,6 +40,12 @@
 
 import { EXPORT_ATTACHMENT_CLASS } from "./exportFileAttachments";
 import { EXPORT_IMAGE_PLACEHOLDER_CLASS } from "./editorImageAssets";
+import {
+  MEDIA_LAYOUT_MODE,
+  MEDIA_LAYOUT_MODE_ATTR,
+  MEDIA_LAYOUT_SIDE_ATTR,
+  normalizeMediaLayout,
+} from "./editorMediaLayout";
 
 /* ------------------------------------------------------------------------ */
 /* Kinds                                                                     */
@@ -55,6 +61,9 @@ export const FREEFORM_BLOCK = Object.freeze({
   CODE: "code",
   TABLE: "table",
   RULE: "rule",
+  // A wrapped image plus the text that flows beside it, fused into ONE atomic
+  // unit before pagination — see groupWrappedImageBlocks below.
+  WRAP_GROUP: "wrapGroup",
   OTHER: "other",
 });
 
@@ -66,6 +75,11 @@ export const FREEFORM_FRAGMENT_FAILURE = Object.freeze({
 // them, so the block model and the resolvers can never drift apart.
 export const FILE_CARD_CLASS = EXPORT_ATTACHMENT_CLASS;
 export const IMAGE_PLACEHOLDER_CLASS = EXPORT_IMAGE_PLACEHOLDER_CLASS;
+
+// The wrap group's own container class: a float-containing formatting context
+// (`display: flow-root` in the export stylesheet), so the floated image can
+// never escape the group and intrude into a block on another page.
+export const FREEFORM_WRAP_GROUP_CLASS = "nw-ff-wrapgroup";
 
 // A split halves its input, so a legitimate split terminates quickly. The cap
 // exists so a degenerate height oracle can never recurse without bound.
@@ -113,6 +127,7 @@ function isImageOnlyParagraph(el) {
 export function classifyBlockElement(el) {
   if (!el || el.nodeType !== 1) return FREEFORM_BLOCK.OTHER;
   const tag = el.tagName;
+  if (hasClass(el, FREEFORM_WRAP_GROUP_CLASS)) return FREEFORM_BLOCK.WRAP_GROUP;
   if (HEADING_TAGS.has(tag)) return FREEFORM_BLOCK.HEADING;
   if (tag === "IMG") return FREEFORM_BLOCK.IMAGE;
   if (tag === "HR") return FREEFORM_BLOCK.RULE;
@@ -206,6 +221,137 @@ function fragmentOf(block, html, suffix) {
     splittable: kindIsSplittable(kind),
     continued: true,
   };
+}
+
+/* ------------------------------------------------------------------------ */
+/* Wrap groups (Phase C3)                                                    */
+/* ------------------------------------------------------------------------ */
+
+// The layout the img inside an IMAGE block asks for, normalized through the
+// shared vocabulary; `{mode: "block"}` for everything that is not a wrap.
+function imageBlockLayout(el) {
+  const img = el && el.tagName === "IMG" ? el : el && el.querySelector && el.querySelector("img");
+  if (!img) return normalizeMediaLayout({});
+  return normalizeMediaLayout({
+    mode: img.getAttribute(MEDIA_LAYOUT_MODE_ATTR),
+    side: img.getAttribute(MEDIA_LAYOUT_SIDE_ATTR),
+  });
+}
+
+// The same block with the wrap attributes removed — honest, deterministic
+// block degradation for a wrap that cannot be paginated as a group.
+function blockDegradedHtml(el) {
+  const clone = el.cloneNode(true);
+  const img = clone.tagName === "IMG" ? clone : clone.querySelector("img");
+  if (img) {
+    img.removeAttribute(MEDIA_LAYOUT_MODE_ATTR);
+    img.removeAttribute(MEDIA_LAYOUT_SIDE_ATTR);
+  }
+  return clone.outerHTML;
+}
+
+// Only text can flow beside a float; anything else ends the group.
+const WRAP_FOLLOWER_KINDS = new Set([FREEFORM_BLOCK.PARAGRAPH, FREEFORM_BLOCK.HEADING]);
+
+// Matches the planner's sub-pixel fit tolerance: a paragraph whose measured
+// bottom coincides with the float's within a fraction of a pixel still sits
+// beside it.
+const WRAP_GROUP_EPSILON_PX = 0.5;
+
+/**
+ * Fuse every wrapped image with the text that flows beside it into ONE atomic
+ * block, BEFORE pagination — the conservative strategy recorded for Phase C3.
+ *
+ * The paginator's whole model is stacked blocks; a free-floating image
+ * spanning several sibling paragraphs would make every one of those blocks
+ * measure and render differently depending on what happens to sit above it.
+ * Fusing the float and its beside-text into one measured unit keeps the model
+ * true: the group is measured whole, placed whole, and — because its
+ * container is a formatting context — renders identically wherever it lands.
+ * A page break can therefore never slice through the image or the text beside
+ * it; a tall group moves to the next page instead.
+ *
+ * Membership is decided by MEASUREMENT, not guessed: text blocks after the
+ * image join the group until the group's measured height first exceeds the
+ * floated image's own — i.e. until the text genuinely clears the float.
+ * Everything after that point sits below the image and paginates exactly as
+ * before.
+ *
+ * A group that cannot fit ONE whole page degrades deterministically: the
+ * image's wrap attributes are stripped (block placement — the same safe
+ * degradation every other consumer of the vocabulary uses) and the text
+ * blocks stay independent and splittable, so the export still succeeds
+ * honestly rather than failing on an unsplittable giant.
+ *
+ * @param blocks     the extracted top-level blocks, in order
+ * @param capacityPx one whole page's content capacity
+ * @param measure    (blockHtml) => rendered height, wrapper included — the
+ *                   same oracle the planner uses
+ */
+export function groupWrappedImageBlocks(blocks, capacityPx, measure, deps = {}) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  if (list.length === 0) return [];
+  const doc = (deps.createDocument || createInertDocument)();
+  const out = [];
+
+  let index = 0;
+  while (index < list.length) {
+    const block = list[index];
+    if (!block || block.kind !== FREEFORM_BLOCK.IMAGE) {
+      out.push(block);
+      index += 1;
+      continue;
+    }
+    const el = parseElement(block.html, doc);
+    if (!el || imageBlockLayout(el).mode !== MEDIA_LAYOUT_MODE.WRAP) {
+      out.push(block);
+      index += 1;
+      continue;
+    }
+
+    const groupWith = (members) => {
+      const group = doc.createElement("div");
+      group.setAttribute("class", FREEFORM_WRAP_GROUP_CLASS);
+      group.innerHTML = members.map((m) => m.html).join("");
+      return group.outerHTML;
+    };
+
+    // The float alone: the height the beside-text has to consume.
+    const floatHeight = measure(groupWith([block]));
+
+    const members = [block];
+    let next = index + 1;
+    let groupHtml = groupWith(members);
+    let groupHeight = floatHeight;
+    while (next < list.length && list[next] && WRAP_FOLLOWER_KINDS.has(list[next].kind)) {
+      members.push(list[next]);
+      next += 1;
+      groupHtml = groupWith(members);
+      groupHeight = measure(groupHtml);
+      // The text now extends past the float, so everything further sits
+      // BELOW the image and needs no grouping.
+      if (groupHeight > floatHeight + WRAP_GROUP_EPSILON_PX) break;
+    }
+
+    if (groupHeight > capacityPx) {
+      // Too tall for any page as one unit: degrade the image to block and
+      // leave the text blocks free to split as they always did.
+      out.push({ ...block, html: blockDegradedHtml(el) });
+      index += 1;
+      continue;
+    }
+
+    out.push({
+      id: `${block.id}-wg`,
+      kind: FREEFORM_BLOCK.WRAP_GROUP,
+      html: groupHtml,
+      keepWithNext: false,
+      splittable: false,
+    });
+    index = next;
+  }
+
+  return out;
 }
 
 /* ------------------------------------------------------------------------ */

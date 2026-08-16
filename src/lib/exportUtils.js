@@ -1,6 +1,7 @@
 // Heavy libs will load only when needed (keeps bundle lean)
 import { resolveExportImageHtml } from "./exportImageAssets";
 import { resolveExportFileAttachmentHtml } from "./exportFileAttachments";
+import { mediaWrapExportCss } from "./editorMediaLayout";
 
 let TurndownServiceMod = null;
 let gfmPluginFn = null;
@@ -62,7 +63,19 @@ function downloadBlob(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
-const buildHTMLDoc = (html) => `
+/**
+ * `wrapMedia` decides whether the document renders wrapped image placement
+ * (the shared media core's `data-layout-*` attributes) as real CSS floats.
+ * The standalone HTML export says yes — the exported page then reflows text
+ * beside the image exactly as the editor did. The DOCX path says NO, on
+ * purpose: html-to-docx cannot represent CSS float wrap reliably, so its
+ * input carries no float rules at all and every image degrades to block
+ * placement deterministically — and the DOCX layout preview, which renders
+ * this same string, shows that honestly instead of a wrap the .docx file
+ * does not contain. `.tiptap-content` is `flow-root` so a float near the end
+ * of the note extends the document rather than escaping it.
+ */
+export const buildHTMLDoc = (html, { wrapMedia = true } = {}) => `
   <html><head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -71,8 +84,9 @@ const buildHTMLDoc = (html) => `
       @page { size: A4; margin: 12mm; }
       * { box-sizing: border-box; }
       body { font-family: Arial, sans-serif; color: var(--fg); background:#fff; }
-      .tiptap-content { max-width:820px; margin:0 auto; line-height:1.5; font-size:12pt; }
+      .tiptap-content { max-width:820px; margin:0 auto; line-height:1.5; font-size:12pt; display:flow-root; }
       img { max-width:100%; height:auto; display:inline-block; }
+      ${wrapMedia ? mediaWrapExportCss(".tiptap-content") : ""}
       table { border-collapse: collapse; width:100%; margin:10px 0; }
       td, th { border:1px solid var(--border); padding:6px; vertical-align:top; }
       blockquote { border-left:3px solid var(--muted); padding-left:10px; color:var(--muted); margin:8px 0; }
@@ -164,7 +178,9 @@ export async function buildFreeformDocxFile({ title, html }) {
   // Preview's "Approximate DOCX layout preview" renders this string rather
   // than independently recreating one: a browser cannot render .docx natively,
   // but this is the real, unmodified input the real DOCX was converted from.
-  const previewHtml = buildHTMLDoc(resolved);
+  // wrapMedia: false — wrapped image placement degrades to block in DOCX (see
+  // buildHTMLDoc), and the preview shows exactly that degradation.
+  const previewHtml = buildHTMLDoc(resolved, { wrapMedia: false });
   const converted = await htmlToDocx(previewHtml, null, {
     table: { row: { cantSplit: true } },
     footer: true,

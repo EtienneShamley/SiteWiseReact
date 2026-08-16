@@ -9,6 +9,7 @@
 // BETWEEN two of them.
 import {
   MIN_VISUAL_PAGE_COUNT,
+  mergeOverlappingBlocks,
   naturalBlockGeometry,
   pageSpacerGapOffsetPx,
   pageSpacerHeightPx,
@@ -302,6 +303,55 @@ describe("an unmeasurable layout degrades rather than guessing", () => {
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.spacers)).toBe(true);
     expect(Object.isFrozen(result.spacers[0])).toBe(true);
+  });
+});
+
+/* ========================= Wrapped media (Phase C3) ======================== */
+
+describe("blocks sharing vertical space plan as one unit", () => {
+  // A floated image spanning three paragraphs: its box overlaps theirs.
+  const floatAndText = () => [
+    { pos: 1, top: 0, bottom: 600 }, // the wrapped image (float)
+    { pos: 5, top: 0, bottom: 220 }, // text beside it
+    { pos: 9, top: 220, bottom: 440 },
+    { pos: 13, top: 440, bottom: 700 }, // extends past the float
+    { pos: 17, top: 700, bottom: 900 }, // below the float — independent again
+  ];
+
+  test("mergeOverlappingBlocks fuses the float and its beside-text, and nothing else", () => {
+    const merged = mergeOverlappingBlocks(floatAndText());
+    expect(merged).toEqual([
+      { pos: 1, top: 0, bottom: 700 },
+      { pos: 17, top: 700, bottom: 900 },
+    ]);
+  });
+
+  test("normal stacked geometry is untouched — an exact no-op for float-free documents", () => {
+    const blocks = stack([400, 300, 200]);
+    expect(mergeOverlappingBlocks(blocks)).toEqual(blocks);
+  });
+
+  test("sub-pixel touching is not overlap", () => {
+    const blocks = [
+      { pos: 1, top: 0, bottom: 400 },
+      { pos: 5, top: 399.8, bottom: 700 },
+    ];
+    expect(mergeOverlappingBlocks(blocks)).toHaveLength(2);
+  });
+
+  test("a sheet boundary can never land between a float and the text beside it", () => {
+    // With CAPACITY 1000, an unmerged plan would break before pos 13
+    // (bottom 700 fits) only if pushed; force it: capacity 500 — the composite
+    // (0..700) is first on its page and overruns (oversized-block rule); the
+    // block at pos 17 starts the next sheet.
+    const result = plan(mergeOverlappingBlocks(floatAndText()), { capacityPx: 500 });
+    expect(result.spacers.map((s) => s.pos)).toEqual([17]);
+  });
+
+  test("planFreeformPageSpacers merges internally — raw overlapping geometry is safe to hand it", () => {
+    const merged = plan(mergeOverlappingBlocks(floatAndText()), { capacityPx: 500 });
+    const raw = plan(floatAndText(), { capacityPx: 500 });
+    expect(samePageSpacerPlan(merged, raw)).toBe(true);
   });
 });
 

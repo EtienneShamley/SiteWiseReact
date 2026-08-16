@@ -149,3 +149,33 @@ export function mediaWidthStyle(widthPct) {
   const pct = normalizeMediaWidthPct(widthPct);
   return pct === null ? null : { width: `${pct}%` };
 }
+
+/**
+ * The float rules an EXPORTED document needs to render wrapped media — the one
+ * derivation both the standalone HTML export and the PDF capture stylesheet
+ * read, so a wrap can never mean different things in different files.
+ *
+ * Serialized note HTML carries the layout as the `data-layout-*` attributes on
+ * a bare `<img>` (there is no NodeView wrapper outside the editor), so these
+ * rules key off exactly the attributes the serializer emits. Every selector is
+ * prefixed with the caller's scope, so an export stylesheet can keep its
+ * "nothing unscoped" guarantee. An image with no layout attributes — every
+ * document written before wrap existed — matches only the clear rule, which
+ * is a no-op in a float-free document; its rendering is untouched.
+ *
+ * The caller remains responsible for float CONTAINMENT (a `display: flow-root`
+ * formatting context around the flow), which is a property of the surrounding
+ * markup, not of the image. No `clear` rule is emitted for other images:
+ * export stylesheets render every image `inline-block` (on which `clear` has
+ * no effect anyway), and forcing them `block` to make one clear rule work
+ * would break genuinely inline legacy images out of their text lines.
+ */
+export function mediaWrapExportCss(scope) {
+  const s = typeof scope === "string" ? scope.trim() : "";
+  const at = (side) =>
+    `${s} img[${MEDIA_LAYOUT_MODE_ATTR}="${MEDIA_LAYOUT_MODE.WRAP}"][${MEDIA_LAYOUT_SIDE_ATTR}="${side}"]`;
+  return `
+    ${at(MEDIA_LAYOUT_SIDE.LEFT)} { float: left; margin: 4px 16px 8px 0; }
+    ${at(MEDIA_LAYOUT_SIDE.RIGHT)} { float: right; margin: 4px 0 8px 16px; }
+  `;
+}

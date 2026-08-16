@@ -18,6 +18,7 @@ import {
   isDefaultMediaLayout,
   mediaLayoutClassNames,
   mediaWidthStyle,
+  mediaWrapExportCss,
   normalizeMediaLayout,
   normalizeMediaLayoutMode,
   normalizeMediaLayoutSide,
@@ -167,5 +168,35 @@ describe("presentation derivation", () => {
     expect(mediaWidthStyle(null)).toBeNull();
     expect(mediaWidthStyle(undefined)).toBeNull();
     expect(mediaWidthStyle("abc")).toBeNull();
+  });
+});
+
+describe("mediaWrapExportCss", () => {
+  test("emits exactly the two float rules, keyed off the serialized attributes", () => {
+    const css = mediaWrapExportCss(".nw-ff-doc");
+    expect(css).toContain(
+      '.nw-ff-doc img[data-layout-mode="wrap"][data-layout-side="left"] { float: left;'
+    );
+    expect(css).toContain(
+      '.nw-ff-doc img[data-layout-mode="wrap"][data-layout-side="right"] { float: right;'
+    );
+  });
+
+  test("every selector carries the caller's scope, so an export stylesheet stays scoped", () => {
+    const css = mediaWrapExportCss(".tiptap-content");
+    for (const line of css.split("\n").map((l) => l.trim()).filter(Boolean)) {
+      expect(line.startsWith(".tiptap-content ")).toBe(true);
+    }
+  });
+
+  test("an image with no layout attributes matches no rule — legacy rendering untouched", () => {
+    // The only selectors present require BOTH wrap attributes.
+    const css = mediaWrapExportCss(".x");
+    const selectors = css.match(/\.x [^{]+/g) || [];
+    expect(selectors.length).toBe(2);
+    for (const s of selectors) {
+      expect(s).toContain('[data-layout-mode="wrap"]');
+      expect(s).toContain("[data-layout-side=");
+    }
   });
 });

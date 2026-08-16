@@ -10,11 +10,14 @@
 import {
   FREEFORM_BLOCK,
   FREEFORM_FRAGMENT_FAILURE,
+  FREEFORM_WRAP_GROUP_CLASS,
   classifyBlockElement,
   countInlineAtoms,
   extractFreeformBlocks,
   fitFreeformBlocks,
+  groupWrappedImageBlocks,
   joinBlockHtml,
+  kindIsSplittable,
   largestFitting,
   safeTableSplitPoints,
   sliceInlineAtoms,
@@ -514,5 +517,108 @@ describe("fitFreeformBlocks", () => {
     );
     const result = fitFreeformBlocks(blocks, 10, () => 999);
     expect(result.ok).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* Wrap groups (Phase C3)                                                    */
+/* ------------------------------------------------------------------------ */
+
+describe("groupWrappedImageBlocks", () => {
+  const IMG_PX = 300;
+  const PARA_PX = 100;
+
+  // A float-aware oracle for the group container ONLY: text consumes the
+  // float's height before the group grows — max(float, beside-text) — which
+  // is exactly what `display: flow-root` over a float renders. Everything
+  // else measures stacked, like the main adapter.
+  const wrapMeasure = (html) => {
+    const doc = document.implementation.createHTMLDocument("");
+    const host = doc.createElement("div");
+    host.innerHTML = html;
+    const el = host.firstElementChild;
+    if (el && el.classList.contains(FREEFORM_WRAP_GROUP_CLASS)) {
+      const img = el.querySelector("img") ? IMG_PX : 0;
+      const text = el.querySelectorAll("p, h1, h2, h3").length * PARA_PX;
+      return Math.max(img, text);
+    }
+    return el && el.tagName === "IMG" ? IMG_PX : PARA_PX;
+  };
+
+  const wrappedImg =
+    '<img src="https://x.test/a.png" data-layout-mode="wrap" data-layout-side="left" data-width-pct="40" alt="site">';
+
+  const group = (html, capacity = 10000) =>
+    groupWrappedImageBlocks(extractFreeformBlocks(html), capacity, wrapMeasure);
+
+  test("a wrapped image absorbs following text until the text clears the float", () => {
+    // 300px float, 100px paragraphs: p1..p3 sit beside it (max stays 300);
+    // p4 pushes past (400 > 300) and closes the group; p5 stays independent.
+    const blocks = group(`${wrappedImg}<p>a</p><p>b</p><p>c</p><p>d</p><p>e</p>`);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].kind).toBe(FREEFORM_BLOCK.WRAP_GROUP);
+    expect(blocks[0].splittable).toBe(false);
+    const g = document.createElement("div");
+    g.innerHTML = blocks[0].html;
+    expect(g.firstElementChild.getAttribute("class")).toBe(FREEFORM_WRAP_GROUP_CLASS);
+    expect(g.querySelectorAll("img")).toHaveLength(1);
+    expect(g.querySelectorAll("p")).toHaveLength(4);
+    expect(blocks[1].html).toBe("<p>e</p>");
+  });
+
+  test("the group carries the image attributes untouched — including the wrap layout", () => {
+    const blocks = group(`${wrappedImg}<p>beside</p>`);
+    const g = document.createElement("div");
+    g.innerHTML = blocks[0].html;
+    const img = g.querySelector("img");
+    expect(img.getAttribute("data-layout-mode")).toBe("wrap");
+    expect(img.getAttribute("data-layout-side")).toBe("left");
+    expect(img.getAttribute("data-width-pct")).toBe("40");
+    expect(img.getAttribute("alt")).toBe("site");
+  });
+
+  test("a block image is never grouped — the list passes through unchanged", () => {
+    const html = '<img src="https://x.test/a.png"><p>below</p>';
+    const blocks = extractFreeformBlocks(html);
+    expect(groupWrappedImageBlocks(blocks, 10000, wrapMeasure)).toEqual(blocks);
+  });
+
+  test("a wrap with no usable side normalizes to block and is never grouped", () => {
+    const html = '<img src="https://x.test/a.png" data-layout-mode="wrap"><p>below</p>';
+    const blocks = extractFreeformBlocks(html);
+    expect(groupWrappedImageBlocks(blocks, 10000, wrapMeasure)).toEqual(blocks);
+  });
+
+  test("a wrapped image followed by a non-text block groups alone — the float is still contained", () => {
+    const blocks = group(`${wrappedImg}<hr><p>later</p>`);
+    expect(blocks[0].kind).toBe(FREEFORM_BLOCK.WRAP_GROUP);
+    const g = document.createElement("div");
+    g.innerHTML = blocks[0].html;
+    expect(g.querySelectorAll("p")).toHaveLength(0);
+    expect(blocks[1].html).toBe("<hr>");
+  });
+
+  test("a group taller than one page degrades the image to block, deterministically", () => {
+    // Capacity below the float height: no group can ever fit.
+    const blocks = group(`${wrappedImg}<p>a</p><p>b</p>`, 250);
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0].kind).toBe(FREEFORM_BLOCK.IMAGE);
+    const g = document.createElement("div");
+    g.innerHTML = blocks[0].html;
+    const img = g.querySelector("img");
+    expect(img.getAttribute("data-layout-mode")).toBeNull();
+    expect(img.getAttribute("data-layout-side")).toBeNull();
+    // Everything else — src, width, alt — survives the degradation.
+    expect(img.getAttribute("data-width-pct")).toBe("40");
+    expect(img.getAttribute("alt")).toBe("site");
+    expect(blocks[1].html).toBe("<p>a</p>");
+  });
+
+  test("the wrap-group container classifies as its own atomic kind", () => {
+    const doc = document.implementation.createHTMLDocument("");
+    const el = doc.createElement("div");
+    el.setAttribute("class", FREEFORM_WRAP_GROUP_CLASS);
+    expect(classifyBlockElement(el)).toBe(FREEFORM_BLOCK.WRAP_GROUP);
+    expect(kindIsSplittable(FREEFORM_BLOCK.WRAP_GROUP)).toBe(false);
   });
 });

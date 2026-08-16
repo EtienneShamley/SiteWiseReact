@@ -381,3 +381,29 @@ describe("stored width activation (shared media core)", () => {
     expect(html).not.toContain("style=");
   });
 });
+
+describe("stored layout survival (Phase C3)", () => {
+  test("the wrap layout attributes survive resolution on an asset-backed image", async () => {
+    const s = store({ a: asset("image/png") });
+    const html = await resolveExportImageHtml(
+      imgRef("a", ' data-layout-mode="wrap" data-layout-side="left" data-width-pct="40"'),
+      { loadAsset: s.loadAsset, blobToDataUrl }
+    );
+    // The export stylesheets key their float rules off these two attributes,
+    // so dropping them here would silently flatten every wrap to block.
+    expect(html).toContain('data-layout-mode="wrap"');
+    expect(html).toContain('data-layout-side="left"');
+    // The internal reference is still gone.
+    expect(html).not.toContain("data-asset-id");
+  });
+
+  test("remote and legacy base64 images keep their layout attributes too", async () => {
+    for (const src of ["https://example.com/r.png", "data:image/png;base64,AAA"]) {
+      const html = await resolveExportImageHtml(
+        `<img src="${src}" data-layout-mode="wrap" data-layout-side="right">`,
+        {}
+      );
+      expect(html).toContain('data-layout-side="right"');
+    }
+  });
+});

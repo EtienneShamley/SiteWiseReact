@@ -84,6 +84,37 @@ export function naturalBlockGeometry(entries) {
 }
 
 /**
+ * Fuse blocks that OVERLAP VERTICALLY into one composite planning unit.
+ *
+ * In normal stacked flow, top-level border boxes never overlap, so this is an
+ * exact no-op for every document written before wrapped media existed. A
+ * FLOATED image (shared media core, layoutMode "wrap") is the exception: its
+ * box spans the same vertical range as the paragraphs flowing beside it. A
+ * sheet boundary between two blocks that share vertical space would slice
+ * straight through the image (and its beside-text), so any run of mutually
+ * overlapping blocks becomes ONE composite — the position of its first block,
+ * the extent of all of them — and the planner's existing rules (boundaries
+ * between blocks; an oversized first-on-page block overruns its sheet) apply
+ * to the whole unit. Purely geometric: no DOM, no knowledge of WHY the boxes
+ * overlap, so it can never misclassify a layout it has not seen before.
+ */
+export function mergeOverlappingBlocks(blocks, epsilonPx = PAGE_FIT_EPSILON_PX) {
+  if (!Array.isArray(blocks) || blocks.length === 0) return [];
+  const epsilon = Math.max(0, toFinite(epsilonPx));
+  const out = [];
+  for (const block of blocks) {
+    if (!block) continue;
+    const last = out[out.length - 1];
+    if (last && toFinite(block.top) < last.bottom - epsilon) {
+      last.bottom = Math.max(last.bottom, toFinite(block.bottom));
+      continue;
+    }
+    out.push({ pos: block.pos, top: toFinite(block.top), bottom: toFinite(block.bottom) });
+  }
+  return out;
+}
+
+/**
  * How much real space a spacer must occupy at one sheet boundary.
  *
  *   fillPx   the unused remainder of the sheet that is ending, so the sheet
@@ -144,6 +175,9 @@ export function planFreeformPageSpacers(
   if (!Array.isArray(blocks) || blocks.length === 0) return empty;
 
   const epsilon = Math.max(0, toFinite(epsilonPx));
+  // Blocks sharing vertical space (a floated image and the text wrapping
+  // beside it) plan as one unit — a boundary can never land between them.
+  blocks = mergeOverlappingBlocks(blocks, epsilon);
   const spacers = [];
 
   // The natural y-coordinate at which the CURRENT sheet's usable region starts.
