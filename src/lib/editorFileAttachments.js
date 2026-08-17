@@ -230,9 +230,20 @@ export function isBlobUrl(value) {
   return typeof value === "string" && /^blob:/i.test(value.trim());
 }
 
-// Ids come from newId() — a UUID, or an `id-<hex>-<hex>` fallback. Anything
-// outside that shape did not come from this application and is refused rather
-// than used as an IndexedDB key.
+// The DOCUMENT id shape. Every asset a document has ever referenced was minted
+// by newId() — a UUID, or an `id-<hex>-<hex>` fallback — and this is that shape
+// (plus the same-alphabet `tpl-logo-<uuid>` logo id, which no document holds).
+//
+// It is NOT the shape of every id the asset store contains: the one-time
+// rowImages migration mints deterministic `note-att-<noteId>-<fieldId>-<index>`
+// ids (src/lib/noteAttachmentMigration.js) that can exceed 64 characters and
+// can carry "_" (default field ids). Those live ONLY in a note's
+// `attachments[rowId]` and are rendered, exported and Blob-protected through
+// their own compatibility strip; no NoteWise-produced document has ever named
+// one (Phase G0, .claude/NOTEWISE_HANDOFF.md §40). An id outside this shape is
+// therefore refused as a document reference rather than used as an IndexedDB
+// key — the character rule keeps the regex-based id collectors and the
+// attribute byte-identical; the length is a format bound, not a security one.
 const ASSET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{7,63}$/;
 
 export function isSafeAssetId(value) {
