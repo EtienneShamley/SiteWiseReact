@@ -94,7 +94,9 @@ function App() {
             underneath the drawer. */}
         {sidebarOverlay && <div className="w-14 shrink-0" aria-hidden="true" />}
         <Sidebar
-          middlePaneHidden={middlePaneHidden}
+          // Not a restore control any more — the collapsed Notes pane is
+          // restored from its own rail. The sidebar needs this only because
+          // selecting a project-child folder opens that pane.
           onShowMiddlePane={() => setMiddlePaneHidden(false)}
           collapsed={sidebarIsRail}
           overlay={sidebarOverlay}
@@ -107,6 +109,7 @@ function App() {
         <MiddlePane
           middlePaneHidden={middlePaneHidden}
           onHideMiddlePane={() => setMiddlePaneHidden(true)}
+          onShowMiddlePane={() => setMiddlePaneHidden(false)}
         />
         <MainArea />
 

@@ -185,7 +185,7 @@ describe("8/9/28. document width responds to the sidebar; no horizontal page ove
   });
 
   test("the sidebar's ONE scroll region is the tree; header, groups and footer are shrink-0", () => {
-    expect(SIDEBAR).toMatch(/className="flex-1 min-h-0 overflow-y-auto /);
+    expect(SIDEBAR).toMatch(/className="nw-tree-scroll flex-1 min-h-0 overflow-y-auto /);
     expect((SIDEBAR.match(/overflow-y-auto/g) || []).length).toBe(1);
     expect(SIDEBAR).not.toMatch(/overflow-x-auto|overflow-auto/);
     expect(SIDEBAR).toMatch(/data-nw-sidebar-footer/);
@@ -212,7 +212,7 @@ describe("10–13. Template form / Free-form / PDF are ONE sidebar group; Docume
     expect(NOTE_MAIN).not.toMatch(/onClick=\{\(\) => setActiveTab\(/);
     expect(NOTE_MAIN).not.toMatch(/aria-pressed=\{activeTab|aria-pressed=\{noteLayout/);
     // The surfaces themselves still render exactly as before.
-    expect(DOCUMENT_REGION).toMatch(/<FreeformPagedEditor editor=\{editor\} \/>/);
+    expect(DOCUMENT_REGION).toMatch(/<FreeformPagedEditor editor=\{editor\} documentZoom=\{documentZoom\} \/>/);
     expect(DOCUMENT_REGION).toMatch(/<NoteTemplateDoc/);
     expect(DOCUMENT_REGION).toMatch(/<PdfEditorTab key=\{linkedPdfId\}/);
   });
@@ -399,9 +399,17 @@ describe("34. accessible names and live regions across the shell", () => {
     expect(SIDEBAR).toMatch(/aria-label=\{collapsed \? `\$\{WORKSPACE_IDENTITY_TITLE\} — \$\{WORKSPACE_IDENTITY_DETAIL\}` : undefined\}/);
   });
 
-  test("the middle pane and its restore control are unchanged", () => {
-    expect(MIDDLE_PANE).toContain("if (middlePaneHidden) return null;");
-    expect(SIDEBAR).toContain('aria-label="Open notes pane"');
-    expect(SIDEBAR).toContain("onClick={onShowMiddlePane}");
+  test("the middle pane and its restore controls are coherent", () => {
+    // Collapsed it renders its own in-flow rail (identity + count + the way
+    // back) rather than nothing — see notesPaneRail.test.js.
+    expect(MIDDLE_PANE).toContain("if (middlePaneHidden) {");
+    expect(MIDDLE_PANE).toContain('aria-label="Notes pane, collapsed"');
+    // ONE restore control, owned by the pane itself — the Sidebar's duplicate
+    // "Show notes" button was removed (see interactionSurfaces.test.js).
+    expect(MIDDLE_PANE).toContain("onClick={onShowMiddlePane}");
+    expect(SIDEBAR).not.toContain('aria-label="Open notes pane"');
+    // The Sidebar keeps the handler only to open the pane on project-child
+    // folder selection.
+    expect(SIDEBAR).toMatch(/if \(projectId\) revealNotesPane\(\);/);
   });
 });

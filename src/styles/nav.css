@@ -65,6 +65,16 @@
   /* Keyboard focus */
   --nw-focus-ring: rgba(11, 110, 120, 0.90);
 
+  /* Navigation-tree scrollbar (projects / folders / notes). A discovery
+     affordance, not decoration: the thumb is the interaction accent at low
+     opacity so the region reads as scrollable at a glance without the pane
+     becoming turquoise. Hover/active raise it; the track stays nearly
+     invisible so nothing competes with the rows themselves. */
+  --nw-tree-scroll-thumb: rgba(11, 110, 120, 0.35);
+  --nw-tree-scroll-thumb-hover: rgba(11, 110, 120, 0.60);
+  --nw-tree-scroll-thumb-active: rgba(11, 110, 120, 0.80);
+  --nw-tree-scroll-track: rgba(15, 23, 42, 0.05);
+
   /* Disabled */
   --nw-state-disabled-text: #94a3b8; /* slate-400 */
 
@@ -110,6 +120,13 @@
   --nw-nav-hover-bg: var(--nw-state-hover-bg);
 
   --nw-focus-ring: rgba(42, 229, 242, 0.90);
+
+  /* Navigation-tree scrollbar — the dark theme's own accent and a track that
+     lifts rather than darkens, so it stays visible on the near-black pane. */
+  --nw-tree-scroll-thumb: rgba(42, 229, 242, 0.32);
+  --nw-tree-scroll-thumb-hover: rgba(42, 229, 242, 0.55);
+  --nw-tree-scroll-thumb-active: rgba(42, 229, 242, 0.78);
+  --nw-tree-scroll-track: rgba(255, 255, 255, 0.06);
 
   --nw-state-disabled-text: #64748b; /* slate-500 */
 
@@ -742,3 +759,68 @@
   color: var(--nw-state-disabled-text);
   cursor: not-allowed;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Navigation-tree scroll affordance                                          */
+/*                                                                            */
+/* `.nw-tree-scroll` marks the PROJECTS / FOLDERS / NOTES regions — the        */
+/* sidebar's tree and the notes pane — and nothing else. It is deliberately    */
+/* NOT applied to the document region (`#chatWindow`), which keeps the         */
+/* platform scrollbar: the document is the thing being read, and a coloured    */
+/* bar beside a page of prose would compete with the content. It is not on the */
+/* collapsed icon rail either, which renders no tree and no scroll container.  */
+/*                                                                            */
+/* Native scrolling is untouched: this styles the browser's own scrollbar      */
+/* through the two standard mechanisms and adds no custom scroll              */
+/* implementation, so trackpad, wheel, touch, keyboard and assistive           */
+/* behaviour are exactly the platform's.                                       */
+/* -------------------------------------------------------------------------- */
+
+/* Standard (Firefox, and every engine as it lands). `thin` is the platform's
+   own slim scrollbar rather than a hand-picked width, so it stays native. */
+.nw-tree-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--nw-tree-scroll-thumb) var(--nw-tree-scroll-track);
+}
+
+/* WebKit/Blink. The same colours through the vendor pseudo-elements, which is
+   where hover and active feedback are expressible today. */
+.nw-tree-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.nw-tree-scroll::-webkit-scrollbar-track {
+  background-color: var(--nw-tree-scroll-track);
+  border-radius: 9999px;
+}
+
+.nw-tree-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--nw-tree-scroll-thumb);
+  border-radius: 9999px;
+  /* A transparent border painted over the thumb's own background keeps the
+     visible bar slim while leaving the full 10px as the grab target — a
+     hairline thumb is discoverable but miserable to hit. */
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+.nw-tree-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: var(--nw-tree-scroll-thumb-hover);
+}
+
+.nw-tree-scroll::-webkit-scrollbar-thumb:active {
+  background-color: var(--nw-tree-scroll-thumb-active);
+}
+
+/* Nothing to scroll, nothing to advertise: with no overflow the browser draws
+   no thumb at all, so the affordance appears exactly when it is true. The
+   corner is cleared so a short tree shows no stray square. */
+.nw-tree-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* The scrollbar carries information (this region scrolls), so it is not
+   animated and is unaffected by reduced motion — there is no transition to
+   disable. Colour is never the only signal either: the thumb's presence and
+   position are the signal, and the accent only makes it discoverable. */

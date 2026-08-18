@@ -93,29 +93,23 @@ import {
   createMediaDropIndicatorPlugin,
   setMediaDragState,
 } from "./mediaDropIndicatorPlugin";
-
-/** An element's content-box width in px, or null when it cannot be measured. */
-function contentBoxWidth(el) {
-  if (!el || typeof el.getBoundingClientRect !== "function") return null;
-  const rect = el.getBoundingClientRect();
-  let width = rect && Number.isFinite(rect.width) ? rect.width : 0;
-  const win = el.ownerDocument && el.ownerDocument.defaultView;
-  if (win && typeof win.getComputedStyle === "function") {
-    const cs = win.getComputedStyle(el);
-    width -= (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
-  }
-  return width > 0 ? width : null;
-}
+// The ONE container-geometry rule: a content-box width in the same coordinate
+// space the pointer is measured in, at any document zoom.
+import { measureMediaContentBoxWidth } from "../../lib/editorMediaGeometry";
 
 /**
  * The width percentage a node view wrapper currently RENDERS at, measured
  * against the content box `widthPct` is a percentage of. This is how a legacy
  * image — which has no stored widthPct — gets a truthful starting width for a
  * resize, so its first gesture begins from the size the user actually sees.
+ *
+ * Both terms are VISUAL px (the wrapper's own rect, and the container width
+ * from the shared geometry rule), so the ratio is the same at every document
+ * zoom level — see src/lib/editorMediaGeometry.js.
  */
 function measuredWidthPctOf(wrapperEl) {
   if (!wrapperEl || !wrapperEl.parentElement) return null;
-  const container = contentBoxWidth(wrapperEl.parentElement);
+  const container = measureMediaContentBoxWidth(wrapperEl.parentElement);
   if (!container) return null;
   const rect = wrapperEl.getBoundingClientRect();
   if (!rect || !(rect.width > 0)) return null;
@@ -211,7 +205,7 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode, extension 
       const wrapper = wrapperRef.current;
       const container =
         wrapper && wrapper.parentElement
-          ? contentBoxWidth(wrapper.parentElement)
+          ? measureMediaContentBoxWidth(wrapper.parentElement)
           : null;
       // Each gesture starts from the PERSISTED width; a legacy image starts
       // from the width it actually renders at.

@@ -45,6 +45,7 @@
 // — a decoded image reflows the observed element, which is exactly what the
 // ResizeObserver reports.
 import { useEffect, useRef, useState } from "react";
+import { DEFAULT_DOCUMENT_ZOOM, layoutPxFromVisualPx } from "../lib/documentZoom";
 import {
   visualPageContentHeight,
   visualPageMarginHeight,
@@ -91,7 +92,7 @@ function topLevelChild(node, root) {
  * entries: spacers (whose height is subtracted back out) and top-level blocks
  * (paired with the document position they start at).
  */
-function readMeasurementEntries(view) {
+function readMeasurementEntries(view, zoom) {
   const root = view.dom;
   const rootTop = root.getBoundingClientRect().top;
 
@@ -112,7 +113,7 @@ function readMeasurementEntries(view) {
     if (child.hasAttribute && child.hasAttribute(FREEFORM_PAGE_SPACER_ATTR)) {
       entries.push({
         spacer: true,
-        heightPx: child.getBoundingClientRect().height,
+        heightPx: layoutPxFromVisualPx(child.getBoundingClientRect().height, zoom),
       });
       continue;
     }
@@ -121,18 +122,33 @@ function readMeasurementEntries(view) {
     // another plugin — contributes nothing and is not a boundary candidate.
     if (pos === undefined) continue;
     const rect = child.getBoundingClientRect();
+    // Client rects come back multiplied by the document zoom (CSS `zoom`
+    // participates in layout, and these are VISUAL pixels); the capacities
+    // they are compared against are LAYOUT pixels derived from the A4
+    // geometry. Dividing the zoom back out here is the single place the whole
+    // zoom architecture needs to compensate, and it is what keeps a page
+    // boundary landing on the same words at 75% as at 150% — zooming changes
+    // how big a page looks, never where it breaks. `dom.clientWidth` below is
+    // already a layout pixel value and is deliberately NOT converted.
     entries.push({
       spacer: false,
       pos,
-      top: rect.top - rootTop,
-      bottom: rect.bottom - rootTop,
+      top: layoutPxFromVisualPx(rect.top - rootTop, zoom),
+      bottom: layoutPxFromVisualPx(rect.bottom - rootTop, zoom),
     });
   }
   return entries;
 }
 
-export default function useFreeformPageGuides(editor) {
+export default function useFreeformPageGuides(editor, documentZoom = DEFAULT_DOCUMENT_ZOOM) {
   const [geometry, setGeometry] = useState(EMPTY_GEOMETRY);
+
+  // Read inside the measurement callback rather than closed over, so changing
+  // zoom re-measures WITHOUT re-running the effect — re-running it would
+  // unregister and re-register the spacer plugin, and zoom is presentation
+  // state that must not reconfigure the editor at all.
+  const zoomRef = useRef(documentZoom);
+  zoomRef.current = documentZoom;
 
   // Read inside the measurement callback so it can compare against the current
   // value without being recreated (and re-subscribed) on every render.
@@ -141,6 +157,7 @@ export default function useFreeformPageGuides(editor) {
 
   const planRef = useRef(null);
   const frameRef = useRef(0);
+  const scheduleRef = useRef(null);
 
   useEffect(() => {
     const view = editor?.view || null;
@@ -179,7 +196,7 @@ export default function useFreeformPageGuides(editor) {
       const gapPx = visualPageWorkspaceGap(contentWidthPx);
 
       const plan = planFreeformPageSpacers(
-        naturalBlockGeometry(readMeasurementEntries(view)),
+        naturalBlockGeometry(readMeasurementEntries(view, zoomRef.current)),
         { capacityPx: pageContentHeightPx, marginPx: pageMarginPx, gapPx }
       );
 
@@ -234,8 +251,15 @@ export default function useFreeformPageGuides(editor) {
       typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
     if (observer) observer.observe(dom);
 
+    // Changing zoom changes every client rect but no layout box, so the
+    // ResizeObserver does not fire. The scheduler is published for the effect
+    // below to call — one extra measurement per zoom change, no plugin churn,
+    // no transaction.
+    scheduleRef.current = schedule;
+
     return () => {
       cancelled = true;
+      scheduleRef.current = null;
       editor.off("update", schedule);
       if (observer) observer.disconnect();
       cancelFrame();
@@ -245,6 +269,15 @@ export default function useFreeformPageGuides(editor) {
       if (!editor.isDestroyed) editor.unregisterPlugin(freeformPageSpacerKey);
     };
   }, [editor]);
+
+  // A zoom change re-measures through the SAME scheduler as every other
+  // signal: one frame, one plan comparison, and nothing at all if the plan is
+  // unchanged (which it will be — the guides are computed in layout pixels, so
+  // zoom must not move a single page boundary). It dispatches no transaction,
+  // touches no document and writes nothing.
+  useEffect(() => {
+    if (typeof scheduleRef.current === "function") scheduleRef.current();
+  }, [documentZoom]);
 
   return geometry;
 }

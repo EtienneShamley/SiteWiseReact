@@ -63,6 +63,14 @@ import { FaChevronDown, FaChevronUp } from "react-icons/fa";
 import { NOTE_VIEW } from "../lib/noteViews";
 import { currentNoteSurface, noteSurfaceLabel } from "../lib/noteSurfaces";
 import { LIVE_TRANSCRIPT_MESSAGE } from "../lib/liveTranscript";
+import {
+  loadDocumentZoom,
+  saveDocumentZoom,
+  zoomIn as zoomInLevel,
+  zoomOut as zoomOutLevel,
+  zoomScale,
+  DEFAULT_DOCUMENT_ZOOM,
+} from "../lib/documentZoom";
 import { actionButtonClass, iconButtonClass } from "../lib/interactionStyles";
 import useSaveStatus from "../hooks/useSaveStatus";
 import {
@@ -160,6 +168,37 @@ export default function MainArea() {
   // never persisted and never note data. Collapsing HIDES the composer
   // (display:none) rather than unmounting it, so an unsent draft — typed text,
   // refine state, staged attachments — is exactly where it was on restore.
+  // DOCUMENT ZOOM — how large the note document is DRAWN. Presentation only:
+  // it never reaches the document's content, its marks, its stored HTML, a
+  // sectionDoc, a Template value or an export (see src/lib/documentZoom.js).
+  // Seeded from the remembered UI preference, which is validated and clamped
+  // on read, so a corrupt or future stored value renders at 100% rather than
+  // at a broken scale.
+  const [documentZoom, setDocumentZoom] = useState(loadDocumentZoom);
+  // Every change goes through the ladder and is remembered. This writes ONLY
+  // the zoom preference key — no note, project, template or section document
+  // is touched, and no editor transaction is dispatched, so changing zoom can
+  // never show "Saving…".
+  const applyDocumentZoom = useCallback((next) => {
+    setDocumentZoom((prev) => {
+      const value = typeof next === "function" ? next(prev) : next;
+      saveDocumentZoom(value);
+      return value;
+    });
+  }, []);
+  const handleZoomIn = useCallback(
+    () => applyDocumentZoom((prev) => zoomInLevel(prev)),
+    [applyDocumentZoom]
+  );
+  const handleZoomOut = useCallback(
+    () => applyDocumentZoom((prev) => zoomOutLevel(prev)),
+    [applyDocumentZoom]
+  );
+  const handleZoomReset = useCallback(
+    () => applyDocumentZoom(DEFAULT_DOCUMENT_ZOOM),
+    [applyDocumentZoom]
+  );
+
   const [composerCollapsed, setComposerCollapsed] = useState(false);
   const toggleComposerCollapsed = useCallback(
     () => setComposerCollapsed((prev) => !prev),
@@ -1816,6 +1855,10 @@ export default function MainArea() {
           imagePolicy={toolbarImagePolicy}
           disabledHint={toolbarHint}
           saveStatus={{ label: activeSaveLabel, failed: activeSaveFailed }}
+          documentZoom={documentZoom}
+          onZoomIn={handleZoomIn}
+          onZoomOut={handleZoomOut}
+          onZoomReset={handleZoomReset}
           workspaceExpanded={workspaceExpanded}
           onToggleWorkspaceExpanded={toggleWorkspaceExpanded}
         />
@@ -1833,7 +1876,31 @@ export default function MainArea() {
           {/* NOTE VIEW */}
           <div style={{ display: activeTab === "note" ? "block" : "none" }}>
             {noteTitle ? (
-              <>
+              /* DOCUMENT ZOOM applies to the note DOCUMENT surfaces — the
+                 Free-form paper and the whole Template form — and to nothing
+                 else, so the sidebar, header, toolbar and Quick Add composer
+                 stay at their normal size. It deliberately wraps BOTH surfaces
+                 together: a Template is one document, so its field labels,
+                 structured controls, Section prose, media, tables and file
+                 cards must scale as one thing rather than the prose scaling
+                 away from the form around it.
+
+                 CSS `zoom`, not `transform: scale()`. `zoom` participates in
+                 layout, so the browser itself handles the enlarged scrolling
+                 extent inside #chatWindow, caret and selection positioning,
+                 mouse hit testing, drag/drop coordinates, context menus and
+                 dropdown placement — none of which a transform would keep
+                 correct without re-deriving every coordinate by hand. It also
+                 leaves `offsetWidth`/`offsetHeight` reporting layout pixels,
+                 which is what the Template's paged-document measurement reads,
+                 so Template pagination is unaffected by zoom. The one system
+                 that reads client rects (the Free-form page guides) is given
+                 the zoom factor and divides it back out — see
+                 layoutPxFromVisualPx in src/lib/documentZoom.js.
+
+                 The PDF surface below is deliberately OUTSIDE this wrapper:
+                 it has its own viewer scale. */
+              <div className="nw-doc-zoom" style={{ zoom: zoomScale(documentZoom) }}>
                 <div
                   style={{
                     display: noteLayout === "natural" ? "block" : "none",
@@ -1845,7 +1912,7 @@ export default function MainArea() {
                       measured from the rendered editor; the Free-form PDF
                       planner remains the authoritative pagination system and is
                       untouched by them. */}
-                  <FreeformPagedEditor editor={editor} />
+                  <FreeformPagedEditor editor={editor} documentZoom={documentZoom} />
                 </div>
                 <div
                   style={{
@@ -1870,7 +1937,7 @@ export default function MainArea() {
                     onClearSectionRefineBackup={handleClearSectionRefineBackup}
                   />
                 </div>
-              </>
+              </div>
             ) : (
               <div className="text-gray-400 px-4 py-10 text-center">
                 <div className="text-base font-medium text-gray-500 dark:text-gray-300">

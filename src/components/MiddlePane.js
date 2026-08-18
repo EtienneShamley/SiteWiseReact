@@ -1,15 +1,26 @@
 // src/components/MiddlePane.js
 import React, { useState, useRef } from "react";
 import { useAppState } from "../context/AppStateContext";
-import { FaEllipsisV, FaPen, FaShare, FaTrash } from "react-icons/fa";
+import {
+  FaEllipsisV, FaPen, FaShare, FaTrash, FaRegStickyNote, FaAngleDoubleRight,
+} from "react-icons/fa";
 import ThreeDotMenu from "./ThreeDotMenu";
 import ShareDialog from "./ShareDialog";
 import { useTheme } from "../context/ThemeContext";
 import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interactionStyles";
+import {
+  formatNoteCount,
+  notesRailCount,
+  notesRailRestoreLabel,
+} from "../lib/notesPaneRail";
 
 const STORAGE_KEY = "sitewise-notes";
 
-export default function MiddlePane({ middlePaneHidden, onHideMiddlePane }) {
+export default function MiddlePane({
+  middlePaneHidden,
+  onHideMiddlePane,
+  onShowMiddlePane,
+}) {
   const {
     workspace,
     state,
@@ -37,15 +48,69 @@ export default function MiddlePane({ middlePaneHidden, onHideMiddlePane }) {
         ? state.rootFolderNotesMap?.[activeFolderId] || []
         : [];
 
-  // The middle pane is the project/folder note list only. It is not shown in the
-  // global PDFs workspace, and requires a folder to be selected.
+  // The middle pane is the NOTES OF ONE FOLDER — that is what it represents,
+  // which is why it opens on folder navigation and not on project navigation
+  // (see Sidebar's selectFolder). It is not shown in the global PDFs
+  // workspace, and with NO FOLDER SELECTED it renders nothing at all: an empty
+  // pane here would be indistinguishable from an empty folder, and offering
+  // "add a note to this folder" when no folder owns the destination would be a
+  // lie about where the note would go.
   if (workspace === "pdfs") return null;
   if (!activeFolderId) return null;
 
-  // The restore control now lives in the Sidebar header ("Show notes"), owned
-  // by App.js alongside this pane's own hidden state — so while collapsed,
-  // this pane renders nothing at all rather than a floating button of its own.
-  if (middlePaneHidden) return null;
+  // COLLAPSED: a narrow rail rather than nothing, so the pane still says what
+  // it is, how much it holds and how to get it back. The count is the length
+  // of the SAME `notes` collection the expanded list renders, so it cannot
+  // drift — it follows note creation, deletion and folder switching with no
+  // second piece of state to keep in step. It is shown only for a
+  // PROJECT-CHILD folder (src/lib/notesPaneRail.js): with a root-level folder
+  // selected a "0" would claim an emptiness that is not what is being
+  // measured, so the count is omitted and the identity and way back remain.
+  //
+  // Deliberately ONE button rather than an arrow plus a separately clickable
+  // surface: the whole rail is the restore control, so there is a single
+  // accessible name, no nested interactive elements, and the explicit arrow is
+  // visibly part of the thing that acts.
+  if (middlePaneHidden) {
+    const railCount = notesRailCount({
+      activeProjectId,
+      activeFolderId,
+      noteCount: notes.length,
+    });
+    const railLabel = notesRailRestoreLabel(railCount);
+    const railText = formatNoteCount(railCount);
+    return (
+      <aside
+        id="middlePaneRail"
+        className="w-14 shrink-0 min-h-0 h-full flex flex-col items-center gap-1 py-3 bg-white dark:bg-gray-900 text-black dark:text-white border-r border-gray-300 dark:border-gray-800"
+        aria-label="Notes pane, collapsed"
+      >
+        <button
+          type="button"
+          className={iconButtonClass({
+            className: "flex flex-col items-center gap-1 rounded-lg px-2 py-2",
+          })}
+          onClick={onShowMiddlePane}
+          aria-label={railLabel}
+          title={railLabel}
+        >
+          <FaAngleDoubleRight aria-hidden="true" />
+          <FaRegStickyNote aria-hidden="true" />
+          {/* The number repeats what the accessible name already says, so it
+              is decoration for the eye only. `tabular-nums` keeps 9 and 99+
+              the same width, so the rail cannot shift as notes are added. */}
+          {railText !== "" && (
+            <span
+              className="text-[11px] font-medium tabular-nums leading-none"
+              aria-hidden="true"
+            >
+              {railText}
+            </span>
+          )}
+        </button>
+      </aside>
+    );
+  }
 
   const onNewNote = () => {
     if (activeProjectId) {
@@ -74,7 +139,7 @@ export default function MiddlePane({ middlePaneHidden, onHideMiddlePane }) {
   return (
     <aside
       id="middlePane"
-      className="w-80 shrink-0 min-h-0 overflow-y-auto bg-white dark:bg-gray-900 text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-800 space-y-3"
+      className="nw-tree-scroll w-80 shrink-0 min-h-0 overflow-y-auto bg-white dark:bg-gray-900 text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-800 space-y-3"
     >
       <div className="flex items-center justify-between mb-2">
         {/* Heading typography and wording unchanged — it is not a control and
@@ -90,16 +155,36 @@ export default function MiddlePane({ middlePaneHidden, onHideMiddlePane }) {
         </button>
       </div>
 
-      <button
-        className={actionButtonClass({ className: "px-3 py-1 rounded-lg text-sm mb-2" })}
-        onClick={onNewNote}
-      >
-        + New Note
-      </button>
+      {/* With notes present this sits above the list, as it always has. An
+          EMPTY folder puts the same action in the empty state instead, so the
+          pane never shows two identical note-creation controls stacked on one
+          another. */}
+      {notes.length > 0 && (
+        <button
+          className={actionButtonClass({ className: "px-3 py-1 rounded-lg text-sm mb-2" })}
+          onClick={onNewNote}
+        >
+          + New Note
+        </button>
+      )}
 
       {notes.length === 0 ? (
-        <div className="text-sm text-gray-500 dark:text-gray-400 px-1 py-6 text-center">
-          No notes yet — create one.
+        /* EMPTY FOLDER — a real empty state, not a shrug. The user has a
+           folder selected (guaranteed above), so the destination is
+           unambiguous, and the action is the pane's OWN canonical creation
+           flow (`onNewNote`), never a second workflow. It stays an ordinary
+           action rather than a primary CTA, because neither pane promotes note
+           creation to a CTA — see docs/DESIGN_SYSTEM.md. */
+        <div className="px-1 py-8 text-center">
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            No notes in this folder yet
+          </p>
+          <button
+            className={actionButtonClass({ className: "mt-3 px-3 py-1.5 rounded-lg text-sm" })}
+            onClick={onNewNote}
+          >
+            + Add note
+          </button>
         </div>
       ) : (
         <ul className="space-y-2 text-sm">

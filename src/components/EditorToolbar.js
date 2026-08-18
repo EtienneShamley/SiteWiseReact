@@ -1,13 +1,25 @@
 import React from "react";
-import { FaChevronUp, FaChevronDown } from "react-icons/fa";
+import { FaChevronUp, FaChevronDown, FaSearchMinus, FaSearchPlus } from "react-icons/fa";
 import FormattingControls from "./editor/FormattingControls";
 import { iconButtonClass } from "../lib/interactionStyles";
 import { SAVED_LOCALLY_HINT, SAVE_FAILED_DETAIL } from "../lib/saveStatus";
+import {
+  canZoomIn,
+  canZoomOut,
+  documentZoomLabel,
+  isDefaultDocumentZoom,
+} from "../lib/documentZoom";
 
 // The document-workspace expand/collapse control's wording. Exported so the
 // wiring test can assert the real strings rather than re-typing them.
 export const WORKSPACE_EXPAND_LABEL = "Expand document workspace";
 export const WORKSPACE_RESTORE_LABEL = "Restore workspace controls";
+
+// The document-zoom controls' wording. Exported so the tests assert the real
+// strings rather than re-typing them.
+export const ZOOM_OUT_LABEL = "Zoom out";
+export const ZOOM_IN_LABEL = "Zoom in";
+export const ZOOM_RESET_LABEL = "Reset zoom to 100%";
 
 // The id of the (visually hidden) explanation the save-status label points at.
 const SAVE_STATUS_HINT_ID = "note-save-status-hint";
@@ -43,6 +55,12 @@ const SAVE_STATUS_HINT_ID = "note-save-status-hint";
  *                      toolbar is the one chrome that survives every layout
  *                      state, so the status is never hidden by expanding the
  *                      workspace or collapsing the sidebar. ONE live region.
+ * @param documentZoom  the document's viewing scale as a percentage. It is
+ *                      PRESENTATION only — the controls below change how large
+ *                      the document is drawn and never touch its content, so
+ *                      they dispatch no editor transaction and cause no save.
+ *                      The three handlers are rendered only when supplied.
+ * @param onZoomIn / onZoomOut / onZoomReset  step up, step down, back to 100%.
  * @param workspaceExpanded  whether MainArea's document workspace is in its
  *                      expanded mode (upper chrome collapsed). The toggle
  *                      lives HERE, at the toolbar's far right, because the
@@ -59,6 +77,10 @@ export default function EditorToolbar({
   imagePolicy = null,
   disabledHint = null,
   saveStatus = null,
+  documentZoom = null,
+  onZoomIn = null,
+  onZoomOut = null,
+  onZoomReset = null,
   workspaceExpanded = false,
   onToggleWorkspaceExpanded = null,
 }) {
@@ -66,6 +88,11 @@ export default function EditorToolbar({
 
   const saveLabel = saveStatus?.label || "";
   const saveFailed = !!saveStatus?.failed;
+  const showZoom =
+    documentZoom !== null &&
+    typeof onZoomIn === "function" &&
+    typeof onZoomOut === "function" &&
+    typeof onZoomReset === "function";
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 bg-gray-100 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2">
@@ -76,6 +103,61 @@ export default function EditorToolbar({
         disabledHint={disabledHint}
       />
       <div className="flex items-center gap-2 ml-auto">
+        {/* DOCUMENT ZOOM — a document-working control, so it belongs on the
+            toolbar with formatting rather than in the header (identity and
+            document actions) or the sidebar (navigation). Three real buttons:
+            step out, the current percentage (which IS the reset control), step
+            in. The percentage is always readable text, never an icon alone,
+            and it is what tells the user the current level at a glance; the
+            two chevron-magnifier icons are decoration beside their own
+            accessible names. The end of the ladder disables its own control
+            rather than silently doing nothing. */}
+        {showZoom && (
+          <div
+            className="flex items-center gap-0.5"
+            role="group"
+            aria-label="Document zoom"
+          >
+            <button
+              type="button"
+              className={iconButtonClass({ className: "p-2 rounded-lg" })}
+              onClick={onZoomOut}
+              disabled={!canZoomOut(documentZoom)}
+              aria-label={ZOOM_OUT_LABEL}
+              title={ZOOM_OUT_LABEL}
+            >
+              <FaSearchMinus aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className={iconButtonClass({
+                // Not the default scale is a live state worth showing, so the
+                // reset control reads as pressed until the document is back
+                // at 100% — the same pressed treatment the workspace expand
+                // control uses, never a new colour.
+                pressed: !isDefaultDocumentZoom(documentZoom),
+                className: "px-2 py-1 rounded-lg text-xs font-medium tabular-nums min-w-[3.25rem]",
+              })}
+              onClick={onZoomReset}
+              disabled={isDefaultDocumentZoom(documentZoom)}
+              aria-label={`${ZOOM_RESET_LABEL} — currently ${documentZoomLabel(documentZoom)}`}
+              title={ZOOM_RESET_LABEL}
+            >
+              {documentZoomLabel(documentZoom)}
+            </button>
+            <button
+              type="button"
+              className={iconButtonClass({ className: "p-2 rounded-lg" })}
+              onClick={onZoomIn}
+              disabled={!canZoomIn(documentZoom)}
+              aria-label={ZOOM_IN_LABEL}
+              title={ZOOM_IN_LABEL}
+            >
+              <FaSearchPlus aria-hidden="true" />
+            </button>
+          </div>
+        )}
+
         {/* Autosave status for the ACTIVE note and the ACTIVE view. There is
             no manual save: editing persists continuously, and this reports
             the confirmed result of those writes — "Saving…" only while a real

@@ -75,8 +75,10 @@ describe("1. the document region owns vertical overflow", () => {
     // The sidebar is a viewport-tall column whose ONE scrolling region is the
     // project tree (applicationShell.test.js asserts the rest of its layout).
     expect(SIDEBAR).toMatch(/"shrink-0 min-h-0 h-full flex flex-col"/);
-    expect(SIDEBAR).toMatch(/className="flex-1 min-h-0 overflow-y-auto /);
-    expect(MIDDLE_PANE).toMatch(/className="w-80 shrink-0 min-h-0 overflow-y-auto /);
+    // Both navigation panes keep their own overflow and now carry the shared
+    // tree scroll affordance class (see navigationTreeScroll.test.js).
+    expect(SIDEBAR).toMatch(/className="nw-tree-scroll flex-1 min-h-0 overflow-y-auto /);
+    expect(MIDDLE_PANE).toMatch(/className="nw-tree-scroll w-80 shrink-0 min-h-0 overflow-y-auto /);
   });
 });
 
@@ -95,7 +97,7 @@ describe("2/3. the toolbar sits OUTSIDE the scrolling document region", () => {
 
 describe("4. Free-form and Template share the ONE workspace and the ONE scroll region", () => {
   test("both document surfaces render inside #chatWindow", () => {
-    expect(DOCUMENT_REGION).toMatch(/<FreeformPagedEditor editor=\{editor\} \/>/);
+    expect(DOCUMENT_REGION).toMatch(/<FreeformPagedEditor editor=\{editor\} documentZoom=\{documentZoom\} \/>/);
     expect(DOCUMENT_REGION).toMatch(/<NoteTemplateDoc/);
     // And the note-linked PDF surface too — one region, three surfaces.
     expect(DOCUMENT_REGION).toMatch(/<PdfEditorTab key=\{linkedPdfId\}/);

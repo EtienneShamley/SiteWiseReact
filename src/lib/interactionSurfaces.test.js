@@ -415,7 +415,9 @@ describe("the left pane's utility controls are actions, not locations", () => {
   test("the New Folder branch still chooses project folder vs root folder", () => {
     expect(sidebar).toContain("if (activeProjectId && !activeFolderId)");
     expect(sidebar).toContain("createRootFolder()");
-    expect(sidebar).toContain("setActiveSelection(null, fid)");
+    // A root folder is selected through the shared folder-selection helper,
+    // which also opens the Notes pane — see notesPaneFolderFlow.test.js.
+    expect(sidebar).toContain("selectFolder(null, fid)");
   });
 
   test("keyboard focus styling reaches them through the shared variant", () => {
@@ -675,38 +677,60 @@ describe("the Sidebar's own hidden-pane restore control", () => {
   });
 });
 
-describe("the Notes-pane restore control ('Show notes') lives in the Sidebar header", () => {
-  test("MiddlePane owns no restore control of its own", () => {
-    // The old fixed-position floating button is gone entirely — MiddlePane
-    // renders nothing while collapsed, rather than a button of its own.
-    expect(middlePane).not.toContain("fixed top-4 left-32");
-    expect(middlePane).not.toMatch(/>\s*Notes\s*<\/button>/);
-    expect(middlePane).toContain("if (middlePaneHidden) return null;");
+describe("ONE way back to a collapsed Notes pane: its own rail", () => {
+  test("the Sidebar's duplicate 'Show notes' restore control is gone", () => {
+    // 2026-08-19: the collapsed Notes pane grew its own in-flow rail
+    // (notesPaneRail.test.js), which made this second control a duplicate way
+    // to do one thing. It was removed, along with the `middlePaneHidden` prop
+    // that existed only to decide when to render it.
+    expect(sidebar).not.toMatch(/Show notes/);
+    expect(sidebar).not.toContain('aria-label="Open notes pane"');
+    expect(sidebar).not.toContain('title="Open notes pane"');
+    expect(sidebar).not.toContain("middlePaneHidden");
+    // …and nothing else in the product offers one either.
+    const restorers = allSourceFiles()
+      .filter((file) => /Show notes|Open notes pane/.test(fs.readFileSync(file, "utf8")))
+      .map((file) => path.basename(file));
+    expect(restorers).toEqual([]);
   });
 
-  test("App.js owns middlePaneHidden and passes it, and the handlers, to both panes", () => {
+  test("MiddlePane owns the ONE restore control, in flow — never floating", () => {
+    // The old fixed-position floating button is gone and stays gone; the
+    // collapsed pane is a narrow in-flow rail carrying the Notes identity,
+    // its folder's note count and the way back.
+    expect(middlePane).not.toContain("fixed top-4 left-32");
+    expect(middlePane).not.toMatch(/>\s*Notes\s*<\/button>/);
+    expect(middlePane).not.toMatch(/\bfixed\b/);
+    expect(middlePane).toContain("if (middlePaneHidden) {");
+    expect(middlePane).toContain('id="middlePaneRail"');
+    expect(middlePane).toContain("onClick={onShowMiddlePane}");
+  });
+
+  test("App.js still owns the collapse state and hands each pane only what it needs", () => {
     // Sidebar and MiddlePane are siblings with no shared context for this —
     // App.js is the lowest common owner, and the state is transient only.
     expect(appJs).toContain(
       "const [middlePaneHidden, setMiddlePaneHidden] = useState(false);"
     );
-    expect(appJs).toMatch(/<Sidebar\s+middlePaneHidden=\{middlePaneHidden\}\s+onShowMiddlePane=\{\(\) => setMiddlePaneHidden\(false\)\}/);
+    // The Sidebar no longer receives the STATE (it renders no restore
+    // control) but keeps the handler, because selecting a project-child
+    // folder opens the pane.
+    expect(appJs).toMatch(/<Sidebar\b[\s\S]{0,400}?onShowMiddlePane=\{\(\) => setMiddlePaneHidden\(false\)\}/);
+    expect(appJs).not.toMatch(/<Sidebar\b[\s\S]{0,400}?middlePaneHidden=\{middlePaneHidden\}/);
     expect(appJs).toMatch(/<MiddlePane\s+middlePaneHidden=\{middlePaneHidden\}\s+onHideMiddlePane=\{\(\) => setMiddlePaneHidden\(true\)\}/);
   });
 
-  test("Sidebar receives the state and handler as props, not from AppStateContext", () => {
-    expect(sidebar).toMatch(
-      /export default function Sidebar\(\{\s*middlePaneHidden,\s*onShowMiddlePane,/
-    );
+  test("Sidebar keeps only the handler the folder auto-expand needs", () => {
+    expect(sidebar).toMatch(/export default function Sidebar\(\{\s*onShowMiddlePane,/);
+    expect(sidebar).toMatch(/if \(typeof onShowMiddlePane === "function"\) onShowMiddlePane\(\);/);
     const destructure = sidebar.match(/const \{([\s\S]*?)\} = useAppState\(\);/);
     expect(destructure).not.toBeNull();
-    expect(destructure[1]).not.toContain("middlePaneHidden");
     expect(destructure[1]).not.toContain("onShowMiddlePane");
   });
 
-  test("MiddlePane receives the state and handler as props, not from AppStateContext", () => {
-    expect(middlePane).toContain(
-      "export default function MiddlePane({ middlePaneHidden, onHideMiddlePane }) {"
+  test("MiddlePane receives the state and both handlers as props, not from AppStateContext", () => {
+    expect(middlePane).toMatch(
+      /export default function MiddlePane\(\{\s*middlePaneHidden,\s*onHideMiddlePane,\s*onShowMiddlePane,\s*\}\) \{/
     );
     const destructure = middlePane.match(/const \{([\s\S]*?)\} = useAppState\(\);/);
     expect(destructure).not.toBeNull();
@@ -714,47 +738,9 @@ describe("the Notes-pane restore control ('Show notes') lives in the Sidebar hea
     expect(destructure[1]).not.toContain("onHideMiddlePane");
   });
 
-  test("visible label, accessible name and tooltip are exact", () => {
-    expect(sidebar).toMatch(/>\s*Show notes\s*</);
-    expect(sidebar).toContain('aria-label="Open notes pane"');
-    expect(sidebar).toContain('title="Open notes pane"');
-  });
-
-  test("appears only under the exact conditions the Middle Pane itself renders under", () => {
-    expect(sidebar).toContain(
-      'workspace === "projects" && activeFolderId && middlePaneHidden &&'
-    );
-  });
-
-  test("clicking it calls the App-owned restore handler", () => {
-    expect(sidebar).toContain("onClick={onShowMiddlePane}");
-  });
-
-  test("uses the shared turquoise primary/highlighted variant, not a one-off colour", () => {
-    const call = sidebar.match(/actionButtonClass\(\{\s*primary: true,[\s\S]*?\}\)/);
-    expect(call).not.toBeNull();
-    expect(call[0]).toContain("shrink-0");
-  });
-
-  test("layout is owned by flex/margin, not fixed or absolute coordinates", () => {
-    const call = sidebar.match(/actionButtonClass\(\{\s*primary: true,[\s\S]*?\}\)/)[0];
-    expect(call).not.toMatch(/\bfixed\b/);
-    expect(call).not.toMatch(/\babsolute\b/);
-    expect(call).not.toMatch(/\btop-\d/);
-    expect(call).not.toMatch(/\bleft-\d/);
-    expect(call).not.toMatch(/\bright-\d/);
-    expect(call).not.toMatch(/-m[lrtb]?-\d/); // no negative margins
-  });
-
   test("the Sidebar's expanded width is unchanged (w-64) and the rail is narrower", () => {
     expect(sidebar).toContain('SIDEBAR_EXPANDED_WIDTH_CLASS = "w-64"');
     expect(sidebar).toContain('SIDEBAR_RAIL_WIDTH_CLASS = "w-14"');
-  });
-
-  test("focus and pressed styling reach it through the shared variant", () => {
-    expect(navCssCode).toMatch(/\.nw-action:focus-visible/);
-    expect(navCssCode).toMatch(/\.nw-action--primary\s*\{/);
-    expect(navCssCode).toMatch(/\.nw-action--primary:hover:not\(:disabled\)/);
   });
 });
 

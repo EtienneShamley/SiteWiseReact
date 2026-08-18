@@ -28,9 +28,9 @@ import { FREEFORM_PAGE_GUIDE_CAPTION } from "../../lib/freeformPageGuides";
 import FreeformPageGuideLayer from "./FreeformPageGuideLayer";
 import "./freeformPagedEditor.css";
 
-export default function FreeformPagedEditor({ editor }) {
+export default function FreeformPagedEditor({ editor, documentZoom }) {
   const { pageContentHeightPx, pageMarginPx, columnHeightPx } =
-    useFreeformPageGuides(editor);
+    useFreeformPageGuides(editor, documentZoom);
 
   // The paper's own top and bottom margin — sheet 1's top margin and the final
   // sheet's bottom margin. Derived from the SAME measurement the spacers' two

@@ -91,6 +91,11 @@ function SidebarGroupHeading({ children }) {
 /**
  * The left workspace sidebar of the application shell.
  *
+ * It carries NO Notes-pane restore control: a collapsed Notes pane is restored
+ * from its own in-flow rail (MiddlePane.js), which is the one canonical way
+ * back. `onShowMiddlePane` survives here for a different reason — selecting a
+ * project-child folder opens that pane (see selectFolder below).
+ *
  * Information architecture (top → bottom):
  *   1. brand + the collapse/expand control (always reachable, both widths)
  *   2. THIS NOTE — the open note's surfaces as one navigation group
@@ -114,7 +119,6 @@ function SidebarGroupHeading({ children }) {
  * it therefore cannot unmount, recreate or re-register anything.
  */
 export default function Sidebar({
-  middlePaneHidden,
   onShowMiddlePane,
   collapsed = false,
   overlay = false,
@@ -292,6 +296,26 @@ export default function Sidebar({
     // drawer closes so the document it just chose is visible.
     if (overlay && typeof onCloseOverlay === "function") onCloseOverlay();
   };
+  // SELECTING A PROJECT-CHILD FOLDER OPENS THE NOTES PANE, because that pane
+  // is that folder's contents (MiddlePane.js) and its collapsed rail counts
+  // exactly those notes. Three cases deliberately do NOT open it:
+  //   a PROJECT — it contains folders, not notes, so the list would show
+  //     whichever folder happened to be selected before, or nothing;
+  //   a ROOT-LEVEL folder — it is not a project child, and the rail shows no
+  //     count for one, so opening the pane is not the same act;
+  //   DESELECTING a folder — there would be nothing to show.
+  // Every folder-selecting path goes through here, so the rule cannot be
+  // applied in one place and forgotten in another.
+  // Used on its own where the selection has already been made by the action
+  // itself — creating a folder selects it inside AppStateContext.
+  const revealNotesPane = () => {
+    if (typeof onShowMiddlePane === "function") onShowMiddlePane();
+  };
+  const selectFolder = (projectId, folderId) => {
+    setActiveSelection(projectId, folderId);
+    if (projectId) revealNotesPane();
+  };
+
   const selectWorkspace = (next) => {
     setWorkspace(next);
     if (overlay && typeof onCloseOverlay === "function") onCloseOverlay();
@@ -374,24 +398,6 @@ export default function Sidebar({
             )}
           </button>
         </div>
-
-        {/* Restore control for the collapsed Middle Pane (expanded width
-            only; the rail has no room and the pane's own state is unchanged).
-            An action, not a location, so it takes the shared primary variant.
-            Owned by App.js — see middlePaneHidden/onShowMiddlePane. */}
-        {!collapsed && workspace === "projects" && activeFolderId && middlePaneHidden && (
-          <button
-            className={actionButtonClass({
-              primary: true,
-              className: "shrink-0 mb-2 px-2 py-1 rounded text-xs",
-            })}
-            onClick={onShowMiddlePane}
-            aria-label="Open notes pane"
-            title="Open notes pane"
-          >
-            Show notes
-          </button>
-        )}
 
         {/* 2. THIS NOTE — the open note's surfaces as ONE navigation group.
             The current one is the surface actually rendered (derived from the
@@ -524,7 +530,7 @@ export default function Sidebar({
             may scroll, and only when it outgrows the viewport. Not shown in
             the rail: a tree cannot be iconified honestly; expand to browse. */}
         {!collapsed && workspace === "projects" && (
-          <div className="flex-1 min-h-0 overflow-y-auto -mx-1 px-1 space-y-2">
+          <div className="nw-tree-scroll flex-1 min-h-0 overflow-y-auto -mx-1 px-1 space-y-2">
             <div className="flex items-center justify-between mt-1 mb-2">
               <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Projects</h2>
             </div>
@@ -541,12 +547,17 @@ export default function Sidebar({
             <button
               className={actionButtonClass({ className: "px-3 py-1 rounded text-sm" })}
               onClick={() => {
+                // A folder is a container FOR NOTES, so creating one takes the
+                // user straight to it: it becomes the selected folder and its
+                // (empty) note list opens, ready to add the first note. A
+                // cancelled prompt returns no id and changes nothing.
                 if (activeProjectId && !activeFolderId) {
-                  createFolder(activeProjectId);
+                  // createFolder selects the new folder itself.
+                  if (createFolder(activeProjectId)) revealNotesPane();
                 } else {
                   const fid = createRootFolder();
                   if (fid) {
-                    setActiveSelection(null, fid);
+                    selectFolder(null, fid);
                   }
                 }
               }}
@@ -593,7 +604,7 @@ export default function Sidebar({
                   >
                     <span
                       className="flex-1 cursor-pointer font-semibold"
-                      onClick={() => setActiveSelection(null, folder.id)}
+                      onClick={() => selectFolder(null, folder.id)}
                     >
                       {folder.name}
                     </span>
@@ -652,6 +663,7 @@ export default function Sidebar({
             </ul>
 
             <ProjectTree
+              onSelectFolder={selectFolder}
               state={state}
               activeProjectId={activeProjectId}
               activeFolderId={activeFolderId}
@@ -834,6 +846,7 @@ function RootNotesList({
 
 /* ------- Project tree (projects + folders) ------- */
 function ProjectTree({
+  onSelectFolder,
   state,
   activeProjectId,
   activeFolderId,
@@ -965,9 +978,11 @@ function ProjectTree({
                               activeFolderId === folder.id &&
                               activeProjectId === pid
                             ) {
+                              // Deselecting: the pane has no folder to show,
+                              // so nothing is opened.
                               clearActiveSelection();
                             } else {
-                              setActiveSelection(pid, folder.id);
+                              onSelectFolder(pid, folder.id);
                             }
                           }}
                         >
