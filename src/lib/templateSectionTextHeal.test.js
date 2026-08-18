@@ -1,12 +1,16 @@
 // src/lib/templateSectionTextHeal.test.js
 //
-// HEALING an image-induced split — the pure rules.
+// HISTORICAL READ COMPATIBILITY — HEALING an image-induced split, the pure
+// rules.
 //
-// Dropping an image into the middle of a paragraph splits it in two. While the
-// image sits between the halves that is exactly right; the moment it is removed
-// or moved somewhere else the halves are adjacent again and must become ONE
-// text item, or the user is left with an invisible line they cannot type
-// across.
+// The legacy per-item interaction that dropped an image into the middle of a
+// paragraph (splitting it in two and writing `continuesFrom` on the right
+// half) was retired in Phase G. HISTORICAL stored `sectionContent` lists still
+// carry that provenance, and the read adapter heals them IN MEMORY before
+// adapting — so an old note whose image was later removed still reads as ONE
+// paragraph, exactly as the live product would have shown it. Nothing here is
+// ever written back. The fixtures below are therefore built LITERALLY, in the
+// stored shape the splitter used to write.
 //
 // The guarantee that matters most in this file is the NEGATIVE one: only
 // fragments of one split ever merge. Two independently captured text items that
@@ -15,10 +19,9 @@ import {
   findHealableSplit,
   healSectionSplitText,
   mergeSplitTextValues,
+  visibleSectionEntries,
 } from "./templateSectionTextHeal";
 import { SECTION_TEXT_JOIN } from "./templateSectionContent";
-import { splitSectionTextForItem } from "./templateSectionTextSplit";
-import { ANSWER_POINT_KIND } from "./templateSectionTextPoint";
 
 const text = (id, value, continuesFrom = null) => ({
   id,
@@ -44,64 +47,58 @@ const rich = (html) => ({ format: "richtext/1", html });
 const inline = (itemId) => ({ itemId, join: SECTION_TEXT_JOIN.INLINE });
 const block = (itemId) => ({ itemId, join: SECTION_TEXT_JOIN.BLOCK });
 
-const paragraphPoint = (blockIndex, offset) => ({
-  kind: ANSWER_POINT_KIND.PARAGRAPH,
-  blockIndex,
-  offset,
-});
-
 /* ========================================================================== */
-/* THE SPLIT RECORDS WHERE THE CONTINUATION CAME FROM (22–25)                  */
+/* THE STORED SHAPE A HISTORICAL SPLIT LEFT BEHIND (22–25)                     */
 /* ========================================================================== */
 
-describe("an image dropped inside text records a split relationship", () => {
+// A HISTORICAL list, exactly as the retired splitter stored it: the LEFT half
+// keeps the original id and no provenance, the image sits between, and the
+// RIGHT half names the left half with the join recorded at split time.
+describe("a historical split's stored shape is read as written", () => {
   const items = [
-    text("t1", "The excavation started this morning and conditions were wet."),
+    text("t1", "The excavation started this morning "),
     photo("p1"),
+    text("t2", "and conditions were wet.", inline("t1")),
   ];
-  const result = splitSectionTextForItem({
-    items,
-    movingItemId: "p1",
-    targetItemId: "t1",
-    point: paragraphPoint(0, "The excavation started this morning ".length),
-    newItemId: "t2",
-  });
 
   test("22. the continuation names the item it was split from", () => {
-    expect(result.items[2].continuesFrom).toEqual({
+    expect(items[2].continuesFrom).toEqual({
       itemId: "t1",
       join: SECTION_TEXT_JOIN.INLINE,
     });
   });
 
-  test("23. the LEFT content is correct, and keeps the original id", () => {
-    expect(result.items[0].id).toBe("t1");
-    expect(result.items[0].value).toBe("The excavation started this morning ");
+  test("23-25. the visible reader sees left, image, right — in stored order, by reference", () => {
+    const visible = visibleSectionEntries(items);
+    expect(visible.map((v) => v.id)).toEqual(["t1", "p1", "t2"]);
+    expect(visible.map((v) => v.index)).toEqual([0, 1, 2]);
+    expect(visible[1].entry).toBe(items[1]);
+    expect(items[0].continuesFrom).toBeUndefined();
   });
 
-  test("24. the RIGHT content is correct, under the new id", () => {
-    expect(result.items[2].id).toBe("t2");
-    expect(result.items[2].value).toBe("and conditions were wet.");
+  test("the visible reader is the render rule — an unrenderable entry is not visible", () => {
+    const visible = visibleSectionEntries([
+      items[0],
+      null,
+      "data:image/png;base64,AAAA",
+      { id: "x", kind: "video", assetId: "a-x" },
+      items[2],
+    ]);
+    expect(visible.map((v) => v.id)).toEqual(["t1", "t2"]);
+    // The raw index is the STORED index, so an unrenderable entry between them
+    // is still accounted for in position.
+    expect(visible.map((v) => v.index)).toEqual([0, 4]);
+    expect(visibleSectionEntries(null)).toEqual([]);
+    expect(visibleSectionEntries("nope")).toEqual([]);
   });
 
-  test("25. the image remains BETWEEN them", () => {
-    expect(result.items.map((entry) => entry.id)).toEqual(["t1", "p1", "t2"]);
-    expect(result.items[1]).toBe(items[1]);
-  });
-
-  test("the left half carries no provenance of its own", () => {
-    expect(result.items[0].continuesFrom).toBeUndefined();
-  });
-
-  test("a split at a real paragraph boundary records a BLOCK join", () => {
-    const boundary = splitSectionTextForItem({
-      items: [text("a", "First paragraph.\nSecond paragraph."), photo("p")],
-      movingItemId: "p",
-      targetItemId: "a",
-      point: paragraphPoint(1, 0),
-      newItemId: "b",
-    });
-    expect(boundary.items[2].continuesFrom).toEqual({
+  test("a split at a real paragraph boundary recorded a BLOCK join", () => {
+    const boundary = [
+      text("a", "First paragraph."),
+      photo("p"),
+      text("b", "Second paragraph.", block("a")),
+    ];
+    expect(boundary[2].continuesFrom).toEqual({
       itemId: "a",
       join: SECTION_TEXT_JOIN.BLOCK,
     });
@@ -340,22 +337,17 @@ describe("rich text survives healing", () => {
 /* ========================================================================== */
 
 describe("provenance does not accumulate", () => {
-  test("42. moving the photo into another paragraph produces fresh provenance", () => {
-    // A-left / photo / A-right, then the photo is dropped into the middle of C.
-    const afterFirstSplit = [
+  test("42. a photo moved into another paragraph left fresh provenance — and only that heals", () => {
+    // Historically: A-left / photo / A-right, then the photo was dropped into
+    // the middle of C. The stored list after that move, built literally:
+    const afterMove = [
       text("a", "left "),
-      photo("p"),
       text("a2", "right", inline("a")),
-      text("c", "Third paragraph."),
+      text("c", "Third "),
+      photo("p"),
+      text("c2", "paragraph.", inline("c")),
     ];
-    const moved = splitSectionTextForItem({
-      items: afterFirstSplit,
-      movingItemId: "p",
-      targetItemId: "c",
-      point: paragraphPoint(0, "Third ".length),
-      newItemId: "c2",
-    });
-    const healed = healSectionSplitText(moved.items);
+    const healed = healSectionSplitText(afterMove);
 
     expect(healed.items.map((entry) => entry.id)).toEqual(["a", "c", "p", "c2"]);
     expect(healed.items[0].value).toBe("left right");
@@ -368,16 +360,10 @@ describe("provenance does not accumulate", () => {
       text("a2", "right", inline("a")),
     ]);
     expect(JSON.stringify(healed.items)).not.toMatch(/continuesFrom/);
-    // Re-splitting the merged item mints a NEW relationship, not a second one.
-    const resplit = splitSectionTextForItem({
-      items: [...healed.items, photo("p")],
-      movingItemId: "p",
-      targetItemId: "a",
-      point: paragraphPoint(0, 5),
-      newItemId: "fresh",
-    });
-    expect(resplit.items[2].continuesFrom).toEqual(inline("a"));
-    expect(resplit.items.filter((entry) => entry.continuesFrom)).toHaveLength(1);
+    // The survivor is an ordinary text item again: healing it a second time
+    // finds nothing, so nothing can accumulate.
+    expect(healSectionSplitText(healed.items)).toBeNull();
+    expect(healed.items.filter((entry) => entry.continuesFrom)).toHaveLength(0);
   });
 
   test("a CHAIN of splits heals completely in one pass", () => {

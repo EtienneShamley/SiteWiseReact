@@ -17,7 +17,7 @@ import {
   SECTION_BODY_SOURCE,
   SECTION_EDITOR_REFUSAL,
   canEditSectionBody,
-  isPlainLegacyTextBody,
+  isLegacyMediaBody,
   resolveSectionBody,
   sectionBodyHtml,
   sectionEditorEligibility,
@@ -100,32 +100,53 @@ describe("7-10. initialization: the document a Section opens with", () => {
   test("9. a legacy ANSWER initializes an adapted document where it is supported", () => {
     const body = bodyOf({ answers: { [ROW]: "An older note's text" } });
     expect(body.source).toBe(SECTION_BODY_SOURCE.LEGACY);
-    expect(isPlainLegacyTextBody(body)).toBe(true);
+    // Prose only: while inactive it keeps rendering as the row's own answer
+    // box (not as document segments); it is still opened by the shared editor.
+    expect(isLegacyMediaBody(body)).toBe(false);
     expect(canEditSectionBody(body)).toBe(true);
     expect(sectionBodyHtml(body)).toBe("<p>An older note's text</p>");
   });
 
   test("9. an EMPTY legacy answer still opens as one typeable empty paragraph", () => {
     const body = bodyOf({ answers: { [ROW]: "" } });
-    expect(isPlainLegacyTextBody(body)).toBe(true);
+    expect(isLegacyMediaBody(body)).toBe(false);
     expect(canEditSectionBody(body)).toBe(true);
     expect(body.nodes).toHaveLength(1);
     expect(body.nodes[0].type).toBe("text");
   });
 
-  test("9. a legacy body carrying EVIDENCE is not opened — it keeps its own blocks", () => {
-    // Carryable evidence would become document media, which is a change to the
-    // READ path (those items render today as the row's own evidence blocks,
-    // with their own display and removal controls). Such a row keeps the path
-    // it has; its first edit still materialises `sectionContent`, and it
-    // becomes a document Section from then on.
+  test("9/G. a legacy body carrying EVIDENCE opens DIRECTLY as an adapted document", () => {
+    // Since Phase G every eligible body opens in the shared editor, this one
+    // included: its carried evidence becomes document media, in stored order,
+    // with no `sectionContent` materialisation step in between. Its first
+    // genuine edit writes `sectionDoc[rowId]`; `evidence[rowId]` stays frozen
+    // underneath. Because it carries MEDIA it also renders statically as the
+    // same document segments it will edit as (isLegacyMediaBody), so its
+    // evidence never renders twice.
     const body = bodyOf({
       answers: { [ROW]: "Text" },
       evidence: { [ROW]: [photo({ id: "ev1" })] },
     });
     expect(body.source).toBe(SECTION_BODY_SOURCE.LEGACY);
     expect(body.nodes.map((n) => n.type)).toEqual(["text", "image"]);
-    expect(isPlainLegacyTextBody(body)).toBe(false);
+    expect(isLegacyMediaBody(body)).toBe(true);
+    expect(canEditSectionBody(body)).toBe(true);
+    const html = sectionBodyHtml(body);
+    expect(html).toContain("Text");
+    expect(html).toContain("asset-photo-1");
+    expect(parseSectionDocHtml(html)).toEqual(body.nodes);
+  });
+
+  test("G. isLegacyMediaBody is a LEGACY-source question only", () => {
+    const modern = bodyOf({
+      sectionDoc: { [ROW]: makeSectionDocValue('<p>A</p><img data-asset-id="asset-photo-1">') },
+    });
+    expect(modern.source).toBe(SECTION_BODY_SOURCE.SECTION_DOC);
+    expect(isLegacyMediaBody(modern)).toBe(false);
+    const ordered = bodyOf({ sectionContent: { [ROW]: [text("t1", "A"), photo()] } });
+    expect(ordered.source).toBe(SECTION_BODY_SOURCE.SECTION_CONTENT);
+    expect(isLegacyMediaBody(ordered)).toBe(false);
+    expect(isLegacyMediaBody(null)).toBe(false);
   });
 
   test("a structured row's supplementary body is a document; its typed value never is", () => {

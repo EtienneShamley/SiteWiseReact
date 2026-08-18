@@ -47,20 +47,29 @@ import {
   ROW_BLOCK_KIND,
   sectionReplacesRowAnswer,
 } from "./templateRowContent";
-import { sectionItemsForRow } from "./templateSectionContent";
-import { appendSectionText } from "./templateSectionText";
 import {
-  NEW_SECTION_PHOTO_WIDTH_PCT,
-  sectionPhotoInsertIndex,
-  sectionListWithNewPhoto,
-} from "./templateSectionImagePlacement";
+  SECTION_BODY_SOURCE,
+  SECTION_QUICK_ADD_ROUTE,
+  resolveSectionBody,
+  resolveSectionQuickAddRoute,
+  sectionEditorEligibility,
+} from "./templateSectionBody";
 import {
-  clampImageWidthPct,
-  IMAGE_MAX_WIDTH_PCT,
-} from "./templateSectionImageResize";
-import { imagePointerZone, IMAGE_MOVE_ZONE } from "./templateSectionImageMove";
+  SECTION_SEGMENT_KIND,
+  sectionDocSegments,
+} from "./templateSectionDocSegments";
+import { clampMediaWidthPct, MEDIA_MAX_WIDTH_PCT } from "./editorMediaResize";
+import {
+  MEDIA_BODY_DRAG_THRESHOLD_PX,
+  mediaDragExceedsThreshold,
+} from "./editorMediaDragGesture";
 import { sectionExtraHeightFor, setSectionExtraHeight } from "./templateSectionHeight";
-import { isRefinableRowType, rowRefineTargetKey } from "./templateRowRefine";
+import {
+  SECTION_REFINE_OWNER,
+  isSectionRefineKeyForRow,
+  resolveSectionRefineOwner,
+  sectionRefineTargetKey,
+} from "./templateSectionRefine";
 import {
   resolveQuickAddTarget,
   canQuickAddText,
@@ -80,6 +89,15 @@ const SCAFFOLD = "templates/defaultTwoColDoc.js";
 
 const catalogValues = () => BUILDER_FIELD_TYPES.map((t) => t.value);
 const catalogLabels = () => BUILDER_FIELD_TYPES.map((t) => t.label);
+
+// A HISTORICAL `sectionContent` list, read the way the runtime reads it: the
+// canonical reader resolves the body, the projection segments it, and the
+// planner is handed the segments. (Since Phase G the planner takes ONLY
+// `sectionSegments`.)
+const segmentsForStored = (sectionContent, row) =>
+  sectionDocSegments(
+    resolveSectionBody({ instance: { sectionContent }, rowId: row.id, rowType: row.type })
+  );
 
 function stripComments(source) {
   return source
@@ -262,10 +280,10 @@ describe("a Section's persisted representation", () => {
     const items = [{ id: "t1", kind: "text", value: "Hello" }];
     const blocks = planRowBlocks({
       row: { ...row, px: 400 },
-      sectionContent: { [row.id]: items },
+      sectionSegments: segmentsForStored({ [row.id]: items }, row),
     });
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].kind).toBe(ROW_BLOCK_KIND.SECTION_ITEM);
+    expect(blocks[0].kind).toBe(ROW_BLOCK_KIND.SECTION_SEGMENT);
     expect(blocks[0].minHeight).toBeLessThan(400);
     expect(blocks[0].minHeight).toBeLessThan(120);
   });
@@ -387,12 +405,13 @@ describe("structured types are unchanged", () => {
     expect(sectionReplacesRowAnswer(type)).toBe(false);
     const blocks = planRowBlocks({
       row,
-      sectionContent: {
-        [row.id]: [{ id: "t1", kind: "text", value: "Supplementary" }],
-      },
+      sectionSegments: segmentsForStored(
+        { [row.id]: [{ id: "t1", kind: "text", value: "Supplementary" }] },
+        row
+      ),
     });
     expect(blocks[0].kind).toBe(ROW_BLOCK_KIND.ROW);
-    expect(blocks[1].kind).toBe(ROW_BLOCK_KIND.SECTION_ITEM);
+    expect(blocks[1].kind).toBe(ROW_BLOCK_KIND.SECTION_SEGMENT);
   });
 
   test("Select option configuration is preserved end to end", () => {
@@ -435,11 +454,14 @@ describe("structured types are unchanged", () => {
         display: { widthPct: 100, alignment: "left" },
       },
     ];
-    const blocks = planRowBlocks({ row, sectionContent: { [row.id]: items } });
+    const blocks = planRowBlocks({
+      row,
+      sectionSegments: segmentsForStored({ [row.id]: items }, row),
+    });
     expect(blocks.map((b) => b.kind)).toEqual([
       ROW_BLOCK_KIND.ROW,
-      ROW_BLOCK_KIND.SECTION_ITEM,
-      ROW_BLOCK_KIND.SECTION_ITEM,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
     ]);
     // And Quick Add accepts every selected Template row regardless of type.
     const target = resolveQuickAddTarget({
@@ -661,9 +683,11 @@ describe("the Builder configures no Section size and no image size", () => {
   });
 
   test("image width belongs to the note instance, never to the Template version", () => {
-    expect(NEW_SECTION_PHOTO_WIDTH_PCT).toBe(100);
-    expect(clampImageWidthPct(NEW_SECTION_PHOTO_WIDTH_PCT)).toBe(100);
-    expect(IMAGE_MAX_WIDTH_PCT).toBe(100);
+    // The shared media resize rule (src/lib/editorMediaResize.js) is what
+    // governs a Section image's width; the Template version stores none.
+    expect(MEDIA_MAX_WIDTH_PCT).toBe(100);
+    expect(clampMediaWidthPct(100)).toBe(100);
+    expect(clampMediaWidthPct(140)).toBe(100);
     expect(read(BUILDER_DOC)).not.toContain("widthPct");
     expect(read(FIELDS)).not.toContain("widthPct");
   });
@@ -708,32 +732,44 @@ describe("a new Section uses the EXISTING flexible runtime path", () => {
   test("a Section row is the flexible body owner the runtime already knows", () => {
     const row = newSection();
     expect(sectionReplacesRowAnswer(row.type)).toBe(true);
-    expect(isRefinableRowType(row.type)).toBe(true);
+    // Refine is the modern owner for every eligible row — a brand-new Section
+    // (an untouched legacy body: one empty paragraph) included.
+    const body = resolveSectionBody({ instance: {}, rowId: row.id, rowType: row.type });
+    const eligibility = sectionEditorEligibility(body);
+    expect(eligibility.ok).toBe(true);
+    expect(resolveSectionRefineOwner({ eligible: eligibility.ok })).toBe(
+      SECTION_REFINE_OWNER.MODERN
+    );
   });
 
-  test("section content materialises into a Section through the shared writer", () => {
+  test("a new Section opens in the ONE shared editor — there is no legacy section writer", () => {
     const row = newSection();
-    const stored = { [row.id]: [] };
-    const result = appendSectionText({
-      rowId: row.id,
-      value: "First paragraph.",
-      materialisation: { answer: "", evidence: null },
-      deps: {
-        readSectionList: (id) => stored[id] || [],
-        persist: (id, items) => {
-          stored[id] = items;
-        },
-        onStructuralChange: () => {},
-      },
-    });
-    expect(result.ok).toBe(true);
-    const items = sectionItemsForRow(stored, row.id);
-    expect(items.map((i) => i.kind)).toEqual(["text", "text"]);
-    expect(items[items.length - 1].value).toBe("First paragraph.");
-
-    // It renders through the ordinary section plan — one block per item.
-    const blocks = planRowBlocks({ row, sectionContent: stored });
-    expect(blocks.every((b) => b.kind === ROW_BLOCK_KIND.SECTION_ITEM)).toBe(true);
+    // An untouched Section resolves to a typeable empty document, eligible for
+    // the shared editor, and Quick Add routes into that document. Its first
+    // genuine edit writes `sectionDoc[rowId]`; nothing here writes anything.
+    const body = resolveSectionBody({ instance: {}, rowId: row.id, rowType: row.type });
+    expect(body.source).toBe(SECTION_BODY_SOURCE.LEGACY);
+    expect(sectionEditorEligibility(body).ok).toBe(true);
+    expect(resolveSectionQuickAddRoute(body)).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+    // The legacy per-item writers are gone (Phase G).
+    for (const gone of [
+      "lib/templateSectionText.js",
+      "lib/templateSectionAttachments.js",
+      "lib/templateSectionImagePlacement.js",
+      "lib/templateSectionLeadingText.js",
+    ]) {
+      expect(fs.existsSync(path.join(SRC, gone))).toBe(false);
+    }
+    // A HISTORICAL ordered list still renders through the ordinary section
+    // plan — one block per segment, the head standing in for the row.
+    const stored = {
+      [row.id]: [
+        { id: "t0", kind: "text", value: "" },
+        { id: "t1", kind: "text", value: "First paragraph." },
+      ],
+    };
+    const blocks = planRowBlocks({ row, sectionSegments: segmentsForStored(stored, row) });
+    expect(blocks.every((b) => b.kind === ROW_BLOCK_KIND.SECTION_SEGMENT)).toBe(true);
     expect(blocks[0].isRowHead).toBe(true);
     expect(blocks[0].id).toBe(row.id);
   });
@@ -754,39 +790,42 @@ describe("a new Section uses the EXISTING flexible runtime path", () => {
     expect(quickAddCapture(target).file).toBe(true);
   });
 
-  test("a new photo uses the existing default placement and 100% width", () => {
-    const photo = {
-      id: "p1",
-      kind: "photo",
-      assetId: "a1",
-      name: "p.jpg",
-      mimeType: "image/jpeg",
-      size: 1,
-      createdAt: 1,
-      display: { widthPct: NEW_SECTION_PHOTO_WIDTH_PCT, alignment: "left" },
+  test("a historical photo item reads back as a document image, at its stored width", () => {
+    const row = newSection();
+    const stored = {
+      [row.id]: [
+        { id: "t1", kind: "text", value: "Meaningful." },
+        {
+          id: "p1",
+          kind: "photo",
+          assetId: "a1",
+          name: "p.jpg",
+          mimeType: "image/jpeg",
+          size: 1,
+          createdAt: 1,
+          display: { widthPct: 100, alignment: "left" },
+        },
+        { id: "t2", kind: "text", value: "More." },
+      ],
     };
-    // No meaningful text yet -> top of the section.
-    expect(sectionPhotoInsertIndex([])).toBe(0);
-    expect(sectionPhotoInsertIndex([{ id: "t1", kind: "text", value: "" }])).toBe(0);
-    // After the first meaningful paragraph otherwise.
-    const withText = [
-      { id: "t1", kind: "text", value: "Meaningful." },
-      { id: "t2", kind: "text", value: "More." },
-    ];
-    expect(sectionPhotoInsertIndex(withText)).toBe(1);
-    const placed = sectionListWithNewPhoto(withText, photo);
-    expect(placed.map((i) => i.id)).toEqual(["t1", "p1", "t2"]);
-    expect(placed[1].display.widthPct).toBe(100);
+    const segments = segmentsForStored(stored, row);
+    expect(segments.map((s) => `${s.kind}:${s.itemId}`)).toEqual([
+      "text:t1",
+      "image:p1",
+      "text:t2",
+    ]);
+    expect(segments[1].attrs.widthPct).toBe(100);
+    expect(clampMediaWidthPct(segments[1].attrs.widthPct)).toBe(100);
   });
 
-  test("file insertion, image movement and image resizing are unchanged", () => {
-    // File items are ordinary section items in the same list.
+  test("file reading, image movement and image resizing come from the SHARED editor modules", () => {
+    // A historical file item is an ordinary segment of the same body.
     const list = [
       { id: "t1", kind: "text", value: "A" },
       {
         id: "f1",
         kind: "file",
-        assetId: "a2",
+        assetId: "file-asset-0002",
         name: "doc.pdf",
         mimeType: "application/pdf",
         size: 2,
@@ -794,26 +833,43 @@ describe("a new Section uses the EXISTING flexible runtime path", () => {
       },
     ];
     const row = newSection();
-    const blocks = planRowBlocks({ row, sectionContent: { [row.id]: list } });
-    expect(blocks.map((b) => b.sectionItem.kind)).toEqual(["text", "file"]);
+    const blocks = planRowBlocks({
+      row,
+      sectionSegments: segmentsForStored({ [row.id]: list }, row),
+    });
+    expect(blocks.map((b) => b.sectionSegment.kind)).toEqual([
+      SECTION_SEGMENT_KIND.TEXT,
+      SECTION_SEGMENT_KIND.FILE,
+    ]);
 
-    // The move/resize gesture rules are the same module the runtime already
-    // uses — nothing about them is per-row-type.
-    const rect = { left: 0, top: 0, width: 200, height: 200 };
-    expect(imagePointerZone({ rect, clientX: 100, clientY: 100 })).toBe(
-      IMAGE_MOVE_ZONE.BODY
-    );
-    expect(imagePointerZone({ rect, clientX: 199, clientY: 199 })).toBe(
-      IMAGE_MOVE_ZONE.CORNER
-    );
-    expect(clampImageWidthPct(140)).toBe(100);
+    // The move/resize gesture rules are the shared editor-media modules —
+    // nothing about them is per-row-type, and the Section-specific copies of
+    // them are gone (Phase G).
+    expect(MEDIA_BODY_DRAG_THRESHOLD_PX).toBe(4);
+    expect(
+      mediaDragExceedsThreshold({ startX: 0, startY: 0, clientX: 2, clientY: 2 })
+    ).toBe(false);
+    expect(
+      mediaDragExceedsThreshold({ startX: 0, startY: 0, clientX: 10, clientY: 0 })
+    ).toBe(true);
+    expect(clampMediaWidthPct(140)).toBe(100);
+    for (const gone of [
+      "lib/templateSectionImageResize.js",
+      "lib/templateSectionImageMove.js",
+      "lib/templateSectionItemDragSession.js",
+      "lib/templateSectionItemDrop.js",
+    ]) {
+      expect(fs.existsSync(path.join(SRC, gone))).toBe(false);
+    }
   });
 
-  test("Refine targets a section TEXT item, addressed by rowId + itemId", () => {
+  test("Refine targets a TEXT RUN of the Section document, addressed by rowId + segment", () => {
     const row = newSection();
-    expect(rowRefineTargetKey({ rowId: row.id })).toBe(row.id);
-    expect(rowRefineTargetKey({ rowId: row.id, itemId: "i1" })).toContain(row.id);
-    expect(rowRefineTargetKey({ rowId: row.id, itemId: "i1" })).not.toBe(row.id);
+    const key = sectionRefineTargetKey({ rowId: row.id, segmentIndex: 0 });
+    expect(key).toContain(row.id);
+    expect(key).not.toBe(row.id);
+    expect(isSectionRefineKeyForRow(key, row.id)).toBe(true);
+    expect(isSectionRefineKeyForRow(key, "other-row")).toBe(false);
   });
 
   test("ordered export recognises a Section and emits its items in order", () => {
@@ -880,32 +936,34 @@ describe("a new Section uses the EXISTING flexible runtime path", () => {
     const tpl = createTemplate("T", { leftPct: 18, rows: builderDefinitionRows(rows) });
     const before = JSON.parse(JSON.stringify(getVersion(tpl.currentVersionId)));
 
-    // Everything a note does happens on its own instance object.
-    const stored = { [rows[0].id]: [] };
-    appendSectionText({
-      rowId: rows[0].id,
-      value: "Typed while completing the note.",
-      materialisation: { answer: "", evidence: null },
-      deps: {
-        readSectionList: (id) => stored[id] || [],
-        persist: (id, items) => {
-          stored[id] = items;
-        },
-        onStructuralChange: () => {},
+    // Everything a note does happens on its own instance object: the Section's
+    // first genuine edit writes `sectionDoc[rowId]` on the NoteTemplateInstance.
+    const instance = {
+      noteId: "n1",
+      templateId: tpl.id,
+      templateVersionId: tpl.currentVersionId,
+      answers: {},
+      attachments: {},
+      customRows: [],
+      sectionDoc: {
+        [rows[0].id]: { format: "sectiondoc/1", html: "<p>Typed while completing the note.</p>" },
       },
-    });
+    };
+    const body = resolveSectionBody({ instance, rowId: rows[0].id, rowType: rows[0].type });
+    expect(body.source).toBe(SECTION_BODY_SOURCE.SECTION_DOC);
     expect(getVersion(tpl.currentVersionId)).toEqual(before);
   });
 
   test("there is no second runtime path for a Section", () => {
     const table = stripComments(read(TABLE));
     // "Section" is a NAME in the Builder, not a new stored type and not a new
-    // branch: no FIELD_TYPE.SECTION exists, and the runtime still dispatches on
-    // the one SECTION_ITEM block kind Phases 1-8 built.
+    // branch: no FIELD_TYPE.SECTION exists, and the runtime dispatches on the
+    // ONE SECTION_SEGMENT block kind (the per-item SECTION_ITEM plan is gone).
     expect(table).not.toMatch(/FIELD_TYPE\.SECTION\b/);
     expect(stripComments(read(FIELDS))).not.toMatch(/SECTION:\s*["']section["']/);
     expect(FIELD_TYPE.SECTION).toBeUndefined();
-    expect(table.match(/case ROW_BLOCK_KIND\.SECTION_ITEM:/g)).toHaveLength(1);
+    expect(table.match(/case ROW_BLOCK_KIND\.SECTION_SEGMENT:/g)).toHaveLength(1);
+    expect(table).not.toContain("ROW_BLOCK_KIND.SECTION_ITEM");
   });
 });
 

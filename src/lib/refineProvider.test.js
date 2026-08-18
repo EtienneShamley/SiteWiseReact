@@ -282,13 +282,14 @@ describe("15-16. only the Refine route's model changed", () => {
     }
   });
 
-  test("16. Listen-In deliberately reuses this same route and contract", () => {
+  test("16. Live transcript's Summarise deliberately reuses this same route and contract", () => {
     // It sends the internal meeting-notes preset through the SAME endpoint, so
     // it moves to the new model with everything else — by design, not by
-    // accident. Nothing about its own behaviour changed.
-    const listenIn = require("fs").readFileSync(`${__dirname}/../hooks/useListenIn.js`, "utf8");
-    expect(listenIn).toContain("style: MEETING_NOTES_STYLE");
-    expect(listenIn).toContain("refineText({");
+    // accident. (2026-08-18: the caller moved from the retired useListenIn
+    // hook to the Live Transcript workspace's explicit Summarise action.)
+    const dialog = require("fs").readFileSync(`${__dirname}/../components/LiveTranscriptDialog.js`, "utf8");
+    expect(dialog).toContain("style: MEETING_NOTES_STYLE");
+    expect(dialog).toContain("refineText({");
     expect(REFINE_MODE_PROMPTS[REFINE_MODE.MEETING]).toContain("MODE: MEETING NOTES");
     // …and it is the only caller that uses that preset.
     const client = require("fs").readFileSync(`${__dirname}/refineClient.js`, "utf8");

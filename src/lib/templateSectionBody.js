@@ -18,6 +18,15 @@
 // being rendered because something outranks it, never because it was destroyed.
 // Nothing in this module writes, migrates or repairs stored data.
 //
+// Since Phase G the shared Section editor is the ONLY interaction any of these
+// bodies has: every eligible body — modern, adapted from the ordered list, or
+// adapted from the legacy answer/evidence — opens in it, and its first genuine
+// edit writes `sectionDoc[rowId]`. The eligibility verdict below is therefore
+// the ONE compatibility gate of the Template Section: what it refuses stays
+// visible through the compatibility rendering, exported, and asset-protected,
+// but is READ-ONLY, because there is no other editor and this one may not own
+// it without dropping something.
+//
 // ---------------------------------------------------------------------------
 // A BAD MODERN DOCUMENT MUST NEVER HIDE HISTORY
 // ---------------------------------------------------------------------------
@@ -119,8 +128,12 @@ export const SECTION_EDITOR_REFUSAL = {
    * would produce a document that is MISSING that material, and the first
    * genuine edit would persist that document as authoritative — which is
    * exactly how a user's photograph disappears. The row therefore keeps its
-   * existing read and interaction path, unchanged, and nothing is dropped,
-   * repositioned, truncated, re-minted or rewritten to make an edit possible.
+   * compatibility READ path — every item still rendered in its stored
+   * position, still exported, still protecting its assets — and is READ-ONLY
+   * (Phase G retired the legacy per-item editor, and this build has no other),
+   * and nothing is dropped, repositioned, truncated, re-minted or rewritten to
+   * make an edit possible. Phase G0 proved no NoteWise-produced Section body
+   * reaches this refusal: it guards hand-edited / foreign storage.
    */
   UNREPRESENTABLE: "unrepresentable-material",
   /** The body resolved to no nodes, so there is no document to open. */
@@ -130,15 +143,25 @@ export const SECTION_EDITOR_REFUSAL = {
 /**
  * May this resolved body become (or already be) a live Section document?
  *
+ * The verdict every Template Section interaction is gated on: activation opens
+ * only an `ok` body; Quick Add opens an `ok` body OR starts an empty document
+ * for a `NO_BODY` / `EMPTY_DOCUMENT` one, and REFUSES only `UNREPRESENTABLE`;
+ * Refine serves only an `ok` body (`resolveSectionRefineOwner`).
+ *
  * @returns { ok: true } | { ok: false, reason }
  */
 export function sectionEditorEligibility(body) {
-  if (!body || body.source === SECTION_BODY_SOURCE.EMPTY) {
-    return { ok: false, reason: SECTION_EDITOR_REFUSAL.NO_BODY };
-  }
-  const skipped = Array.isArray(body.skipped) ? body.skipped : [];
+  // Unrepresentable material is checked FIRST, before "is there a body at
+  // all": a row whose ONLY stored material is a legacy evidence entry the
+  // document cannot carry resolves to an EMPTY-source body that still reports
+  // that entry as skipped, and such a row must be refused — not offered an
+  // empty document that would render on top of it.
+  const skipped = body && Array.isArray(body.skipped) ? body.skipped : [];
   if (skipped.length > 0) {
     return { ok: false, reason: SECTION_EDITOR_REFUSAL.UNREPRESENTABLE };
+  }
+  if (!body || body.source === SECTION_BODY_SOURCE.EMPTY) {
+    return { ok: false, reason: SECTION_EDITOR_REFUSAL.NO_BODY };
   }
   const nodes = Array.isArray(body.nodes) ? body.nodes : [];
   if (!nodes.length) {
@@ -148,28 +171,26 @@ export function sectionEditorEligibility(body) {
 }
 
 /**
- * Is this a body that is STILL on its legacy answer and holds nothing but
- * prose?
+ * Does this body come from the LEGACY sources and carry MEDIA — a legacy Text
+ * or custom row whose `evidence[rowId]` was carried into its document, or a
+ * structured / Photo-File-primary row whose supplementary body is evidence
+ * alone?
  *
- * The one legacy shape the shared Section editor may open in Phase F4, and the
- * reason is a READ-path one: such a body renders today as exactly the same
- * paragraphs the adapted document holds, so opening it in the Section editor
- * changes nothing a user can see, and its first genuine edit simply writes the
- * document rather than materialising an ordered item list on the way.
- *
- * A legacy body carrying MEDIA — a row whose `evidence[rowId]` is carryable
- * into a document — is deliberately NOT included: that material renders today
- * as the row's own legacy EVIDENCE blocks, with their own display and removal
- * controls, and folding it into a document is a change to the read path rather
- * than to editing. Such a row keeps the path it has (its first edit
- * materialises `sectionContent`, exactly as today) and becomes editable as a
- * document from then on.
+ * Phase G opens EVERY eligible body in the shared Section editor, legacy ones
+ * included, so this is no longer an editability question. It is a RENDERING
+ * one: a legacy body that is nothing but prose keeps rendering, while inactive,
+ * exactly as it always has — the row's own answer box, at the row's designed
+ * height (`row.px`) — so an untouched form still looks like the form its
+ * template designed. A legacy body that carries media, by contrast, renders as
+ * the SAME static document segments it will edit as (the shared image and file
+ * presentation, in stored order, evidence represented exactly once), so
+ * activating it changes nothing the user can see and its evidence never renders
+ * twice.
  */
-export function isPlainLegacyTextBody(body) {
+export function isLegacyMediaBody(body) {
   if (!body || body.source !== SECTION_BODY_SOURCE.LEGACY) return false;
   const nodes = Array.isArray(body.nodes) ? body.nodes : [];
-  if (!nodes.length) return false;
-  return nodes.every((node) => node && node.type === SECTION_DOC_NODE.TEXT);
+  return nodes.some((node) => node && node.type !== SECTION_DOC_NODE.TEXT);
 }
 
 /** Convenience: `sectionEditorEligibility(body).ok`. */
@@ -178,51 +199,40 @@ export function canEditSectionBody(body) {
 }
 
 /**
- * Where should ONE Quick Add capture for a row actually go — Phase F5.
+ * Where should ONE Quick Add capture for a row actually go.
  *
- * Three destinations, and exactly one of them is ever right for a given row
- * at a given moment:
+ * Since Phase G there are exactly two destinations, and the rule is a pure
+ * function of the row's body ELIGIBILITY — the same reader verdict activation
+ * and Refine use — never of whether an editor happens to exist:
  *
- *   DOCUMENT  the modern Section document — because it is already
- *             authoritative, OR because a live editor already holds this
- *             row's undo history (whose next transaction would otherwise
- *             persist a document that never contained the capture), OR
- *             because this row's body is safely eligible to become one and
- *             has simply never been opened yet. That last case is new in
- *             F5: an untouched-but-eligible row's FIRST Quick Add is now the
- *             row's first genuine modern write, instead of one more legacy
- *             `sectionContent` append that a later click would eclipse.
- *   LEGACY    the row is not modern, has no live editor, and is not eligible
- *             to open one — its existing `sectionContent` writer stays the
- *             destination, exactly as before F5. This is a SAFE fallback,
- *             not a degraded one: that path is still visibly rendered
- *             (adapted) by the static Section view.
- *   REFUSE    the row IS modern (or has a live editor) but this build may
- *             not open it — unrepresentable material underneath. Neither the
- *             document (would silently drop it) nor `sectionContent` (would
- *             be frozen and invisible) is safe, so the capture must be
- *             refused rather than written somewhere nobody can see it.
+ *   DOCUMENT  the Section's shared editor. For a row that is already modern,
+ *             or already holds a live editor, or is eligible-but-untouched,
+ *             the capture is inserted as an editor transaction (the row's
+ *             first modern write, when it is the first). For a row with NO
+ *             body yet — a structured row nobody has captured into, say —
+ *             the capture opens an EMPTY document and lands in it: nothing is
+ *             lost because nothing existed. The legacy `sectionContent`
+ *             append that F5's LEGACY route named no longer exists.
+ *   REFUSE    the row's body carries material this build cannot represent
+ *             (`UNREPRESENTABLE`). Neither the document (would silently drop
+ *             it) nor a frozen legacy list (would be invisible) is safe, so
+ *             the capture must be refused, visibly, rather than written
+ *             somewhere nobody can see it.
  *
- * Pure: the caller resolves `isModern`, `hasLiveEditor` and `eligible` from
- * the live instance and the registry; this function only orders the three
- * outcomes so the rule is stated once and is unit-testable without a DOM, an
- * editor or a stored note.
+ * Pure: the caller resolves the body; this function only turns its
+ * eligibility into a destination so the rule is stated once and is
+ * unit-testable without a DOM, an editor or a stored note.
  */
 export const SECTION_QUICK_ADD_ROUTE = {
   DOCUMENT: "document",
-  LEGACY: "legacy",
   REFUSE: "refuse",
 };
 
-export function resolveSectionQuickAddRoute({
-  isModern = false,
-  hasLiveEditor = false,
-  eligible = false,
-} = {}) {
-  if (!isModern && !hasLiveEditor && !eligible) {
-    return SECTION_QUICK_ADD_ROUTE.LEGACY;
+export function resolveSectionQuickAddRoute(body) {
+  const eligibility = sectionEditorEligibility(body);
+  if (!eligibility.ok && eligibility.reason === SECTION_EDITOR_REFUSAL.UNREPRESENTABLE) {
+    return SECTION_QUICK_ADD_ROUTE.REFUSE;
   }
-  if (!eligible) return SECTION_QUICK_ADD_ROUTE.REFUSE;
   return SECTION_QUICK_ADD_ROUTE.DOCUMENT;
 }
 

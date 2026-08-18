@@ -414,37 +414,47 @@ describe("F6a-b. ownership, before any sectionDoc exists", () => {
     );
   });
 
-  test("an eligible Section nobody has opened keeps its LEGACY Refine", () => {
-    // Pressing Refine must not migrate a row on its own.
+  test("G. an eligible Section nobody has opened is the modern path's too", () => {
+    // Since Phase G there is no legacy Refine to keep: the handler creates the
+    // row's editor from the same adapted document activation would open
+    // (creating it writes nothing) and the applied refinement is that row's
+    // first genuine modern write.
     expect(owner({ eligible: true, hasLiveEditor: false, isModern: false })).toBe(
-      SECTION_REFINE_OWNER.LEGACY
+      SECTION_REFINE_OWNER.MODERN
     );
   });
 
   test("11. an INELIGIBLE Section never reaches the modern path, whatever else is true", () => {
     // Unrepresentable/skipped material: the modern path would have to open a
-    // document that is missing it, so eligibility is never traded away.
+    // document that is missing it, so eligibility is never traded away — and
+    // since Phase G there is no other path, so such a row gets NO Refine.
     for (const state of [
       { hasLiveEditor: true, isModern: false },
       { hasLiveEditor: false, isModern: true },
       { hasLiveEditor: true, isModern: true },
       { hasLiveEditor: false, isModern: false },
     ]) {
-      expect(owner({ ...state, eligible: false })).toBe(SECTION_REFINE_OWNER.LEGACY);
+      expect(owner({ ...state, eligible: false })).toBe(SECTION_REFINE_OWNER.NONE);
     }
-    expect(owner()).toBe(SECTION_REFINE_OWNER.LEGACY);
+    expect(owner()).toBe(SECTION_REFINE_OWNER.NONE);
   });
 
-  test("12. the answer is exactly one path — the two are never both true", () => {
+  test("12. the answer is exactly one path — MODERN or NONE, decided by eligibility alone", () => {
+    expect(Object.keys(SECTION_REFINE_OWNER).sort()).toEqual(["MODERN", "NONE"]);
+    expect(SECTION_REFINE_OWNER.LEGACY).toBeUndefined();
     const answers = new Set();
     for (const eligible of [true, false]) {
       for (const hasLiveEditor of [true, false]) {
         for (const isModern of [true, false]) {
-          answers.add(owner({ eligible, hasLiveEditor, isModern }));
+          const result = owner({ eligible, hasLiveEditor, isModern });
+          answers.add(result);
+          expect(result).toBe(
+            eligible ? SECTION_REFINE_OWNER.MODERN : SECTION_REFINE_OWNER.NONE
+          );
         }
       }
     }
-    expect([...answers].sort()).toEqual(["legacy", "modern"]);
+    expect([...answers].sort()).toEqual(["modern", "none"]);
   });
 
   test("7-10. a not-yet-persisted document refines through exactly the same code", () => {

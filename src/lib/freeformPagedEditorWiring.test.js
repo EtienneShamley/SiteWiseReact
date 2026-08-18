@@ -61,16 +61,15 @@ describe("one continuous editor, not one per page", () => {
     const renderers = files.filter((name) =>
       /<EditorContent/.test(read(path.join("components", name)))
     );
-    // The Free-form paged editor, and the Template form's single active
-    // Text-row editor — a separate, pre-existing surface (see
-    // docs/ARCHITECTURE.md → Contextual rich text in Template Text answers).
-    // Adding a page-per-editor architecture would show up here immediately.
+    // The Free-form paged editor, and the Template form's ONE shared Section
+    // editor (Phase F4; the legacy per-row TemplateRowEditor was retired in
+    // Phase G). Adding a page-per-editor architecture would show up here
+    // immediately.
     expect(renderers.sort()).toEqual([
       path.join("editor", "FreeformPagedEditor.js"),
-      path.join("template", "TemplateRowEditor.js"),
-      // The flexible Template Section's own editor (Phase F4): ONE per
-      // Section, mounted only while that Section is active — never one per
-      // page, and never one per stored item.
+      // The flexible Template Section's own editor: ONE per Section, mounted
+      // only while that Section is active — never one per page, and never one
+      // per stored item.
       path.join("template", "TemplateSectionEditor.js"),
     ]);
   });

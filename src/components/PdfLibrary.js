@@ -41,7 +41,7 @@ export default function PdfLibrary() {
   };
 
   return (
-    <main className="flex-1 flex flex-col min-h-screen p-4 gap-3">
+    <main className="flex-1 min-w-0 h-full min-h-0 flex flex-col p-4 gap-3">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold tracking-tight text-gray-900 dark:text-white">

@@ -51,12 +51,15 @@ describe("Document Preview naming and entry point", () => {
     expect(PREVIEW).not.toMatch(/>PDF Preview</);
   });
 
-  test("EditorToolbar renders it beside ExportMenu with the same export source", () => {
-    expect(EDITOR_TOOLBAR).toMatch(
+  test("MainArea's document header renders it beside ExportMenu with the same export source", () => {
+    // 2026-08-18: Export + Document Preview moved from the formatting toolbar
+    // to the document header in MainArea (the toolbar is formatting-only).
+    const MAIN_AREA = withoutComments(read("components/MainArea.js"));
+    expect(MAIN_AREA).toMatch(
       /import DocumentPreview from "\.\/editor\/DocumentPreview"/
     );
-    expect(EDITOR_TOOLBAR).toMatch(/<DocumentPreview source=\{exportSource\}/);
-    expect(EDITOR_TOOLBAR).not.toMatch(/FreeformPdfPreview/);
+    expect(MAIN_AREA).toMatch(/<ExportMenu source=\{exportSource\} \/>\s*\n\s*<DocumentPreview source=\{exportSource\} \/>/);
+    expect(EDITOR_TOOLBAR).not.toMatch(/DocumentPreview|ExportMenu|FreeformPdfPreview/);
   });
 
   test("the old PDF-only files are gone", () => {
@@ -104,9 +107,14 @@ describe("Document Preview naming and entry point", () => {
     expect(handler).not.toMatch(/localStorage/);
   });
 
-  test("available only for the Free-form export source, exactly like ExportMenu", () => {
-    expect(PREVIEW).toMatch(/isFreeformPreviewAvailable\(source\)/);
+  test("available for BOTH export sources through one gate, mirroring ExportMenu's own", () => {
+    // One availability gate for the trigger: the Free-form rule (view + note +
+    // editor, exactly ExportMenu's `unavailable` check) OR the Template rule
+    // (view + note — no editor is needed or wanted).
+    expect(PREVIEW).toMatch(/isDocumentPreviewAvailable\(source\)/);
     expect(EXPORT_MENU).toMatch(/view === NOTE_VIEW\.FREEFORM && !freeformEditor/);
+    // No leftover Free-form-only wording on the trigger.
+    expect(PREVIEW).not.toMatch(/available for the Free-form note/);
   });
 
   test("Template-form export controls are unchanged", () => {
@@ -124,14 +132,23 @@ describe("Document Preview naming and entry point", () => {
 /* ======================== Snapshot, refresh, staleness ===================== */
 
 describe("one immutable snapshot per generation, captured before any await", () => {
-  test("captureFreeformExportSnapshot is called synchronously in handleOpen, with no preceding await", () => {
+  test("the snapshot is captured synchronously in handleOpen, with no preceding await, for the CAPTURED view", () => {
     const body = PREVIEW.slice(
       PREVIEW.indexOf("const handleOpen = useCallback("),
-      PREVIEW.indexOf("}, [available, noteId, noteTitle, view, freeformEditor, releaseUrls, generate]);")
+      PREVIEW.indexOf("}, [available, captureSnapshot, releaseUrls, generate]);")
     );
-    const snapshotIndex = body.indexOf("captureFreeformExportSnapshot(");
+    const snapshotIndex = body.indexOf("snapshotRef.current = captureSnapshot();");
     expect(snapshotIndex).toBeGreaterThan(-1);
     expect(body.slice(0, snapshotIndex)).not.toMatch(/await /);
+    // captureSnapshot itself is synchronous and view-dispatched: the Free-form
+    // editor snapshot, or the Template identity + shared model promise.
+    const capture = PREVIEW.slice(
+      PREVIEW.indexOf("const captureSnapshot = useCallback("),
+      PREVIEW.indexOf("}, [noteId, noteTitle, view, freeformEditor]);")
+    );
+    expect(capture).not.toMatch(/await /);
+    expect(capture).toMatch(/if \(view === NOTE_VIEW\.TEMPLATE_FORM\) \{\s*\n\s*return captureTemplateExportSnapshot\(\{ noteId, noteTitle \}\);/);
+    expect(capture).toMatch(/return captureFreeformExportSnapshot\(\{/);
   });
 
   test("the snapshot carries note id, note title, view and the editor's HTML", () => {
@@ -158,9 +175,9 @@ describe("one immutable snapshot per generation, captured before any await", () 
   test("Refresh captures a NEW snapshot synchronously before any await", () => {
     const body = PREVIEW.slice(
       PREVIEW.indexOf("const handleRefresh = useCallback("),
-      PREVIEW.indexOf("}, [available, format, noteId, noteTitle, view, freeformEditor, releaseUrls, generate]);", PREVIEW.indexOf("const handleRefresh"))
+      PREVIEW.indexOf("}, [available, format, captureSnapshot, releaseUrls, generate]);", PREVIEW.indexOf("const handleRefresh"))
     );
-    const snapshotIndex = body.indexOf("captureFreeformExportSnapshot(");
+    const snapshotIndex = body.indexOf("snapshotRef.current = captureSnapshot();");
     expect(snapshotIndex).toBeGreaterThan(-1);
     expect(body.slice(0, snapshotIndex)).not.toMatch(/await /);
   });
@@ -168,7 +185,7 @@ describe("one immutable snapshot per generation, captured before any await", () 
   test("Refresh retains the currently selected format", () => {
     const body = PREVIEW.slice(
       PREVIEW.indexOf("const handleRefresh = useCallback("),
-      PREVIEW.indexOf("}, [available, format, noteId, noteTitle, view, freeformEditor, releaseUrls, generate]);", PREVIEW.indexOf("const handleRefresh"))
+      PREVIEW.indexOf("}, [available, format, captureSnapshot, releaseUrls, generate]);", PREVIEW.indexOf("const handleRefresh"))
     );
     expect(body).toMatch(/const currentFormat = format;/);
     expect(body).toMatch(/generate\(currentFormat, \{ keepFile: true \}\);/);
@@ -178,7 +195,7 @@ describe("one immutable snapshot per generation, captured before any await", () 
   test("Refresh invalidates every cached artifact via invalidatePreviewEntries, keeping the current format", () => {
     const body = PREVIEW.slice(
       PREVIEW.indexOf("const handleRefresh = useCallback("),
-      PREVIEW.indexOf("}, [available, format, noteId, noteTitle, view, freeformEditor, releaseUrls, generate]);", PREVIEW.indexOf("const handleRefresh"))
+      PREVIEW.indexOf("}, [available, format, captureSnapshot, releaseUrls, generate]);", PREVIEW.indexOf("const handleRefresh"))
     );
     expect(body).toMatch(/invalidatePreviewEntries\(entriesRef\.current, \{/);
     expect(body).toMatch(/keepFormat: currentFormat,/);
@@ -351,7 +368,7 @@ describe("lazy generation and per-format caching", () => {
   test("opening the dialog generates PDF only — no other format is built eagerly", () => {
     const openBody = PREVIEW.slice(
       PREVIEW.indexOf("const handleOpen = useCallback("),
-      PREVIEW.indexOf("}, [available, noteId, noteTitle, view, freeformEditor, releaseUrls, generate]);")
+      PREVIEW.indexOf("}, [available, captureSnapshot, releaseUrls, generate]);")
     );
     expect(openBody).toMatch(/generate\(DOCUMENT_PREVIEW_FORMAT\.PDF\);/);
     expect(openBody.match(/generate\(/g)).toHaveLength(1);

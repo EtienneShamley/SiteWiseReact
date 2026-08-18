@@ -74,7 +74,7 @@ export default function MiddlePane({ middlePaneHidden, onHideMiddlePane }) {
   return (
     <aside
       id="middlePane"
-      className="w-80 bg-white dark:bg-gray-900 text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-800 space-y-3"
+      className="w-80 shrink-0 min-h-0 overflow-y-auto bg-white dark:bg-gray-900 text-black dark:text-white p-4 border-r border-gray-300 dark:border-gray-800 space-y-3"
     >
       <div className="flex items-center justify-between mb-2">
         {/* Heading typography and wording unchanged — it is not a control and

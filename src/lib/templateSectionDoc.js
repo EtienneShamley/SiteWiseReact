@@ -44,9 +44,13 @@
 // THE NODE MODEL — what a Section document IS, once normalized
 // ---------------------------------------------------------------------------
 //
-//   { type: "text",  blocks }  one or more rich-text model blocks
-//                              (paragraph / bulletList / orderedList — exactly
-//                              the model templateRichText.js produces)
+//   { type: "text",  blocks }  one or more rich-text model blocks — exactly the
+//                              model templateRichText.js produces: since the
+//                              2026-08-18 parity work the full document
+//                              vocabulary (paragraph, heading, lists, task
+//                              list, blockquote, code block, horizontal rule,
+//                              table, with every mark), not only the earlier
+//                              paragraph/bulletList/orderedList subset
 //   { type: "image", attrs }   the shared AssetImage node's attributes
 //   { type: "file",  attrs }   the shared FileAttachment node's attributes
 //
@@ -73,22 +77,26 @@
 // so a document whose image sat somewhere the whitelist cannot represent would
 // normalize to text with the image silently gone. Rather than show a Section
 // with a missing photograph, such a document is refused as an authority source
-// and the row falls back to the representation it rendered before.
+// and the row falls back to the representation it rendered before. (Since
+// 2026-08-18 the Section editor's own schema keeps media at the top level —
+// `sectionMedia` group, see sectionEditorExtensions.js — so no NoteWise-
+// produced document places an image inside a table cell, list item or quote.)
 //
 // Anything invalid is IGNORED, never repaired: nothing here rewrites, migrates
 // or deletes a stored value, and the deletion gate below deliberately keeps
 // protecting the assets a malformed document names.
 //
-// "THE SUPPORTED SECTION SCHEMA" named in rule 3 is
-// src/components/editor/sectionEditorExtensions.js — the ONE place the future
-// Section editor's real node identities and rich-text vocabulary are declared.
-// This module's own image/file detection (the `img` tag, the shared
-// `FILE_ATTACHMENT_ASSET_ATTR` / `FILE_ATTACHMENT_CLASS` contracts imported
-// below) is built from the SAME canonical attribute contracts that factory's
-// nodes parse via, so the two cannot silently name different things even
-// though this module does not import a live ProseMirror schema from it — see
-// that file's own header for exactly why, and exactly what is and is not
-// consolidated between them.
+// "THE SUPPORTED SECTION SCHEMA" named in rule 3 is, for PERSISTENCE, the
+// shared rich-text model (src/lib/templateRichText.js — the one sanitization
+// boundary and the vocabulary a stored document may carry), and, for the LIVE
+// editor, the shared editor core configured by
+// src/components/editor/sectionEditorExtensions.js. The two are kept in
+// agreement by executable round-trip tests against a real editor
+// (src/lib/sectionEditorRoundTrip.test.js). This module's own image/file
+// detection (the `img` tag, the shared `FILE_ATTACHMENT_ASSET_ATTR` /
+// `FILE_ATTACHMENT_CLASS` contracts imported below) is built from the SAME
+// canonical attribute contracts the shared media nodes parse via, so the two
+// cannot silently name different things.
 //
 // Pure apart from DOMParser (browser + jsdom), exactly like templateRichText.js.
 // No React, no storage, no editor.

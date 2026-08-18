@@ -112,7 +112,7 @@ import {
 import { SECTION_ITEM_KIND, normalizeSectionItem } from "./templateSectionContent";
 import { healSectionSplitText } from "./templateSectionTextHeal";
 import { MEDIA_LAYOUT_MODE } from "./editorMediaLayout";
-import { answerToModel } from "./templateRichText";
+import { answerToModel, isEmptyAnswerValue } from "./templateRichText";
 
 /** Why something that renders today is not in the adapted document. */
 export const SECTION_DOC_SKIP_REASON = {
@@ -260,29 +260,32 @@ export function adaptSectionItemsToNodes(rawList) {
  * @param evidence      the row's RAW `evidence[rowId]` list.
  * @param includeAnswer whether the answer is part of the body.
  *
- * The composition mirrors what materialisation already writes today —
+ * The composition mirrors what materialisation wrote before Phase G —
  * `[ the text, ...carryable evidence in order ]` — so a row adapted here and a
- * row that materialised through the older path hold the same body.
+ * row that materialised through the older path hold the same body. The one
+ * deliberate difference: an answer that says NOTHING contributes no paragraph
+ * when the row has carryable evidence to begin with (see the comment on the
+ * answer below).
  */
 export function adaptLegacyBodyToNodes({ answer, evidence, includeAnswer = true } = {}) {
-  const nodes = [];
-  const sources = [];
   const skipped = [];
 
-  if (includeAnswer) {
-    // An empty answer yields one empty paragraph, which is what an empty
-    // Section renders (and is typeable into) today.
-    // The answer is not an ordered item, so its provenance part carries no
-    // stable id and the index that precedes every evidence entry.
-    pushBlocks(nodes, sources, answerToModel(answer), { index: -1, id: null });
-  }
-
+  // THE EVIDENCE IS ADAPTED FIRST, into its own arrays.
+  //
+  // Not for ordering — it still comes after the answer — but because whether an
+  // EMPTY answer contributes a paragraph depends on whether anything follows it
+  // (see below), and that cannot be known until the carry gate has run. The two
+  // lists are then simply appended, which is safe by construction: the carry
+  // gate refuses a text item outright, so evidence NEVER produces a text node
+  // and no run of prose can be split or merged across the join.
+  const evidenceNodes = [];
+  const evidenceSources = [];
   const rawEvidence = Array.isArray(evidence) ? evidence : [];
 
   rawEvidence.forEach((entry, index) => {
     // The EXISTING carry gate, asked one entry at a time — the same rule
-    // materialisation uses, so an adapted row and a materialised row carry
-    // exactly the same evidence.
+    // materialisation used, so a row adapted today and a row materialised in an
+    // earlier build carry exactly the same evidence.
     const [copy] = carryableEvidenceItems([entry]);
     if (!copy) {
       // Renders today through the more tolerant legacy evidence path, but
@@ -301,8 +304,45 @@ export function adaptLegacyBodyToNodes({ answer, evidence, includeAnswer = true 
     }
     const item = normalizeSectionItem(copy);
     if (item === null) return;
-    appendItem(nodes, sources, skipped, item, index, entry);
+    appendItem(evidenceNodes, evidenceSources, skipped, item, index, entry);
   });
+
+  const nodes = [];
+  const sources = [];
+
+  // THE ANSWER, and the ONE case in which it contributes nothing.
+  //
+  // An empty answer normally yields one empty paragraph, and that is right: it
+  // is what an empty Section renders, and it is the paragraph the user types
+  // into. But a row whose answer says NOTHING and whose body is its EVIDENCE —
+  // an old note where a photo was attached and no text was ever written — would
+  // otherwise begin with a paragraph that exists only to represent the absence
+  // of text: a blank line above the picture, and a prompt where the content
+  // should start. The media is that row's content, so the document begins with
+  // it. Nothing is lost — `answers[rowId]` is untouched and frozen exactly as
+  // it is, and the caret can still be placed before the media by the editor's
+  // own gap cursor rather than by a manufactured block.
+  //
+  // The emptiness test is the EXISTING one (`isEmptyAnswerValue`, a trimmed
+  // plain-text projection), so "says nothing" means here exactly what it means
+  // everywhere else in the product. A genuinely empty Section — no answer AND no
+  // carryable evidence — still yields that one empty paragraph, because there
+  // is then nothing else to begin with and the row must stay typeable.
+  //
+  // The answer is not an ordered item, so its provenance part carries no stable
+  // id and the index that precedes every evidence entry.
+  //
+  // The emptiness question is asked ONLY when there is evidence to begin with,
+  // which is also what keeps this off the hot path: the common legacy row has no
+  // evidence at all, so `answerToModel` still parses its answer exactly once per
+  // read.
+  const answerIsSilent = evidenceNodes.length > 0 && isEmptyAnswerValue(answer);
+  if (includeAnswer && !answerIsSilent) {
+    pushBlocks(nodes, sources, answerToModel(answer), { index: -1, id: null });
+  }
+
+  nodes.push(...evidenceNodes);
+  sources.push(...evidenceSources);
 
   return { nodes, sources, skipped };
 }

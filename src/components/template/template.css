@@ -306,6 +306,166 @@
   opacity: 0.45;
 }
 
+/* ---------- The full document vocabulary (2026-08-18) ----------
+ * A flexible Section is a real document surface: headings, quotes, code, task
+ * lists, rules, tables, sub/superscript and font choices. EVERY rule below is
+ * stated for BOTH the static rendering (.twocol-rich) and the live editor
+ * (.twocol-rich-input) so activating a Section cannot change how any block
+ * measures — pagination cannot jump and the document keeps one structure.
+ * Tailwind's preflight strips heading sizes and table/blockquote/code styling
+ * globally, so each is restated here. The white Template paper is the same in
+ * both app themes, so there are no dark overrides. */
+.twocol-rich h1, .twocol-rich-input h1,
+.twocol-rich h2, .twocol-rich-input h2,
+.twocol-rich h3, .twocol-rich-input h3,
+.twocol-rich h4, .twocol-rich-input h4,
+.twocol-rich h5, .twocol-rich-input h5,
+.twocol-rich h6, .twocol-rich-input h6 {
+  margin: 0.35em 0 0.15em;
+  line-height: 1.25;
+  font-weight: 700;
+}
+.twocol-rich h1, .twocol-rich-input h1 { font-size: 1.5em; }
+.twocol-rich h2, .twocol-rich-input h2 { font-size: 1.3em; }
+.twocol-rich h3, .twocol-rich-input h3 { font-size: 1.15em; font-weight: 600; }
+.twocol-rich h4, .twocol-rich-input h4 { font-size: 1.05em; font-weight: 600; }
+.twocol-rich h5, .twocol-rich-input h5 { font-size: 1em; font-weight: 600; }
+.twocol-rich h6, .twocol-rich-input h6 { font-size: 0.95em; font-weight: 600; }
+.twocol-rich h1:first-child, .twocol-rich-input h1:first-child,
+.twocol-rich h2:first-child, .twocol-rich-input h2:first-child,
+.twocol-rich h3:first-child, .twocol-rich-input h3:first-child {
+  margin-top: 0;
+}
+
+.twocol-rich blockquote,
+.twocol-rich-input blockquote {
+  margin: 0.25rem 0;
+  padding: 0.1rem 0 0.1rem 0.75rem;
+  border-left: 3px solid #9ca3af;
+  color: #4b5563;
+}
+
+.twocol-rich pre,
+.twocol-rich-input pre {
+  margin: 0.25rem 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.25rem;
+  background: #f3f4f6;
+  color: #111827;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.twocol-rich code,
+.twocol-rich-input code {
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.25rem;
+  background: #f3f4f6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+.twocol-rich pre code,
+.twocol-rich-input pre code {
+  padding: 0;
+  background: none;
+  font-size: inherit;
+}
+
+.twocol-rich hr,
+.twocol-rich-input hr {
+  margin: 0.5rem 0;
+  border: 0;
+  border-top: 1px solid #d1d5db;
+}
+/* The rule is a selectable atom in the editor; the selection ring stays subtle. */
+.twocol-rich-input hr.ProseMirror-selectednode {
+  border-top-color: #39dde9;
+}
+
+.twocol-rich sub, .twocol-rich-input sub,
+.twocol-rich sup, .twocol-rich-input sup {
+  line-height: 0;
+}
+
+/* Tables — the DOCUMENT table inside a Section, not the Template's own
+   two-column form layout. */
+.twocol-rich table,
+.twocol-rich-input table {
+  width: 100%;
+  margin: 0.25rem 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.twocol-rich th, .twocol-rich-input th,
+.twocol-rich td, .twocol-rich-input td {
+  position: relative;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #d1d5db;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.twocol-rich th,
+.twocol-rich-input th {
+  background: #f3f4f6;
+  font-weight: 600;
+  text-align: left;
+}
+/* The Table extension wraps a live table so a wide one scrolls in place. */
+.twocol-rich-input .tableWrapper {
+  overflow-x: auto;
+}
+/* Table UX from the Table extension: cell selection + column resize (editor only). */
+.twocol-rich-input .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(57, 221, 233, 0.18);
+  pointer-events: none;
+}
+.twocol-rich-input .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: -2px;
+  width: 4px;
+  background-color: #39dde9;
+  pointer-events: none;
+}
+.twocol-rich-input.resize-cursor {
+  cursor: col-resize;
+}
+
+/* Task lists: checkbox + text, no markers. The static view renders the SAME
+   label/checkbox/div shape the TaskItem NodeView renders. */
+.twocol-rich ul[data-type="taskList"],
+.twocol-rich-input ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0.25rem;
+}
+.twocol-rich li[data-type="taskItem"],
+.twocol-rich-input li[data-type="taskItem"] {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.twocol-rich li[data-type="taskItem"] > label,
+.twocol-rich-input li[data-type="taskItem"] > label {
+  flex: 0 0 auto;
+  margin-top: 0.15rem;
+  user-select: none;
+}
+.twocol-rich li[data-type="taskItem"] > div,
+.twocol-rich-input li[data-type="taskItem"] > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* A static checkbox shows state only; the pointer belongs to the Section
+   press target beneath it (activation), so it does not look interactive. */
+.twocol-rich .nw-tpl-task-checkbox {
+  pointer-events: none;
+}
+
 /* Row drag handle */
 .twocol-resize-handle {
   position: absolute;
@@ -576,19 +736,11 @@
      Open/Preview and Download are as meaningless on paper as Remove is. */
   .photo-att-toolbar,
   .photo-att-handle,
-  /* Resizing is an editing affordance; the size it produces is document
-     content and prints exactly as laid out. */
-  .photo-att-corner,
   .photo-att-missing-remove,
   .file-att-actions,
-  /* Placing an image is an editing affordance. The ORDER it produces is
-     document content and prints; the transient drop indicator is not, and never
-     appears on paper. */
-  .twocol-item-dropline,
-  .twocol-item-ghost,
-  /* The leading insertion point is a place to click, not content. It occupies
-     no layout at all, so hiding it changes nothing on paper — it is listed for
-     the same reason every other affordance is. */
+  /* The lead-in above a media-headed Section is a place to click, not
+     content. It occupies no layout at all, so hiding it changes nothing on
+     paper — it is listed for the same reason every other affordance is. */
   .twocol-section-lead,
   /* An empty field's prompt is editing guidance, not report content. */
   .twocol-rich-placeholder {
@@ -633,6 +785,17 @@
 
   .ProseMirror-gapcursor,
   .ProseMirror-selectednode {
+    display: none !important;
+  }
+
+  /* A selected horizontal rule is document content and must still print;
+     table editing chrome must not. */
+  .twocol-rich-input hr.ProseMirror-selectednode {
+    display: block !important;
+    border-top-color: #d1d5db;
+  }
+  .twocol-rich-input .column-resize-handle,
+  .twocol-rich-input .selectedCell::after {
     display: none !important;
   }
 }
@@ -695,84 +858,11 @@
   pointer-events: none;
 }
 
-/* ---------- Word-like image placement within a section ----------
- * A section reads as a document body, so an image is moved the way a picture is
- * moved in a word processor: by dragging the IMAGE ITSELF. There is deliberately
- * no grip, no Move up / Move down pair and no affordance of any kind on a text
- * item — those made a section read as a stack of blocks rather than as prose.
- *
- * `cursor: grab` on the image is the whole affordance: it appears only where a
- * move is actually possible (the class is applied only when a move handler was
- * supplied), it adds no chrome to the paper and it costs no measured height.
- * The image's CORNERS are excluded from the gesture in JS
- * (src/lib/templateSectionImageMove.js) and stay reserved for proportional
- * corner resizing. */
-.photo-att-img--movable {
-  cursor: grab;
-}
-
-.twocol-row--itemdrag .photo-att-img--movable {
-  cursor: grabbing;
-}
-
-/* The item being moved fades slightly, so the insertion line reads as "this goes
-   there" rather than as an unexplained rule between two items. Applied only once
-   the gesture has ARMED — a press that is still just a press changes nothing. */
-.twocol-row--itemdrag .twocol-cell-right {
-  opacity: 0.55;
-}
-
-/* The insertion line: where the dragged image would land, on the item currently
- * under the pointer and inside the SAME section only. Absolutely positioned, so
- * moving it reflows nothing and costs no measured height — and it is transient
- * visual state that never touches storage.
- *
- * `--caret` is the Word-like case: the image will land INSIDE this text, at the
- * resolved caret's own line, so the line is drawn at that line's top (supplied
- * inline) rather than at an edge of the block. */
-.twocol-item-dropline {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--nw-accent-bright, #0b6e78);
-  z-index: 4;
-  pointer-events: none;
-}
-
-.twocol-item-dropline--before {
-  top: -1px;
-}
-
-.twocol-item-dropline--after {
-  bottom: -1px;
-}
-
-.twocol-item-dropline--caret {
-  top: 0;
-}
-
-/* The image currently being dragged, drawn under the pointer.
- *
- * `position: fixed` because the pointer is in viewport coordinates and the
- * preview must be able to travel anywhere on screen; `pointer-events: none`
- * because the drop resolver asks the document what is under the pointer and
- * must never be answered "the ghost". Slightly translucent so the insertion
- * line and the text underneath stay readable. Positioned imperatively while the
- * pointer moves — see positionItemGhost in ResizableTwoColTable.js. */
-.twocol-item-ghost {
-  position: fixed;
-  z-index: 60;
-  pointer-events: none;
-  opacity: 0.7;
-  border-radius: 2px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
-  object-fit: contain;
-}
-
-/* ---------- The leading insertion point above a section's first image ----------
+/* ---------- The lead-in above a media-headed Section ----------
  * Where a user clicks to type ABOVE an image that is the first thing in a
- * section. It is a click target and nothing else: no button, no icon, no label.
+ * Section: pressing it activates the Section's shared editor, whose gap cursor
+ * puts the caret before the first block. It is a click target and nothing
+ * else: no button, no icon, no label.
  *
  * IT ADDS NO HEIGHT. The negative top margin exactly cancels the element's own
  * height, so it sits inside the cell's existing top padding and an image-only
@@ -813,10 +903,25 @@
   outline: none;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .twocol-item-ghost {
-    box-shadow: none;
-  }
+/* A static image segment of a Section the shared editor owns is a press
+ * target: pressing anywhere on it opens the Section's ONE document at that
+ * point (ResizableTwoColTable → renderSectionDocMedia). The cursor is the
+ * whole affordance — no chrome, no measured height. */
+.twocol-section-media--pressable {
+  cursor: text;
+}
+
+/* A FILE card is not text: pressing its surface activates the Section, but the
+ * pointer should not promise a caret. Its own buttons keep their own cursor. */
+.twocol-section-media--card {
+  cursor: default;
+}
+
+/* A Text answer the shared editor may NOT own (material the document cannot
+ * represent — see sectionEditorEligibility): the same box, read-only, with the
+ * default cursor so it does not invite typing. */
+.twocol-rich--readonly {
+  cursor: default;
 }
 
 .twocol-seg--resume {
@@ -1148,102 +1253,6 @@
 
   .photo-att-handle::after {
     inset: -14px;
-  }
-}
-
-/* ---------- Proportional corner resize (ordered section images) ----------
- * Four handles, one per corner, occupying exactly the zone the move gesture
- * declines (src/lib/templateSectionImageMove.js — the size and the small-image
- * ratio are supplied inline from those shared constants, so the two gestures
- * cannot disagree about where a corner is).
- *
- * They are layered ON TOP of the image, so a press on one never reaches the move
- * surface beneath it. Absolutely positioned, so they add no measured height and
- * pagination is untouched; a marker is drawn inside the hit area rather than the
- * hit area being drawn, so the grabbable region is comfortable without a chunky
- * square sitting on the photo.
- *
- * Visible on hover / keyboard focus only, like every other control on the paper.
- * The keyboard equivalent is Alt/Option + Left/Right on the focused frame. */
-.photo-att-corner {
-  position: absolute;
-  z-index: 2;
-  touch-action: none;
-}
-
-.photo-att-corner::after {
-  content: "";
-  position: absolute;
-  width: 10px;
-  height: 10px;
-  border: 2px solid #39dde9;
-  border-radius: 2px;
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-  opacity: 0;
-  transition: opacity 120ms ease-out;
-}
-
-.photo-att-frame:hover .photo-att-corner::after,
-.photo-att-frame:focus-within .photo-att-corner::after,
-.photo-att-frame:focus .photo-att-corner::after,
-.photo-att-frame--resizing .photo-att-corner::after {
-  opacity: 1;
-}
-
-.photo-att-corner--top-left {
-  top: 0;
-  left: 0;
-  cursor: nwse-resize;
-}
-.photo-att-corner--top-left::after {
-  top: -3px;
-  left: -3px;
-}
-
-.photo-att-corner--top-right {
-  top: 0;
-  right: 0;
-  cursor: nesw-resize;
-}
-.photo-att-corner--top-right::after {
-  top: -3px;
-  right: -3px;
-}
-
-.photo-att-corner--bottom-left {
-  bottom: 0;
-  left: 0;
-  cursor: nesw-resize;
-}
-.photo-att-corner--bottom-left::after {
-  bottom: -3px;
-  left: -3px;
-}
-
-.photo-att-corner--bottom-right {
-  bottom: 0;
-  right: 0;
-  cursor: nwse-resize;
-}
-.photo-att-corner--bottom-right::after {
-  bottom: -3px;
-  right: -3px;
-}
-
-/* Coarse pointers (touch): no hover to reveal anything, and fingers need a
- * larger marker. The hit area itself is already the reserved corner zone. */
-@media (pointer: coarse) {
-  .photo-att-corner::after {
-    width: 14px;
-    height: 14px;
-    opacity: 1;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .photo-att-corner::after {
-    transition: none;
   }
 }
 

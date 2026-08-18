@@ -13,9 +13,12 @@
 //   - Rich-text answers are rendered through the EXISTING sanitization boundary
 //     (`answerToModel` + `modelToHtml`, src/lib/templateRichText.js). Stored
 //     HTML is never passed through: the output is rebuilt from the normalized
-//     model, so only p/br/strong/em/u/s/ul/ol/li/span/mark/a can appear, colours
-//     are already validated to #rrggbb, alignment is one of four keywords, and
-//     hrefs have already passed the project's URL policy.
+//     model, so only the model's own elements (p, h1–h6, br, strong, em, u, s,
+//     sub, sup, code, pre, blockquote, hr, ul, ol, li, table, tbody, tr, td,
+//     th, span, mark, a — plus a disabled checkbox for a task item's state)
+//     can appear, colours are already validated to #rrggbb, fonts to the
+//     approved family list and a bounded pixel size, alignment is one of four
+//     keywords, and hrefs have already passed the project's URL policy.
 //   - Every other string (labels, note title, template name, filenames, field
 //     values) is HTML-escaped here.
 //   - Colours and dimensions come from `normalizeBranding` / `photoLayout`, so
@@ -28,7 +31,7 @@ import {
   normalizeBranding,
   layoutShowsLogo,
 } from "./templateBranding";
-import { modelToHtml } from "./templateRichText";
+import { RICH_BLOCK, modelToHtml } from "./templateRichText";
 import { EXPORT_UNIT } from "./templateExportModel";
 import {
   MEDIA_LAYOUT_MODE,
@@ -104,6 +107,58 @@ function styleAttr(styleObject) {
 /* Rich text                                                                 */
 /* ------------------------------------------------------------------------ */
 
+// The glyphs a task item's state degrades to where a checkbox control cannot
+// travel (Word input), and the text a horizontal rule degrades to there.
+export const DOCX_TASK_CHECKED_GLYPH = "\u2611"; // ☑
+export const DOCX_TASK_UNCHECKED_GLYPH = "\u2610"; // ☐
+export const DOCX_RULE_TEXT = "\u2500".repeat(32); // ────
+
+/**
+ * LOCKED FORMAT POLICY for the document vocabulary (2026-08-18), per flavour:
+ *
+ *   heading / blockquote / code / inline marks / tables / sub-sup / fonts
+ *     standalone, PDF, DOCX  → the SAME semantic markup `modelToHtml` emits
+ *                              (headings, <blockquote>, <pre><code>, <table>,
+ *                              <sub>/<sup>, one validated style span);
+ *                              html-to-docx carries every one of these.
+ *   task list
+ *     standalone, PDF        → the TaskItem NodeView's own shape with a
+ *                              disabled native checkbox showing the state
+ *                              (the Free-form exports carry the same control)
+ *     DOCX                   → degrades DETERMINISTICALLY: each item becomes
+ *                              its own blocks with a ☑ / ☐ glyph leading the
+ *                              first line (html-to-docx has no checkbox)
+ *   horizontal rule
+ *     standalone, PDF        → <hr>
+ *     DOCX                   → degrades DETERMINISTICALLY to a rule line of
+ *                              box-drawing characters (html-to-docx drops <hr>)
+ *
+ * The semantic ORDER is identical in every flavour and nothing is dropped.
+ */
+function docxDegrade(block) {
+  if (!block) return [];
+  if (block.type === RICH_BLOCK.HORIZONTAL_RULE) {
+    return [{ type: RICH_BLOCK.PARAGRAPH, align: "left", content: [{ type: "text", text: DOCX_RULE_TEXT, marks: {} }] }];
+  }
+  if (block.type === RICH_BLOCK.TASK_LIST) {
+    const out = [];
+    for (const item of block.items || []) {
+      const glyph = { type: "text", text: `${item && item.checked ? DOCX_TASK_CHECKED_GLYPH : DOCX_TASK_UNCHECKED_GLYPH} `, marks: {} };
+      const blocks = Array.isArray(item && item.blocks) && item.blocks.length ? item.blocks : [{ type: RICH_BLOCK.PARAGRAPH, align: "left", content: [] }];
+      const [first, ...rest] = blocks;
+      if (first && first.type === RICH_BLOCK.PARAGRAPH) {
+        out.push({ ...first, content: [glyph, ...(first.content || [])] });
+      } else {
+        out.push({ type: RICH_BLOCK.PARAGRAPH, align: "left", content: [glyph] });
+        out.push(first);
+      }
+      out.push(...rest);
+    }
+    return out;
+  }
+  return [block];
+}
+
 /**
  * One rich-text block as sanitized HTML.
  *
@@ -112,8 +167,10 @@ function styleAttr(styleObject) {
  * from 1 after a page break — applied to the `<ol>` this function itself just
  * produced, never to user input.
  */
-function blockHtml(block) {
-  const html = modelToHtml([block]);
+function blockHtml(block, ctx) {
+  const docx = !!ctx && ctx.flavor === EXPORT_FLAVOR.DOCX;
+  const blocks = docx ? docxDegrade(block) : [block];
+  const html = modelToHtml(blocks, { taskCheckbox: docx ? "none" : "input" });
   const start = Number(block && block.start);
   if (block && block.type === "orderedList" && Number.isFinite(start) && start > 1) {
     return html.replace(/^<ol>/, `<ol start="${Math.floor(start)}">`);
@@ -272,7 +329,7 @@ export function unitHtml(unit, ctx) {
   if (!unit) return "";
   switch (unit.type) {
     case EXPORT_UNIT.BLOCK:
-      return hardenLinks(blockHtml(unit.block));
+      return hardenLinks(blockHtml(unit.block, ctx));
     case EXPORT_UNIT.VALUE:
       return `<p>${esc(unit.text)}</p>`;
     case EXPORT_UNIT.PHOTO:
@@ -633,6 +690,33 @@ export function templateExportComponentCss(flavor) {
     .nw-tpl-cell p:last-child { margin-bottom: 0; }
     .nw-tpl-cell ul, .nw-tpl-cell ol { margin: 0 0 6px 18px; padding: 0; }
     .nw-tpl-cell a { color: inherit; text-decoration: underline; }
+    .nw-tpl-cell h1, .nw-tpl-cell h2, .nw-tpl-cell h3, .nw-tpl-cell h4, .nw-tpl-cell h5, .nw-tpl-cell h6 {
+      margin: 0 0 4px 0; line-height: 1.25; font-weight: 700; page-break-after: avoid; break-after: avoid;
+    }
+    .nw-tpl-cell h1 { font-size: 1.5em; }
+    .nw-tpl-cell h2 { font-size: 1.3em; }
+    .nw-tpl-cell h3 { font-size: 1.15em; font-weight: 600; }
+    .nw-tpl-cell h4, .nw-tpl-cell h5, .nw-tpl-cell h6 { font-size: 1.05em; font-weight: 600; }
+    .nw-tpl-cell blockquote { margin: 0 0 6px 0; padding: 2px 0 2px 10px; border-left: 3px solid #999999; color: #444444; }
+    .nw-tpl-cell pre {
+      margin: 0 0 6px 0; padding: 6px 8px; background: #f5f5f5; border-radius: 3px;
+      white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+    }
+    .nw-tpl-cell pre, .nw-tpl-cell code {
+      font-family: ui-monospace, Menlo, Monaco, Consolas, "Courier New", monospace; font-size: 0.9em;
+    }
+    .nw-tpl-cell code { background: #f5f5f5; padding: 0 3px; border-radius: 2px; }
+    .nw-tpl-cell pre code { background: none; padding: 0; }
+    .nw-tpl-cell hr { border: 0; border-top: 1px solid #cccccc; margin: 4px 0 6px 0; }
+    .nw-tpl-cell sub, .nw-tpl-cell sup { line-height: 0; }
+    .nw-tpl-cell table { width: 100%; margin: 0 0 6px 0; border-collapse: collapse; table-layout: fixed; }
+    .nw-tpl-cell td, .nw-tpl-cell th { border: 1px solid #cccccc; padding: 4px 6px; vertical-align: top; overflow-wrap: anywhere; word-break: break-word; }
+    .nw-tpl-cell th { background: #f2f2f2; font-weight: 700; text-align: left; }
+    .nw-tpl-cell td p:last-child, .nw-tpl-cell th p:last-child { margin-bottom: 0; }
+    .nw-tpl-cell ul[data-type="taskList"] { list-style: none; margin-left: 4px; }
+    .nw-tpl-cell li[data-type="taskItem"] { display: flex; gap: 6px; align-items: flex-start; }
+    .nw-tpl-cell li[data-type="taskItem"] > label { flex: 0 0 auto; }
+    .nw-tpl-cell li[data-type="taskItem"] > div { flex: 1 1 auto; min-width: 0; }
     .nw-tpl-empty { min-height: 1em; }
     .nw-tpl-space { width: 100%; }
     .nw-tpl-missing { font-style: italic; color: #555555; }

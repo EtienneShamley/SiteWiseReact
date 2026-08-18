@@ -56,73 +56,62 @@ export function canRevertRefine({ freeformEnabled, hasBackup, isLoading }) {
 export const TOOLBAR_OWNER = {
   NONE: "none",
   FREEFORM: "freeform",
-  TEMPLATE_ROW: "template-row",
+  /**
+   * The active flexible Template SECTION's shared editor
+   * (src/components/template/TemplateSectionEditor.js over the retained
+   * registry). Named `template-row` until Phase G, when the per-row/per-TextItem
+   * roving editor it used to mean was retired; the VALUE is unchanged so no
+   * stored or serialized state depends on the rename.
+   */
+  TEMPLATE_SECTION: "template-row",
 };
 
 /**
  * Which editor the shared formatting toolbar acts on right now.
  *
  * Free-form view  -> the Free-form editor (unchanged behaviour).
- * Template form   -> the ONE active Template Text-row editor, and only while
- *                    such a row is active. No active Text answer, a structured
- *                    field, or a focused row label all mean "nobody owns it",
- *                    and every control is then genuinely disabled — the
- *                    Free-form editor is merely hidden behind this view and
- *                    must never be dispatched into.
+ * Template form   -> the ONE active Template SECTION editor, and only while a
+ *                    Section is active. No active Section, a structured field,
+ *                    or a focused row label all mean "nobody owns it", and
+ *                    every control is then genuinely disabled — the Free-form
+ *                    editor is merely hidden behind this view and must never be
+ *                    dispatched into.
+ *
+ * There is ONE toolbar, ONE owner and ONE command path: the owner is DERIVED
+ * here, the surface's editor instance is handed to the toolbar, and every
+ * command and every active-state read goes through that one instance. No
+ * surface has its own toolbar implementation.
  */
 export function resolveToolbarOwner({
   hasNote,
   noteLayout,
   hasFreeformEditor,
-  hasTemplateRowEditor,
+  hasTemplateSectionEditor,
 } = {}) {
   if (!hasNote) return TOOLBAR_OWNER.NONE;
   if (noteLayout === TEMPLATE_LAYOUT) {
-    return hasTemplateRowEditor ? TOOLBAR_OWNER.TEMPLATE_ROW : TOOLBAR_OWNER.NONE;
+    return hasTemplateSectionEditor ? TOOLBAR_OWNER.TEMPLATE_SECTION : TOOLBAR_OWNER.NONE;
   }
   if (noteLayout !== FREEFORM_LAYOUT) return TOOLBAR_OWNER.NONE;
   return hasFreeformEditor ? TOOLBAR_OWNER.FREEFORM : TOOLBAR_OWNER.NONE;
 }
 
-/**
- * The controls a Template Text answer supports.
+/*
+ * WHICH CONTROLS THE OWNER SUPPORTS is no longer a per-surface list kept here.
  *
- * A Template Text answer is a form field, not a document: it carries emphasis,
- * lists, alignment, approved colours and approved links, and nothing that would
- * embed media, restructure the page or act on a whole document. Every control
- * outside this set stays present but genuinely disabled while the toolbar
- * belongs to a Template row, so the toolbar's shape never shifts.
- *
- * `null` means "every control" and is what the Free-form editor uses — its
- * toolbar is unchanged by this feature.
+ * Until 2026-08-18 this module exported `SECTION_TOOLBAR_CONTROLS`, a
+ * hand-maintained allowlist of what a Template Section could do. It drifted
+ * once (Phase G made a Section one real document while the list still
+ * described the retired Text answer field), and it would have drifted again
+ * with every capability added. The permitted set is now DERIVED from the owning
+ * editor's own schema and commands — src/lib/editorCapabilities.js
+ * (`toolbarControlsForEditor`) — inside the toolbar itself. Both surfaces are
+ * built from the shared editor core, so the derived sets are identical today;
+ * a genuine future difference would follow the editor automatically.
  */
-export const TEMPLATE_TEXT_CONTROLS = new Set([
-  "undo",
-  "redo",
-  "clearFormatting",
-  "bold",
-  "italic",
-  "underline",
-  "strike",
-  "bulletList",
-  "orderedList",
-  // List nesting only. There is deliberately no arbitrary paragraph indent:
-  // these commands act on a list item or are disabled.
-  "indent",
-  "outdent",
-  "alignLeft",
-  "alignCenter",
-  "alignRight",
-  "alignJustify",
-  "link",
-  "unlink",
-  "textColor",
-  "highlightColor",
-  "highlight",
-]);
 
-/** Shown when the Template form is visible but no Text answer is active. */
-export const TEMPLATE_TOOLBAR_HINT = "Select a Text answer to use formatting.";
+/** Shown when the Template form is visible but no Section is active. */
+export const TEMPLATE_TOOLBAR_HINT = "Select a section to use formatting.";
 
 /** True when `controls` (null = unrestricted) permits this control. */
 export function isToolbarControlAllowed(controls, key) {
@@ -131,115 +120,18 @@ export function isToolbarControlAllowed(controls, key) {
 }
 
 /* ------------------------------------------------------------------------ */
-/* Template-row ownership transitions                                        */
+/* Template Section editor registration                                      */
 /* ------------------------------------------------------------------------ */
-
-// What the user just put focus into inside the Template document.
-export const TEMPLATE_FOCUS = {
-  ANSWER: "answer", // the right-hand answer control of a row
-  STRUCTURED: "structured", // number/date/time/checkbox/yes-no/dropdown/photo/file
-  LABEL: "label", // a note-specific row's own label (always plain text)
-};
-
-/**
- * The Text row that owns the toolbar after a focus event, or null.
- *
- * A structured control and a row label both CLEAR ownership: a label is plain
- * text by definition, and formatting must never be applied to the answer of a
- * row whose label the caret is sitting in.
- */
-export function nextActiveTextRow({ target, rowId, isTextRow } = {}) {
-  if (target !== TEMPLATE_FOCUS.ANSWER) return null;
-  if (!rowId || !isTextRow) return null;
-  return rowId;
-}
-
-/**
- * May an editor change be committed?
- *
- * Both arguments are the SAME kind of token — a full editor identity (see
- * `templateRowEditorIdentity`). The active identity is passed explicitly so a
- * late callback from an editor that has already been replaced cannot write
- * into whatever replaced it, whether that is another row, another version of
- * the same row, or the same row under a different template.
- */
-export function canCommitRowEdit(activeIdentity, identity) {
-  return !!identity && !!activeIdentity && activeIdentity === identity;
-}
-
-/* ------------------------------------------------------------------------ */
-/* Template row editor identity                                              */
-/* ------------------------------------------------------------------------ */
-
-/**
- * The complete identity of one Template Text editor.
- *
- * A row id alone is NOT an identity: the same field id exists in every
- * immutable version published from a template, and two templates may contain
- * the same id entirely. Editing "Site conditions" on version 3 is a different
- * editor — different answer, different history — from editing "Site conditions"
- * on version 2, even though the row id is identical.
- *
- * The parts are the note instance's own fields (`noteId`, `templateId`,
- * `templateVersionId`) plus the row and whether it is a note-specific custom
- * row (a custom row's answer lives on the row, a master row's in `answers`, so
- * an id shared between the two would otherwise be ambiguous).
- *
- * `itemId` — OPTIONAL and ADDITIVE — names one ordered SECTION TEXT ITEM inside
- * that row (src/lib/templateSectionContent.js). A row is no longer necessarily
- * one editable answer: a section may hold text A, a photo, text B, and clicking
- * text B must open an editor that can only ever write text B. Because items are
- * addressed by their stable id and never by position, a token stays pointed at
- * the same block of prose even after the list is reordered.
- *
- * When no item is named the token is byte-identical to the one this function
- * produced before section content existed, so a legacy row editor — and
- * everything built on its identity — is completely unchanged. This is EDITOR
- * and CARET identity only: `activeTemplateRowId` remains the sole Quick Add /
- * row destination authority, and an item is never a destination.
- *
- * Returns a comparable token, or null when there is no addressable editor.
- */
-export function templateRowEditorIdentity({
-  noteId,
-  templateId = null,
-  templateVersionId = null,
-  rowId,
-  isCustomRow = false,
-  itemId = null,
-} = {}) {
-  if (!noteId || !rowId) return null;
-  const parts = [
-    noteId,
-    templateId ?? null,
-    templateVersionId ?? null,
-    rowId,
-    !!isCustomRow,
-  ];
-  // Appended only when an item is genuinely addressed, so the legacy token
-  // keeps its exact previous shape and value.
-  if (typeof itemId === "string" && itemId) parts.push(itemId);
-  return JSON.stringify(parts);
-}
-
-/**
- * The identity of the currently active row, or null.
- *
- * `rowExists` is the caller's answer to "is this row still part of what the
- * note is pinned to right now" — a master row of the pinned version, or one of
- * this note's custom rows for the assigned template. Re-pinning a note to
- * another template or version can remove the row the user was editing; when it
- * does, there is no active editor, no toolbar owner, and the toolbar says so.
- *
- * When an `itemId` is passed through, the same flag is also the caller's answer
- * to "does that ordered section text item still exist": an item that has gone
- * has no editor either, which is what makes a late callback aimed at it refuse
- * rather than land somewhere else.
- */
-export function resolveActiveRowIdentity({ rowExists, ...parts } = {}) {
-  if (!rowExists) return null;
-  return templateRowEditorIdentity(parts);
-}
+//
+// PHASE G. This section once also carried the LEGACY Template row-editor
+// identity model — `TEMPLATE_FOCUS`, `nextActiveTextRow`, `canCommitRowEdit`,
+// `templateRowEditorIdentity` and `resolveActiveRowIdentity` — which addressed
+// the per-row / per-TextItem roving editor of a Template Section. That editor
+// was retired: a flexible Section is ONE shared editor, identified by
+// `sectionEditorIdentity` (src/lib/sectionEditorRegistry.js), and those
+// functions were deleted with it. What remains is the ONE rule the Section
+// editor still needs from here — who owns the single Template editor
+// registration the shared toolbar targets.
 
 /**
  * The single rule for who owns the one Template editor registration.

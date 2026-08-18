@@ -139,51 +139,51 @@ export function isSectionRefineKeyForRow(targetKey, rowId) {
 /* ------------------------------------------------------------------------ */
 
 /**
- * WHICH of the two Refine implementations serves one row.
+ * WHICH Refine implementation serves one row.
  *
- * `LEGACY` means "not this path" — whether the legacy path then offers anything
- * is its own, unchanged rule (a modern-but-unopenable Section, for instance,
- * still ends up with no Refine at all, exactly as before).
+ * Since Phase G there is exactly ONE Refine implementation — the modern
+ * text-range bridge in this module — and `NONE` means "no Refine at all": a
+ * Section carrying material the shared serializers cannot represent is never
+ * opened, never partially migrated, and therefore never refined. (The legacy
+ * per-item TextItem / answer writer that `LEGACY` once named was retired with
+ * the legacy Section interaction.)
  */
 export const SECTION_REFINE_OWNER = {
   MODERN: "modern",
-  LEGACY: "legacy",
+  NONE: "none",
 };
 
 /**
  * The ownership rule, stated once and purely.
  *
  *   ELIGIBLE is the gate, and it is never weakened: a Section carrying material
- *   the shared serializers cannot represent (`sectionEditorEligibility`) stays
- *   on the legacy compatibility path whatever else is true of it, because the
- *   modern path would have to open a document that is missing it.
+ *   the shared serializers cannot represent (`sectionEditorEligibility`) gets
+ *   NO Refine whatever else is true of it, because the modern path would have
+ *   to open a document that is missing it — and there is no other path.
  *
- *   MODERN when the row's body IS the authoritative document, OR when a LIVE
- *   Section editor already holds that row — active or retained. The live-editor
- *   case is the one that matters here: that editor holds the row's undo history
- *   and its next transaction is what persists the document, so a legacy writer
- *   landing underneath it would be silently discarded (which is exactly why
- *   Phase F4 had to destroy the instance after a legacy refinement). Refining
- *   through the editor instead keeps one document, one history and one writer.
+ *   MODERN for every eligible row, whether its body IS already the
+ *   authoritative document, a LIVE Section editor holds it (active or retained
+ *   — that editor holds the row's undo history and its next transaction is
+ *   what persists the document), or nobody has opened it yet. In the last case
+ *   the Refine handler creates the editor from the SAME adapted document
+ *   activation would open (creating it writes nothing), and the applied
+ *   refinement — one editor transaction — is that row's first genuine modern
+ *   write. Nothing else is migrated: the frozen legacy sources stay underneath.
  *
- *   LEGACY for an eligible row nobody has opened: its legacy slots are still
- *   authoritative and still rendered, so its existing Refine is correct and
- *   NOTHING is migrated merely because Refine was pressed.
- *
- * Note the deliberate difference from `resolveSectionQuickAddRoute`: Quick Add
- * sends an UNTOUCHED eligible row's first capture to the document (it is new
- * material, and the legacy append would be eclipsed by the first click). Refine
- * transforms material that already has an authoritative home, so it leaves an
- * untouched row exactly where it is.
+ * `isModern` and `hasLiveEditor` are accepted for callers that already know
+ * them, but since Phase G they no longer change the answer: eligibility alone
+ * decides. Kept as parameters so the call sites read as the three facts they
+ * resolve.
  */
 export function resolveSectionRefineOwner({
+  // eslint-disable-next-line no-unused-vars
   isModern = false,
+  // eslint-disable-next-line no-unused-vars
   hasLiveEditor = false,
   eligible = false,
 } = {}) {
-  if (!eligible) return SECTION_REFINE_OWNER.LEGACY;
-  if (isModern || hasLiveEditor) return SECTION_REFINE_OWNER.MODERN;
-  return SECTION_REFINE_OWNER.LEGACY;
+  if (!eligible) return SECTION_REFINE_OWNER.NONE;
+  return SECTION_REFINE_OWNER.MODERN;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -198,6 +198,29 @@ const SECTION_MEDIA_NODE_NAMES = new Set([
   MEDIA_IMAGE_NODE_NAME,
   FILE_ATTACHMENT_NODE_NAME,
 ]);
+
+/**
+ * THE PROSE REFINE ADDRESSES — and nothing else.
+ *
+ * Refine is text-targeted: it rewrites a run of paragraphs and plain lists
+ * (the vocabulary Template Refine has always addressed) and applies the answer
+ * as paragraphs. Since the Section document vocabulary was widened
+ * (2026-08-18) a Section may also hold headings, blockquotes, code blocks, task
+ * lists, horizontal rules and tables. Those are STRUCTURE the AI must neither
+ * receive nor overwrite — a refined range replaced by paragraphs would
+ * silently destroy a table or a heading — so every one of them is a run
+ * BOUNDARY, exactly as an image or a file is. The names are Tiptap's node
+ * names AND the rich-text model's block types (they coincide by design), so
+ * the live-document reading and the model reading below apply ONE rule.
+ */
+export const SECTION_REFINE_PROSE_BLOCK_TYPES = Object.freeze(
+  new Set(["paragraph", "bulletList", "orderedList"])
+);
+
+/** Is this top-level block prose Refine may address? (by node/block type name) */
+export function isSectionRefineProseType(typeName) {
+  return SECTION_REFINE_PROSE_BLOCK_TYPES.has(typeName);
+}
 
 /**
  * Is this top-level node a boundary rather than prose?
@@ -229,7 +252,8 @@ export function sectionRefineRanges(doc) {
   let open = null;
   doc.forEach((node, offset) => {
     if (!node) return;
-    if (isSectionMediaNode(node)) {
+    const typeName = node.type && node.type.name;
+    if (isSectionMediaNode(node) || !isSectionRefineProseType(typeName)) {
       if (open) ranges.push(open);
       open = null;
       return;
@@ -258,19 +282,29 @@ export function sectionRefineRangeAt(ranges, pos) {
 /* ------------------------------------------------------------------------ */
 
 /**
- * The document's TEXT nodes, in order — one per run of prose between media.
+ * The document's PROSE RUNS, in order — one per maximal run of refineable
+ * blocks between boundaries (media, and every structural block type — see
+ * SECTION_REFINE_PROSE_BLOCK_TYPES).
  *
- * The node model already merges adjacent prose into one text node, so this is
- * simply "the text nodes", and its Nth entry is the Nth range above.
+ * The node model merges adjacent prose into one TEXT node; a text node whose
+ * blocks include a heading, table, quote, code block, task list or rule is
+ * split at those blocks here, so its Nth entry is the Nth range above.
  */
 export function sectionRefineTextRuns(nodes) {
   const runs = [];
   for (const node of Array.isArray(nodes) ? nodes : []) {
     if (!node || node.type !== SECTION_DOC_NODE.TEXT) continue;
-    runs.push({
-      index: runs.length,
-      blocks: Array.isArray(node.blocks) ? node.blocks : [],
-    });
+    let open = null;
+    for (const block of Array.isArray(node.blocks) ? node.blocks : []) {
+      if (!block || !isSectionRefineProseType(block.type)) {
+        if (open) runs.push(open);
+        open = null;
+        continue;
+      }
+      if (!open) open = { index: runs.length, blocks: [] };
+      open.blocks.push(block);
+    }
+    if (open) runs.push(open);
   }
   return runs;
 }

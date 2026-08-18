@@ -665,11 +665,14 @@ describe("all four modes receive exactly the same source for one target", () => 
     expect(mainArea).toContain("onStyleChange={handleRefineStyleChange}");
   });
 
-  test("the Template Refine paths still send only their own target's text", () => {
-    // Both Template paths build `sentText` from ONE target's own value; neither
-    // reads a neighbouring row, a section list, or the note.
+  test("the Template Refine path still sends only its own target's text", () => {
+    // Phase G: the legacy per-row request builder in templateRowRefine.js is
+    // gone; the ONE Template path (the shared Section editor's text run) builds
+    // `sentText` from ONE target's own value and reads no neighbouring row,
+    // section list, or note.
     const rowRefine = require("fs").readFileSync(`${__dirname}/templateRowRefine.js`, "utf8");
-    expect(rowRefine).toContain("sentText: richAnswerText(sentValue)");
+    expect(rowRefine).not.toContain("sentText: richAnswerText(sentValue)");
+    expect(rowRefine).not.toContain("export function makeRowRefineRequest");
     const sectionRefine = require("fs").readFileSync(
       `${__dirname}/templateSectionRefine.js`,
       "utf8"
@@ -679,9 +682,10 @@ describe("all four modes receive exactly the same source for one target", () => 
       `${__dirname}/../components/template/NoteTemplateDoc.js`,
       "utf8"
     );
-    // The style is passed beside the text, never into its resolution.
+    // The style is passed beside the text, never into its resolution — and
+    // there is exactly ONE Template call site now.
     const calls = noteDoc.match(/refineText\(\{ text: request\.sentText, style: request\.style \}\)/g) || [];
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
   });
 });
 

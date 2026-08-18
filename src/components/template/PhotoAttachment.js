@@ -18,9 +18,9 @@
 //
 // READ-ONLY MODE (`readOnly`) means the LEGACY DISPLAY TOOLBAR is not offered
 // here: no Small/Normal/Large/Full-width presets, no alignment buttons, no
-// edge drag-resize handle. It is what an ordered section item uses — a section
-// image is resized by its own proportional corner handles instead (below), so
-// the preset toolbar is not re-exposed to get resizing back.
+// edge drag-resize handle. It is what a compatibility segment (a stored item
+// the modern document cannot represent) renders with: visible, openable,
+// never editable from here.
 //
 // REMOVAL is a SEPARATE capability and is gated on `onRemove` alone, never on
 // `readOnly`. A caller that can delete this photo passes a handler; one that
@@ -29,62 +29,23 @@
 // nothing, or — worse — be wired to a different collection than the one on
 // screen. "Open larger" is always available: it is inherently read-only.
 //
-// MOVING is a third separate capability, gated on `onMoveStart` alone. When a
-// caller supplies it, the IMAGE ITSELF becomes the move surface — the Word-like
-// gesture, with no grip and no arrow commands. The image body only: a square at
-// each CORNER belongs to the resize gesture below, so a pixel never means two
-// things. The rules live in src/lib/templateSectionImageMove.js; this component
-// only decides whether the press landed on a movable surface and hands the event
-// on. Whether that press becomes a move or stays an ordinary click is settled by
-// how far the pointer then travels, which the owner of the gesture tracks.
-//
-// PROPORTIONAL RESIZING is a fourth separate capability, gated on
-// `onResizeWidth` alone. Four corner handles occupy exactly the zone the move
-// gesture declines (both read the geometry from templateSectionImageMove), and
-// they are layered ON TOP of the image, so a press on one never reaches the move
-// surface. Dragging away from the image grows it and dragging into it shrinks
-// it; the ARITHMETIC is in src/lib/templateSectionImageResize.js. During the
-// drag the new width is PREVIEW ONLY — nothing is persisted until release, and a
-// cancelled or unchanged gesture persists nothing at all. Alt/Option + the
-// left/right arrow keys on the focused frame is the same command from the
-// keyboard, through the same clamp; plain arrow keys are never intercepted.
-//
-// THE RESIZE GESTURE CONTRACT (a manual-test defect made this explicit):
-//
-//   - A handle receives POINTERDOWN and nothing else. Move and release are
-//     handled on the WINDOW, by listeners that exist only while a gesture is in
-//     flight. A handle is a ~20px box on an edge of the frame the gesture is
-//     resizing, and height is derived from width — so for a portrait image the
-//     bottom handles travel away from the pointer FASTER than the pointer moves.
-//     Termination must not depend on the pointer still being over them.
-//   - The gesture's geometry is captured ONCE at pointerdown
-//     (`{ pointerId, corner, startX, startPct, containerWidth, maxPct }`) and is
-//     never re-derived from the box being resized. The preview never becomes the
-//     next basis, and the corner captured at pointerdown decides the direction
-//     for the whole gesture.
-//   - Only the pointer that started the gesture may drive it, and a move with no
-//     button held ENDS it. Hovering a handle can therefore never resize.
-//   - Every exit goes through one function that clears the record first, so no
-//     path can leave a gesture active. With no gesture there are no move
-//     listeners at all.
+// PHASE G. Two further capabilities this component once carried — a body-drag
+// MOVE surface (`onMoveStart`) and proportional four-corner RESIZE
+// (`onResizeWidth`) — belonged to the legacy per-item Template Section
+// interaction, and were retired with it. A Section image is now the shared
+// editor core's `AssetImage` node (src/components/editor/AssetImage.js), which
+// owns move, wrap/block placement, corner resize and Remove as editor
+// transactions. This component now serves the surfaces that are NOT a Section
+// document: a legacy Photo field's PRIMARY attachments, the historical
+// migrated-attachment compatibility strip, a refused row's legacy evidence
+// blocks, and read-only compatibility segments — with the display toolbar and
+// the edge drag-resize handle unchanged for the primary/evidence cases.
 //
 // Only `display.widthPct` is ever produced. No pixel width and no height is
 // stored, which is what makes it impossible for a resize to stretch, squash or
 // crop the photograph: the height follows the intrinsic aspect ratio through
 // ordinary layout, so the section — and pagination — simply grow around it.
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import {
-  IMAGE_CORNER_ZONE_MAX_RATIO,
-  IMAGE_CORNER_ZONE_PX,
-  isImageMoveSurface,
-} from "../../lib/templateSectionImageMove";
-import {
-  IMAGE_RESIZE_CORNERS,
-  IMAGE_WIDTH_KEY_STEP_PCT,
-  nudgeImageWidthPct,
-  resizeWidthPctFromPointer,
-  widthPctChanged,
-} from "../../lib/templateSectionImageResize";
+import React, { useCallback, useRef, useState } from "react";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import PhotoPreviewDialog from "./PhotoPreviewDialog";
 import {
@@ -105,34 +66,18 @@ export default function PhotoAttachment({
   attachment,
   onChangeDisplay, // (displayPatch) => void — persists size/alignment metadata
   onRemove, // () => void — omitted entirely when this photo cannot be removed
-  // (pointerDownEvent) => void — omitted entirely when this photo cannot be
-  // moved. Called ONLY for a primary press on the image BODY; the reserved
-  // corners and every control on top of the image are excluded.
-  onMoveStart,
-  // (widthPct) => void — omitted entirely when this photo cannot be resized.
-  // Called at most ONCE per gesture, on release, and only when the width
-  // actually changed. Four corner handles appear when it is supplied.
-  onResizeWidth,
   readOnly = false, // display metadata not editable: no size, alignment or drag-resize
 }) {
   const { url, status } = useAssetObjectUrl(attachment.assetId);
   const [preview, setPreview] = useState(false);
   // Transient width during a drag; null when not dragging (prop value shows).
   const [dragPct, setDragPct] = useState(null);
-  // The corner-resize preview, kept separate from the legacy edge handle's so
-  // the two gestures can never read each other's state. Null when idle, which
-  // is also what makes a FAILED SAVE revert by itself: the displayed width falls
-  // back to the persisted one, and that only changed if the save was confirmed.
-  const [resizePct, setResizePct] = useState(null);
-  const [resizing, setResizing] = useState(false);
   const wrapRef = useRef(null);
-  const frameRef = useRef(null);
   const dragState = useRef(null);
-  const resizeState = useRef(null);
 
   const display = attachment.display || {};
   const alignment = display.alignment || "left";
-  const widthPct = dragPct ?? resizePct ?? clampWidthPct(display.widthPct);
+  const widthPct = dragPct ?? clampWidthPct(display.widthPct);
 
   // Width cap so the photo's height can never exceed the usable page height:
   // when intrinsic dimensions are known the cap is exact (no letterboxing);
@@ -198,232 +143,6 @@ export default function PhotoAttachment({
     [pctFromPointer, onChangeDisplay]
   );
 
-  /* ---------------------- proportional corner resize ---------------------- */
-
-  // The display cap the model's own clamp is layered under: a photo may never
-  // render taller than one usable page, or its atomic block could not be placed
-  // on a page at all. Measured from the live box, so it is right at zoom and on
-  // a narrow window too.
-  const resizeLimits = useCallback(() => {
-    const container = wrapRef.current;
-    if (!container) return null;
-    const containerWidth = container.getBoundingClientRect().width || 1;
-    return {
-      containerWidth,
-      maxPct: maxWidthPx ? Math.min(100, (maxWidthPx / containerWidth) * 100) : null,
-    };
-  }, [maxWidthPx]);
-
-  // The width this gesture is asking for, computed ONLY from the immutable
-  // record captured at pointerdown plus the pointer's current x. The preview it
-  // produces is never fed back in as the next basis.
-  const cornerPctFor = useCallback(
-    (st, clientX) =>
-      resizeWidthPctFromPointer({
-        corner: st.corner,
-        startWidthPct: st.startPct,
-        startX: st.startX,
-        clientX,
-        containerWidth: st.containerWidth,
-        maxPct: st.maxPct,
-      }),
-    []
-  );
-
-  /**
-   * End the gesture in flight. The ONE exit, used by every terminator.
-   *
-   * `commitEvent` is the pointer event that ended it, or null to abandon with
-   * nothing written. State is cleared FIRST and unconditionally, so no exit path
-   * can leave a gesture record behind — which is exactly the failure this
-   * replaces (see the module note on window-bound gesture listeners).
-   */
-  const endCornerResize = useCallback(
-    (commitEvent) => {
-      const st = resizeState.current;
-      if (!st) return;
-      resizeState.current = null;
-      setResizing(false);
-      setResizePct(null);
-      if (!commitEvent || !onResizeWidth) return;
-      const pct = cornerPctFor(st, commitEvent.clientX);
-      if (pct == null) return;
-      // A gesture that ends where it started saves nothing.
-      if (!widthPctChanged(pct, st.startPct)) return;
-      onResizeWidth(Math.round(pct));
-    },
-    [cornerPctFor, onResizeWidth]
-  );
-
-  // Nothing is persisted here. The immutable geometry of the whole gesture is
-  // captured NOW — the corner, the pointer id, the pointer's x, the persisted
-  // width, the content column width and the one-page cap — and nothing below
-  // re-derives any of it from the box being resized.
-  const onCornerPointerDown = useCallback(
-    (corner) => (e) => {
-      if (!onResizeWidth) return;
-      if (typeof e.button === "number" && e.button !== 0) return;
-      const limits = resizeLimits();
-      if (!limits) return;
-      // Never let a corner press reach the image body's move gesture.
-      e.preventDefault();
-      e.stopPropagation();
-      resizeState.current = {
-        pointerId: e.pointerId,
-        corner,
-        startX: e.clientX,
-        startPct: clampWidthPct(display.widthPct),
-        containerWidth: limits.containerWidth,
-        maxPct: limits.maxPct,
-      };
-      // Kept for the cursor and for touch, but it is deliberately NOT what makes
-      // the gesture terminate — the window listeners below are.
-      e.currentTarget.setPointerCapture?.(e.pointerId);
-      frameRef.current?.focus?.();
-      setResizing(true);
-      // The preview starts at the width it already has, so a press alone can
-      // never change the rendered size.
-      setResizePct(resizeState.current.startPct);
-    },
-    [onResizeWidth, resizeLimits, display.widthPct]
-  );
-
-  /**
-   * The gesture's move/end listeners — ONE set, on the window, existing ONLY
-   * while a gesture is actually in flight.
-   *
-   * They are not on the handle. A corner handle is a ~20px box positioned at an
-   * edge of the very frame this gesture is resizing, and because height is
-   * derived from width (dH = dW / aspectRatio) a bottom handle travels
-   * VERTICALLY faster than the pointer travels horizontally for any portrait
-   * image — so the pointer leaves the handle almost immediately. Handle-bound
-   * `pointerup` therefore could not be relied on to arrive, and a missed
-   * `pointerup` left the gesture record set: after that, merely HOVERING a
-   * corner recomputed a width from the previous gesture's origin and the image
-   * flickered between sizes. Binding to the window removes the dependency
-   * entirely rather than compensating for it.
-   *
-   * Because the listeners exist only while `resizing` is true, and every exit
-   * goes through `endCornerResize`, a stale gesture is structurally impossible:
-   * with no gesture there are no move listeners at all, so hover cannot resize.
-   * Unmount tears them down for free.
-   */
-  useEffect(() => {
-    if (!resizing) return undefined;
-
-    // Only the pointer that started this gesture may drive it.
-    const isThisPointer = (e) => {
-      const st = resizeState.current;
-      return !!st && (e.pointerId === undefined || e.pointerId === st.pointerId);
-    };
-
-    const onMove = (e) => {
-      const st = resizeState.current;
-      if (!st || !isThisPointer(e)) return;
-      // No button held is not a drag. If the release was missed for any reason,
-      // this ends the gesture rather than continuing to track a pointer that is
-      // no longer pressed.
-      if (e.buttons === 0) {
-        endCornerResize(e);
-        return;
-      }
-      const pct = cornerPctFor(st, e.clientX);
-      if (pct != null) setResizePct(pct);
-    };
-    const onUp = (e) => {
-      if (!isThisPointer(e)) return;
-      endCornerResize(e);
-    };
-    const onAbort = (e) => {
-      if (!isThisPointer(e)) return;
-      endCornerResize(null);
-    };
-    const onKey = (e) => {
-      // Escape abandons an in-flight resize, exactly as it abandons a move.
-      if (e.key === "Escape") endCornerResize(null);
-    };
-
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onAbort);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onAbort);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [resizing, cornerPctFor, endCornerResize]);
-
-  /**
-   * The keyboard equivalent, on the focused frame.
-   *
-   * Alt/Option + ArrowRight widens, Alt/Option + ArrowLeft narrows, through the
-   * same normalizer, the same clamp and the same single confirmed save the
-   * pointer gesture uses. PLAIN arrow keys are deliberately not intercepted —
-   * they still scroll and still move a caret — and neither is any combination
-   * carrying Ctrl or Cmd, which belong to the browser and the OS.
-   */
-  const handleFrameKeyDown = useCallback(
-    (e) => {
-      if (!onResizeWidth) return;
-      if (!e.altKey || e.ctrlKey || e.metaKey) return;
-      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-      const limits = resizeLimits();
-      const next = nudgeImageWidthPct({
-        widthPct: clampWidthPct(display.widthPct),
-        stepPct:
-          e.key === "ArrowRight" ? IMAGE_WIDTH_KEY_STEP_PCT : -IMAGE_WIDTH_KEY_STEP_PCT,
-        maxPct: limits ? limits.maxPct : null,
-      });
-      e.preventDefault();
-      e.stopPropagation();
-      // Already at the limit: a silent no-op, never a save of the width it has.
-      if (next == null) return;
-      onResizeWidth(next);
-    },
-    [onResizeWidth, resizeLimits, display.widthPct]
-  );
-
-  /**
-   * A press on the image itself — a POINTER press, so the gesture owner knows
-   * which pointer started it and can refuse every other one.
-   *
-   * Whether the press becomes a move is decided by where it landed: the
-   * reserved corners are declined here, so a press there behaves as it does
-   * today and stays available for the corner-resize gesture.
-   *
-   * The press deliberately does NOT focus the frame any more. Focus — and
-   * therefore the toolbar it reveals — belongs to the CLICK below: a short
-   * click still selects the photo exactly as before, but a completed drag's
-   * trailing click is consumed by the gesture owner
-   * (src/lib/templateSectionItemDragSession.js), so dropping an image no
-   * longer pops its controls the instant it lands.
-   */
-  const handleImagePointerDown = useCallback(
-    (e) => {
-      if (!onMoveStart) return;
-      if (typeof e.button === "number" && e.button !== 0) return;
-      // A second touch mid-gesture is not a new move.
-      if (e.isPrimary === false) return;
-      const rect =
-        e.currentTarget && typeof e.currentTarget.getBoundingClientRect === "function"
-          ? e.currentTarget.getBoundingClientRect()
-          : null;
-      if (!isImageMoveSurface({ rect, clientX: e.clientX, clientY: e.clientY })) return;
-      onMoveStart(e);
-    },
-    [onMoveStart]
-  );
-
-  // The SHORT-CLICK half of the gesture: select the photo (the frame takes
-  // focus, which is what reveals the toolbar — Open larger, Remove — for a
-  // keyboard user too). An armed drag's trailing click never reaches this
-  // handler; every ordinary later click does.
-  const handleImageClick = useCallback(() => {
-    frameRef.current?.focus?.();
-  }, []);
-
   const name = attachment.name || "Photo";
 
   if (status === "loading" || status === "idle") {
@@ -464,29 +183,17 @@ export default function PhotoAttachment({
   return (
     <div ref={wrapRef} className="photo-att" style={{ justifyContent: justify }}>
       <div
-        ref={frameRef}
-        className={`photo-att-frame ${resizing ? "photo-att-frame--resizing" : ""}`.trim()}
+        className="photo-att-frame"
         tabIndex={0}
-        aria-label={
-          onResizeWidth
-            ? `Photo attachment: ${name}. Hold Alt and press the left or right arrow key to resize.`
-            : `Photo attachment: ${name}`
-        }
-        onKeyDown={onResizeWidth ? handleFrameKeyDown : undefined}
+        aria-label={`Photo attachment: ${name}`}
         style={{ width: `${widthPct}%`, maxWidth: maxWidthPx ? `min(100%, ${maxWidthPx}px)` : "100%" }}
       >
         <img
           src={url}
           alt={name}
-          className={`photo-att-img ${onMoveStart ? "photo-att-img--movable" : ""}`.trim()}
+          className="photo-att-img"
           style={maxWidthPx ? undefined : { maxHeight: `${PHOTO_MAX_HEIGHT_PX}px`, objectFit: "contain" }}
           draggable={false}
-          // The move surface, when this photo can be moved at all. It is the
-          // image and nothing else: the toolbar and the resize handle sit ON TOP
-          // of it as siblings, so a press on one of them never reaches here.
-          onPointerDown={onMoveStart ? handleImagePointerDown : undefined}
-          onClick={onMoveStart ? handleImageClick : undefined}
-          title={onMoveStart ? "Drag to move this image within the section" : undefined}
         />
 
         {/* Compact controls — visible on hover / keyboard focus only, and never
@@ -564,36 +271,6 @@ export default function PhotoAttachment({
           />
         )}
 
-        {/* Proportional corner handles. They occupy exactly the zone the move
-            gesture declines — the size comes from the shared geometry constants,
-            including the ratio that shrinks the zone on a small image so its
-            body stays draggable — and they sit ON TOP of the image, so a press
-            here never reaches the move surface beneath. Absolutely positioned,
-            so they add no measured height and pagination is unaffected. Hidden
-            in print: resizing is an editing affordance, the resulting size is
-            document content. */}
-        {onResizeWidth &&
-          IMAGE_RESIZE_CORNERS.map((corner) => (
-            <div
-              key={corner}
-              className={`photo-att-corner photo-att-corner--${corner}`}
-              role="presentation"
-              title="Drag a corner to resize this image"
-              style={{
-                width: `min(${IMAGE_CORNER_ZONE_PX}px, ${
-                  IMAGE_CORNER_ZONE_MAX_RATIO * 100
-                }%)`,
-                height: `min(${IMAGE_CORNER_ZONE_PX}px, ${
-                  IMAGE_CORNER_ZONE_MAX_RATIO * 100
-                }%)`,
-              }}
-              // POINTERDOWN ONLY. Move and release are handled on the window
-              // for the gesture's lifetime — a handle that the gesture itself
-              // moves out from under the pointer cannot be trusted to receive
-              // them. See the gesture effect above.
-              onPointerDown={onCornerPointerDown(corner)}
-            />
-          ))}
       </div>
 
       {preview && (

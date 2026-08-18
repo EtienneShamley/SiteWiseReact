@@ -64,8 +64,10 @@ import {
   SECTION_BODY_SOURCE,
   SECTION_EDITOR_REFUSAL,
   canEditSectionBody,
-  isPlainLegacyTextBody,
+  isLegacyMediaBody,
   resolveSectionBody,
+  resolveSectionQuickAddRoute,
+  SECTION_QUICK_ADD_ROUTE,
   sectionBodyHtml,
   sectionEditorEligibility,
 } from "./templateSectionBody";
@@ -397,7 +399,10 @@ describe("15-21. the REAL historical case: migrated ids live in `attachments`, w
     expect(body.skipped).toEqual([]);
     expect(sectionEditorEligibility(body)).toEqual({ ok: true });
     expect(canEditSectionBody(body)).toBe(true);
-    expect(isPlainLegacyTextBody(body)).toBe(true); // opens in the shared editor today
+    // Prose only (nothing from `attachments` is carried into it): it opens in
+    // the shared editor today, and Quick Add routes it to that document.
+    expect(isLegacyMediaBody(body)).toBe(false);
+    expect(resolveSectionQuickAddRoute(body)).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
     expect(sectionBodyHtml(body)).toContain("Overcast, light wind.");
     // The historical ids are not in the document — and must not be: they are
     // rendered by the compatibility strip that reads `attachments` directly.

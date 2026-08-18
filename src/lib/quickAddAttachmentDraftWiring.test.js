@@ -254,34 +254,21 @@ describe("the composer clears only what was delivered", () => {
   });
 });
 
-describe("voice only fills the text half", () => {
+describe("the composer's microphone is a Live Transcript shortcut, not a recorder", () => {
   const voice = bottomBar.slice(
     bottomBar.indexOf("const handleVoiceClick"),
     bottomBar.indexOf("const runRefine")
   );
 
-  test("transcription never touches the staged queue", () => {
-    expect(voice).not.toMatch(/draftStoreRef/);
-    expect(voice).not.toMatch(/clearStaged/);
-    expect(voice).not.toMatch(/removeMany/);
-    expect(voice).not.toMatch(/syncStaged/);
-  });
-
-  test("transcription only updates the draft text", () => {
-    expect(voice).toMatch(/setRefinedDraft\(/);
-    expect(voice).toMatch(/setInput\(/);
-  });
-
-  test("a stale voice target reports and discards, clearing no attachments", () => {
-    expect(voice).toMatch(/capturedTarget !== targetTokenRef\.current/);
-    const stale = voice.slice(voice.indexOf("capturedTarget !== targetTokenRef.current"));
-    expect(stale).not.toMatch(/clearStaged/);
-    expect(stale).not.toMatch(/draftStoreRef/);
-  });
-
-  test("transcription never sends anything by itself", () => {
-    expect(voice).not.toMatch(/onSendComposer/);
-    expect(voice).not.toMatch(/handleSend/);
+  test("it opens the one Live Transcript session and touches nothing in the composer", () => {
+    // 2026-08-18: the composer's own recorder/transcriber was retired; the
+    // microphone opens the sidebar's Capture → Live transcript workspace,
+    // whose insertion goes through MainArea (liveTranscriptWiring.test.js).
+    expect(voice).toMatch(/onOpenLiveTranscript\(e\.currentTarget\)/);
+    expect(voice).not.toMatch(/draftStoreRef|clearStaged|removeMany|syncStaged/);
+    expect(voice).not.toMatch(/setRefinedDraft\(|setInput\(/);
+    expect(voice).not.toMatch(/onSendComposer|handleSend/);
+    expect(bottomBar).not.toMatch(/MediaRecorder|getUserMedia|transcribeBlob|useTranscription/);
   });
 });
 

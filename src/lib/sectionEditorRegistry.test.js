@@ -16,7 +16,7 @@ import {
   sectionEditorIdentity,
   sectionEditorIdentityRowId,
 } from "./sectionEditorRegistry";
-import { templateRowEditorIdentity } from "./editorToolbarState";
+import * as editorToolbarState from "./editorToolbarState";
 
 const NOTE = "note-1";
 const TPL = "tpl-1";
@@ -91,36 +91,27 @@ describe("a Section editor's identity", () => {
     expect(sectionEditorIdentity()).toBeNull();
   });
 
-  test("56. can NEVER collide with the legacy per-item row editor's identity", () => {
-    // The two interaction systems must not be able to claim one identity: a
-    // Section editor and a legacy row editor for the same row would otherwise
-    // register over one another, and a change from one could be committed as
-    // if it came from the other.
-    const legacyRow = templateRowEditorIdentity({
-      noteId: NOTE,
-      templateId: TPL,
-      templateVersionId: VER,
-      rowId: "row-1",
-    });
-    const legacyItem = templateRowEditorIdentity({
-      noteId: NOTE,
-      templateId: TPL,
-      templateVersionId: VER,
-      rowId: "row-1",
-      itemId: "item-1",
-    });
-    expect(identityFor("row-1")).not.toBe(legacyRow);
-    expect(identityFor("row-1")).not.toBe(legacyItem);
-    expect(identityFor("row-1")).toContain(SECTION_EDITOR_SCOPE);
-    expect(legacyRow).not.toContain(SECTION_EDITOR_SCOPE);
+  test("56. is scope-prefixed, and the legacy per-item row editor identity no longer exists (Phase G)", () => {
+    // Until Phase G a second interaction system minted identity tokens for the
+    // same rows (templateRowEditorIdentity in editorToolbarState.js). It is
+    // gone; the scope prefix stays so any FUTURE identity minted for the same
+    // row must differ from ours, and a bare legacy-shaped tuple is refused.
+    expect(editorToolbarState.templateRowEditorIdentity).toBeUndefined();
+    expect(editorToolbarState.resolveActiveRowIdentity).toBeUndefined();
+    expect(editorToolbarState.canCommitRowEdit).toBeUndefined();
+    const token = identityFor("row-1");
+    expect(JSON.parse(token)[0]).toBe(SECTION_EDITOR_SCOPE);
+    expect(SECTION_EDITOR_SCOPE).toBe("sectiondoc/1");
+    const legacyShaped = JSON.stringify([NOTE, TPL, VER, "row-1", false]);
+    expect(token).not.toBe(legacyShaped);
+    expect(legacyShaped).not.toContain(SECTION_EDITOR_SCOPE);
   });
 
   test("names the row it addresses, and refuses anything that is not one of ours", () => {
     expect(sectionEditorIdentityRowId(identityFor("row-7"))).toBe("row-7");
+    // A legacy-shaped bare tuple (no scope prefix) is not one of ours.
     expect(
-      sectionEditorIdentityRowId(
-        templateRowEditorIdentity({ noteId: NOTE, rowId: "row-7" })
-      )
+      sectionEditorIdentityRowId(JSON.stringify([NOTE, null, null, "row-7", false]))
     ).toBeNull();
     expect(sectionEditorIdentityRowId("not json")).toBeNull();
     expect(sectionEditorIdentityRowId(null)).toBeNull();

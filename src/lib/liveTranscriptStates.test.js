@@ -1,27 +1,21 @@
-// src/lib/listenInStates.test.js
+// src/lib/liveTranscriptStates.test.js
 //
-// The three defects manual testing found, tested as BEHAVIOUR rather than as
-// source strings — the previous suite passed while all three were broken,
-// because it only asserted that the right words appeared in the right files.
-//
-//   1. the recording microphone did not turn red
-//   2. the adjacent dropdowns showed no field border or focus highlight
-//   3. "There is nothing to refine." never went away
-//
-// What each is tested with:
-//   - the phase -> class mapping is a pure function, so it is called directly
-//   - the CSS cause is a SPECIFICITY fact, so specificity is computed here and
-//     compared, rather than assuming rule order settles it
-//   - the message lifetime is a timer, so jest fake timers drive it; the suite
-//     never waits four real seconds
-
+// THE LIVE TRANSCRIPT STATES (retargeted 2026-08-18 from the retired
+// Listen-In strip): the recording microphone treatment (VoiceButton's pure
+// state and the danger CSS that keeps a live microphone red in every state),
+// the self-dismissing "nothing to summarise" notice recognised from the shared
+// refine contract, its four-second lifetime through the shared transient
+// message model, and how the Live Transcript workspace renders notices vs
+// failures. No DOM testing library is installed (docs/TESTING.md), so the
+// pure pieces are exercised directly and the rendered wiring is asserted as
+// source text.
 import fs from "fs";
 import path from "path";
 import { voiceButtonState } from "../components/VoiceButton";
 import {
-  LISTEN_IN_TRANSIENT_MS,
   isTransientRefineNotice,
-} from "../components/ListenInPanel";
+  liveTranscriptErrorMessage,
+} from "./liveTranscript";
 import { REFINE_ERROR_CODE, REFINE_ERROR_MESSAGE } from "./refineContract";
 import {
   clearMessage,
@@ -35,6 +29,16 @@ const SRC = path.join(__dirname, "..");
 const navCss = fs
   .readFileSync(path.join(SRC, "styles/nav.css"), "utf8")
   .replace(/\/\*[\s\S]*?\*\//g, "");
+const DIALOG = fs
+  .readFileSync(path.join(SRC, "components/LiveTranscriptDialog.js"), "utf8")
+  .replace(/\{\/\*[\s\S]*?\*\/\}/g, "")
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/(^|[^:])\/\/.*$/gm, "$1");
+// The dialog's notice lifetime, read from source (importing the component
+// would pull the whole app tree into jsdom).
+const LIVE_TRANSCRIPT_TRANSIENT_MS = Number(
+  DIALOG.match(/export const LIVE_TRANSCRIPT_TRANSIENT_MS = (\d+);/)[1]
+);
 
 const classesOf = (value) => new Set(value.split(" ").filter(Boolean));
 
@@ -305,11 +309,12 @@ describe("identifying the self-dismissing notice", () => {
     expect(isTransientRefineNotice(new Error(message))).toBe(true);
   });
 
-  test("the wording is not duplicated in the component", () => {
-    const panel = fs.readFileSync(path.join(SRC, "components/ListenInPanel.js"), "utf8");
-    const body = panel.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  test("the wording is not duplicated outside the contract", () => {
+    const lib = fs.readFileSync(path.join(SRC, "lib/liveTranscript.js"), "utf8");
+    const body = lib.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
     expect(body).not.toContain("There is nothing to refine");
     expect(body).toContain("REFINE_ERROR_MESSAGE[REFINE_ERROR_CODE.EMPTY_TEXT]");
+    expect(DIALOG).not.toContain("There is nothing to refine");
   });
 
   test.each([
@@ -318,7 +323,7 @@ describe("identifying the self-dismissing notice", () => {
     ["a busy microphone", { name: "NotReadableError", message: "in use" }],
     ["a transcription failure", new Error("AI Refine could not complete. Your note has not been changed.")],
     ["an unavailable summary", new Error("AI Refine is currently unavailable. Your note has not been changed.")],
-    ["a capture failure", new Error("Listen-in failed")],
+    ["a capture failure", new Error("Transcription failed")],
     ["no audio at all", new Error("No audio captured")],
     ["an unknown failure", new Error("something else entirely")],
   ])("%s is NOT treated as self-dismissing", (_label, error) => {
@@ -348,7 +353,7 @@ describe("the notice's four-second lifetime", () => {
     timer = setTimeout(() => {
       timer = null;
       state = expireMessage(state, token);
-    }, LISTEN_IN_TRANSIENT_MS);
+    }, LIVE_TRANSCRIPT_TRANSIENT_MS);
   };
 
   const clear = () => {
@@ -369,14 +374,14 @@ describe("the notice's four-second lifetime", () => {
   });
 
   test("the configured duration is four seconds", () => {
-    expect(LISTEN_IN_TRANSIENT_MS).toBe(4000);
+    expect(LIVE_TRANSCRIPT_TRANSIENT_MS).toBe(4000);
   });
 
   test("it stays visible long enough to read, then dismisses itself", () => {
     show(NOTICE);
     expect(state.message).toBe(NOTICE);
 
-    jest.advanceTimersByTime(LISTEN_IN_TRANSIENT_MS - 1);
+    jest.advanceTimersByTime(LIVE_TRANSCRIPT_TRANSIENT_MS - 1);
     expect(state.message).toBe(NOTICE);
 
     jest.advanceTimersByTime(1);
@@ -425,7 +430,7 @@ describe("the notice's four-second lifetime", () => {
     clear();
     expect(state.message).toBe("");
 
-    jest.advanceTimersByTime(LISTEN_IN_TRANSIENT_MS * 2);
+    jest.advanceTimersByTime(LIVE_TRANSCRIPT_TRANSIENT_MS * 2);
     expect(state.message).toBe("");
   });
 
@@ -455,34 +460,27 @@ describe("the notice's four-second lifetime", () => {
   });
 });
 
-describe("the notice is informational, not a failure", () => {
-  const panel = fs
-    .readFileSync(path.join(SRC, "components/ListenInPanel.js"), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1");
-
-  test("it renders muted in a polite status region, not as a red alert", () => {
-    expect(panel).toMatch(
-      /\{!!transient\.message &&[\s\S]{0,200}role="status" aria-live="polite"/
-    );
-    expect(panel).not.toMatch(
-      /\{!!transient\.message &&[\s\S]{0,200}text-red/
-    );
+describe("the workspace tells a notice from a failure", () => {
+  test("a completion notice renders muted in a polite status region, not as a red alert", () => {
+    expect(DIALOG).toMatch(/\{!!notice\.message && \([\s\S]{0,120}role="status"[\s\S]{0,40}aria-live="polite"/);
+    // Muted unless the notice itself is an error tone.
+    expect(DIALOG).toMatch(/notice\.tone === MESSAGE_TONE\.ERROR\s*\n\s*\? "text-red-600 dark:text-red-400"\s*\n\s*: "text-gray-500 dark:text-gray-400"/);
   });
 
   test("a real failure keeps the red alert treatment and is never auto-dismissed", () => {
-    expect(panel).toContain("persistentError");
-    expect(panel).toMatch(
-      /\{persistentError &&[\s\S]{0,200}text-red-600 dark:text-red-400" role="alert"/
-    );
-    // Only the transient path is wired to the timer hook.
-    expect(panel).toMatch(/if \(isTransientRefineNotice\(error\)\) showTransient/);
-    expect(panel).toContain("else clearTransient();");
+    // Session errors come from the session model (state.error), are worded by
+    // liveTranscriptErrorMessage, render as an alert, and clear only by an
+    // explicit Dismiss or the next start/clear — no timer.
+    expect(DIALOG).toContain("liveTranscriptErrorMessage(state.error)");
+    expect(DIALOG).toMatch(/<p role="alert" className="text-xs text-red-700 dark:text-red-300">/);
+    expect(DIALOG).toContain("onClick={session.clearError}");
+    expect(liveTranscriptErrorMessage({ name: "NotAllowedError", message: "x" })).toMatch(/Microphone access was blocked/);
   });
 
   test("the shared lifecycle hook is reused rather than a second timer written", () => {
-    expect(panel).toContain("useTransientMessage(LISTEN_IN_TRANSIENT_MS)");
-    expect(panel).not.toContain("setTimeout");
-    expect(panel).not.toContain("setInterval");
+    expect(DIALOG).toContain("useTransientMessage(LIVE_TRANSCRIPT_TRANSIENT_MS)");
+    // The only interval in the dialog is the once-a-second elapsed indicator.
+    expect((DIALOG.match(/setInterval\(/g) || []).length).toBe(1);
+    expect(DIALOG).not.toContain("setTimeout");
   });
 });

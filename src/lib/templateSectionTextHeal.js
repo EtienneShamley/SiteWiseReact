@@ -1,7 +1,20 @@
 // src/lib/templateSectionTextHeal.js
 //
 // Putting a paragraph back together when the image that was inside it goes
-// away — the INVERSE of src/lib/templateSectionTextSplit.js.
+// away — the INVERSE of the retired legacy splitter (Phase G).
+//
+// PHASE G STATUS — A HISTORICAL-READ COMPATIBILITY RULE ONLY. The legacy
+// per-item Template Section interaction that dropped an image INTO a paragraph
+// (splitting one TextItem into two and writing `continuesFrom` on the right
+// half) no longer exists: a modern Section is one shared ProseMirror document,
+// where an image between two paragraphs is simply an image between two
+// paragraphs. Nothing writes `continuesFrom` any more, and nothing persists a
+// healed list. This module survives because HISTORICAL stored `sectionContent`
+// lists still carry that provenance, and the read adapter
+// (src/lib/templateSectionDocAdapter.js) runs `healSectionSplitText` IN MEMORY
+// over them before adapting — so an old note whose image was later removed
+// still reads as one paragraph, exactly as the live product would have shown
+// it. The stored list is never rewritten.
 //
 // Dropping an image into the middle of a paragraph produces three items:
 //
@@ -91,7 +104,27 @@ import {
   normalizeSectionItem,
   normalizeTextContinuation,
 } from "./templateSectionContent";
-import { visibleSectionEntries } from "./templateSectionReorder";
+
+/**
+ * The entries of one stored list that actually RENDER, each with the id the
+ * screen shows for it and the raw index it occupies.
+ *
+ * The gate is `normalizeSectionItem` — the same rule the render path uses — so
+ * "what the user can see" and "what is adjacent" are the same set by
+ * construction: an entry that renders as nothing never sits between two
+ * fragments as far as healing is concerned. The entry itself is carried by
+ * reference. (Moved here from the retired `templateSectionReorder.js` in
+ * Phase G — this reader is its one surviving consumer.)
+ */
+export function visibleSectionEntries(list) {
+  const out = [];
+  (Array.isArray(list) ? list : []).forEach((entry, index) => {
+    const item = normalizeSectionItem(entry);
+    if (item === null) return;
+    out.push({ id: item.id, index, entry });
+  });
+  return out;
+}
 
 /** An answer value for a merged model, through the ordinary plain/rich demotion. */
 function modelToAnswerValue(model) {

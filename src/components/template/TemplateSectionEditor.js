@@ -22,7 +22,8 @@
 //             and this file contains no gesture, no transaction and no
 //             persistence logic at all.
 //
-// FOCUS IS SYNCHRONOUS, for the reason TemplateRowEditor.js records: Tiptap's
+// FOCUS IS SYNCHRONOUS, for the reason the legacy Template row editor first
+// recorded (see the handoff, §23): Tiptap's
 // own `commands.focus()` defers the DOM focus through requestAnimationFrame,
 // which loses the keystrokes typed between the click and that frame (and never
 // runs at all in a backgrounded tab). `editor.view.focus()` is the underlying

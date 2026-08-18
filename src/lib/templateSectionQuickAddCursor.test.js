@@ -30,8 +30,12 @@
 import { deliverQuickAddComposer } from "./quickAddDelivery";
 import {
   resolveSectionQuickAddRoute,
+  sectionEditorEligibility,
+  SECTION_BODY_SOURCE,
+  SECTION_EDITOR_REFUSAL,
   SECTION_QUICK_ADD_ROUTE,
 } from "./templateSectionBody";
+import { SECTION_DOC_NODE } from "./templateSectionDoc";
 
 const image = (id) => ({ id, kind: "image", name: `${id}.jpg`, payload: {} });
 const file = (id) => ({ id, kind: "file", name: `${id}.pdf`, payload: {} });
@@ -193,52 +197,70 @@ describe("Phase F5 — inactive-route ordering needs no separator", () => {
   });
 });
 
-describe("Phase F5 — explicit guardrail proofs (Etienne, 2026-08-16)", () => {
+describe("Phase F5/G — explicit guardrail proofs (Etienne, 2026-08-16; two-way since Phase G)", () => {
+  // Since Phase G the rule takes the RESOLVED BODY (the same reader verdict
+  // activation and Refine use) and knows exactly two destinations: DOCUMENT
+  // and REFUSE. The legacy `sectionContent` append F5 named no longer exists.
+  const proseBody = {
+    source: SECTION_BODY_SOURCE.LEGACY,
+    nodes: [{ type: SECTION_DOC_NODE.TEXT, blocks: [] }],
+    sources: [[]],
+    skipped: [],
+  };
+  const unrepresentableBody = {
+    source: SECTION_BODY_SOURCE.SECTION_CONTENT,
+    nodes: [{ type: SECTION_DOC_NODE.TEXT, blocks: [] }],
+    sources: [[]],
+    skipped: [{ index: 1, item: { kind: "file" } }],
+  };
+
   test("an eligible, untouched Section routes a Quick Add capture to the DOCUMENT", () => {
     // Never touched (no live editor), not yet modern, but its resolved body
     // is safely representable: the capture's first transaction becomes the
     // row's first modern write, not one more legacy sectionContent append.
-    const route = resolveSectionQuickAddRoute({
-      isModern: false,
-      hasLiveEditor: false,
-      eligible: true,
-    });
-    expect(route).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+    expect(sectionEditorEligibility(proseBody).ok).toBe(true);
+    expect(resolveSectionQuickAddRoute(proseBody)).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
   });
 
-  test("an ineligible compatibility row stays safely on the LEGACY route", () => {
-    // Unrepresentable material and no live editor holding it open: the
-    // legacy `sectionContent` writer is the only safe destination, and it
-    // stays visible (adapted, not frozen) until it IS eligible.
-    const route = resolveSectionQuickAddRoute({
-      isModern: false,
-      hasLiveEditor: false,
-      eligible: false,
-    });
-    expect(route).toBe(SECTION_QUICK_ADD_ROUTE.LEGACY);
+  test("a row with NO body at all opens an EMPTY document — nothing existed to lose", () => {
+    expect(resolveSectionQuickAddRoute(null)).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+    expect(
+      resolveSectionQuickAddRoute({ source: SECTION_BODY_SOURCE.EMPTY, nodes: [], sources: [], skipped: [] })
+    ).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+    expect(
+      resolveSectionQuickAddRoute({ source: SECTION_BODY_SOURCE.LEGACY, nodes: [], sources: [], skipped: [] })
+    ).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
   });
 
-  test("a modern row already holding unrepresentable material underneath REFUSES rather than silently dropping it", () => {
-    const route = resolveSectionQuickAddRoute({
-      isModern: true,
-      hasLiveEditor: false,
-      eligible: false,
-    });
-    expect(route).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
+  test("a row holding unrepresentable material REFUSES rather than silently dropping it", () => {
+    expect(sectionEditorEligibility(unrepresentableBody).reason).toBe(
+      SECTION_EDITOR_REFUSAL.UNREPRESENTABLE
+    );
+    expect(resolveSectionQuickAddRoute(unrepresentableBody)).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
+    // …even when the ONLY stored material is the unrepresentable entry.
+    expect(
+      resolveSectionQuickAddRoute({
+        source: SECTION_BODY_SOURCE.EMPTY,
+        nodes: [],
+        sources: [],
+        skipped: [{ index: 0, item: { kind: "file" } }],
+      })
+    ).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
   });
 
-  test("DOCUMENT and LEGACY are mutually exclusive for every input — a row is never routed to both", () => {
-    const combinations = [
-      { isModern: false, hasLiveEditor: false, eligible: false },
-      { isModern: false, hasLiveEditor: false, eligible: true },
-      { isModern: false, hasLiveEditor: true, eligible: false },
-      { isModern: false, hasLiveEditor: true, eligible: true },
-      { isModern: true, hasLiveEditor: false, eligible: false },
-      { isModern: true, hasLiveEditor: false, eligible: true },
-      { isModern: true, hasLiveEditor: true, eligible: false },
-      { isModern: true, hasLiveEditor: true, eligible: true },
+  test("there is no LEGACY route any more, and every input maps to exactly one of the two", () => {
+    expect(Object.keys(SECTION_QUICK_ADD_ROUTE).sort()).toEqual(["DOCUMENT", "REFUSE"]);
+    expect(SECTION_QUICK_ADD_ROUTE.LEGACY).toBeUndefined();
+    const inputs = [
+      null,
+      undefined,
+      {},
+      proseBody,
+      unrepresentableBody,
+      { source: SECTION_BODY_SOURCE.SECTION_DOC, nodes: proseBody.nodes, sources: [], skipped: [] },
+      { source: SECTION_BODY_SOURCE.SECTION_DOC, nodes: proseBody.nodes, sources: [], skipped: [{}] },
     ];
-    for (const input of combinations) {
+    for (const input of inputs) {
       const route = resolveSectionQuickAddRoute(input);
       expect(Object.values(SECTION_QUICK_ADD_ROUTE)).toContain(route);
       // Exactly one route, never a combination.

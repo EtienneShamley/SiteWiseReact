@@ -3,24 +3,20 @@
 // The gate that stops the formatting toolbar, Undo/Redo and AI Refine acting
 // on a Free-form editor the user cannot see.
 
+import * as editorToolbarState from "./editorToolbarState";
 import {
   FREEFORM_LAYOUT,
-  TEMPLATE_FOCUS,
   TEMPLATE_LAYOUT,
-  TEMPLATE_TEXT_CONTROLS,
   TEMPLATE_TOOLBAR_HINT,
   TOOLBAR_OWNER,
   applyRowEditorRegistration,
-  canCommitRowEdit,
   canRefine,
   canRevertRefine,
   isFreeformEditingEnabled,
   isToolbarControlAllowed,
-  nextActiveTextRow,
-  resolveActiveRowIdentity,
   resolveToolbarOwner,
-  templateRowEditorIdentity,
 } from "./editorToolbarState";
+import { SECTION_EDITOR_SCOPE, sectionEditorIdentity } from "./sectionEditorRegistry";
 
 describe("isFreeformEditingEnabled", () => {
   const live = { hasNote: true, hasEditor: true, noteLayout: FREEFORM_LAYOUT };
@@ -114,32 +110,32 @@ describe("resolveToolbarOwner", () => {
     hasNote: true,
     noteLayout: FREEFORM_LAYOUT,
     hasFreeformEditor: true,
-    hasTemplateRowEditor: false,
+    hasTemplateSectionEditor: false,
   };
 
   test("Free-form view: the Free-form editor owns the toolbar, as it always has", () => {
     expect(resolveToolbarOwner(base)).toBe(TOOLBAR_OWNER.FREEFORM);
   });
 
-  test("Free-form view keeps its owner even while a Template row editor exists", () => {
+  test("Free-form view keeps its owner even while a Template Section editor exists", () => {
     // Ownership follows the VISIBLE view, never whatever editor happens to be
     // alive — this is what keeps the two histories and surfaces separate.
     expect(
-      resolveToolbarOwner({ ...base, hasTemplateRowEditor: true })
+      resolveToolbarOwner({ ...base, hasTemplateSectionEditor: true })
     ).toBe(TOOLBAR_OWNER.FREEFORM);
   });
 
-  test("Template form with an active Text answer: the row editor owns it", () => {
+  test("Template form with an ACTIVE SECTION: that Section's shared editor owns it", () => {
     expect(
       resolveToolbarOwner({
         ...base,
         noteLayout: TEMPLATE_LAYOUT,
-        hasTemplateRowEditor: true,
+        hasTemplateSectionEditor: true,
       })
-    ).toBe(TOOLBAR_OWNER.TEMPLATE_ROW);
+    ).toBe(TOOLBAR_OWNER.TEMPLATE_SECTION);
   });
 
-  test("Template form with NO active Text answer: nobody owns it", () => {
+  test("Template form with NO active Section: nobody owns it", () => {
     // Crucially not the Free-form editor, which is merely hidden behind this
     // view: a control acting on it would edit a document nobody can see.
     expect(
@@ -154,7 +150,7 @@ describe("resolveToolbarOwner", () => {
         ...base,
         hasNote: false,
         noteLayout: TEMPLATE_LAYOUT,
-        hasTemplateRowEditor: true,
+        hasTemplateSectionEditor: true,
       })
     ).toBe(TOOLBAR_OWNER.NONE);
   });
@@ -169,9 +165,9 @@ describe("resolveToolbarOwner", () => {
     const inTemplate = {
       ...base,
       noteLayout: TEMPLATE_LAYOUT,
-      hasTemplateRowEditor: true,
+      hasTemplateSectionEditor: true,
     };
-    expect(resolveToolbarOwner(inTemplate)).toBe(TOOLBAR_OWNER.TEMPLATE_ROW);
+    expect(resolveToolbarOwner(inTemplate)).toBe(TOOLBAR_OWNER.TEMPLATE_SECTION);
     // Returning to Free-form restores Free-form ownership immediately.
     expect(resolveToolbarOwner({ ...inTemplate, noteLayout: FREEFORM_LAYOUT })).toBe(
       TOOLBAR_OWNER.FREEFORM
@@ -189,101 +185,29 @@ describe("resolveToolbarOwner", () => {
   });
 });
 
-describe("the Template Text control set", () => {
-  test("supports exactly the approved controls", () => {
-    for (const key of [
-      "undo", "redo", "bold", "italic", "underline", "strike",
-      "bulletList", "orderedList", "indent", "outdent",
-      "alignLeft", "alignCenter", "alignRight", "alignJustify",
-      "textColor", "highlightColor", "highlight",
-      "link", "unlink", "clearFormatting",
-    ]) {
-      expect(isToolbarControlAllowed(TEMPLATE_TEXT_CONTROLS, key)).toBe(true);
-    }
+describe("the toolbar's permitted set is derived, not listed here", () => {
+  test("no hand-maintained Section control set remains in this module", () => {
+    // Since 2026-08-18 the permitted controls are derived from the owning
+    // editor's schema (src/lib/editorCapabilities.js); this module keeps only
+    // the generic gate.
+    expect(require("./editorToolbarState").SECTION_TOOLBAR_CONTROLS).toBeUndefined();
   });
 
-  test("keeps embedded media, files, tables and document structure disabled", () => {
-    for (const key of [
-      "imageUpload", "imageUrl", "table", "tableOptions", "heading1",
-      "blockquote", "codeBlock", "taskList", "horizontalRule",
-      "subscript", "superscript", "fontFamily", "fontSize",
-    ]) {
-      expect(isToolbarControlAllowed(TEMPLATE_TEXT_CONTROLS, key)).toBe(false);
-    }
-  });
-
-  test("indent/outdent are the ONLY indentation controls — list nesting only", () => {
-    // There is deliberately no paragraph-indent control, so no margin or
-    // padding can ever be stored on an answer.
-    const indentish = [...TEMPLATE_TEXT_CONTROLS].filter((k) =>
-      /indent|outdent/i.test(k)
-    );
-    expect(indentish.sort()).toEqual(["indent", "outdent"]);
-  });
-
-  test("the Free-form toolbar is unrestricted — null permits everything", () => {
-    for (const key of ["imageUpload", "table", "heading1", "bold"]) {
+  test("the generic gate: a set permits exactly its keys; null permits everything", () => {
+    const set = new Set(["bold", "indent", "outdent"]);
+    expect(isToolbarControlAllowed(set, "bold")).toBe(true);
+    expect(isToolbarControlAllowed(set, "table")).toBe(false);
+    for (const key of ["imageUpload", "table", "heading", "bold"]) {
       expect(isToolbarControlAllowed(null, key)).toBe(true);
     }
+    // There is deliberately no paragraph-indent control anywhere: only list
+    // nesting is exposed (asserted against the capability key list).
+    const { TOOLBAR_CONTROL_KEYS } = require("./editorCapabilities");
+    expect(TOOLBAR_CONTROL_KEYS.filter((k) => /indent|outdent/i.test(k)).sort()).toEqual(["indent", "outdent"]);
   });
 
   test("there is an understandable explanation for the disabled state", () => {
-    expect(TEMPLATE_TOOLBAR_HINT).toBe("Select a Text answer to use formatting.");
-  });
-});
-
-describe("which row owns the toolbar after a focus event", () => {
-  test("focusing a Text answer makes that row the target", () => {
-    expect(
-      nextActiveTextRow({ target: TEMPLATE_FOCUS.ANSWER, rowId: "row-1", isTextRow: true })
-    ).toBe("row-1");
-  });
-
-  test("focusing another Text answer moves the target immediately", () => {
-    expect(
-      nextActiveTextRow({ target: TEMPLATE_FOCUS.ANSWER, rowId: "row-2", isTextRow: true })
-    ).toBe("row-2");
-  });
-
-  test("a structured field clears ownership entirely", () => {
-    // number/date/time/checkbox/yes-no/dropdown/Photo/File are not rich text.
-    expect(
-      nextActiveTextRow({
-        target: TEMPLATE_FOCUS.STRUCTURED,
-        rowId: "row-3",
-        isTextRow: false,
-      })
-    ).toBeNull();
-  });
-
-  test("an answer row that is not a Text field cannot become the target", () => {
-    expect(
-      nextActiveTextRow({ target: TEMPLATE_FOCUS.ANSWER, rowId: "row-4", isTextRow: false })
-    ).toBeNull();
-  });
-
-  test("focusing a row LABEL never targets that row's answer", () => {
-    expect(
-      nextActiveTextRow({ target: TEMPLATE_FOCUS.LABEL, rowId: "row-5", isTextRow: true })
-    ).toBeNull();
-  });
-});
-
-describe("canCommitRowEdit", () => {
-  test("the active row may commit its own edit", () => {
-    expect(canCommitRowEdit("row-1", "row-1")).toBe(true);
-  });
-
-  test("a callback from a REPLACED editor cannot write into the new row", () => {
-    // Switching rows destroys the previous editor; anything still holding a
-    // reference to it must not be able to save into the row that replaced it.
-    expect(canCommitRowEdit("row-2", "row-1")).toBe(false);
-  });
-
-  test("nothing may commit once no row is active (note or view switched away)", () => {
-    expect(canCommitRowEdit(null, "row-1")).toBe(false);
-    expect(canCommitRowEdit("row-1", null)).toBe(false);
-    expect(canCommitRowEdit(null, null)).toBe(false);
+    expect(TEMPLATE_TOOLBAR_HINT).toBe("Select a section to use formatting.");
   });
 });
 
@@ -291,139 +215,72 @@ describe("canCommitRowEdit", () => {
 /* Editor identity across templates and immutable versions                   */
 /* ------------------------------------------------------------------------ */
 //
-// A row id is not an identity. The same field id exists in every version
-// published from a template (versions are immutable, so re-pinning a note
-// carries the same ids forward) and may exist in another template entirely.
-// Editing that id under a different template or version is a different answer
-// with a different history, and must be a different editor.
+// Phase G retired the legacy per-item row editor and, with it, this module's
+// TEMPLATE_FOCUS / nextActiveTextRow / canCommitRowEdit /
+// templateRowEditorIdentity / resolveActiveRowIdentity. Identity now has ONE
+// home — sectionEditorIdentity in sectionEditorRegistry.js — and it is
+// scope-prefixed so nothing else can mint a token that collides with it.
 
-describe("templateRowEditorIdentity", () => {
-  const base = {
-    noteId: "note-1",
-    templateId: "tpl-1",
-    templateVersionId: "ver-1",
-    rowId: "row-1",
-    isCustomRow: false,
-  };
-
-  test("the same row id in two TEMPLATES is not the same editor", () => {
-    expect(templateRowEditorIdentity(base)).not.toBe(
-      templateRowEditorIdentity({ ...base, templateId: "tpl-2" })
-    );
+describe("the legacy row-editor identity is gone; sectionEditorIdentity is the one home", () => {
+  test("editorToolbarState no longer exports the retired identity functions", () => {
+    for (const name of [
+      "TEMPLATE_FOCUS",
+      "nextActiveTextRow",
+      "canCommitRowEdit",
+      "templateRowEditorIdentity",
+      "resolveActiveRowIdentity",
+    ]) {
+      expect({ name, present: name in editorToolbarState }).toEqual({ name, present: false });
+    }
   });
 
-  test("the same row id in two immutable VERSIONS is not the same editor", () => {
-    expect(templateRowEditorIdentity(base)).not.toBe(
-      templateRowEditorIdentity({ ...base, templateVersionId: "ver-2" })
-    );
+  test("the surviving toolbar-owner surface is intact", () => {
+    expect(typeof applyRowEditorRegistration).toBe("function");
+    expect(typeof resolveToolbarOwner).toBe("function");
+    expect(TOOLBAR_OWNER.TEMPLATE_SECTION).toBeTruthy();
   });
 
-  test("the same row id in two NOTES is not the same editor", () => {
-    expect(templateRowEditorIdentity(base)).not.toBe(
-      templateRowEditorIdentity({ ...base, noteId: "note-2" })
-    );
+  test("the Section identity is scope-prefixed and still separates templates, versions, notes and custom rows", () => {
+    const base = {
+      noteId: "note-1",
+      templateId: "tpl-1",
+      templateVersionId: "ver-1",
+      rowId: "row-1",
+    };
+    const token = sectionEditorIdentity(base);
+    expect(JSON.parse(token)[0]).toBe(SECTION_EDITOR_SCOPE);
+    expect(token).toBe(sectionEditorIdentity({ ...base }));
+    expect(token).not.toBe(sectionEditorIdentity({ ...base, templateId: "tpl-2" }));
+    expect(token).not.toBe(sectionEditorIdentity({ ...base, templateVersionId: "ver-2" }));
+    expect(token).not.toBe(sectionEditorIdentity({ ...base, noteId: "note-2" }));
+    expect(token).not.toBe(sectionEditorIdentity({ ...base, isCustomRow: true }));
+    expect(sectionEditorIdentity({ ...base, noteId: null })).toBeNull();
+    expect(sectionEditorIdentity({ ...base, rowId: null })).toBeNull();
+    expect(sectionEditorIdentity()).toBeNull();
   });
 
-  test("a master row and a custom row sharing an id are not the same editor", () => {
-    expect(templateRowEditorIdentity(base)).not.toBe(
-      templateRowEditorIdentity({ ...base, isCustomRow: true })
-    );
-  });
-
-  test("identical parts produce an identical, comparable token", () => {
-    expect(templateRowEditorIdentity(base)).toBe(templateRowEditorIdentity({ ...base }));
-  });
-
-  test("a note with no template assigned still has a usable identity", () => {
-    // An unassigned note has null templateId/templateVersionId; a custom row
-    // still needs to be addressable, and null must compare equal to null.
-    const unassigned = { noteId: "note-1", rowId: "row-1" };
-    expect(templateRowEditorIdentity(unassigned)).toBe(
-      templateRowEditorIdentity({ ...unassigned, templateId: null, templateVersionId: null })
-    );
-    expect(templateRowEditorIdentity(unassigned)).not.toBe(
-      templateRowEditorIdentity({ ...unassigned, templateId: "tpl-1" })
-    );
-  });
-
-  test("without a note or a row there is no editor to address", () => {
-    expect(templateRowEditorIdentity({ ...base, noteId: null })).toBeNull();
-    expect(templateRowEditorIdentity({ ...base, rowId: null })).toBeNull();
-    expect(templateRowEditorIdentity()).toBeNull();
-  });
-});
-
-describe("resolveActiveRowIdentity", () => {
-  const parts = {
-    noteId: "note-1",
-    templateId: "tpl-1",
-    templateVersionId: "ver-1",
-    rowId: "row-1",
-    isCustomRow: false,
-  };
-
-  test("a row that still exists under the pinned version has an identity", () => {
-    expect(resolveActiveRowIdentity({ ...parts, rowExists: true })).toBe(
-      templateRowEditorIdentity(parts)
-    );
-  });
-
-  test("a row that the NEW template/version does not contain has none", () => {
-    // Which is what disables the Template rich-text controls and shows the
-    // "Select a Text answer to use formatting." explanation.
-    const identity = resolveActiveRowIdentity({ ...parts, rowExists: false });
-    expect(identity).toBeNull();
-    expect(
-      resolveToolbarOwner({
-        hasNote: true,
-        noteLayout: TEMPLATE_LAYOUT,
-        hasFreeformEditor: true,
-        hasTemplateRowEditor: !!identity,
-      })
-    ).toBe(TOOLBAR_OWNER.NONE);
-  });
-
-  test("a row that survives a version change is a NEW identity, not the old one", () => {
-    const before = resolveActiveRowIdentity({ ...parts, rowExists: true });
-    const after = resolveActiveRowIdentity({
-      ...parts,
-      templateVersionId: "ver-2",
-      rowExists: true,
+  test("a stale registration from a previous template cannot be mistaken for the new one", () => {
+    const oldIdentity = sectionEditorIdentity({
+      noteId: "note-1",
+      templateId: "tpl-1",
+      templateVersionId: "ver-1",
+      rowId: "row-1",
     });
-    expect(after).not.toBeNull();
-    expect(after).not.toBe(before);
-  });
-});
-
-describe("stale callbacks cannot cross an identity change", () => {
-  const oldIdentity = templateRowEditorIdentity({
-    noteId: "note-1",
-    templateId: "tpl-1",
-    templateVersionId: "ver-1",
-    rowId: "row-1",
-  });
-  const newIdentity = templateRowEditorIdentity({
-    noteId: "note-1",
-    templateId: "tpl-2",
-    templateVersionId: "ver-9",
-    rowId: "row-1", // the SAME row id in the newly assigned template
-  });
-
-  test("an update from the previous template's editor is refused", () => {
-    expect(canCommitRowEdit(newIdentity, oldIdentity)).toBe(false);
-    expect(canCommitRowEdit(newIdentity, newIdentity)).toBe(true);
-  });
-
-  test("an update is refused once no row is active at all", () => {
-    expect(canCommitRowEdit(null, oldIdentity)).toBe(false);
-    expect(canCommitRowEdit(oldIdentity, null)).toBe(false);
-  });
-
-  test("a BottomBar insertion aimed at the previous template is refused", () => {
-    // The insertion resolves the target row's identity NOW; if the note has
-    // been re-pinned, that no longer matches the registered editor.
-    const registered = { identity: newIdentity };
-    expect(canCommitRowEdit(registered.identity, oldIdentity)).toBe(false);
+    const newIdentity = sectionEditorIdentity({
+      noteId: "note-1",
+      templateId: "tpl-2",
+      templateVersionId: "ver-9",
+      rowId: "row-1", // the SAME row id in the newly assigned template
+    });
+    expect(newIdentity).not.toBe(oldIdentity);
+    const registered = applyRowEditorRegistration(null, {
+      identity: newIdentity,
+      editor: { name: "new" },
+    });
+    // The old editor's cleanup cannot clear the new registration.
+    expect(applyRowEditorRegistration(registered, { identity: oldIdentity, editor: null })).toBe(
+      registered
+    );
   });
 });
 

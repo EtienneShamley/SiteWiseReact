@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEditorState } from "@tiptap/react";
 import {
   FaBold, FaItalic, FaUnderline, FaStrikethrough, FaListUl, FaListOl,
@@ -7,6 +7,7 @@ import {
   FaIndent, FaOutdent, FaSubscript, FaSuperscript, FaMinus, FaUnlink,
   FaAlignLeft, FaAlignCenter, FaAlignRight, FaAlignJustify, FaCaretDown,
 } from "react-icons/fa";
+import { HEADING_LEVELS } from "../../lib/templateRichText";
 import { FONT_FAMILIES, FONT_SIZES } from "../../constants/editorOptions";
 import { getNearestListItemType } from "./extensions";
 import {
@@ -19,6 +20,8 @@ import {
 import { validateEditorImageFile } from "../../lib/editorImages";
 import { insertLocalImageAsset } from "../../lib/editorImageInsert";
 import { isToolbarControlAllowed } from "../../lib/editorToolbarState";
+import { toolbarControlsForEditor } from "../../lib/editorCapabilities";
+import { importImageFromUrl } from "../../lib/editorImageUrlImport";
 import { iconButtonClass, menuItemClass } from "../../lib/interactionStyles";
 import useTransientMessage from "../../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../../lib/transientMessage";
@@ -26,27 +29,48 @@ import { MESSAGE_TONE } from "../../lib/transientMessage";
 /**
  * @param editor    the editor this toolbar currently OWNS. In the Free-form
  *                  view that is the note's editor; in the Template form it is
- *                  the single active Text-row editor.
+ *                  the active flexible Section's shared editor. EVERY command
+ *                  below and EVERY active-state read goes through this one
+ *                  instance, so the toolbar can never write to one surface
+ *                  while reading from another.
  * @param disabled  true when nothing owns the toolbar (no note open, or the
- *                  Template form visible with no active Text answer). Every
+ *                  Template form visible with no active Section). Every
  *                  control below is genuinely disabled in that state — the
  *                  Free-form editor is only hidden with display:none, so an
  *                  enabled control would otherwise dispatch into a document
  *                  nobody can see and persist the result.
- * @param controls  the permitted control set, or null for all of them. A
- *                  Template Text answer is a form field, not a document: images,
- *                  files, tables, headings and document-wide actions stay
- *                  present but disabled there (TEMPLATE_TEXT_CONTROLS in
- *                  src/lib/editorToolbarState.js), so the toolbar keeps one
- *                  shape and one position in every view.
+ *                  Which controls the owner supports is DERIVED from that
+ *                  editor's own schema and commands
+ *                  (src/lib/editorCapabilities.js) — never a per-surface list.
+ *                  Both surfaces are built from the shared editor core, so the
+ *                  toolbar keeps one shape, one position and one capability
+ *                  set in every view.
+ * @param imagePolicy  optional `{ validateFile, insertDeps, importFromUrl }`
+ *                  for the surface an image is inserted into. Absent means the
+ *                  Free-form note's own policy (`editor-image` assets, its own
+ *                  validator, a web address kept as a remote src) — unchanged.
+ *                  The Template form supplies the Section's policy instead
+ *                  (`photo` assets, the Template's validator, a web address
+ *                  IMPORTED into an asset; src/lib/templateSectionToolbarImage.js),
+ *                  which is the ONLY difference between inserting an image here
+ *                  and inserting one there: the write sequence itself is the
+ *                  one shared pipeline.
  * @param disabledHint  a short explanation shown when nothing owns the toolbar.
  */
+// The heading levels the toolbar OFFERS. The shared core (and the stored
+// document model) carry 1–6 for pasted / imported content; three is what a
+// field report needs and what keeps the control readable.
+export const TOOLBAR_HEADING_LEVELS = Object.freeze([1, 2, 3]);
+
 export default function FormattingControls({
   editor,
   disabled = false,
-  controls = null,
+  imagePolicy = null,
   disabledHint = null,
 }) {
+  // What the OWNING editor can do, read from the editor itself. Recomputed
+  // only when ownership moves to another instance.
+  const controls = useMemo(() => toolbarControlsForEditor(editor), [editor]);
   const fileInputRef = useRef();
   const tableMenuRef = useRef(null);
   const textColorRef = useRef(null);
@@ -77,7 +101,7 @@ export default function FormattingControls({
         strike: e.isActive("strike"),
         subscript: e.isActive("subscript"),
         superscript: e.isActive("superscript"),
-        heading1: e.isActive("heading", { level: 1 }),
+        headingLevel: HEADING_LEVELS.find((level) => e.isActive("heading", { level })) || 0,
         blockquote: e.isActive("blockquote"),
         codeBlock: e.isActive("codeBlock"),
         bulletList: e.isActive("bulletList"),
@@ -249,8 +273,11 @@ export default function FormattingControls({
     // A new attempt supersedes whatever the last one said.
     clearControlMessage();
 
-    // Cheap rejections happen before any decoding work.
-    const check = validateEditorImageFile(file);
+    // Cheap rejections happen before any decoding work, through the SAME
+    // validator the pipeline below will apply — so a file can never be accepted
+    // by one and refused by the other.
+    const validateFile = imagePolicy?.validateFile || validateEditorImageFile;
+    const check = validateFile(file);
     if (!check.ok) {
       showControlError(check.error);
       return;
@@ -258,10 +285,44 @@ export default function FormattingControls({
 
     setImageBusy(true);
     try {
-      const result = await insertLocalImageAsset({
-        sourceFile: file,
+      // ONE shared write sequence (validate → normalize → store the Blob →
+      // insert the reference → roll the Blob back if the insertion is refused).
+      // The surface supplies only its own policy: which files it accepts and
+      // which asset kind the bytes become.
+      const result = await insertLocalImageAsset(
+        {
+          sourceFile: file,
+          editor,
+          name: file.name,
+        },
+        imagePolicy?.insertDeps || undefined
+      );
+      report(result);
+    } finally {
+      setImageBusy(false);
+    }
+  };
+
+  // Image by web address. The surface's policy decides what the address
+  // becomes: a Template Section IMPORTS it into an asset-backed image through
+  // the same pipeline as the local picker (validated from the downloaded
+  // content, never from the URL); the Free-form note keeps its remote-src
+  // behaviour. A refused or blocked address inserts nothing and says why.
+  const insertImageUrl = async () => {
+    if (!editor) return;
+    const url = window.prompt("Enter image URL");
+    if (!imagePolicy?.importFromUrl) {
+      report(insertImageFromUrl(editor, url));
+      return;
+    }
+    if (url === null || url === undefined || !String(url).trim()) return;
+    clearControlMessage();
+    setImageBusy(true);
+    try {
+      const result = await importImageFromUrl({
+        url,
         editor,
-        name: file.name,
+        insertDeps: imagePolicy?.insertDeps || undefined,
       });
       report(result);
     } finally {
@@ -269,10 +330,17 @@ export default function FormattingControls({
     }
   };
 
-  const insertImageUrl = () => {
+  // Heading level: 0 is normal text (a paragraph). One control for every
+  // level the shared core supports on the toolbar; a Section and a Free-form
+  // note offer the same levels.
+  const setHeadingLevel = (value) => {
     if (!editor) return;
-    const url = window.prompt("Enter image URL");
-    report(insertImageFromUrl(editor, url));
+    const level = Number(value);
+    if (!level) {
+      editor.chain().focus().setParagraph().run();
+      return;
+    }
+    editor.chain().focus().setHeading({ level }).run();
   };
 
   if (!editor || !s) return null;
@@ -417,7 +485,24 @@ export default function FormattingControls({
         <button onClick={() => editor.chain().focus().toggleStrike().run()} disabled={offFor("strike")} aria-pressed={pressed(s.strike)} className={`${btnBase} ${btnDisabled} ${pressed(s.strike) ? `${activeBg} line-through text-blue-600` : ""}`} title="Strikethrough" aria-label="Strikethrough"><FaStrikethrough /></button>
         <button onClick={() => editor.chain().focus().toggleSubscript().run()} disabled={offFor("subscript")} aria-pressed={pressed(s.subscript)} className={`${btnBase} ${btnDisabled} ${pressed(s.subscript) ? `${activeBg} text-blue-600` : ""}`} title="Subscript" aria-label="Subscript"><FaSubscript /></button>
         <button onClick={() => editor.chain().focus().toggleSuperscript().run()} disabled={offFor("superscript")} aria-pressed={pressed(s.superscript)} className={`${btnBase} ${btnDisabled} ${pressed(s.superscript) ? `${activeBg} text-blue-600` : ""}`} title="Superscript" aria-label="Superscript"><FaSuperscript /></button>
-        <button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} disabled={offFor("heading1")} aria-pressed={pressed(s.heading1)} className={`${btnBase} ${btnDisabled} ${pressed(s.heading1) ? `${activeBg} font-bold text-purple-600` : ""}`} title="Heading 1" aria-label="Heading 1"><FaHeading /></button>
+        {/* Heading level. A select rather than one H1 button: normal document
+            semantics need more than one level, and the same control serves
+            every surface. Level 0 is ordinary text. */}
+        <span className="inline-flex items-center gap-1" title="Heading">
+          <FaHeading className={pressed(s.headingLevel) ? "text-purple-600" : "text-gray-400"} aria-hidden="true" />
+          <select
+            onChange={(e) => setHeadingLevel(e.target.value)}
+            value={pressed(s.headingLevel) ? String(s.headingLevel) : "0"}
+            disabled={offFor("heading")}
+            className={selectCls}
+            aria-label="Heading level"
+          >
+            <option value="0">Text</option>
+            {TOOLBAR_HEADING_LEVELS.map((level) => (
+              <option key={level} value={String(level)}>{`Heading ${level}`}</option>
+            ))}
+          </select>
+        </span>
         <button onClick={() => editor.chain().focus().toggleBlockquote().run()} disabled={offFor("blockquote")} aria-pressed={pressed(s.blockquote)} className={`${btnBase} ${btnDisabled} ${pressed(s.blockquote) ? `${activeBg} text-blue-600` : ""}`} title="Quote" aria-label="Quote"><FaQuoteRight /></button>
         <button onClick={() => editor.chain().focus().toggleCodeBlock().run()} disabled={offFor("codeBlock")} aria-pressed={pressed(s.codeBlock)} className={`${btnBase} ${btnDisabled} ${pressed(s.codeBlock) ? `${activeBg} text-yellow-600` : ""}`} title="Code" aria-label="Code block"><FaCode /></button>
       </div>

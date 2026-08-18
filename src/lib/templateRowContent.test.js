@@ -1,19 +1,26 @@
 // src/lib/templateRowContent.test.js
 //
-// What a Template row renders once supporting evidence and ordered section
-// content exist — and, just as importantly, what it still renders when neither
-// does.
+// What a Template row renders once supporting evidence and a unified Section
+// DOCUMENT body exist — and, just as importantly, what it still renders when
+// neither does.
 //
 // The rules under test are the ones a render site must never re-derive:
 //   - evidence renders because `evidence[rowId]` exists, NOT because the row's
 //     current field type is one of the "evidence-capable" ones;
 //   - a Photo/File field's primary attachments and a row's historical evidence
 //     are two collections that are never merged;
-//   - ordered `sectionContent[rowId]` is AUTHORITATIVE when present: it replaces
-//     the row's legacy answer and its evidence, but never its typed value or
-//     its primary attachments;
-//   - stored order is preserved exactly;
-//   - a row with neither collection produces exactly the block it always did.
+//   - a Section document body (`sectionSegments`) is AUTHORITATIVE when
+//     present: it replaces the row's legacy answer and its evidence, but never
+//     its typed value or its primary attachments;
+//   - stored order is preserved exactly (a HISTORICAL `sectionContent` list is
+//     read through the canonical reader and segments back onto its items);
+//   - a row with no document body produces exactly the block it always did.
+//
+// Since Phase G the planner takes ONLY `sectionSegments` — there is no raw
+// `sectionContent` parameter and no per-item plan. The historical fixtures
+// below reach it the way the product does: resolveSectionBody → sectionDocSegments.
+// The segment projection itself is covered by templateSectionDocSegments.test.js
+// and templateSectionStaticRead.test.js; what is proven here is the PLAN.
 
 import {
   ROW_BLOCK_KIND,
@@ -22,15 +29,22 @@ import {
   planRowBlocks,
   rowEvidenceItems,
   rowAttachmentItems,
-  rowSectionItems,
   hasRowEvidence,
-  hasRowSectionContent,
-  sectionItemMinHeight,
+  sectionSegmentMinHeight,
   sectionReplacesRowAnswer,
 } from "./templateRowContent";
 import { resolveBlockHeight } from "./paginateBlocks";
 import { FIELD_TYPE } from "./templateFields";
 import { sectionItemsForRow } from "./templateSectionContent";
+import {
+  isLegacyMediaBody,
+  isSectionDocumentBody,
+  resolveSectionBody,
+} from "./templateSectionBody";
+import {
+  SECTION_SEGMENT_KIND,
+  sectionDocSegments,
+} from "./templateSectionDocSegments";
 
 const photo = (id, assetId, over = {}) => ({
   id,
@@ -71,17 +85,46 @@ const row = (over = {}) => ({
 // value (a plain string or a tagged rich value) — never an extended shape.
 const secText = (id, value = "") => ({ id, kind: "text", value });
 const secPhoto = (id, assetId, over = {}) => photo(id, assetId, { ...over });
-const secFile = (id, assetId, over = {}) => file(id, assetId, { ...over });
+// A file's asset reference must be one the shared FileAttachment node contract
+// accepts (a real asset id, 8+ chars) or the reader reports it as
+// unrepresentable — so the short fixture ids are widened to a valid one.
+const fileAssetId = (short) => `file-asset-${short}`;
+const secFile = (id, assetId, over = {}) => file(id, fileAssetId(assetId), { ...over });
 
 const kinds = (blocks) => blocks.map((b) => b.kind);
 const names = (blocks) =>
   blocks.filter((b) => b.item).map((b) => b.item.norm.name);
-// The ordered section blocks of a plan, described by item kind + id, which is
-// what "renders in exactly the stored order" actually means.
+// The section blocks of a plan, described by segment kind + the stored item id
+// the segment came from, which is what "renders in exactly the stored order"
+// actually means.
 const sectionIds = (blocks) =>
   blocks
-    .filter((b) => b.kind === ROW_BLOCK_KIND.SECTION_ITEM)
-    .map((b) => `${b.sectionItem.kind}:${b.sectionItem.id}`);
+    .filter((b) => b.kind === ROW_BLOCK_KIND.SECTION_SEGMENT)
+    .map((b) => `${b.sectionSegment.kind}:${b.sectionSegment.itemId}`);
+
+// A HISTORICAL `sectionContent` map, read exactly as the product reads it: the
+// canonical reader resolves the row's body, the projection segments it, and
+// segments are handed to the planner ONLY for a body the product publishes as
+// a document (an ordered-document source, or a legacy body carrying media —
+// NoteTemplateDoc's `sectionState`). An unusable map resolves to no document
+// body, and no document body means NO segments: the row plans as it always has.
+const segmentsFor = (sectionContent, rowId, rowType) => {
+  const body = resolveSectionBody({ instance: { sectionContent }, rowId, rowType });
+  return isSectionDocumentBody(body) || isLegacyMediaBody(body)
+    ? sectionDocSegments(body)
+    : [];
+};
+
+// The planner, fed a stored `sectionContent` fixture through the read boundary.
+// `sectionSegments` is the ONLY body the planner accepts.
+const plan = ({ sectionContent, ...rest }) =>
+  planRowBlocks({
+    ...rest,
+    sectionSegments:
+      sectionContent === undefined
+        ? undefined
+        : segmentsFor(sectionContent, rest.row && rest.row.id, rest.row && rest.row.type),
+  });
 
 /* -------------------------------------------------------------------------- */
 /* Evidence beneath an ordinary answer                                         */
@@ -403,19 +446,25 @@ describe("asset references reachable from a row's blocks", () => {
 });
 
 /* ========================================================================== */
-/* ORDERED SECTION CONTENT                                                     */
+/* SECTION DOCUMENT BODY — HISTORICAL sectionContent read through the reader */
 /* ========================================================================== */
 
 /* -------------------------------------------------------------------------- */
 /* Absent / unusable section content falls back to the legacy path             */
 /* -------------------------------------------------------------------------- */
 
-describe("no usable section content changes nothing", () => {
-  test("a row with no sectionContent plans EXACTLY the legacy blocks", () => {
+describe("no usable section body changes nothing", () => {
+  test("a row with no sectionSegments plans EXACTLY the legacy blocks", () => {
     const legacy = planRowBlocks({ row: row() });
-    expect(planRowBlocks({ row: row(), sectionContent: {} })).toEqual(legacy);
-    expect(planRowBlocks({ row: row(), sectionContent: null })).toEqual(legacy);
-    expect(planRowBlocks({ row: row(), sectionContent: undefined })).toEqual(legacy);
+    expect(planRowBlocks({ row: row(), sectionSegments: [] })).toEqual(legacy);
+    expect(planRowBlocks({ row: row(), sectionSegments: null })).toEqual(legacy);
+    expect(planRowBlocks({ row: row(), sectionSegments: undefined })).toEqual(legacy);
+    // A malformed segments value is no body at all.
+    expect(planRowBlocks({ row: row(), sectionSegments: "nope" })).toEqual(legacy);
+    expect(planRowBlocks({ row: row(), sectionSegments: {} })).toEqual(legacy);
+    // And a stored map that resolves to nothing reaches the planner as no body.
+    expect(plan({ row: row(), sectionContent: {} })).toEqual(legacy);
+    expect(plan({ row: row(), sectionContent: null })).toEqual(legacy);
     // And that plan is still the single, ungrouped block it always was.
     expect(legacy).toHaveLength(1);
     expect(legacy[0]).toMatchObject({
@@ -430,7 +479,7 @@ describe("no usable section content changes nothing", () => {
 
   test("an empty array, a malformed container and malformed-only items all fall back", () => {
     const legacy = planRowBlocks({ row: row() });
-    // Every one of these normalizes to no items, so the legacy path is used.
+    // Every one of these resolves to no body, so the legacy path is used.
     for (const map of [
       { "row-1": [] },
       { "row-1": "not-an-array" },
@@ -446,17 +495,17 @@ describe("no usable section content changes nothing", () => {
       { "row-1": ["data:image/png;base64,AAAA"] },
       { "row-1": [null, 42, { nope: true }] },
     ]) {
-      expect(planRowBlocks({ row: row(), sectionContent: map })).toEqual(legacy);
+      expect(plan({ row: row(), sectionContent: map })).toEqual(legacy);
     }
   });
 
   test("evidence-only behaviour is untouched when section content is absent", () => {
-    const withEvidence = planRowBlocks({
+    const withEvidence = plan({
       row: row(),
       evidence: { "row-1": [photo("E1", "a1"), file("E2", "a2")] },
     });
     expect(
-      planRowBlocks({
+      plan({
         row: row(),
         evidence: { "row-1": [photo("E1", "a1"), file("E2", "a2")] },
         sectionContent: { "row-1": [] },
@@ -470,13 +519,13 @@ describe("no usable section content changes nothing", () => {
   });
 
   test("primary Photo/File rendering is untouched when section content is absent", () => {
-    const legacy = planRowBlocks({
+    const legacy = plan({
       row: row({ type: FIELD_TYPE.PHOTO, px: 56 }),
       isAttachmentField: true,
       attachments: { "row-1": [photo("P1", "a1"), photo("P2", "a2")] },
     });
     expect(
-      planRowBlocks({
+      plan({
         row: row({ type: FIELD_TYPE.PHOTO, px: 56 }),
         isAttachmentField: true,
         attachments: { "row-1": [photo("P1", "a1"), photo("P2", "a2")] },
@@ -492,42 +541,45 @@ describe("no usable section content changes nothing", () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* One block per ordered item, in stored order                                 */
+/* One block per segment, in stored order                                      */
 /* -------------------------------------------------------------------------- */
 
-describe("ordered items render one block each, in stored order", () => {
+describe("segments render one block each, in stored order", () => {
   test("a single text item emits ONE section block", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secText("t1", "Ground was soft.")] },
     });
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].kind).toBe(ROW_BLOCK_KIND.SECTION_ITEM);
-    expect(blocks[0].sectionItem.value).toBe("Ground was soft.");
+    expect(blocks[0].kind).toBe(ROW_BLOCK_KIND.SECTION_SEGMENT);
+    expect(blocks[0].sectionSegment.kind).toBe(SECTION_SEGMENT_KIND.TEXT);
+    expect(blocks[0].sectionSegment.itemId).toBe("t1");
+    expect(blocks[0].sectionSegment.blocks[0].content[0].text).toBe("Ground was soft.");
   });
 
   test("a single photo item emits ONE section block", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secPhoto("p1", "a1")] },
     });
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].kind).toBe(ROW_BLOCK_KIND.SECTION_ITEM);
-    expect(blocks[0].sectionItem.assetId).toBe("a1");
+    expect(blocks[0].kind).toBe(ROW_BLOCK_KIND.SECTION_SEGMENT);
+    expect(blocks[0].sectionSegment.kind).toBe(SECTION_SEGMENT_KIND.IMAGE);
+    expect(blocks[0].sectionSegment.attrs.assetId).toBe("a1");
   });
 
   test("a single file item emits ONE section block", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secFile("f1", "a1")] },
     });
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].sectionItem.kind).toBe("file");
-    expect(blocks[0].sectionItem.assetId).toBe("a1");
+    expect(blocks[0].sectionSegment.kind).toBe(SECTION_SEGMENT_KIND.FILE);
+    expect(blocks[0].sectionSegment.attrs.assetId).toBe(fileAssetId("a1"));
   });
 
   test("text → photo → text → file renders in EXACTLY that order", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [
@@ -541,14 +593,14 @@ describe("ordered items render one block each, in stored order", () => {
     // Not regrouped by kind: the stored interleaving is the document order.
     expect(sectionIds(blocks)).toEqual([
       "text:A",
-      "photo:B",
+      "image:B",
       "text:C",
       "file:D",
     ]);
   });
 
   test("a malformed item between valid ones is skipped without reordering its neighbours", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [
@@ -560,46 +612,46 @@ describe("ordered items render one block each, in stored order", () => {
         ],
       },
     });
-    expect(sectionIds(blocks)).toEqual(["text:A", "photo:B", "text:C"]);
+    expect(sectionIds(blocks)).toEqual(["text:A", "image:B", "text:C"]);
   });
 
   test("the order is exactly what sectionItemsForRow returns — nothing re-derives it", () => {
     const stored = {
       "row-1": [secFile("D", "a-d"), secText("A", "x"), secPhoto("B", "a-b")],
     };
-    const blocks = planRowBlocks({ row: row(), sectionContent: stored });
+    const blocks = plan({ row: row(), sectionContent: stored });
     const fromModel = sectionItemsForRow(stored, "row-1");
-    expect(blocks.map((b) => b.sectionItem)).toEqual(fromModel);
-    // The planner's own accessor is the same read model, not a second one.
-    expect(rowSectionItems(stored, "row-1")).toEqual(fromModel);
-    expect(hasRowSectionContent(stored, "row-1")).toBe(true);
-    expect(hasRowSectionContent(stored, "row-gone")).toBe(false);
+    // Every segment names the stored item it came from, in the render model's
+    // order — the planner never re-derives it from the raw map.
+    expect(blocks.map((b) => b.sectionSegment.itemId)).toEqual(fromModel.map((i) => i.id));
+    expect(segmentsFor(stored, "row-1")).toHaveLength(3);
+    expect(segmentsFor(stored, "row-gone")).toEqual([]);
   });
 
   test("a legitimately EMPTY text item is still an authored item", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "before"), secText("B", ""), secText("C", "after")] },
     });
     expect(sectionIds(blocks)).toEqual(["text:A", "text:B", "text:C"]);
-    expect(blocks[1].sectionItem.value).toBe("");
+    expect(blocks[1].sectionSegment.itemId).toBe("B");
     // On its own it is the whole body — not an empty row falling back to legacy.
-    const alone = planRowBlocks({
+    const alone = plan({
       row: row(),
       sectionContent: { "row-1": [secText("only", "")] },
     });
     expect(alone).toHaveLength(1);
-    expect(alone[0].kind).toBe(ROW_BLOCK_KIND.SECTION_ITEM);
+    expect(alone[0].kind).toBe(ROW_BLOCK_KIND.SECTION_SEGMENT);
   });
 });
 
 /* -------------------------------------------------------------------------- */
-/* Section content is authoritative — no duplicate legacy body                 */
+/* A section body is authoritative — no duplicate legacy body                  */
 /* -------------------------------------------------------------------------- */
 
-describe("section content replaces the legacy body, never duplicates it", () => {
+describe("a section body replaces the legacy body, never duplicates it", () => {
   test("a Text row with section content emits NO legacy answer block", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secText("t1", "authored")] },
     });
@@ -607,28 +659,28 @@ describe("section content replaces the legacy body, never duplicates it", () => 
   });
 
   test("a Text row with section content emits NO evidence block", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       evidence: { "row-1": [photo("E1", "a-ev"), file("E2", "a-ev2")] },
       sectionContent: { "row-1": [secText("t1", "authored"), secPhoto("p1", "a-p")] },
     });
     expect(kinds(blocks)).toEqual([
-      ROW_BLOCK_KIND.SECTION_ITEM,
-      ROW_BLOCK_KIND.SECTION_ITEM,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
     ]);
     // The evidence is not rendered — and reading it did not remove it.
     expect(rowEvidenceItems({ "row-1": [photo("E1", "a-ev")] }, "row-1")).toHaveLength(1);
   });
 
   test("a note-specific custom row uses its section content instead of its legacy answer", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ id: "custom-9", isCustom: true }),
       evidence: { "custom-9": [photo("E1", "a-ev")] },
       sectionContent: { "custom-9": [secText("t1", "custom body"), secFile("f1", "a-f")] },
     });
     expect(kinds(blocks)).toEqual([
-      ROW_BLOCK_KIND.SECTION_ITEM,
-      ROW_BLOCK_KIND.SECTION_ITEM,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
     ]);
     expect(blocks.every((b) => b.rowId === "custom-9")).toBe(true);
     expect(blocks[0].isRowHead).toBe(true);
@@ -636,7 +688,7 @@ describe("section content replaces the legacy body, never duplicates it", () => 
 
   test("section content keyed to a row that is not on the page renders nothing, and is not mutated", () => {
     const stored = { "row-gone": [secText("t1", "ghost"), secPhoto("p1", "a1")] };
-    const blocks = planRowBlocks({ row: row({ id: "row-live" }), sectionContent: stored });
+    const blocks = plan({ row: row({ id: "row-live" }), sectionContent: stored });
     expect(blocks).toHaveLength(1);
     expect(kinds(blocks)).toEqual([ROW_BLOCK_KIND.ROW]);
     // Same preservation rule as evidence: unreachable content stays in storage.
@@ -648,7 +700,7 @@ describe("section content replaces the legacy body, never duplicates it", () => 
 /* Structured rows keep their typed value first                                */
 /* -------------------------------------------------------------------------- */
 
-describe("a structured row keeps its typed control above the ordered items", () => {
+describe("a structured row keeps its typed control above the segments", () => {
   test.each([
     FIELD_TYPE.NUMBER,
     FIELD_TYPE.DATE,
@@ -657,14 +709,14 @@ describe("a structured row keeps its typed control above the ordered items", () 
     FIELD_TYPE.YESNO,
     FIELD_TYPE.SELECT,
   ])("a %s row emits its ROW block, then the section items", (type) => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type }),
       sectionContent: { "row-1": [secText("t1", "note"), secPhoto("p1", "a1")] },
     });
     expect(kinds(blocks)).toEqual([
       ROW_BLOCK_KIND.ROW,
-      ROW_BLOCK_KIND.SECTION_ITEM,
-      ROW_BLOCK_KIND.SECTION_ITEM,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
     ]);
     // The typed value is the head, and it is never orphaned from its content.
     expect(blocks[0].id).toBe("row-1");
@@ -673,12 +725,12 @@ describe("a structured row keeps its typed control above the ordered items", () 
   });
 
   test("a structured row with section content emits no evidence either", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.SELECT }),
       evidence: { "row-1": [photo("E1", "a-ev")] },
       sectionContent: { "row-1": [secText("t1", "note")] },
     });
-    expect(kinds(blocks)).toEqual([ROW_BLOCK_KIND.ROW, ROW_BLOCK_KIND.SECTION_ITEM]);
+    expect(kinds(blocks)).toEqual([ROW_BLOCK_KIND.ROW, ROW_BLOCK_KIND.SECTION_SEGMENT]);
   });
 });
 
@@ -686,9 +738,9 @@ describe("a structured row keeps its typed control above the ordered items", () 
 /* Legacy Photo/File rows keep their primary attachments first                 */
 /* -------------------------------------------------------------------------- */
 
-describe("a legacy Photo/File field keeps its primary attachments above the items", () => {
+describe("a legacy Photo/File field keeps its primary attachments above the segments", () => {
   test("a Photo field emits head + primary attachments, then the section items", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.PHOTO }),
       isAttachmentField: true,
       attachments: { "row-1": [photo("P1", "a1"), photo("P2", "a2")] },
@@ -698,15 +750,15 @@ describe("a legacy Photo/File field keeps its primary attachments above the item
       ROW_BLOCK_KIND.ATTACHMENT_HEAD,
       ROW_BLOCK_KIND.ATTACHMENT,
       ROW_BLOCK_KIND.ATTACHMENT,
-      ROW_BLOCK_KIND.SECTION_ITEM,
-      ROW_BLOCK_KIND.SECTION_ITEM,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
     ]);
     expect(names(blocks)).toEqual(["P1.jpg", "P2.jpg"]);
     expect(sectionIds(blocks)).toEqual(["text:t1", "file:f1"]);
   });
 
   test("a File field behaves equivalently", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.FILE }),
       isAttachmentField: true,
       attachments: { "row-1": [file("P1", "a1")] },
@@ -715,12 +767,12 @@ describe("a legacy Photo/File field keeps its primary attachments above the item
     expect(kinds(blocks)).toEqual([
       ROW_BLOCK_KIND.ATTACHMENT_HEAD,
       ROW_BLOCK_KIND.ATTACHMENT,
-      ROW_BLOCK_KIND.SECTION_ITEM,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
     ]);
   });
 
   test("an EMPTY Photo field keeps its head with the first section item", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.PHOTO }),
       isAttachmentField: true,
       attachments: {},
@@ -728,14 +780,14 @@ describe("a legacy Photo/File field keeps its primary attachments above the item
     });
     expect(kinds(blocks)).toEqual([
       ROW_BLOCK_KIND.ATTACHMENT_HEAD,
-      ROW_BLOCK_KIND.SECTION_ITEM,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
     ]);
     expect(blocks[0].keepWithNext).toBe(true);
     expect(blocks[0].attachmentCount).toBe(0);
   });
 
   test("a Photo/File field with section content emits no evidence either", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.PHOTO }),
       isAttachmentField: true,
       attachments: { "row-1": [photo("P1", "a1")] },
@@ -743,7 +795,7 @@ describe("a legacy Photo/File field keeps its primary attachments above the item
       sectionContent: { "row-1": [secText("t1", "caption")] },
     });
     expect(kinds(blocks)).not.toContain(ROW_BLOCK_KIND.EVIDENCE);
-    expect(blocks.filter((b) => b.kind === ROW_BLOCK_KIND.SECTION_ITEM)).toHaveLength(1);
+    expect(blocks.filter((b) => b.kind === ROW_BLOCK_KIND.SECTION_SEGMENT)).toHaveLength(1);
   });
 });
 
@@ -753,8 +805,8 @@ describe("a legacy Photo/File field keeps its primary attachments above the item
 
 describe("section pagination grouping", () => {
   test("ONE text item reproduces the simple single-row block STRUCTURE", () => {
-    const legacy = planRowBlocks({ row: row() })[0];
-    const single = planRowBlocks({
+    const legacy = plan({ row: row() })[0];
+    const single = plan({
       row: row(),
       sectionContent: { "row-1": [secText("t1", "body")] },
     })[0];
@@ -779,7 +831,7 @@ describe("section pagination grouping", () => {
   });
 
   test("multiple items share the row group and use continuation semantics", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [secText("A", "x"), secPhoto("B", "a-b"), secText("C", "y")],
@@ -801,7 +853,7 @@ describe("section pagination grouping", () => {
   });
 
   test("every ordered item is atomic — photo, file and text alike", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [secText("A", "x"), secPhoto("B", "a-b"), secFile("C", "a-c")],
@@ -811,7 +863,7 @@ describe("section pagination grouping", () => {
     // Continuation items are sized by what they hold, not by the row height.
     expect(blocks[1].minHeight).toBe(ATTACHMENT_BLOCK_MIN_PX.photo);
     expect(blocks[2].minHeight).toBe(ATTACHMENT_BLOCK_MIN_PX.file);
-    const textAfterHead = planRowBlocks({
+    const textAfterHead = plan({
       row: row(),
       sectionContent: { "row-1": [secPhoto("B", "a-b"), secText("A", "x")] },
     })[1];
@@ -819,7 +871,7 @@ describe("section pagination grouping", () => {
   });
 
   test("block ids are namespaced apart from primary attachments and evidence", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.PHOTO }),
       isAttachmentField: true,
       // Deliberately the same item id in both collections.
@@ -832,7 +884,7 @@ describe("section pagination grouping", () => {
   });
 
   test("the planner states row identity only — it never carries selection state", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
     });
@@ -848,9 +900,9 @@ describe("section pagination grouping", () => {
     }
   });
 
-  test("section content is ignored entirely when note rendering is off (Template Builder)", () => {
-    // The caller withholds the map exactly as it withholds attachments/evidence.
-    const blocks = planRowBlocks({ row: row(), sectionContent: null });
+  test("a section body is ignored entirely when note rendering is off (Template Builder)", () => {
+    // The caller withholds the segments exactly as it withholds attachments/evidence.
+    const blocks = planRowBlocks({ row: row(), sectionSegments: null });
     expect(blocks).toHaveLength(1);
     expect(blocks[0].kind).toBe(ROW_BLOCK_KIND.ROW);
   });
@@ -869,7 +921,7 @@ describe("one row is ONE logical section group", () => {
   const groupsOf = (blocks) => new Set(blocks.map((b) => b.group));
 
   test("text + image belong to one group", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
     });
@@ -878,7 +930,7 @@ describe("one row is ONE logical section group", () => {
   });
 
   test("text + image + text belong to one group", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [secText("A", "x"), secPhoto("B", "a-b"), secText("C", "y")],
@@ -892,7 +944,7 @@ describe("one row is ONE logical section group", () => {
   });
 
   test("a STRUCTURED row's supplementary items stay in that row's group", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.NUMBER }),
       sectionContent: { "row-1": [secPhoto("B", "a-b"), secText("C", "y")] },
     });
@@ -903,7 +955,7 @@ describe("one row is ONE logical section group", () => {
   });
 
   test("a legacy Photo/File field's supplementary items stay in that row's group", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.PHOTO }),
       isAttachmentField: true,
       attachments: { "row-1": [photo("P", "a-p")] },
@@ -912,13 +964,13 @@ describe("one row is ONE logical section group", () => {
     expect(kinds(blocks)).toEqual([
       ROW_BLOCK_KIND.ATTACHMENT_HEAD,
       ROW_BLOCK_KIND.ATTACHMENT,
-      ROW_BLOCK_KIND.SECTION_ITEM,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
     ]);
     expect(groupsOf(blocks)).toEqual(new Set(["row-1"]));
   });
 
   test("a CUSTOM row's items stay in that custom row's group", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ id: "custom-9", isCustom: true }),
       sectionContent: {
         "custom-9": [secText("A", "x"), secFile("B", "a-b")],
@@ -929,11 +981,11 @@ describe("one row is ONE logical section group", () => {
   });
 
   test("two different rows never share a group", () => {
-    const a = planRowBlocks({
+    const a = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
     });
-    const b = planRowBlocks({
+    const b = plan({
       row: row({ id: "row-2" }),
       sectionContent: { "row-2": [secText("C", "y"), secPhoto("D", "a-d")] },
     });
@@ -945,13 +997,13 @@ describe("one row is ONE logical section group", () => {
     // After an item-level Remove the row must collapse back to the plain
     // single-block shape — no leftover grouping, no continuation semantics and
     // no empty segment where the attachment used to be.
-    const before = planRowBlocks({
+    const before = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
     });
     expect(before).toHaveLength(2);
 
-    const after = planRowBlocks({
+    const after = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x")] },
     });
@@ -962,7 +1014,7 @@ describe("one row is ONE logical section group", () => {
   });
 
   test("removing a middle attachment closes the gap and keeps the text around it", () => {
-    const after = planRowBlocks({
+    const after = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x"), secText("C", "y")] },
     });
@@ -979,21 +1031,21 @@ describe("one row is ONE logical section group", () => {
 // paragraph reserved the whole legacy row height and the photo beneath it began
 // far below the text. `row.px` still governs every row whose body is its own
 // answer control — that height is the one the user actually dragged.
-describe("section height comes from the items, never from the legacy row height", () => {
+describe("section height comes from the segments, never from the legacy row height", () => {
   const heights = (blocks) => blocks.map((b) => b.minHeight);
 
   test("a legacy Text row with NO section content keeps its row height", () => {
-    expect(planRowBlocks({ row: row() })[0].minHeight).toBe(120);
-    expect(planRowBlocks({ row: row({ px: 300 }) })[0].minHeight).toBe(300);
+    expect(plan({ row: row() })[0].minHeight).toBe(120);
+    expect(plan({ row: row({ px: 300 }) })[0].minHeight).toBe(300);
     // And an empty/absent section map changes nothing.
     expect(
-      planRowBlocks({ row: row({ px: 300 }), sectionContent: { "row-1": [] } })[0]
+      plan({ row: row({ px: 300 }), sectionContent: { "row-1": [] } })[0]
         .minHeight
     ).toBe(300);
   });
 
   test("an authoritative section TEXT item does not inherit row.px", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ px: 300 }),
       sectionContent: { "row-1": [secText("A", "short")] },
     });
@@ -1002,7 +1054,7 @@ describe("section height comes from the items, never from the legacy row height"
   });
 
   test("short text + photo stacks with no legacy-height gap", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ px: 300 }),
       sectionContent: { "row-1": [secText("A", "short"), secPhoto("B", "a-b")] },
     });
@@ -1013,7 +1065,7 @@ describe("section height comes from the items, never from the legacy row height"
   });
 
   test("text + file stacks naturally", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "short"), secFile("B", "a-b")] },
     });
@@ -1024,7 +1076,7 @@ describe("section height comes from the items, never from the legacy row height"
   });
 
   test("text + photo + text stacks naturally", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ px: 240 }),
       sectionContent: {
         "row-1": [secText("A", "x"), secPhoto("B", "a-b"), secText("C", "y")],
@@ -1042,7 +1094,7 @@ describe("section height comes from the items, never from the legacy row height"
   test("an EMPTY text item keeps a compact usable editing minimum", () => {
     // Small enough not to be a blank band, large enough to remain a real click
     // target — and it is a MINIMUM, so the rendered editor line governs.
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ px: 300 }),
       sectionContent: { "row-1": [secText("A", ""), secPhoto("B", "a-b")] },
     });
@@ -1054,11 +1106,11 @@ describe("section height comes from the items, never from the legacy row height"
   test("the height is a MINIMUM, so long text can still grow", () => {
     // resolveBlockHeight takes max(preferred, measured): a hint never caps the
     // rendered height, so a pasted essay simply makes the block taller.
-    const short = planRowBlocks({
+    const short = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x")] },
     })[0];
-    const long = planRowBlocks({
+    const long = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x".repeat(5000))] },
     })[0];
@@ -1067,18 +1119,19 @@ describe("section height comes from the items, never from the legacy row height"
     expect(resolveBlockHeight(long.minHeight, 900)).toBe(900);
   });
 
-  test("every section item's height is decided by its own kind", () => {
-    expect(sectionItemMinHeight(secText("A", "x"))).toBe(SECTION_TEXT_BLOCK_MIN_PX);
-    expect(sectionItemMinHeight(secPhoto("B", "a-b"))).toBe(
-      ATTACHMENT_BLOCK_MIN_PX.photo
+  test("every section segment's height is decided by its own kind", () => {
+    const [text, image, file] = segmentsFor(
+      { "row-1": [secText("A", "x"), secPhoto("B", "a-b"), secFile("C", "a-c")] },
+      "row-1"
     );
-    expect(sectionItemMinHeight(secFile("C", "a-c"))).toBe(
-      ATTACHMENT_BLOCK_MIN_PX.file
-    );
+    expect(sectionSegmentMinHeight(text)).toBe(SECTION_TEXT_BLOCK_MIN_PX);
+    expect(sectionSegmentMinHeight(image)).toBe(ATTACHMENT_BLOCK_MIN_PX.photo);
+    expect(sectionSegmentMinHeight(file)).toBe(ATTACHMENT_BLOCK_MIN_PX.file);
+    expect(sectionSegmentMinHeight(null)).toBe(SECTION_TEXT_BLOCK_MIN_PX);
   });
 
   test("a STRUCTURED row keeps its real primary control height", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.DATE, px: 160 }),
       sectionContent: { "row-1": [secPhoto("B", "a-b")] },
     });
@@ -1091,7 +1144,7 @@ describe("section height comes from the items, never from the legacy row height"
   });
 
   test("a legacy PHOTO field keeps its primary area and adds nothing artificial", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.PHOTO, px: 200 }),
       isAttachmentField: true,
       attachments: { "row-1": [photo("P", "a-p")] },
@@ -1106,7 +1159,7 @@ describe("section height comes from the items, never from the legacy row height"
   });
 
   test("a legacy FILE field behaves the same way", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.FILE, px: 90 }),
       isAttachmentField: true,
       attachments: { "row-1": [file("F", "a-f")] },
@@ -1118,7 +1171,7 @@ describe("section height comes from the items, never from the legacy row height"
   });
 
   test("a CUSTOM flexible row is content-driven too", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ id: "custom-9", isCustom: true, px: 260 }),
       sectionContent: {
         "custom-9": [secText("A", "x"), secPhoto("B", "a-b")],
@@ -1131,11 +1184,11 @@ describe("section height comes from the items, never from the legacy row height"
   });
 
   test("removing an item removes its space entirely — nothing is reserved", () => {
-    const before = planRowBlocks({
+    const before = plan({
       row: row({ px: 300 }),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
     });
-    const after = planRowBlocks({
+    const after = plan({
       row: row({ px: 300 }),
       sectionContent: { "row-1": [secText("A", "x")] },
     });
@@ -1147,7 +1200,7 @@ describe("section height comes from the items, never from the legacy row height"
   });
 
   test("composition and continuation are unaffected by the height change", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [secText("A", "x"), secPhoto("B", "a-b"), secText("C", "y")],
@@ -1171,7 +1224,7 @@ describe("a flexible section's optional extra working space", () => {
   const tail = (blocks) => blocks[blocks.length - 1];
 
   test("with no manual resize the section stays exactly content-driven", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ px: 300 }),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
     });
@@ -1185,7 +1238,7 @@ describe("a flexible section's optional extra working space", () => {
   test("an absent, empty or malformed map is the same as no resize", () => {
     const items = { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] };
     for (const map of [undefined, null, {}, [], "nope"]) {
-      const blocks = planRowBlocks({
+      const blocks = plan({
         row: row({ px: 300 }),
         sectionContent: items,
         sectionExtraHeight: map,
@@ -1197,7 +1250,7 @@ describe("a flexible section's optional extra working space", () => {
   test("the legacy row.px is NEVER treated as a section's extra space", () => {
     // Reinterpreting it would reserve blank space in every existing section at
     // once, which is exactly the defect that was fixed.
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ px: 400, minPx: 380 }),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
       sectionExtraHeight: {},
@@ -1209,7 +1262,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("an explicit resize makes the section taller, at its END only", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [secText("A", "x"), secPhoto("B", "a-b"), secText("C", "y")],
@@ -1225,7 +1278,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("no extra height is ever added BETWEEN items", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [secText("A", "x"), secFile("B", "a-b"), secPhoto("C", "a-c")],
@@ -1238,7 +1291,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("exactly ONE block is the section's tail", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [secText("A", "x"), secPhoto("B", "a-b"), secText("C", "y")],
@@ -1252,7 +1305,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("a single-item section is its own tail", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ px: 300 }),
       sectionContent: { "row-1": [secText("A", "x")] },
       sectionExtraHeight: { "row-1": 60 },
@@ -1267,7 +1320,7 @@ describe("a flexible section's optional extra working space", () => {
     // resolveBlockHeight takes max(preferred, measured): a taller measured block
     // always wins, whatever the extra is. Long text, a tall image and a file card
     // are all safe by the same rule.
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
       sectionExtraHeight: { "row-1": 100 },
@@ -1279,7 +1332,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("a stored value is normalized, never trusted raw", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x")] },
       sectionExtraHeight: { "row-1": -500 },
@@ -1288,14 +1341,14 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("removing an item moves the tail and recalculates the natural minimum", () => {
-    const before = planRowBlocks({
+    const before = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
       sectionExtraHeight: { "row-1": 120 },
     });
     expect(before[1].minHeight).toBe(ATTACHMENT_BLOCK_MIN_PX.photo + 120);
 
-    const after = planRowBlocks({
+    const after = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x")] },
       sectionExtraHeight: { "row-1": 120 },
@@ -1308,7 +1361,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("adding an item moves the extra to the NEW end of the section", () => {
-    const grown = planRowBlocks({
+    const grown = plan({
       row: row(),
       sectionContent: { "row-1": [secText("A", "x"), secPhoto("B", "a-b")] },
       sectionExtraHeight: { "row-1": 120 },
@@ -1318,7 +1371,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("a STRUCTURED row gets no section extra and keeps its own row height", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.DATE, px: 160 }),
       sectionContent: { "row-1": [secPhoto("B", "a-b")] },
       sectionExtraHeight: { "row-1": 200 },
@@ -1329,7 +1382,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("a legacy Photo/File field gets no section extra either", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ type: FIELD_TYPE.PHOTO, px: 200 }),
       isAttachmentField: true,
       attachments: { "row-1": [photo("P", "a-p")] },
@@ -1342,7 +1395,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("a CUSTOM flexible row resizes like any other section", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ id: "custom-9", isCustom: true, px: 260 }),
       sectionContent: { "custom-9": [secText("A", "x"), secPhoto("B", "a-b")] },
       sectionExtraHeight: { "custom-9": 75 },
@@ -1353,7 +1406,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("a LEGACY row with no section content is completely unaffected", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row({ px: 300 }),
       sectionExtraHeight: { "row-1": 500 },
     });
@@ -1364,7 +1417,7 @@ describe("a flexible section's optional extra working space", () => {
   });
 
   test("composition and grouping are unaffected by an extra", () => {
-    const blocks = planRowBlocks({
+    const blocks = plan({
       row: row(),
       sectionContent: {
         "row-1": [secText("A", "x"), secPhoto("B", "a-b"), secText("C", "y")],
@@ -1382,7 +1435,7 @@ describe("a flexible section's optional extra working space", () => {
     // attachments, evidence and section content already are.
     const blocks = planRowBlocks({
       row: row(),
-      sectionContent: null,
+      sectionSegments: null,
       sectionExtraHeight: null,
     });
     expect(blocks).toHaveLength(1);

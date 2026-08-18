@@ -28,7 +28,6 @@ import {
 import {
   ROW_BLOCK_KIND,
   planRowBlocks,
-  sectionItemMinHeight,
   sectionSegmentMinHeight,
 } from "../../lib/templateRowContent";
 import {
@@ -37,37 +36,20 @@ import {
   compatSegmentItemKind,
   sectionDocSegments,
 } from "../../lib/templateSectionDocSegments";
-import { SECTION_BODY_SOURCE } from "../../lib/templateSectionBody";
 import TemplateSectionDocView from "./TemplateSectionDocView";
 import TemplateSectionEditor from "./TemplateSectionEditor";
-import {
-  SECTION_ITEM_KIND,
-  normalizeSectionContent,
-} from "../../lib/templateSectionContent";
+import { SECTION_ITEM_KIND } from "../../lib/templateSectionContent";
 import {
   normalizeSectionExtraHeight,
   resizeSectionExtraHeight,
 } from "../../lib/templateSectionHeight";
-import { resolveSectionItemDrop } from "../../lib/templateSectionItemDrop";
-import {
-  beginItemDragGesture,
-  suppressGestureTrailingClick,
-} from "../../lib/templateSectionItemDragSession";
-import {
-  exceedsMoveThreshold,
-  imageDragPreviewGeometry,
-} from "../../lib/templateSectionImageMove";
+import { pressIsOnMediaControl } from "../../lib/templateSectionMediaPress";
 import { answerToModel, isEmptyAnswerValue } from "../../lib/templateRichText";
 import TemplateRichTextView from "./TemplateRichTextView";
 import PhotoAttachment from "./PhotoAttachment";
 import FileAttachmentRow from "./FileAttachmentRow";
 import RowRefineAction from "./RowRefineAction";
-import TemplateTextCell from "./TemplateTextCell";
-import {
-  ROW_REFINE_STATUS,
-  isRefinableRowType,
-  rowRefineTargetKey,
-} from "../../lib/templateRowRefine";
+import { ROW_REFINE_STATUS } from "../../lib/templateRowRefine";
 import { sectionRefineTargetKey } from "../../lib/templateSectionRefine";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import useOutsideClose from "../../hooks/useOutsideClose";
@@ -153,6 +135,21 @@ import { actionButtonClass } from "../../lib/interactionStyles";
  *   template's persisted `leftPct` and is published with the version, so every
  *   page and every note pinned to that version shares one ratio. In note mode
  *   the ratio comes from the pinned version and is deliberately not adjustable.
+ *
+ * FLEXIBLE SECTIONS (note mode, since Phase G):
+ * - A flexible Section body — a Text or custom row's whole answer, or the
+ *   supplementary material under a structured row / legacy Photo-File field —
+ *   is ONE Section document (`sectionBodies`, resolved by the canonical reader),
+ *   rendered statically one block per segment while inactive and as ONE shared
+ *   Tiptap/ProseMirror editor block while active (`sectionEditor`). Every edit
+ *   — text, images, files, placement, resize, Remove, Quick Add, Refine — is an
+ *   editor transaction; this component renders, activates and paginates, and
+ *   never writes. A body the editor may not own (material the document cannot
+ *   represent) renders read-only through the compatibility path.
+ * - The legacy per-item Section interaction (a roving per-row/per-TextItem
+ *   editor, an image body-drag with drop indicators and a ghost, a leading
+ *   caret above a media-headed section, per-item Remove/resize) was retired
+ *   in Phase G; nothing of it remains here.
  */
 
 // Unified Text field: a full-cell textarea that grows with its content instead
@@ -178,29 +175,6 @@ function AutoGrowTextarea({ value, onFocus, onChange, placeholder, className }) 
   );
 }
 
-// Are two resolved image-drop destinations the same one? Used to short-circuit
-// the drag's state setter, so moving the pointer across an item costs one
-// re-render rather than one per pixel. A TEXT destination compares by the
-// resolved position inside the paragraph, so sliding the pointer along a line
-// does move the insertion line.
-function sameItemDrop(a, b) {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  if (a.kind !== b.kind || a.targetItemId !== b.targetItemId) return false;
-  if (a.kind === "placement") return a.placement === b.placement;
-  const pa = a.point || {};
-  const pb = b.point || {};
-  return (
-    pa.kind === pb.kind &&
-    pa.blockIndex === pb.blockIndex &&
-    pa.offset === pb.offset &&
-    pa.itemIndex === pb.itemIndex
-  );
-}
-
-// Legacy-compatibility thumbnail for an already-MIGRATED legacy image that sits
-// on a row whose pinned type is not Photo/File (the row predates those types).
-// Module-scope so its hook state survives re-renders.
 function LegacyAssetImage({ attachment, maxH }) {
   const { url, status } = useAssetObjectUrl(attachment.assetId);
   if (status === "loading" || status === "idle") {
@@ -252,17 +226,6 @@ export default function ResizableTwoColTable({
   onRowLabelFocus, // (rowId) => void — a label is plain text; it must clear
   // rich-text toolbar ownership so formatting can never reach the answer of the
   // row whose label the caret is in.
-  // Contextual rich text for Text targets (note mode only). Absent — as in the
-  // Template Builder — leaves the previous plain textarea in place untouched.
-  //
-  //   { activeRowId, activeItemId, activeIdentity, reloadToken,
-  //     onActivate: (rowId, itemId | null) => identity | null,
-  //     onChange, onRegisterEditor }
-  //
-  // `activeItemId` names the ordered section TEXT ITEM the one editor is on, or
-  // null when it is on the row's own answer. It is EDITOR/CARET state only —
-  // `targetRowId` below stays the single Quick Add destination, and it is a ROW.
-  richText = null,
   logoLocked = false,
   enableFieldTypeEditor = false,
   knownOptionIds = null,
@@ -280,69 +243,39 @@ export default function ResizableTwoColTable({
   evidence = {},
   onRemoveEvidence, // (rowId, index) => void
   onUpdateEvidenceDisplay, // (rowId, index, displayPatch) => void
-  // ORDERED SECTION CONTENT (note mode): the raw instance sectionContent map
-  // keyed by row id. When a row has valid items here they ARE its body, in
-  // stored order — see src/lib/templateSectionContent.js and the authority rule
-  // in src/lib/templateRowContent.js.
-  //
-  // TEXT items are directly editable through the same `richText` wiring a
-  // legacy Text answer uses (the cell reports WHICH item was activated; the
-  // parent decides where a change is written). PHOTO and FILE items keep the
-  // legacy display toolbar hidden (no size presets, no alignment) but may be
-  // REMOVED individually (onRemoveSectionItem), and a PHOTO may be moved by its
-  // body and resized by its corners (onResizeSectionPhoto).
-  sectionContent = {},
   // THE UNIFIED SECTION BODIES (note mode): `{ [rowId]: resolvedBody }`, each
   // one produced by the CANONICAL body reader (src/lib/templateSectionBody.js)
   // — the single place that decides which stored representation a Section's
   // body comes from. A row present here renders its body as ONE ordered
-  // document through the static Section view, one block per segment, WHENEVER
-  // the legacy per-item interaction is not currently on it.
+  // document through the static Section view, one block per segment, whenever
+  // its shared editor is not mounted on it.
   //
   // This component never asks which representation won, and never reads
-  // `sectionDoc` for itself: the reader answered that, and the answer arrives
-  // here already resolved.
+  // `sectionDoc`, `sectionContent` or `evidence` for itself: the reader
+  // answered that, and the answer arrives here already resolved. A stored item
+  // the document cannot represent arrives as a COMPAT segment carrying the raw
+  // stored entry, and is rendered read-only through the compatibility renderer.
   //
   // Absent (the Template Builder, and any row without a document body) leaves
   // the row planning and rendering exactly as it always has.
   sectionBodies = null,
-  // THE SHARED SECTION EDITOR (Phase F4). Absent in the Template Builder and
-  // anywhere else that renders no note content, in which case a Section is
-  // never activated and every one of the branches below is inert.
+  // THE SHARED SECTION EDITOR — since Phase G the ONLY interaction a flexible
+  // Section body has (text, images, files, Quick Add, Refine all go through
+  // its ONE ProseMirror document). Absent in the Template Builder and anywhere
+  // else that renders no note content, in which case a Section is never
+  // activated and every one of the branches below is inert.
+  //
+  //   { activeRowId, identity, editor, editable, editableRows,
+  //     onActivate: (rowId) => identity | null, onRegisterEditor }
+  //
+  // `editableRows` names the Sections this build may open at all
+  // (`{ [rowId]: { html, ariaLabel, minHeightPx, isDocument } }`). A row
+  // ABSENT from it holds material the modern document cannot represent
+  // (src/lib/templateSectionBody.js → sectionEditorEligibility): it renders
+  // exactly what it always rendered, through the compatibility path, and is
+  // READ-ONLY — there is no other editor. `onActivate` returns the identity
+  // that was activated so the press point can be stamped with it.
   sectionEditor = null,
-  // Remove ONE ordered section photo/file item, addressed by the row id and the
-  // item's own stable id — never by a position, and never by index into another
-  // collection. Omit it and no item Remove is offered at all (the Template
-  // Builder never passes it). A TEXT item is never given this action.
-  onRemoveSectionItem, // (rowId, itemId) => void
-  // Move ONE ordered section item WITHIN its own section, to a position BESIDE
-  // another item. Both ends are the items' own stable ids and there is exactly
-  // one row id, so a cross-section move is not expressible through this API at
-  // all — moving never becomes a second destination concept alongside the Quick
-  // Add target row. Omit it and the gesture cannot land beside an item.
-  onReorderSectionItem, // (rowId, sourceItemId, targetItemId, "before"|"after") => void
-  // Move ONE ordered section item to a position INSIDE a text item of the same
-  // section — the Word-like drop. `point` is a resolved position in that text
-  // item's normalized model (src/lib/templateSectionTextPoint.js); the writer
-  // splits the text around the moved item. One row id again, so this is
-  // same-section only by construction. Omit it and a text item is only ever a
-  // before/after destination. One completed gesture is ONE call.
-  onDropSectionItemIntoText, // (rowId, sourceItemId, targetItemId, point) => void
-  // Resize ONE ordered section PHOTO, proportionally, by its corner handles (or
-  // by Alt + Left/Right on the focused image). The value is a WIDTH PERCENTAGE
-  // of the section's content column and nothing else — no pixels, no height — so
-  // the aspect ratio is preserved by construction. Called once per completed
-  // gesture. Omit it and no corner handle is rendered at all (the Template
-  // Builder never passes it). A TEXT or FILE item is never given this action.
-  onResizeSectionPhoto, // (rowId, itemId, widthPct) => void
-  // OPEN A LEADING CARET above a section whose first visible item is an image or
-  // a file, so the user can type ABOVE it exactly as they would in a word
-  // processor. It writes NOTHING: the parent mints an item id, opens the one
-  // editor against it, and the stored list gains a text item only when the user
-  // actually types (src/lib/templateSectionLeadingText.js). Omit it and no
-  // leading insertion point is offered at all (the Template Builder never
-  // passes it).
-  onOpenSectionLeadingText, // (rowId) => void
   // OPTIONAL EXTRA WORKING SPACE on a flexible section, keyed by row id. It is
   // additive trailing space the user dragged into existence — never the legacy
   // `row.px`, which is a different value with a different owner (see
@@ -354,24 +287,16 @@ export default function ResizableTwoColTable({
   fieldBusy = {}, // { [fieldId]: true while uploading }
   onDismissFieldError, // (fieldId) => void
   onFieldError, // (fieldId, message) => void — e.g. a failed file open
-  // TEXT-TARGET AI (note mode only). All four are optional and inert by default:
-  // with no `onRefineRow` nothing about AI renders at all, which is how the
-  // Template Builder stays entirely free of it.
-  //
-  // A target is a legacy Text ROW (`itemId` omitted) or ONE ordered section TEXT
-  // ITEM (`itemId` given). Both maps below are keyed by `rowRefineTargetKey`,
-  // which is the bare row id in the legacy case.
-  onRefineRow, // (rowId, styleValue, itemId|null) => void
-  onRevertRowRefine, // (rowId, itemId|null) => void
+  // Per-target AI feedback, keyed by `sectionRefineTargetKey`
+  // (`rowId::seg::n`) — the modern Section Refine's status map. Inert by default.
   rowRefineStatus = {}, // { [targetKey]: { status, message } }
-  refineRevertableTargetKeys = null, // Set<targetKey> with a session Revert backup
-  // MODERN SECTION AI (note mode only, Phase F6a). Inert when absent, exactly
-  // like the four above. A row whose body is an authoritative document has no
-  // legacy per-item target to refine, so its prose is addressed as TEXT RUNS of
-  // that document instead:
+  // SECTION AI (note mode only, Phase F6a — since Phase G the ONLY Refine a
+  // Template Section has). Inert when absent, which is how the Template Builder
+  // stays entirely free of it. A Section's prose is addressed as TEXT RUNS of
+  // its document:
   //
   //   rows        { [rowId]: true }  — the rows this path serves, decided by
-  //                                    the parent (modern AND openable)
+  //                                    the parent (openable in the editor)
   //   revertKeys  { [rowId]: { [runIndex]: targetKey } } — re-anchored by the
   //                                    parent on the run that still holds each
   //                                    backup's refined text
@@ -381,9 +306,7 @@ export default function ResizableTwoColTable({
   //                                    means "the run the caret is in"
   //   onRevert    (rowId, targetKey) => void
   //
-  // Status messages share `rowRefineStatus` above: the two paths use disjoint
-  // key spaces (`rowId::seg::n` vs `rowId` / `rowId::item::id`), so one map
-  // carries both without either being able to read the other's entry.
+  // Status messages live in `rowRefineStatus` above.
   sectionRefine = null,
   // Row actions: "builder" (master template rows) | "note" (note-specific
   // custom rows) | "none". See the block comment above.
@@ -569,23 +492,6 @@ export default function ResizableTwoColTable({
 
   const showRightEditor = !!enableRightEditor;
 
-  // The note's ordered section content, through the Phase 0 read model (so the
-  // strict item discriminator decides, not this component). Memoized because
-  // the answer normalizer parses stored rich text and several render helpers
-  // ask about it. Note mode only: the Template Builder renders the reusable
-  // form, never a note's content.
-  const normalizedSectionContent = useMemo(
-    () => normalizeSectionContent(showRightEditor ? sectionContent : null),
-    [showRightEditor, sectionContent]
-  );
-
-  // The rows whose body comes from ordered section content rather than from the
-  // legacy answer.
-  const sectionContentRowIds = useMemo(
-    () => new Set(Object.keys(normalizedSectionContent)),
-    [normalizedSectionContent]
-  );
-
   // The rows whose body the CANONICAL reader resolved to a unified Section
   // DOCUMENT — the modern stored document, or the ordered item list adapted
   // into one. Nothing here re-derives that; the reader decided and this is
@@ -646,10 +552,6 @@ export default function ResizableTwoColTable({
       const segments = sectionDocSegments(body);
       map.set(rowId, {
         segments,
-        // Is this row's body the MODERN stored document (rather than the
-        // ordered item list adapted on read)? It is what decides which Refine
-        // path the row is served by, and the reader already answered it.
-        modern: body.source === SECTION_BODY_SOURCE.SECTION_DOC,
         // Which TEXT RUN each segment carries, by the segment's own key.
         //
         // A run is the document's unit of refineable prose, and it is NOT the
@@ -658,42 +560,18 @@ export default function ResizableTwoColTable({
         // segment carries the run. Counting in segment order therefore
         // reproduces exactly the run ordinals the document itself has.
         runIndexByKey: runIndexByKey(segments),
-        // CAN this row hand itself back to the legacy per-item interaction?
-        //
-        // Only a body ADAPTED from the ordered item list can: the legacy
-        // interaction addresses stored items, and its plan renders them. A row
-        // whose body is a MODERN stored document has no items behind it, so
-        // handing it over would silently show a different document — the frozen
-        // legacy answer, or nothing. Such a row therefore stays read-only until
-        // the Section editor lands (Phase F4); no Template writer produces one
-        // yet, so no stored note reaches this branch today.
-        editable: body.source === SECTION_BODY_SOURCE.SECTION_CONTENT,
       });
     }
     return map;
   }, [showRightEditor, sectionBodies]);
 
   /**
-   * The point the caret should land on when a STATIC Section text segment hands
-   * the row back to the legacy editor.
-   *
-   * Clicking static text activates the row, which re-plans it onto the legacy
-   * per-item blocks — so the cell that finally carries the editor is a NEW
-   * component instance and cannot have recorded the click itself. This ref
-   * carries the point across that one render, stamped with the editor identity
-   * the activation resolved, so a point can only ever be consumed by the exact
-   * target it was aimed at.
-   */
-  const pendingSectionCaret = useRef(null);
-
-  /**
    * Where the caret should land once the SHARED Section editor's view is
-   * attached — the same hand-off `pendingSectionCaret` performs for the legacy
-   * editor, and for the same reason: the component that finally carries the
-   * editor is a different one from the static box the user pressed, so it
-   * cannot have recorded the press itself. Stamped with the editor identity the
-   * activation resolved, so a point can only ever be consumed by the exact
-   * Section it was aimed at.
+   * attached. The component that finally carries the editor is a different one
+   * from the static box the user pressed, so it cannot have recorded the press
+   * itself; this ref carries the point across that one render, stamped with the
+   * editor identity the activation resolved, so a point can only ever be
+   * consumed by the exact Section it was aimed at.
    */
   const sectionEditorCaret = useRef(null);
 
@@ -701,8 +579,10 @@ export default function ResizableTwoColTable({
    * MAY the shared Section editor own this row's flexible body?
    *
    * The answer is the parent's, not this component's: a body carrying material
-   * the modern document cannot represent is absent from `editableRows` and
-   * therefore keeps whichever path it already has (see NoteTemplateDoc).
+   * the modern document cannot represent is absent from `editableRows` and is
+   * therefore READ-ONLY here — rendered exactly as stored through the
+   * compatibility path, never editable (see NoteTemplateDoc and
+   * src/lib/templateSectionBody.js → sectionEditorEligibility).
    */
   function sectionEditorOwnsRow(row) {
     if (!row || !sectionEditor || !sectionEditor.editableRows) return false;
@@ -732,10 +612,8 @@ export default function ResizableTwoColTable({
    *     unmount the editor underneath the user.
    *   - the STATIC segments when nobody is editing it (Phase F3).
    *   - null, meaning "plan and render this row exactly as it always has":
-   *     it has no document body, or the LEGACY per-item interaction currently
-   *     owns it (a Section this build refuses to modernize, being edited or
-   *     showing its leading caret) and must keep its own blocks, its editor,
-   *     its image drag and its resize handles.
+   *     it has no document body (its body is its own answer control, its
+   *     primary attachments, or its legacy evidence blocks).
    */
   function sectionStaticSegments(row) {
     if (!row) return null;
@@ -748,31 +626,14 @@ export default function ResizableTwoColTable({
     }
     const entry = documentBodySegments.get(row.id);
     if (!entry || !entry.segments.length) return null;
-    if (richText && (richText.activeRowId === row.id || richText.leadingRowId === row.id)) {
-      return null;
-    }
     return entry.segments;
-  }
-
-  /**
-   * May the legacy per-item interaction take this row's body over?
-   *
-   * Only for a body adapted from the ordered item list that the shared Section
-   * editor is NOT allowed to own. Once the shared editor may own a Section, the
-   * legacy interaction must never also be reachable on it — running both over
-   * one body is exactly the state this phase exists to end.
-   */
-  function sectionCanHandBackToLegacy(row) {
-    if (sectionEditorOwnsRow(row)) return false;
-    const entry = row ? documentBodySegments.get(row.id) : null;
-    return !!(entry && entry.editable);
   }
 
   /**
    * ACTIVATE this row's shared Section editor at the point the user pressed.
    *
-   * Returns true when the press was taken, so a caller can leave the legacy
-   * activation alone.
+   * Returns true when the press was taken (false for a row the editor may not
+   * own, or a surface with no editor at all).
    */
   function activateSectionEditor(row, event) {
     if (!sectionEditor || typeof sectionEditor.onActivate !== "function") return false;
@@ -815,282 +676,6 @@ export default function ResizableTwoColTable({
     const first = entry.segments.find((s) => s.kind === SECTION_SEGMENT_KIND.TEXT);
     return !!first && first.key === segment.key;
   }
-
-  /** The legacy stored item a segment was adapted from, or null. */
-  function segmentLegacyItem(row, segment) {
-    if (!row || !segment || !segment.itemId) return null;
-    const items = normalizedSectionContent[row.id] || [];
-    return items.find((i) => i.id === segment.itemId) || null;
-  }
-
-  // ---------- WORD-LIKE IMAGE PLACEMENT WITHIN A SECTION ----------
-  // A section behaves like a word-processor document body: text is typed, and an
-  // IMAGE is placed by dragging the image itself. There is deliberately no grip,
-  // no ▲/▼ command pair and no reorder affordance of any kind on a text item —
-  // a paragraph is prose the user edits, not a block they shuffle.
-  //
-  // Three interactions still stay strictly apart on this surface:
-  //
-  //   whole-section height   the handle at the bottom of the logical section
-  //   image MOVE             the body/centre of a persisted section image
-  //   image RESIZE           the image's four CORNERS (PhotoAttachment)
-  //
-  // The body/corner split is enforced in PhotoAttachment through the one shared
-  // rule in src/lib/templateSectionImageMove.js, so a resize gesture and a move
-  // gesture never contend for the same pixel.
-  //
-  // The drag is pointer-based rather than HTML5 drag-and-drop, because the
-  // document surface is full of rich-text editors that handle native drop
-  // events themselves. Its move/up/cancel listeners are installed
-  // SYNCHRONOUSLY inside the pointerdown handler, through
-  // src/lib/templateSectionItemDragSession.js — never through a React effect.
-  // A browser session proved why: an effect gated on the gesture state attaches
-  // only after React commits, and a fast press-flick-release fits entirely
-  // inside that gap, so the whole drag was silently lost.
-  //
-  // `itemDrag` is PURELY VISUAL. It starts PENDING (`armed: false`) — a press is
-  // not yet a move — and arms only once the pointer has travelled past the
-  // threshold, which is what keeps an ordinary click on an image an ordinary
-  // click. Nothing is written at any point before the drop.
-  const [itemDrag, setItemDrag] = useState(null);
-  // The SAME gesture record, readable synchronously: the window listeners run
-  // outside React's render cycle and must see the gesture as it is NOW, not as
-  // of the last committed render. Updated together with the state, always.
-  const itemDragRef = useRef(null);
-  // The live gesture's listener handle. Set synchronously at pointerdown,
-  // cleared exactly once when the gesture ends — whichever exit ends it.
-  const itemDragSessionRef = useRef(null);
-  // The latest move/end handlers, re-pointed every render, so the listeners
-  // installed at pointerdown never call a stale closure mid-gesture.
-  const itemDragCallbacksRef = useRef({ move: () => {}, end: () => {} });
-  // Cancels an armed trailing-click suppression on unmount; it otherwise
-  // resolves itself on the very next click or pointerdown.
-  const suppressItemClickRef = useRef(null);
-  const canMoveSectionItems =
-    typeof onReorderSectionItem === "function" ||
-    typeof onDropSectionItemIntoText === "function";
-
-  const startItemDrag = useCallback(
-    (rowId, itemId, e) => {
-      if (!canMoveSectionItems) return;
-      // One gesture at a time: a second pointer pressing mid-drag cannot mint
-      // a competing session or orphan the first one's listeners.
-      if (itemDragSessionRef.current) return;
-      // Suppressing the browser defaults stops the native image drag and stops
-      // a drag across the page selecting the text it passes over.
-      e.preventDefault();
-      e.stopPropagation();
-      // WHAT THE PREVIEW WILL SHOW, captured now — the gesture starts on the
-      // <img> itself, so its resolved object URL and its box on the page are
-      // both right here. Read synchronously, while the event is still being
-      // dispatched. A source we cannot read simply produces no preview; the
-      // move still works.
-      const img = e.currentTarget;
-      const rect =
-        img && typeof img.getBoundingClientRect === "function"
-          ? img.getBoundingClientRect()
-          : null;
-      const src = (img && (img.currentSrc || img.src)) || null;
-      const record = {
-        rowId,
-        itemId,
-        // Only the pointer that started the gesture may drive or end it.
-        pointerId: e.pointerId,
-        startX: e.clientX,
-        startY: e.clientY,
-        armed: false,
-        drop: null,
-        // Presentation only. Nothing here is stored, and the item keeps its
-        // place in the document while it is shown.
-        preview:
-          rect && src
-            ? {
-                src,
-                rect: {
-                  left: rect.left,
-                  top: rect.top,
-                  width: rect.width,
-                  height: rect.height,
-                },
-                grabX: e.clientX,
-                grabY: e.clientY,
-              }
-            : null,
-        pointerX: e.clientX,
-        pointerY: e.clientY,
-      };
-      itemDragRef.current = record;
-      setItemDrag(record);
-      // The gesture's listeners exist from THIS instant — before the browser
-      // can deliver the next event — so a fast press-move-release can never
-      // outrun a React commit and be lost. They dispatch through the callbacks
-      // ref, so mid-gesture re-renders never leave them calling stale closures.
-      itemDragSessionRef.current = beginItemDragGesture({
-        win: window,
-        pointerId: record.pointerId,
-        onMove: (ev) => itemDragCallbacksRef.current.move(ev),
-        onEnd: (commitEvent) => itemDragCallbacksRef.current.end(commitEvent),
-      });
-    },
-    [canMoveSectionItems]
-  );
-
-  /**
-   * WHERE WOULD THIS DROP? Resolved from the element under the pointer, so the
-   * whole item band is a target rather than a thin strip.
-   *
-   * A block belonging to ANOTHER row is not a destination at all: the row id
-   * must match the one the drag started in, which is what makes a cross-section
-   * drop impossible on screen as well as in the writers.
-   *
-   * Two kinds of destination:
-   *
-   *   "text"      the pointer is over a TEXT item and the browser could resolve
-   *               the coordinate to a caret position inside it. The image lands
-   *               THERE, splitting the paragraph around it — the Word-like case.
-   *               A drop at the very start or very end of the text resolves to
-   *               the same point and the writer places the image beside the item
-   *               instead of creating an empty fragment, so no separate
-   *               before/after code path is needed for text.
-   *   "placement" the pointer is over a photo or a file item (or over text whose
-   *               caret could not be resolved, or resolved to a position the
-   *               image is already sitting beside): before or after it, by which
-   *               half of the band the pointer is in.
-   *
-   * A destination is only ever a position the image would ACTUALLY move to — a
-   * drop that would change nothing resolves to no destination at all, so an
-   * insertion line never promises a move that the writer then refuses. The rule
-   * itself lives in src/lib/templateSectionItemDrop.js, with the document
-   * injected, so the whole resolution is testable without a browser.
-   */
-  const resolveItemDrop = useCallback(
-    (drag, e) =>
-      resolveSectionItemDrop({
-        doc: typeof document !== "undefined" ? document : null,
-        clientX: e.clientX,
-        clientY: e.clientY,
-        rowId: drag.rowId,
-        movingItemId: drag.itemId,
-        items: normalizedSectionContent[drag.rowId] || [],
-        allowTextDrop: !!onDropSectionItemIntoText,
-        allowPlacement: !!onReorderSectionItem,
-      }),
-    [normalizedSectionContent, onDropSectionItemIntoText, onReorderSectionItem]
-  );
-
-  // The floating preview's element, positioned IMPERATIVELY while the pointer
-  // moves. Re-rendering the whole document on every mousemove to move a ghost
-  // would be a real cost on a long note; one style write is not. Nothing about
-  // the preview is state the document depends on.
-  const itemGhostRef = useRef(null);
-
-  const positionItemGhost = useCallback((preview, clientX, clientY) => {
-    const el = itemGhostRef.current;
-    if (!el || !preview) return;
-    const geo = imageDragPreviewGeometry({
-      rect: preview.rect,
-      grabX: preview.grabX,
-      grabY: preview.grabY,
-      clientX,
-      clientY,
-    });
-    if (!geo) return;
-    el.style.left = `${geo.left}px`;
-    el.style.top = `${geo.top}px`;
-  }, []);
-
-  // A pointermove belonging to the live gesture (the session has already
-  // checked the pointer id and that a button is still held).
-  const handleItemDragMove = useCallback(
-    (e) => {
-      const drag = itemDragRef.current;
-      if (!drag) return;
-      // A press that has not travelled far enough is still a click. Nothing is
-      // resolved, nothing is drawn, and releasing here does nothing at all.
-      if (
-        !drag.armed &&
-        !exceedsMoveThreshold({
-          startX: drag.startX,
-          startY: drag.startY,
-          clientX: e.clientX,
-          clientY: e.clientY,
-        })
-      ) {
-        return;
-      }
-
-      positionItemGhost(drag.preview, e.clientX, e.clientY);
-
-      const drop = resolveItemDrop(drag, e);
-      if (drag.armed && sameItemDrop(drag.drop, drop)) {
-        // No state change, no re-render, no persistence — the preview has
-        // already followed the pointer imperatively above.
-        return;
-      }
-      const next = { ...drag, armed: true, drop, pointerX: e.clientX, pointerY: e.clientY };
-      itemDragRef.current = next;
-      setItemDrag(next);
-    },
-    [resolveItemDrop, positionItemGhost]
-  );
-
-  // The gesture is over — every exit funnels through here exactly once.
-  // `commitEvent` is the pointerup that completed it, or null for every
-  // abandoning exit (Escape, pointercancel, stale gesture, unmount).
-  //
-  // ONE confirmed persistence attempt, on a committing release, and only when
-  // an ARMED gesture actually named a destination. A short press, a drop on
-  // nothing, and every abandoning exit end the drag and write nowhere.
-  const handleItemDragEnd = useCallback(
-    (commitEvent) => {
-      itemDragSessionRef.current = null;
-      const drag = itemDragRef.current;
-      itemDragRef.current = null;
-      setItemDrag(null);
-      if (!drag) return;
-      if (drag.armed) {
-        // The drag genuinely moved: the click the browser generates after its
-        // pointerup is not something the user asked for, so it is consumed —
-        // and ONLY it. A press that stayed a click never comes through here
-        // armed, so ordinary clicks keep their ordinary behaviour.
-        suppressItemClickRef.current = suppressGestureTrailingClick({ win: window });
-      }
-      if (!commitEvent || !drag.armed || !drag.drop) return;
-      if (drag.drop.kind === "text") {
-        if (!onDropSectionItemIntoText) return;
-        onDropSectionItemIntoText(
-          drag.rowId,
-          drag.itemId,
-          drag.drop.targetItemId,
-          drag.drop.point
-        );
-        return;
-      }
-      if (!onReorderSectionItem) return;
-      onReorderSectionItem(
-        drag.rowId,
-        drag.itemId,
-        drag.drop.targetItemId,
-        drag.drop.placement
-      );
-    },
-    [onReorderSectionItem, onDropSectionItemIntoText]
-  );
-
-  // Re-pointed every render, so the window listeners installed at pointerdown
-  // always dispatch into the newest handlers.
-  itemDragCallbacksRef.current = { move: handleItemDragMove, end: handleItemDragEnd };
-
-  // Unmounting mid-gesture abandons it: listeners torn down, nothing written.
-  // The session's own exits (pointerup, pointercancel, Escape, stale gesture)
-  // need no effect at all — they were installed synchronously at pointerdown.
-  React.useEffect(
-    () => () => {
-      if (itemDragSessionRef.current) itemDragSessionRef.current.end();
-      if (suppressItemClickRef.current) suppressItemClickRef.current();
-    },
-    []
-  );
 
   // ---------- ROW MUTATION HELPERS (builder field-type editor) ----------
   const patchRow = useCallback(
@@ -1232,39 +817,28 @@ export default function ResizableTwoColTable({
     }
     // FIELD_TYPE.TEXT — the unified Text field.
     //
-    // In a completed note it is the contextual rich-text cell: read-only React
-    // rendering until this row is the active one, then the single Template
-    // editor. The raw stored value is passed through (a plain string or a
-    // tagged rich value); only a STRING is put through the internal-id guard,
-    // because a rich value can never be an option id.
-    // A row whose flexible body the SHARED Section editor owns — a legacy
-    // answer-only Text or custom row this build may modernize. Inactive it is
-    // the same static box it has always been; pressing it opens the Section's
-    // real document, and the first genuine edit writes `sectionDoc[rowId]`
-    // (leaving `answers[rowId]` frozen underneath).
-    if (richText && sectionEditorOwnsRow(row)) {
-      if (isSectionEditorActive(row)) return renderSectionEditor(row);
-      return renderSectionStaticAnswer(row, typeof raw === "string" ? safeStr : raw);
-    }
-
-    if (richText) {
-      // The row's OWN answer, so it is active only while the editor addresses
-      // the row rather than one of its ordered section text items.
-      const active = richText.activeRowId === row.id && !richText.activeItemId;
-      return (
-        <TemplateTextCell
-          identity={active ? richText.activeIdentity : null}
-          rowId={row.id}
-          label={row.label}
-          value={typeof raw === "string" ? safeStr : raw}
-          placeholder="Enter details for this field..."
-          active={active}
-          reloadToken={richText.reloadToken}
-          onActivate={richText.onActivate}
-          onChange={richText.onChange}
-          onRegisterEditor={richText.onRegisterEditor}
-        />
-      );
+    // In a completed note (`sectionEditor` present) a legacy answer-only Text or
+    // custom row is a flexible Section the SHARED editor owns. Inactive it is
+    // the same static box it has always been, at the row's designed height;
+    // pressing it opens the Section's real document at the press point, and
+    // the first genuine edit writes `sectionDoc[rowId]` (leaving
+    // `answers[rowId]` / the custom row's `answer` frozen underneath). The raw
+    // stored value is passed through (a plain string or a tagged rich value);
+    // only a STRING is put through the internal-id guard, because a rich value
+    // can never be an option id.
+    if (sectionEditor) {
+      const value = typeof raw === "string" ? safeStr : raw;
+      if (sectionEditorOwnsRow(row)) {
+        if (isSectionEditorActive(row)) return renderSectionEditor(row);
+        return renderSectionStaticAnswer(row, value);
+      }
+      // A row the shared editor may NOT own — its body carries material the
+      // document cannot represent (a legacy evidence entry that was never
+      // carryable). Its answer renders exactly as it always has, READ-ONLY:
+      // Phase G retired the legacy row editor and this build has no other, so
+      // nothing here can write `answers[rowId]`. Its evidence keeps rendering
+      // through the legacy evidence blocks beneath.
+      return renderSectionReadOnlyAnswer(row, value);
     }
 
     // Builder / any caller without the rich-text cell: the previous full-cell
@@ -1389,81 +963,13 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // True for a LEGACY row that may be refined with AI: note mode, an answer row
-  // of the unified Text type (master or note-specific custom), and a handler
-  // wired. Number/date/time/checkbox/yes-no/dropdown/photo/file rows are
-  // excluded here, once, so no other call site has to remember the rule.
-  //
-  // A row whose body comes from ordered section content is excluded from THIS
-  // question, because "refine this row" has no meaning there: such a row does
-  // not render `answers[rowId]` at all. Its prose is refined per TEXT ITEM
-  // instead — see sectionItemAcceptsAiRefine — so nothing is lost, and no
-  // control can rewrite text the user cannot see.
-  function rowAcceptsAiRefine(row) {
-    return (
-      !!onRefineRow &&
-      showRightEditor &&
-      !!row &&
-      isRefinableRowType(row.type) &&
-      !sectionContentRowIds.has(row.id) &&
-      !documentBodySegments.has(row.id) &&
-      // …and a row the MODERN path owns is not this path's, even when its body
-      // is still its legacy answer: its live editor holds the row's history and
-      // is where a refinement must land.
-      !modernRefineOwnsRow(row)
-    );
-  }
-
-  // True for ONE ordered section TEXT item that may be refined with AI.
-  //
-  // The item's own kind is the whole rule: a section paragraph is prose whatever
-  // its row's field type is, so a Date row's supplementary text and a legacy
-  // Photo field's supplementary text are both refinable while their primary
-  // values — the typed answer, the primary attachment — are not reachable from
-  // here at all. A PHOTO or FILE item is never offered a Refine control.
-  function sectionItemAcceptsAiRefine(row, item) {
-    return (
-      !!onRefineRow &&
-      showRightEditor &&
-      !!row &&
-      !!item &&
-      item.kind === SECTION_ITEM_KIND.TEXT &&
-      // The per-ITEM trigger addresses a stored `sectionContent` entry. Once the
-      // modern path owns the row, that entry is no longer where an edit goes.
-      !modernRefineOwnsRow(row)
-    );
-  }
-
-  // The section text item a row-level control would act on, or null.
-  //
-  // The row head IS the section's first item, so when that item is text the
-  // existing row-level affordance stays exactly where it has always been and
-  // simply names the item it was already sitting on. A section whose head is an
-  // image has no row-level text target: its paragraphs carry their own controls.
-  function headRefineItem(sectionHeadItem) {
-    return sectionHeadItem && sectionHeadItem.kind === SECTION_ITEM_KIND.TEXT
-      ? sectionHeadItem
-      : null;
-  }
-
-  // How this target is announced. A section holding a single paragraph is
-  // unambiguous and keeps the row's own label; one holding several says WHICH
-  // paragraph, so the user can always tell which text is about to be rewritten.
-  function refineTargetLabel(row, item) {
-    if (!item) return row.label;
-    const items = normalizedSectionContent[row.id] || [];
-    const textItems = items.filter((i) => i.kind === SECTION_ITEM_KIND.TEXT);
-    if (textItems.length <= 1) return row.label;
-    return sectionTextItemLabel(row, item);
-  }
-
   /**
-   * Is this row served by the MODERN Refine path?
+   * Is this row served by Section Refine at all?
    *
-   * The parent's answer, never re-derived here: a row whose body is the
-   * authoritative document, OR one whose live Section editor already holds it
-   * (`resolveSectionRefineOwner`). It is what makes the two paths mutually
-   * exclusive — a row this returns true for shows no legacy trigger anywhere.
+   * The parent's answer, never re-derived here: every row whose body the shared
+   * editor may open (`resolveSectionRefineOwner`). A row it may not open — one
+   * holding material the document cannot represent — has no Refine, because it
+   * has no editor.
    */
   function modernRefineOwnsRow(row) {
     return !!(row && sectionRefine && sectionRefine.rows && sectionRefine.rows[row.id]);
@@ -1490,7 +996,7 @@ export default function ResizableTwoColTable({
   }
 
   /**
-   * The MODERN refine target a ROW-LEVEL trigger acts on, or null.
+   * The refine target a ROW-LEVEL trigger acts on, or null.
    *
    * Three shapes, one control, so the affordance never disappears as a Section
    * changes state:
@@ -1501,10 +1007,10 @@ export default function ResizableTwoColTable({
    *                     target it last acted on, so the message and the Revert
    *                     control have something to be about.
    *   STATIC document   the run its HEAD segment opens.
-   *   NO document yet   an eligible LEGACY prose body whose retained editor
-   *                     holds the row's history. Its live document is all prose,
-   *                     so it has exactly one run; the retained cursor is
-   *                     deliberately not consulted for an unmounted Section.
+   *   NO document yet   an eligible LEGACY prose body still rendering as its
+   *                     own answer box. Its document is all prose, so it has
+   *                     exactly one run — the Refine handler opens (or reuses)
+   *                     the row's editor and refines run 0.
    */
   function rowModernRefineTarget(row, headSegment) {
     if (!modernRefineOwnsRow(row)) return null;
@@ -1522,8 +1028,7 @@ export default function ResizableTwoColTable({
     };
   }
 
-  // The MODERN Refine trigger — the SAME control, in the same action areas, with
-  // the same preset menu and the same loading language as the legacy one.
+  // The Section Refine trigger, in whichever action area it belongs to.
   function renderSectionRefineAction(row, target) {
     return (
       <RowRefineAction
@@ -1540,39 +1045,15 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // The Refine trigger for one target, in whichever action area it belongs to.
-  function renderRefineAction(row, item) {
-    return (
-      <RowRefineAction
-        rowId={row.id}
-        itemId={item ? item.id : null}
-        rowLabel={refineTargetLabel(row, item)}
-        loading={
-          (rowRefineStatus[rowRefineTargetKey({ rowId: row.id, itemId: item?.id })] || {})
-            .status === ROW_REFINE_STATUS.LOADING
-        }
-        onRefine={onRefineRow}
-      />
-    );
-  }
-
   // Compact per-row actions (hover/focus only, absolutely positioned so the
   // row's measured height never changes, hidden in print). Icon-free text
   // triggers with explicit accessible names.
   //
-  // `sectionHeadItem` is the row's first ordered item when it has one. When that
-  // item is text it is the row-level Refine control's target, so a flexible
-  // section keeps ONE simple affordance in the familiar place while addressing
-  // the item by id underneath.
-  function renderRowActions(row, sectionHeadItem = null, modernTarget = null) {
-    const refineItem = headRefineItem(sectionHeadItem);
-    const canAiRefine = refineItem
-      ? sectionItemAcceptsAiRefine(row, refineItem)
-      : rowAcceptsAiRefine(row);
-    // A modern head target and a legacy one are mutually exclusive: a row whose
-    // body is the modern document has no legacy item behind it at all.
-    const modern = !canAiRefine && modernTarget ? modernTarget : null;
-    if (!showRowActions && !canAiRefine && !modern) return null;
+  // `modernTarget` is the Section Refine target the row-level trigger acts on
+  // (see rowModernRefineTarget), or null for a row that has no Refine.
+  function renderRowActions(row, modernTarget = null) {
+    const modern = modernTarget || null;
+    if (!showRowActions && !modern) return null;
     const name = row.label || (row.isCustom ? "custom section" : "this field");
     const options = [
       {
@@ -1594,7 +1075,6 @@ export default function ResizableTwoColTable({
     }
     return (
       <div className="twocol-row-actions">
-        {canAiRefine && renderRefineAction(row, refineItem)}
         {modern && renderSectionRefineAction(row, modern)}
         {showRowActions && (
           <>
@@ -1629,37 +1109,14 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // Restrained per-TARGET AI feedback, rendered inside the content cell of the
-  // text it is about — the row's own cell for a legacy row, the item's own
-  // segment for a section paragraph — so a message and its Revert are never
-  // ambiguous about which text they belong to. The loading state, the outcome,
-  // and the Revert control for the last successful refinement of THAT target.
-  // It renders only when there is something to say, so an untouched form carries
-  // no extra chrome and no extra height.
-  //
-  // Revert is addressed by the same target key the backup was recorded under, so
-  // restoring paragraph C cannot touch paragraph A, the images between them, the
-  // files, or their order.
-  function renderRowRefineStatus(row, item = null) {
-    const eligible = item
-      ? sectionItemAcceptsAiRefine(row, item)
-      : rowAcceptsAiRefine(row);
-    if (!eligible) return null;
-    const targetKey = rowRefineTargetKey({ rowId: row.id, itemId: item?.id });
-    const canRevert = !!(
-      onRevertRowRefine &&
-      refineRevertableTargetKeys &&
-      refineRevertableTargetKeys.has(targetKey)
-    );
-    return renderRefineStatusBox({
-      entry: rowRefineStatus[targetKey] || null,
-      name: (refineTargetLabel(row, item) || "").trim() || "this field",
-      onRevert: canRevert ? () => onRevertRowRefine(row.id, item ? item.id : null) : null,
-    });
-  }
-
   /**
-   * The same restrained feedback for ONE MODERN text run.
+   * Restrained per-TARGET AI feedback for ONE text run, rendered inside the
+   * content cell of the text it is about — the row's own cell for the head run
+   * (and for an ACTIVE Section), the run's own segment otherwise — so a message
+   * and its Revert are never ambiguous about which text they belong to. The
+   * loading state, the outcome, and the Revert control for the last successful
+   * refinement of THAT target. It renders only when there is something to say,
+   * so an untouched form carries no extra chrome and no extra height.
    *
    * Its message is keyed by the run's own target key. Its Revert control is
    * anchored by the parent on the run that still holds that backup's refined
@@ -1856,76 +1313,9 @@ export default function ResizableTwoColTable({
     );
   }
 
-  /**
-   * The insertion line shown WHILE an image is being dragged: where it would
-   * land, on the item currently under the pointer and inside the SAME section
-   * only.
-   *
-   * Two forms, matching the two kinds of destination:
-   *
-   *   BESIDE an item   a rule at the top or bottom edge of the item's band
-   *   INSIDE text      a rule at the resolved caret's own line, so the user can
-   *                    see WHICH line of the paragraph the image will split it
-   *                    at rather than only which paragraph
-   *
-   * Absolutely positioned, so moving it reflows nothing and costs no measured
-   * height — and it is transient visual state only: nothing about it touches
-   * storage, and it appears only once the gesture has armed.
-   */
-  function renderItemDropIndicator(row, item) {
-    if (!itemDrag || !itemDrag.armed) return null;
-    if (itemDrag.rowId !== row.id) return null;
-    const drop = itemDrag.drop;
-    if (!drop || drop.targetItemId !== item.id) return null;
-
-    if (drop.kind === "text") {
-      return (
-        <div
-          className="twocol-item-dropline twocol-item-dropline--caret"
-          style={
-            typeof drop.caretOffsetTop === "number"
-              ? { top: `${Math.max(0, Math.round(drop.caretOffsetTop))}px` }
-              : undefined
-          }
-          aria-hidden="true"
-        />
-      );
-    }
-    return (
-      <div
-        className={`twocol-item-dropline twocol-item-dropline--${drop.placement}`}
-        aria-hidden="true"
-      />
-    );
-  }
-
-  // Is this block the one currently being MOVED? Purely a visual state, and only
-  // once the gesture has armed — a press that is still just a press fades
-  // nothing.
-  function itemDragClass(row, item) {
-    return itemDrag &&
-      itemDrag.armed &&
-      itemDrag.rowId === row.id &&
-      itemDrag.itemId === item.id
-      ? "twocol-row--itemdrag"
-      : "";
-  }
-
-  function renderRowBlock(
-    row,
-    sectionHeadItem = null,
-    ctx = null,
-    section = null,
-    headSegment = null
-  ) {
+  function renderRowBlock(row, ctx = null, section = null, headSegment = null) {
     const type = normalizeType(row.type);
-    // The row-level text target, whichever plan produced the head. A static
-    // document head names the stored item it was adapted from, so the row's
-    // familiar Refine affordance keeps addressing exactly the same text.
-    const headTarget = headSegment
-      ? segmentLegacyItem(row, headSegment)
-      : sectionHeadItem;
-    // The MODERN row-level target. Null for every row the modern path does not
+    // The row-level Refine target. Null for every row Section Refine does not
     // serve; otherwise the run this block's trigger acts on — see
     // rowModernRefineTarget for the three shapes it covers.
     const headModernTarget = rowModernRefineTarget(row, headSegment);
@@ -1948,19 +1338,15 @@ export default function ResizableTwoColTable({
     // user actually dragged for it. That is the legacy Text row, a structured
     // row and a Photo/File field, and none of them changes.
     //
-    // A row whose body is AUTHORITATIVE SECTION CONTENT is content-driven
-    // instead: its head item is one item among several, so reserving the whole
-    // legacy row height here would leave a blank area between a short paragraph
-    // and the photo beneath it. The value comes from the planner's own
-    // `sectionItemMinHeight`, so the DOM box and the pagination estimate are the
-    // same number rather than two guesses that can drift apart. It is a real
-    // `min-height` on a real box: the content genuinely grows it, and nothing is
-    // faked with negative margins or absolute positioning.
-    const baseMin = headSegment
-      ? sectionSegmentMinHeight(headSegment)
-      : sectionHeadItem
-      ? sectionItemMinHeight(sectionHeadItem)
-      : row.px || 120;
+    // A row whose body is a SECTION DOCUMENT is content-driven instead: its
+    // head segment is one segment among several, so reserving the whole legacy
+    // row height here would leave a blank area between a short paragraph and
+    // the photo beneath it. The value comes from the planner's own
+    // `sectionSegmentMinHeight`, so the DOM box and the pagination estimate are
+    // the same number rather than two guesses that can drift apart. It is a
+    // real `min-height` on a real box: the content genuinely grows it, and
+    // nothing is faked with negative margins or absolute positioning.
+    const baseMin = headSegment ? sectionSegmentMinHeight(headSegment) : row.px || 120;
     // The legacy base64 compatibility strip needs room for its images whatever
     // the rest of the row is doing.
     const effectiveMin = legacyItems.length ? Math.max(baseMin, 170) : baseMin;
@@ -1986,18 +1372,10 @@ export default function ResizableTwoColTable({
       <div
         className={`twocol-row grid ${row.isCustom ? "twocol-row--custom" : ""} ${
           isTarget ? "twocol-row--target" : ""
-        } ${composingClass(ctx)} ${
-          sectionHeadItem ? itemDragClass(row, sectionHeadItem) : ""
-        }`.trim()}
+        } ${composingClass(ctx)}`.trim()}
         // The target state is carried semantically as well as visually, so it
         // does not depend on the turquoise border alone.
         aria-current={isTarget ? "true" : undefined}
-        // A section item's whole band is its reorder drop zone. The attributes
-        // exist ONLY on a section item's own block, and the row id is carried
-        // alongside the item id so a drop can be rejected the moment it leaves
-        // the section it started in.
-        data-section-row={sectionHeadItem ? row.id : undefined}
-        data-section-item={sectionHeadItem ? sectionHeadItem.id : undefined}
         style={{
           gridTemplateColumns: `${leftWidth} 1fr`,
           minHeight: `${effectiveMin}px`,
@@ -2055,28 +1433,21 @@ export default function ResizableTwoColTable({
 
           {/* THE ANSWER SLOT — TWO fixed positions, always in this order.
               Everything that can hold the one live editor renders at the FIRST
-              of them, deliberately: React reconciles by position, so an editor
+              of them, deliberately: React reconciles by position, so the editor
               survives every transition that happens underneath it while the
-              user is typing.
+              user is typing (including its first genuine edit, which changes
+              which stored representation the body comes from).
 
-                slot 1   the row's own control, OR the head item of its ordered
-                         section, OR — for a section whose first item is an
-                         image — the leading insertion point above that image
-                         (a caret once clicked, a thin click target before that)
-                slot 2   the head MEDIA item, but only while a leading caret
-                         sits above it. It becomes null the moment the leading
-                         text is written, because the text is then the section's
-                         head and the image has become its own block.
+                slot 1   the row's own control, OR the head prose segment of
+                         its Section document, OR — for a Section whose first
+                         content is a picture or a file — the zero-height
+                         lead-in above it (press it to type above the image)
+                slot 2   the head MEDIA segment, when the Section starts with
+                         one, so text typed above it pushes it down through
+                         ordinary document flow. */}
+          {renderAnswerSlot(row, headSegment)}
+          {renderHeadMediaSlot(row, headSegment)}
 
-              Two transitions depend on this shape. A legacy Text row
-              MATERIALISING into a section keeps the same cell in slot 1, and a
-              leading caret being TYPED INTO keeps the same cell in slot 1 while
-              slot 2 empties. In both cases the live editor keeps its focus, its
-              caret and its undo history. */}
-          {renderAnswerSlot(row, sectionHeadItem, headSegment)}
-          {renderHeadMediaSlot(row, sectionHeadItem, headSegment)}
-
-          {showRightEditor && renderRowRefineStatus(row, headRefineItem(headTarget))}
           {showRightEditor &&
             headModernTarget &&
             renderSectionRefineStatus(row, headModernTarget)}
@@ -2097,13 +1468,8 @@ export default function ResizableTwoColTable({
           {isSectionTail && renderSectionTail(row, sectionExtraPx)}
         </div>
 
-        {renderRowActions(row, headTarget, headModernTarget)}
+        {renderRowActions(row, headModernTarget)}
         {renderColumnDivider()}
-
-        {/* The insertion line, while an image is being dragged over this item.
-            An absolutely positioned sibling of the cells, so neither the answer
-            slot's position in the tree nor any measured height changes. */}
-        {sectionHeadItem && renderItemDropIndicator(row, sectionHeadItem)}
 
         {/* LEGACY ROW HEIGHT HANDLE — a row whose body is its own answer
             control only. A flexible section is sized by its content plus the
@@ -2112,7 +1478,7 @@ export default function ResizableTwoColTable({
             A row still on its legacy answer keeps this handle while its shared
             Section editor is open, and loses it the moment its first genuine
             edit makes its body a document. */}
-        {!sectionHeadItem && (!headSegment || (editorHead && !hasDocumentBody)) && (
+        {(!headSegment || (editorHead && !hasDocumentBody)) && (
           <div
             className="twocol-resize-handle"
             onMouseDown={(e) => startRowDrag(row, e)}
@@ -2286,7 +1652,7 @@ export default function ResizableTwoColTable({
   function renderSegmentShell(
     row,
     ctx,
-    { extraClass = "", note = null, body, movableItem = null, actions = null }
+    { extraClass = "", note = null, body, actions = null }
   ) {
     const continued = !!(ctx && ctx.continuedFromPrevPage);
     const isTarget = !!targetRowId && row.id === targetRowId;
@@ -2296,11 +1662,7 @@ export default function ResizableTwoColTable({
           continued ? "twocol-seg--resume" : ""
         } ${isTarget ? "twocol-row--target" : ""} ${composingClass(
           ctx
-        )} ${extraClass} ${
-          movableItem ? itemDragClass(row, movableItem) : ""
-        }`.trim()}
-        data-section-row={movableItem ? row.id : undefined}
-        data-section-item={movableItem ? movableItem.id : undefined}
+        )} ${extraClass}`.trim()}
         style={{ gridTemplateColumns: `${leftWidth} 1fr` }}
       >
         <div className="twocol-cell-left twocol-seg-left px-3 py-2">
@@ -2319,10 +1681,10 @@ export default function ResizableTwoColTable({
         </div>
         {/* Absolutely positioned overlay, exactly like `.twocol-row-actions` on
             a row head: no measured height, revealed on hover/focus only, hidden
-            in print. Supplied only by a section TEXT item that is not the row
-            head — the head's own trigger stays in the row action area. */}
+            in print. Supplied only by a Section segment that opens a text run
+            and is not the row head — the head's own trigger stays in the row
+            action area. */}
         {actions && <div className="twocol-item-actions">{actions}</div>}
-        {movableItem && renderItemDropIndicator(row, movableItem)}
       </div>
     );
   }
@@ -2364,72 +1726,6 @@ export default function ResizableTwoColTable({
     });
   }
 
-  // The accessible name of ONE section text item.
-  //
-  // A section may hold several text items, and "Label — answer" repeated three
-  // times tells a screen-reader user nothing about which one they are in. The
-  // ordinal counts TEXT items only, so inserting a photo between two paragraphs
-  // does not renumber the prose.
-  function sectionTextItemLabel(row, item) {
-    const items = normalizedSectionContent[row.id] || [];
-    const textItems = items.filter((i) => i.kind === SECTION_ITEM_KIND.TEXT);
-    const name = (row.label || "").trim() || "Section";
-    if (textItems.length <= 1) return `${name} — answer`;
-    const position = textItems.findIndex((i) => i.id === item.id) + 1;
-    if (position < 1) return `${name} — answer`;
-    return `${name} — text ${position} of ${textItems.length}`;
-  }
-
-  // Which item id, if any, the LEADING CARET of this section is currently open
-  // against. It is a virtual item: nothing with this id is stored until the
-  // user types (src/lib/templateSectionLeadingText.js).
-  function sectionLeadingItemId(row) {
-    if (!richText || richText.leadingRowId !== row.id) return null;
-    return richText.leadingItemId || null;
-  }
-
-  /**
-   * THE LEADING INSERTION POINT — how a user types ABOVE a section's first
-   * image.
-   *
-   * A section whose first item is a picture has no text to click into above it,
-   * so this is the click target that gives them one: press at the top-left of
-   * the content area and a caret appears, exactly as it would in a word
-   * processor. There is deliberately no button, no toolbar and no label — the
-   * affordance is the cursor and the position, nothing more.
-   *
-   * It costs NO layout. The element sits inside the cell's own top padding
-   * (a negative margin exactly cancels its height), so an image-only section is
-   * as compact as it was before, with no blank band and no reserved height. It
-   * is not printed, and it is not rendered at all in the Template Builder.
-   *
-   * Clicking it writes nothing — see the leading-caret rule in NoteTemplateDoc.
-   */
-  function renderSectionLeadingInsertionPoint(row) {
-    if (!richText || typeof onOpenSectionLeadingText !== "function") return null;
-    const open = () => onOpenSectionLeadingText(row.id);
-    return (
-      <div
-        className="twocol-section-lead"
-        role="button"
-        tabIndex={0}
-        title="Click to type above this image"
-        aria-label={`Add text above the first image in ${row.label || "this section"}`}
-        onMouseDown={(e) => {
-          // Take the click ourselves: the browser would otherwise focus this
-          // div a moment before the editor that replaces it exists.
-          e.preventDefault();
-          open();
-        }}
-        onKeyDown={(e) => {
-          if (e.key !== "Enter" && e.key !== " ") return;
-          e.preventDefault();
-          open();
-        }}
-      />
-    );
-  }
-
   /**
    * The press target ABOVE a media-headed Section the shared editor owns.
    *
@@ -2460,33 +1756,6 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // The leading caret itself, once opened: the same TemplateTextCell every other
-  // text target uses, created ALREADY ACTIVE against the virtual item id. It
-  // becomes the section's real head item on the first keystroke, at this same
-  // position, so the editor is never torn down mid-word.
-  function renderSectionLeadingCell(row, itemId) {
-    const active = richText.activeRowId === row.id && richText.activeItemId === itemId;
-    return (
-      <TemplateTextCell
-        identity={active ? richText.activeIdentity : null}
-        rowId={row.id}
-        itemId={itemId}
-        label={row.label}
-        ariaLabel={`${(row.label || "").trim() || "Section"} — text above the image`}
-        value=""
-        // No prompt here: the section's own prompt belongs to its first stored
-        // text item, and duplicating it would read as two empty answers.
-        placeholder=""
-        active={active}
-        focusOnActivate
-        reloadToken={richText.reloadToken}
-        onActivate={richText.onActivate}
-        onChange={richText.onChange}
-        onRegisterEditor={richText.onRegisterEditor}
-      />
-    );
-  }
-
   /**
    * The INACTIVE rendering of a legacy answer-only Section the shared editor
    * owns.
@@ -2494,9 +1763,8 @@ export default function ResizableTwoColTable({
    * Byte-for-byte the box an inactive Template Text answer has always been —
    * the same `.twocol-rich twocol-rich--static` shell, the same role, the same
    * placeholder, the same validated React rendering of the stored value — so
-   * nothing about how such a row LOOKS changes in this phase. The only
-   * difference is where a press goes: to the Section's own document rather than
-   * to the legacy roving row editor.
+   * nothing about how such a row LOOKS changed when the shared editor arrived.
+   * A press goes to the Section's own document, at the press point.
    */
   function renderSectionStaticAnswer(row, value) {
     const entry = sectionEditor.editableRows[row.id];
@@ -2530,223 +1798,61 @@ export default function ResizableTwoColTable({
     );
   }
 
+  /**
+   * The READ-ONLY rendering of a Text answer the shared editor may NOT own.
+   *
+   * The same validated React rendering of the stored value, in the same
+   * `.twocol-rich` box, without the textbox role and without a press handler:
+   * there is nothing a press could open. Such a row's body carries material the
+   * document cannot represent (see `sectionEditorEligibility`), which Phase G0
+   * proved no NoteWise-produced note reaches — this is the guard for foreign or
+   * hand-edited storage, and it keeps that data VISIBLE rather than editable.
+   */
+  function renderSectionReadOnlyAnswer(row, value) {
+    const empty = isEmptyAnswerValue(value);
+    return (
+      <div
+        className="twocol-rich twocol-rich--readonly"
+        aria-label={`${(row.label || "").trim() || "Answer"} — answer (read-only)`}
+        title="This section holds content this version cannot edit."
+      >
+        {empty ? null : <TemplateRichTextView model={answerToModel(value)} />}
+      </div>
+    );
+  }
+
   // SLOT 1 of the answer area (see renderRowBlock): whatever can hold the one
   // live editor.
-  function renderAnswerSlot(row, sectionHeadItem, headSegment = null) {
-    if (headSegment) {
-      // The ACTIVE Section: one live editor, in slot 1, for the whole body.
-      if (headSegment.kind === SECTION_SEGMENT_KIND.EDITOR) {
-        return renderSectionEditor(row);
-      }
-      // The static Section document's own head. Prose renders in slot 1 exactly
-      // as a head text item does; a head IMAGE or FILE keeps the leading
-      // insertion point above it, so "type above the first picture" still works
-      // and still writes nothing until the user types.
-      if (headSegment.kind === SECTION_SEGMENT_KIND.TEXT) {
-        return renderSectionDocText(row, headSegment, {
-          isPrompt: isPromptSegment(row, headSegment),
-        });
-      }
-      // A Section the shared editor may own needs no leading-caret machinery at
-      // all: pressing above its first picture activates the real document and
-      // ProseMirror's own gap cursor puts the caret there. Nothing is stored
-      // until the user types, exactly as before, but now for the ordinary
-      // reason that nothing has changed rather than through a virtual item.
-      if (sectionEditorOwnsRow(row)) {
-        return renderSectionEditorLeadIn(row);
-      }
-      // The leading caret is a LEGACY writer: it opens the legacy editor against
-      // a virtual item of the stored list. A row whose body is a modern
-      // document has no such list, so it is not offered one.
-      if (!sectionCanHandBackToLegacy(row)) return null;
-      return renderSectionLeadingInsertionPoint(row);
+  function renderAnswerSlot(row, headSegment = null) {
+    if (!headSegment) return showRightEditor && renderAnswerControl(row);
+    // The ACTIVE Section: one live editor, in slot 1, for the whole body.
+    if (headSegment.kind === SECTION_SEGMENT_KIND.EDITOR) {
+      return renderSectionEditor(row);
     }
-    if (!sectionHeadItem) return showRightEditor && renderAnswerControl(row);
-    if (sectionHeadItem.kind === SECTION_ITEM_KIND.TEXT) {
-      return renderSectionItemBody(row, sectionHeadItem, { isRowHead: true });
+    // The static Section document's own head. Prose renders in slot 1.
+    if (headSegment.kind === SECTION_SEGMENT_KIND.TEXT) {
+      return renderSectionDocText(row, headSegment, {
+        isPrompt: isPromptSegment(row, headSegment),
+      });
     }
-    const leadingItemId = sectionLeadingItemId(row);
-    if (leadingItemId) return renderSectionLeadingCell(row, leadingItemId);
-    return renderSectionLeadingInsertionPoint(row);
+    // A media-headed Section the shared editor owns needs no leading-caret
+    // machinery at all: pressing above its first picture activates the real
+    // document and ProseMirror's own gap cursor puts the caret there. Nothing
+    // is stored until the user types. A row the editor may NOT own is
+    // read-only, and offers no lead-in.
+    if (sectionEditorOwnsRow(row)) return renderSectionEditorLeadIn(row);
+    return null;
   }
 
-  // SLOT 2: the head item when it is an image or a file. It is a sibling BELOW
-  // slot 1, so text typed above it pushes it down through ordinary document
-  // flow — nothing is absolutely positioned and no height is reserved.
-  function renderHeadMediaSlot(row, sectionHeadItem, headSegment = null) {
-    if (headSegment) {
-      // The live editor already IS the whole body — it has no second slot.
-      if (headSegment.kind === SECTION_SEGMENT_KIND.EDITOR) return null;
-      if (headSegment.kind === SECTION_SEGMENT_KIND.TEXT) return null;
-      return renderSectionDocSegmentBody(row, headSegment);
-    }
-    if (!sectionHeadItem || sectionHeadItem.kind === SECTION_ITEM_KIND.TEXT) {
-      return null;
-    }
-    return renderSectionItemBody(row, sectionHeadItem, { isRowHead: true });
-  }
-
-  /**
-   * The floating preview of the image being dragged.
-   *
-   * It exists so a move FEELS like moving a picture: the image follows the
-   * pointer, keeps its proportions, and is drawn translucently above the page
-   * while the insertion line shows where it would land. The original item stays
-   * exactly where it is in the document, so nothing reflows underneath the
-   * gesture, and nothing is persisted until the drop.
-   *
-   * `pointer-events: none` (in CSS) is what keeps it out of its own way:
-   * `elementFromPoint` must see the document, not the ghost.
-   */
-  function renderItemDragGhost() {
-    if (!itemDrag || !itemDrag.armed || !itemDrag.preview) return null;
-    const geo = imageDragPreviewGeometry({
-      rect: itemDrag.preview.rect,
-      grabX: itemDrag.preview.grabX,
-      grabY: itemDrag.preview.grabY,
-      clientX: itemDrag.pointerX,
-      clientY: itemDrag.pointerY,
-    });
-    if (!geo) return null;
-    return (
-      <img
-        ref={itemGhostRef}
-        className="twocol-item-ghost"
-        src={itemDrag.preview.src}
-        alt=""
-        aria-hidden="true"
-        draggable={false}
-        style={{
-          left: `${geo.left}px`,
-          top: `${geo.top}px`,
-          width: `${geo.width}px`,
-          height: `${geo.height}px`,
-        }}
-      />
-    );
-  }
-
-  // The visual body of ONE ordered section item.
-  //
-  // A TEXT item is DIRECTLY EDITABLE wherever the contextual rich-text cell is
-  // wired (a completed note): it is the same TemplateTextCell, the same single
-  // TemplateRowEditor, the same toolbar, the same normalization and the same
-  // confirmed-save behaviour a legacy Text answer has always used — there is
-  // deliberately no second rich-text implementation. Which stored slot a change
-  // lands in is decided by the parent from the editor identity, which names the
-  // item; this component only says which item was activated. The Template
-  // Builder passes no `richText`, so a section stays read-only there, rendered
-  // through the same safe read primitives (answerToModel →
-  // TemplateRichTextView: React elements from the normalized model, never
-  // injected HTML).
-  //
-  // A PHOTO or FILE item never shows the LEGACY display toolbar — no
-  // Small/Normal/Large/Full-width preset, no alignment, no edge drag handle.
-  // Those controls are not what a document image needs, and they are not
-  // re-exposed to get resizing back.
-  //
-  // A PHOTO is instead a Word-like picture, with two pointer gestures on one
-  // element tree and no overlap between them: dragging its BODY moves it within
-  // this section, and dragging a CORNER resizes it proportionally. A TEXT item
-  // gets neither — a paragraph is prose, edited in place, never a block the user
-  // shuffles — and a FILE keeps its card behaviour unchanged.
-  //
-  // REMOVAL is offered per item, and only when `onRemoveSectionItem` is wired.
-  // It addresses the item by `rowId + the item's own stable id`, so it can only
-  // ever reach the ordered section list on screen — never `attachments` and
-  // never `evidence`. A TEXT item never gets it: text is removed by editing it,
-  // and an attachment remover must not be able to delete a paragraph. Removing
-  // an attachment leaves every adjacent item, including the text around it,
-  // exactly where it was.
-  //
-  // Opening or downloading a persisted asset stays available: both are
-  // inherently read-only and go through the existing safe path
-  // (safeAttachmentOpen — the stored Blob's own MIME type decides, never the
-  // filename).
-  function renderSectionItemBody(row, item, { isRowHead = false } = {}) {
-    if (item.kind === SECTION_ITEM_KIND.TEXT) {
-      // WHICH text item carries the row's prompt.
-      //
-      // Normally that is the head item, because the head IS the row's own
-      // answer control's position. But a section whose first content is an
-      // IMAGE — which is where a new image lands when the section holds no
-      // meaningful text yet — has a photo as its head, and its empty text item
-      // sits below. Without this the section would offer no visible invitation
-      // to type at all. The prompt therefore belongs to the FIRST TEXT item,
-      // which for every text-headed section is the head and changes nothing.
-      const items = normalizedSectionContent[row.id] || [];
-      const firstText = items.find((i) => i.kind === SECTION_ITEM_KIND.TEXT);
-      const isPromptItem = isRowHead || !!(firstText && firstText.id === item.id);
-      if (richText) {
-        const active =
-          richText.activeRowId === row.id && richText.activeItemId === item.id;
-        const identity = active ? richText.activeIdentity : null;
-        return (
-          <TemplateTextCell
-            identity={identity}
-            rowId={row.id}
-            itemId={item.id}
-            label={row.label}
-            ariaLabel={sectionTextItemLabel(row, item)}
-            value={item.value}
-            // This cell may be REPLACING a static Section document segment the
-            // user just pressed — a different component instance, which could
-            // not have recorded the press. When it is, it seeds its caret from
-            // the point that activation carried across.
-            focusOnActivate={isSectionCaretPending(identity)}
-            caretPoint={pendingCaretFor(identity)}
-            // Only the section's FIRST text item stands in for the row's own
-            // answer control, so only it carries the row's prompt. A later item
-            // is a paragraph the user added: an empty one keeps its blank line
-            // and says nothing — it is real authored content, not a gap to be
-            // filled.
-            placeholder={isPromptItem ? "Enter details for this field..." : ""}
-            active={active}
-            reloadToken={richText.reloadToken}
-            onActivate={richText.onActivate}
-            onChange={richText.onChange}
-            onRegisterEditor={richText.onRegisterEditor}
-          />
-        );
-      }
-      return (
-        <div className="twocol-rich">
-          <TemplateRichTextView model={answerToModel(item.value)} />
-        </div>
-      );
-    }
-    // Addressed by the item's OWN stable id, never by a position in the list.
-    const removeItem = onRemoveSectionItem
-      ? () => onRemoveSectionItem(row.id, item.id)
-      : undefined;
-
-    if (item.kind === SECTION_ITEM_KIND.FILE) {
-      return (
-        <FileAttachmentRow
-          attachment={item}
-          onRemove={removeItem}
-          onError={(msg) => onFieldError && onFieldError(row.id, msg)}
-        />
-      );
-    }
-    return (
-      <PhotoAttachment
-        attachment={item}
-        readOnly
-        onRemove={removeItem}
-        onMoveStart={
-          canMoveSectionItems ? (e) => startItemDrag(row.id, item.id, e) : undefined
-        }
-        // Addressed by the item's OWN stable id, exactly as removal is, so a
-        // resize can only ever reach the ordered section list on screen — never
-        // `attachments` and never `evidence`. One completed gesture is one call.
-        onResizeWidth={
-          onResizeSectionPhoto
-            ? (widthPct) => onResizeSectionPhoto(row.id, item.id, widthPct)
-            : undefined
-        }
-      />
-    );
+  // SLOT 2: the head segment when it is an image or a file. It is a sibling
+  // BELOW slot 1, so text typed above it pushes it down through ordinary
+  // document flow — nothing is absolutely positioned and no height is reserved.
+  function renderHeadMediaSlot(row, headSegment = null) {
+    if (!headSegment) return null;
+    // The live editor already IS the whole body — it has no second slot.
+    if (headSegment.kind === SECTION_SEGMENT_KIND.EDITOR) return null;
+    if (headSegment.kind === SECTION_SEGMENT_KIND.TEXT) return null;
+    return renderSectionDocSegmentBody(row, headSegment);
   }
 
   /* ------------------------------------------------------------------ */
@@ -2773,62 +1879,17 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // Hand this Section back to the legacy per-item interaction, at the point the
-  // user pressed.
-  //
-  // The static view is a READ rendering; every edit still belongs to the
-  // existing editor, its split/heal writers and its Quick Add path. Pressing
-  // static text therefore does exactly what pressing an inactive text cell has
-  // always done — activate that stored text item — and the press point is
-  // carried across the one render that re-plans the row so the caret lands
-  // where the user clicked rather than at the end.
-  //
-  // A segment that names no stored item (a modern stored document, which no
-  // Template writer produces yet) has nothing for the legacy editor to open
-  // against, so it stays read-only until the Section editor lands in F4.
-  function activateSectionTextSegment(row, segment, event) {
-    // The shared Section editor first: a Section this build may modernize opens
-    // as ONE document at the point the user pressed, and the legacy per-item
-    // interaction is never reachable on it.
-    if (activateSectionEditor(row, event)) return;
-    if (!richText || typeof richText.onActivate !== "function") return;
-    if (!sectionCanHandBackToLegacy(row)) return;
-    const item = segmentLegacyItem(row, segment);
-    if (!item) return;
-    const identity = richText.onActivate(row.id, item.id) || null;
-    if (!identity) return;
-    pendingSectionCaret.current = event
-      ? { identity, left: event.clientX, top: event.clientY }
-      : { identity, left: null, top: null };
-  }
-
-  // The caret hand-off for a cell that is being created ALREADY ACTIVE by the
-  // activation above. Matched on the editor IDENTITY the activation resolved,
-  // so a recorded point can only ever be consumed by the exact target it was
-  // aimed at.
-  function pendingCaretFor(identity) {
-    const pending = pendingSectionCaret.current;
-    if (!pending || !identity || pending.identity !== identity) return null;
-    return pending.left == null ? null : { left: pending.left, top: pending.top };
-  }
-
-  function isSectionCaretPending(identity) {
-    const pending = pendingSectionCaret.current;
-    return !!(pending && identity && pending.identity === identity);
-  }
-
   // ONE prose segment of a static Section document.
   //
   // The document rendering is the static Section view's; the SHELL around it is
   // this component's, because in a completed note that shell is also the
-  // activation target of the legacy editor — the same `.twocol-rich--static`
-  // box, the same role, the same focus behaviour an inactive text cell has
-  // always had, so activating a Section neither moves nor resizes it.
+  // activation target of the shared Section editor — the same
+  // `.twocol-rich--static` box, the same role, the same focus behaviour an
+  // inactive text cell has always had, so activating a Section neither moves
+  // nor resizes it. Pressing it opens the Section's ONE document at the press
+  // point; a row the editor may not own renders the same prose read-only.
   function renderSectionDocText(row, segment, { isPrompt = false } = {}) {
-    const item = segmentLegacyItem(row, segment);
-    const ariaLabel = item
-      ? sectionTextItemLabel(row, item)
-      : `${(row.label || "").trim() || "Section"} — answer`;
+    const ariaLabel = `${(row.label || "").trim() || "Section"} — answer`;
     const empty = isEmptySegmentText(segment.blocks);
     const body =
       empty && isPrompt ? (
@@ -2837,10 +1898,7 @@ export default function ResizableTwoColTable({
         <TemplateSectionDocView segment={segment} />
       );
 
-    const pressable = sectionEditorOwnsRow(row)
-      ? !!richText
-      : !!richText && !!item && sectionCanHandBackToLegacy(row);
-    if (!pressable) {
+    if (!sectionEditorOwnsRow(row)) {
       return <div className="twocol-rich">{body}</div>;
     }
     return (
@@ -2855,11 +1913,58 @@ export default function ResizableTwoColTable({
           // user clicked — the browser would otherwise focus this div a moment
           // before the editor that replaces it exists.
           event.preventDefault();
-          activateSectionTextSegment(row, segment, event);
+          activateSectionEditor(row, event);
         }}
-        onFocus={() => activateSectionTextSegment(row, segment, null)}
+        onFocus={() => activateSectionEditor(row, null)}
       >
         {body}
+      </div>
+    );
+  }
+
+  // ONE media segment — an image (with or without the prose wrapping beside it)
+  // or a file card — of a static Section document the shared editor OWNS.
+  //
+  // The rendering is the static Section view's, unchanged. What this adds is the
+  // press: "click anywhere in the Section" must open the Section's ONE document,
+  // and a Section whose visible content is a picture or a file (a structured
+  // row's supplementary evidence, say) has no prose box to press. Pressing the
+  // segment activates the editor at the press point, where the shared media node
+  // then owns selection, movement, placement, resize and Remove.
+  //
+  // THE FILE CARD'S OWN CONTROLS ARE NOT HIJACKED. A file card carries Open /
+  // Preview, Download and (while a text preview is open) a dialog inside itself;
+  // a press on any of those is left entirely alone — not prevented, not
+  // activated — so the action the user aimed at still happens. Only a press on
+  // the card's own surface (its name, its metadata, the space around them)
+  // activates the Section. The rule is its own tested module:
+  // src/lib/templateSectionMediaPress.js.
+  //
+  // A KEYBOARD user reaches the same Section through the zero-height lead-in
+  // above a media-headed Section (`renderSectionEditorLeadIn`, role=button,
+  // Enter/Space) and through the card's own focusable buttons — this press
+  // target adds a pointer route, it does not replace an accessible one.
+  function renderSectionDocMedia(row, segment) {
+    const view = <TemplateSectionDocView segment={segment} />;
+    const isMedia =
+      segment.kind === SECTION_SEGMENT_KIND.IMAGE ||
+      segment.kind === SECTION_SEGMENT_KIND.FILE;
+    if (!sectionEditorOwnsRow(row) || !isMedia) return view;
+    const isFile = segment.kind === SECTION_SEGMENT_KIND.FILE;
+    return (
+      <div
+        className={`twocol-section-media twocol-section-media--pressable ${
+          isFile ? "twocol-section-media--card" : ""
+        }`.trim()}
+        onMouseDown={(event) => {
+          // A real control keeps its own press. Returning WITHOUT
+          // preventDefault is what lets its click proceed normally.
+          if (pressIsOnMediaControl(event)) return;
+          event.preventDefault();
+          activateSectionEditor(row, event);
+        }}
+      >
+        {view}
       </div>
     );
   }
@@ -2886,16 +1991,15 @@ export default function ResizableTwoColTable({
     // A file card reports its own action failures in its own live region,
     // exactly as it does in a Free-form note; the row's field-error surface is
     // for this Section's own save failures.
-    return <TemplateSectionDocView segment={segment} />;
+    return renderSectionDocMedia(row, segment);
   }
 
   // A stored item the unified document cannot represent, rendered exactly as it
-  // is rendered today — the SAME components, the same asset policy, the same
-  // open/download behaviour. Read-only: the legacy per-item Remove belongs to
-  // the legacy plan, and this row is not on it.
+  // is stored — the SAME components, the same asset policy, the same
+  // open/download behaviour. READ-ONLY: it belongs to a row the shared editor
+  // may not own, and there is no other editor.
   function renderCompatSegmentBody(row, segment) {
-    const item = segmentLegacyItem(row, segment);
-    const entry = item || segment.entry;
+    const entry = segment.entry;
     if (!entry || typeof entry !== "object") return null;
     if (compatSegmentItemKind(segment) === SECTION_ITEM_KIND.FILE) {
       return (
@@ -2915,56 +2019,17 @@ export default function ResizableTwoColTable({
   // and no insertion line.
   function renderSectionDocSegment(row, segment, ctx, section = null) {
     const isSectionTail = !!(section && section.isTail);
-    const item = segmentLegacyItem(row, segment);
-    const canAiRefine =
-      segment.kind === SECTION_SEGMENT_KIND.TEXT &&
-      sectionItemAcceptsAiRefine(row, item);
-    // The modern target this segment opens, when the row is served by the
-    // modern path. A wrapped image's segment carries the run that flows beside
-    // it, which is why this is not restricted to TEXT segments. `canAiRefine`
-    // is false for every owned row (see sectionItemAcceptsAiRefine), so the two
-    // can never both be rendered.
-    const modern = canAiRefine ? null : modernRefineTarget(row, segment);
+    // The Refine target this segment opens, when the row is served by Section
+    // Refine. A wrapped image's segment carries the run that flows beside it,
+    // which is why this is not restricted to TEXT segments.
+    const modern = modernRefineTarget(row, segment);
     return renderSegmentShell(row, ctx, {
       extraClass: "twocol-seg--section",
-      actions: canAiRefine
-        ? renderRefineAction(row, item)
-        : modern
-        ? renderSectionRefineAction(row, modern)
-        : null,
+      actions: modern ? renderSectionRefineAction(row, modern) : null,
       body: (
         <>
           {renderSectionDocSegmentBody(row, segment)}
-          {canAiRefine && renderRowRefineStatus(row, item)}
           {modern && renderSectionRefineStatus(row, modern)}
-          {isSectionTail && renderSectionTail(row, section.extraPx)}
-        </>
-      ),
-    });
-  }
-
-  // One ordered section item AFTER the row head: the same atomic segment shell
-  // the primary attachments use, so it inherits the merged-cell look, the
-  // branded colours, page continuation and print behaviour. No label and no
-  // "Supporting evidence" note — these are ordinary section contents, not
-  // supporting material.
-  function renderSectionSegment(row, item, ctx, section = null) {
-    const isSectionTail = !!(section && section.isTail);
-    // A TEXT item that is not the row head carries its own Refine trigger and
-    // its own AI feedback, both addressed by this item's stable id. A photo or
-    // file item gets neither: there is no image or file Refine.
-    const canAiRefine = sectionItemAcceptsAiRefine(row, item);
-    return renderSegmentShell(row, ctx, {
-      extraClass: "twocol-seg--section",
-      movableItem: item,
-      actions: canAiRefine ? renderRefineAction(row, item) : null,
-      body: (
-        <>
-          {renderSectionItemBody(row, item)}
-          {canAiRefine && renderRowRefineStatus(row, item)}
-          {/* The LAST block of the section carries its extra working space and
-              its one resize handle — never a block in the middle, and never a
-              fragment continuing onto another page. */}
           {isSectionTail && renderSectionTail(row, section.extraPx)}
         </>
       ),
@@ -3009,11 +2074,11 @@ export default function ResizableTwoColTable({
   }
 
   // Which blocks each row produces — whether it carries supporting evidence,
-  // and whether its body comes from ordered section content instead of its
-  // legacy answer — is decided by one pure, tested planner
-  // (src/lib/templateRowContent.js) rather than re-derived here. A row with
-  // neither still produces exactly the single block it always did, with no
-  // group and no keepWithNext, so such a note paginates identically.
+  // and whether its body is a Section document — is decided by one pure,
+  // tested planner (src/lib/templateRowContent.js) rather than re-derived
+  // here. A row with neither still produces exactly the single block it always
+  // did, with no group and no keepWithNext, so such a note paginates
+  // identically.
   rows.forEach((row) => {
     const type = normalizeType(row.type);
     const isAttachmentField =
@@ -3024,15 +2089,15 @@ export default function ResizableTwoColTable({
       row,
       isAttachmentField,
       attachments,
-      // Evidence and section content render in note mode only, exactly like
-      // attachments — the Template Builder shows the reusable form, never a
-      // note's content.
+      // Evidence renders in note mode only, exactly like attachments — the
+      // Template Builder shows the reusable form, never a note's content. It
+      // renders through its LEGACY blocks only for a row that has no document
+      // body — a refused row, or a row whose evidence the document cannot
+      // carry; the planner never renders it beside a document.
       evidence: showRightEditor ? evidence : null,
-      sectionContent: showRightEditor ? sectionContent : null,
-      // The unified body, when this row is not currently owned by the legacy
-      // per-item interaction. Present -> the row plans one block per document
-      // segment and renders statically; absent -> it plans and renders exactly
-      // as it always has.
+      // The unified body: one block per document segment (or ONE editor block
+      // while the Section is active); absent -> the row plans and renders
+      // exactly as it always has.
       sectionSegments: sectionStaticSegments(row),
       sectionExtraHeight: showRightEditor ? sectionExtraHeight : null,
     });
@@ -3043,7 +2108,6 @@ export default function ResizableTwoColTable({
       const {
         kind,
         item,
-        sectionItem,
         sectionSegment,
         isRowHead,
         isSectionTail,
@@ -3069,23 +2133,17 @@ export default function ResizableTwoColTable({
           render = (ctx) =>
             renderEvidenceSegment(row, item, ctx, showEvidenceLabel);
           break;
-        case ROW_BLOCK_KIND.SECTION_ITEM:
-          // The head item is the row itself (label, actions, height handle);
-          // every item after it is an atomic continuation segment.
-          render = isRowHead
-            ? (ctx) => renderRowBlock(row, sectionItem, ctx, sectionTail)
-            : (ctx) => renderSectionSegment(row, sectionItem, ctx, sectionTail);
-          break;
         case ROW_BLOCK_KIND.SECTION_SEGMENT:
-          // The same two positions, from the unified Section document: the head
-          // segment IS the row, every segment after it is an atomic
-          // continuation segment. Read-only — no drag, no resize, no Remove.
+          // Two positions, from the unified Section document: the head segment
+          // IS the row (label, actions, height handle), every segment after it
+          // is an atomic continuation segment. Static — the shared editor is
+          // the only thing that edits it, and it mounts as ONE segment.
           render = isRowHead
-            ? (ctx) => renderRowBlock(row, null, ctx, sectionTail, sectionSegment)
+            ? (ctx) => renderRowBlock(row, ctx, sectionTail, sectionSegment)
             : (ctx) => renderSectionDocSegment(row, sectionSegment, ctx, sectionTail);
           break;
         default:
-          render = (ctx) => renderRowBlock(row, null, ctx);
+          render = (ctx) => renderRowBlock(row, ctx);
       }
       blocks.push({ ...blockProps, render });
     }
@@ -3121,11 +2179,6 @@ export default function ResizableTwoColTable({
 
       {/* PAGE-AWARE DOCUMENT */}
       <PagedDocument blocks={blocks} />
-
-      {/* The image currently being dragged, drawn under the pointer. Transient
-          visual state only: it exists while a gesture is armed and disappears
-          the instant it is dropped or cancelled. */}
-      {renderItemDragGhost()}
     </div>
   );
 }

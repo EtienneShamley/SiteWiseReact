@@ -28,38 +28,96 @@
 //     down, so no exit path can leave a ghost or an indicator behind.
 //
 // The threshold rule and the trailing-click suppression were built and proven
-// on Template section images; they are re-exported here under media-core
-// names, WRAPPING — not copying — their proven implementations
-// (src/lib/templateSectionImageMove.js, templateSectionItemDragSession.js),
-// exactly as editorMediaResize.js wraps the resize arithmetic. Consolidating
-// their home is Phase G of the shared-core plan.
+// on Template section images. Until Phase G they were re-exported here wrapping
+// the legacy `templateSectionImageMove.js` / `templateSectionItemDragSession.js`;
+// Phase G retired that interaction and both now live HERE, unchanged in
+// behaviour — exactly as editorMediaResize.js now owns the resize arithmetic.
 //
 // Pure apart from the injected `win`: no React, no editor, no storage.
 
 import { beginMediaResizeSession } from "./editorMediaResizeSession";
-import {
-  IMAGE_MOVE_THRESHOLD_PX,
-  exceedsMoveThreshold,
-} from "./templateSectionImageMove";
-import { suppressGestureTrailingClick } from "./templateSectionItemDragSession";
-
-/** How far the pointer must travel before a press becomes a drag. */
-export const MEDIA_BODY_DRAG_THRESHOLD_PX = IMAGE_MOVE_THRESHOLD_PX;
-
-/** Has this pointer travelled far enough to arm? The proven straight-line rule. */
-export const mediaDragExceedsThreshold = exceedsMoveThreshold;
 
 /**
- * Consume the CLICK the browser generates after a completed drag — armed by
- * the gesture owner ONLY for a drag that genuinely crossed the threshold, so
- * a short click never loses its ordinary behaviour. The very next click is
- * swallowed in the capture phase; a new pointerdown arriving first disarms it
- * untriggered. Returns a cancel function for the caller's unmount path.
+ * How far the pointer must travel before a press becomes a drag.
+ *
+ * Small enough that a deliberate drag feels immediate, large enough that the
+ * incidental travel of a click never arms one.
  */
-export const suppressMediaGestureTrailingClick = suppressGestureTrailingClick;
+export const MEDIA_BODY_DRAG_THRESHOLD_PX = 4;
 
 function finite(value) {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * Has this pointer travelled far enough to arm? The proven straight-line rule:
+ * travel in any direction counts the same, and EXACTLY at the threshold is
+ * still a click — a drag must be unambiguously intended.
+ */
+export function mediaDragExceedsThreshold({
+  startX,
+  startY,
+  clientX,
+  clientY,
+  thresholdPx = MEDIA_BODY_DRAG_THRESHOLD_PX,
+} = {}) {
+  if (!finite(startX) || !finite(startY)) return false;
+  if (!finite(clientX) || !finite(clientY)) return false;
+  const limit =
+    finite(thresholdPx) && thresholdPx >= 0 ? thresholdPx : MEDIA_BODY_DRAG_THRESHOLD_PX;
+  return Math.hypot(clientX - startX, clientY - startY) > limit;
+}
+
+/**
+ * Consume the CLICK the browser generates after a completed drag.
+ *
+ * A drag is pointerdown → pointermove → pointerup — and after that pointerup
+ * the browser still dispatches an ordinary `click`. For a drag that actually
+ * moved the image, that trailing click is not something the user asked for:
+ * left alone it would reach the image's own click behaviour (selection) the
+ * instant the drop landed.
+ *
+ * Armed by the gesture owner ONLY when the drag genuinely crossed the movement
+ * threshold — a short click never comes through here and keeps its ordinary
+ * behaviour. Consumption is deterministic, with no timers:
+ *
+ *   - the very next `click` (capture phase, so it is swallowed before any
+ *     target handler) is prevented, stopped, and the suppression disarms;
+ *   - a new `pointerdown` arriving FIRST proves the drag's own click is never
+ *     coming (the release happened off-window, or the gesture was cancelled
+ *     and released without one) — the suppression disarms untriggered, so the
+ *     click that press produces behaves completely normally.
+ *
+ * Returns a `cancel` function for the caller's unmount path; calling it after
+ * the suppression has already resolved is a no-op.
+ */
+export function suppressMediaGestureTrailingClick({ win } = {}) {
+  if (
+    !win ||
+    typeof win.addEventListener !== "function" ||
+    typeof win.removeEventListener !== "function"
+  ) {
+    return () => {};
+  }
+
+  let done = false;
+  const disarm = () => {
+    if (done) return;
+    done = true;
+    win.removeEventListener("click", handleClick, true);
+    win.removeEventListener("pointerdown", handleDown, true);
+  };
+  const handleClick = (e) => {
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    if (typeof e.stopPropagation === "function") e.stopPropagation();
+    disarm();
+  };
+  const handleDown = () => disarm();
+
+  win.addEventListener("click", handleClick, true);
+  win.addEventListener("pointerdown", handleDown, true);
+
+  return disarm;
 }
 
 /**

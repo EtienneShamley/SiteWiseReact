@@ -6,9 +6,10 @@
 // pretend otherwise: there is no logo, no banner, no colour and no page
 // geometry. What it DOES carry is an honest structured document — the note
 // title, the template's name and publication date, every field in its real
-// document order with its label and answer, lists, understandable degradation
-// of the formatting Markdown has no equivalent for, note-specific custom rows,
-// Photo evidence references and File metadata with the "not included" wording.
+// document order with its label and answer, lists, headings, quotes, fenced
+// code, task lists, rules and pipe tables, understandable degradation of the
+// formatting Markdown has no equivalent for, note-specific custom rows, Photo
+// evidence references and File metadata with the "not included" wording.
 //
 // It renders from the same canonical model every other Template exporter uses,
 // so it can never contain the Free-form note, and it never emits an internal
@@ -24,14 +25,29 @@ function escapeMd(value) {
   return String(value == null ? "" : value).replace(/([\\`*_[\]])/g, "\\$1");
 }
 
+// Inline code: the raw text inside backticks (a backtick inside it widens the
+// fence), never Markdown-escaped — that is what a code span means.
+function codeSpanMd(text) {
+  const raw = String(text || "");
+  if (!raw) return "";
+  const longest = (raw.match(/`+/g) || []).reduce((n, run) => Math.max(n, run.length), 0);
+  const fence = "`".repeat(longest + 1);
+  const pad = raw.startsWith("`") || raw.endsWith("`") ? " " : "";
+  return `${fence}${pad}${raw}${pad}${fence}`;
+}
+
 function inlineMd(node) {
   if (!node) return "";
   if (node.type === "break") return "\n";
   const marks = node.marks || {};
-  let text = escapeMd(node.text || "");
+  let text = marks.code ? codeSpanMd(node.text) : escapeMd(node.text || "");
   if (!text) return "";
-  // Underline, text colour and highlight have no Markdown equivalent: the words
-  // survive as plain text rather than being dropped or faked.
+  // Underline, text colour, highlight, font family and font size have no
+  // Markdown equivalent: the words survive as plain text rather than being
+  // dropped or faked. Sub/superscript survive as the inline HTML GitHub-flavoured
+  // Markdown carries (the same form the Free-form Markdown export emits).
+  if (marks.subscript) text = `<sub>${text}</sub>`;
+  if (marks.superscript) text = `<sup>${text}</sup>`;
   if (marks.strike) text = `~~${text}~~`;
   if (marks.italic) text = `_${text}_`;
   if (marks.bold) text = `**${text}**`;
@@ -43,6 +59,55 @@ function paragraphMd(block) {
   return (block.content || []).map(inlineMd).join("");
 }
 
+// The one-line text of a table cell: its blocks' text, joined by the <br>
+// GitHub-flavoured Markdown allows inside a cell, pipes escaped.
+function cellMd(cell) {
+  const lines = [];
+  for (const child of (cell && cell.blocks) || []) lines.push(...blockMd(child, ""));
+  return lines
+    .filter((line) => line !== "")
+    .join("<br>")
+    .replace(/\|/g, "\\|");
+}
+
+function tableMd(block) {
+  const rows = Array.isArray(block.rows) ? block.rows : [];
+  if (!rows.length) return [];
+  // GFM has no spans: a spanned cell is written once and padded with empty
+  // cells so every row keeps the table's column count.
+  const expand = (row) => {
+    const out = [];
+    for (const cell of (row && row.cells) || []) {
+      out.push(cellMd(cell));
+      const span = Number(cell && cell.colspan) > 1 ? Number(cell.colspan) : 1;
+      for (let i = 1; i < span; i += 1) out.push("");
+    }
+    return out;
+  };
+  const expanded = rows.map(expand);
+  const width = expanded.reduce((n, cells) => Math.max(n, cells.length), 0);
+  if (!width) return [];
+  const pad = (cells) => {
+    const copy = cells.slice(0, width);
+    while (copy.length < width) copy.push("");
+    return copy;
+  };
+  const line = (cells) => `| ${pad(cells).join(" | ")} |`;
+  const separator = `| ${Array.from({ length: width }, () => "---").join(" | ")} |`;
+  // GFM requires a header row: the table's own header row when it has one,
+  // otherwise an empty header so no body row is promoted to a heading.
+  const firstIsHeader = (rows[0].cells || []).length > 0 && rows[0].cells.every((c) => c && c.header);
+  const lines = [];
+  if (firstIsHeader) {
+    lines.push(line(expanded[0]), separator);
+    for (const cells of expanded.slice(1)) lines.push(line(cells));
+  } else {
+    lines.push(line([]), separator);
+    for (const cells of expanded) lines.push(line(cells));
+  }
+  return lines;
+}
+
 function blockMd(block, indent = "") {
   if (!block) return [];
   if (block.type === "paragraph") {
@@ -52,6 +117,39 @@ function blockMd(block, indent = "") {
       ? text.split("\n").map((line) => `${indent}${line}`)
       : [""];
   }
+  if (block.type === "heading") {
+    const level = Math.min(6, Math.max(1, Number(block.level) || 1));
+    // A heading holds one line: hard breaks inside it become spaces.
+    return [`${indent}${"#".repeat(level)} ${paragraphMd(block).replace(/\n/g, " ")}`.trimEnd()];
+  }
+  if (block.type === "blockquote") {
+    const inner = [];
+    for (const child of block.blocks || []) inner.push(...blockMd(child, ""));
+    return inner.map((line) => `${indent}> ${line}`.trimEnd());
+  }
+  if (block.type === "codeBlock") {
+    const text = String(block.text || "");
+    // A fence longer than any run of backticks inside the code keeps it intact.
+    const longest = (text.match(/`{3,}/g) || []).reduce((n, run) => Math.max(n, run.length), 0);
+    const fence = "`".repeat(Math.max(3, longest + 1));
+    const language = block.language || "";
+    return [`${indent}${fence}${language}`, ...text.split("\n").map((l) => `${indent}${l}`), `${indent}${fence}`];
+  }
+  if (block.type === "horizontalRule") return [`${indent}---`];
+  if (block.type === "table") return tableMd(block).map((line) => `${indent}${line}`);
+  if (block.type === "taskList") {
+    const lines = [];
+    (block.items || []).forEach((item) => {
+      const marker = item && item.checked ? "- [x] " : "- [ ] ";
+      const inner = [];
+      for (const child of (item && item.blocks) || []) inner.push(...blockMd(child, ""));
+      const [first, ...rest] = inner.length ? inner : [""];
+      lines.push(`${indent}${marker}${first}`);
+      for (const line of rest) lines.push(`${indent}  ${line}`);
+    });
+    return lines;
+  }
+  if (block.type !== "bulletList" && block.type !== "orderedList") return [];
 
   const ordered = block.type === "orderedList";
   const start = Number(block.start) > 0 ? Number(block.start) : 1;

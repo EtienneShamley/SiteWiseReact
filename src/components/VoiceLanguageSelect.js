@@ -1,23 +1,12 @@
-// src/components/VoiceLanguageSelect.jsx
+// src/components/VoiceLanguageSelect.js
 import React from "react";
+import { TRANSCRIPTION_LANGUAGES } from "../lib/transcriptionLanguage";
 
-const LANGS = [
-  { label: "Auto-detect", value: "auto" },
-  { label: "English", value: "en" },
-  { label: "Spanish", value: "es" },
-  { label: "French", value: "fr" },
-  { label: "German", value: "de" },
-  { label: "Portuguese", value: "pt" },
-  { label: "Italian", value: "it" },
-  { label: "Dutch", value: "nl" },
-  { label: "Chinese (Mandarin)", value: "zh" },
-  { label: "Japanese", value: "ja" },
-  { label: "Korean", value: "ko" },
-  { label: "Arabic", value: "ar" },
-  { label: "Hindi", value: "hi" },
-  { value: "tl", label: "Filipino (Tagalog)" },
-];
-
+/**
+ * The TRANSCRIPTION language selector (Auto-detect + the supported spoken
+ * languages — src/lib/transcriptionLanguage.js). It is a transcription
+ * preference, never a document language.
+ */
 export default function VoiceLanguageSelect({ value, onChange, disabled }) {
   return (
     // A native <select>, deliberately kept native: every option, value and
@@ -32,7 +21,7 @@ export default function VoiceLanguageSelect({ value, onChange, disabled }) {
       title="Transcription language"
       aria-label="Transcription language"
     >
-      {LANGS.map((l) => (
+      {TRANSCRIPTION_LANGUAGES.map((l) => (
         <option key={l.value} value={l.value}>
           {l.label}
         </option>

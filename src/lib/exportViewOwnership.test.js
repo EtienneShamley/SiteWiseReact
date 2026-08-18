@@ -43,9 +43,13 @@ describe("the export control is owned by the view, not the toolbar", () => {
     expect(exportMenu).not.toMatch(/function ExportMenu\(\{\s*editor/);
   });
 
-  test("EditorToolbar hands the export control the source, never its own editor", () => {
-    expect(editorToolbar).toMatch(/<ExportMenu source=\{exportSource\}/);
-    expect(editorToolbar).not.toMatch(/<ExportMenu editor=/);
+  test("MainArea's document header hands the export control the source, never an editor", () => {
+    // 2026-08-18: Export moved from the formatting toolbar to the document
+    // header (MainArea) beside Document Preview; the toolbar carries no
+    // export control at all any more.
+    expect(mainArea).toMatch(/<ExportMenu source=\{exportSource\} \/>/);
+    expect(mainArea).not.toMatch(/<ExportMenu editor=/);
+    expect(editorToolbar).not.toMatch(/ExportMenu/);
   });
 
   test("the Free-form editor reaches the export source only in the Free-form view", () => {
@@ -55,8 +59,13 @@ describe("the export control is owned by the view, not the toolbar", () => {
   });
 
   test("the export source is NOT derived from toolbar ownership", () => {
-    expect(mainArea).not.toMatch(/exportSource[\s\S]{0,200}toolbarEditor/);
-    expect(mainArea).not.toMatch(/exportSource[\s\S]{0,200}templateRowEditor/);
+    // The derivation site itself: the memo that builds `exportSource` reads
+    // the active view, note and Free-form editor — never the toolbar's owner.
+    const memo = mainArea.slice(
+      mainArea.indexOf("const exportSource = useMemo("),
+      mainArea.indexOf("const activeSaveStatus")
+    );
+    expect(memo).not.toMatch(/toolbarEditor|templateSectionEditor|toolbarOwner/);
     // The toolbar still gets its own, separate owner — this must not be lost.
     expect(mainArea).toMatch(/const toolbarEditor =/);
   });

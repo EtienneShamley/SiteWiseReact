@@ -401,7 +401,7 @@ export function invalidatePreviewEntries(entries, { keepFormat = null } = {}) {
 }
 
 /**
- * Whether Document Preview is available at all: the Free-form view, a real
+ * Whether a FREE-FORM Document Preview is available: the Free-form view, a real
  * note id, and a real editor to read from. Mirrors ExportMenu's own
  * `unavailable` check so the two controls can never disagree about whether
  * there is a document to act on. Format-independent — every format shares one
@@ -414,4 +414,29 @@ export function isFreeformPreviewAvailable(source) {
     !!source.noteId &&
     !!source.freeformEditor
   );
+}
+
+/**
+ * Whether a TEMPLATE-FORM Document Preview is available: the Template form and
+ * a real note id. No editor is needed (or wanted): the Template document is
+ * built from the note's persisted instance and its pinned immutable template
+ * version through the canonical Template export model — exactly what
+ * ExportMenu exports for this view. Whether that note actually HAS Template
+ * data is discovered by the capture itself and reported as a preview failure
+ * in the same curated wording the export uses; the control is never disabled
+ * on a guess about stored state.
+ */
+export function isTemplatePreviewAvailable(source) {
+  return (
+    !!source && source.view === NOTE_VIEW.TEMPLATE_FORM && !!source.noteId
+  );
+}
+
+/**
+ * Whether Document Preview is available for the current export source at all —
+ * the one gate the trigger reads. Same source object ExportMenu receives, so
+ * the two controls agree about which note view is being acted on.
+ */
+export function isDocumentPreviewAvailable(source) {
+  return isFreeformPreviewAvailable(source) || isTemplatePreviewAvailable(source);
 }

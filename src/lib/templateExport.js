@@ -22,6 +22,9 @@
 // deliberately deferred.
 
 import { safeFilename } from "./exportUtils";
+import { NOTE_VIEW } from "./noteViews";
+import { captureExportIdentity } from "./exportIdentity";
+import { getNoteTemplateInstance } from "./templateModel";
 import {
   TEMPLATE_EXPORT_FAILURE,
   buildTemplateExportModel,
@@ -540,48 +543,92 @@ export async function exportTemplateForm({ identity, noteTitle, format }, deps =
 }
 
 /**
- * A Template document as a named Blob, for the multi-note ZIP path. Nothing is
- * downloaded here — the archive is assembled by the caller.
+ * Capture a Template export for a control that will build SEVERAL formats from
+ * ONE captured document (Document Preview): the identity is read synchronously
+ * — the note, and its pinned template/version from the note's own persisted
+ * instance, exactly what ExportMenu captures before an export — and the model
+ * resolution starts in this same tick. The returned `model` promise is shared
+ * by every format built from this capture, so all of them are provably the same
+ * document; it never rejects (`{ ok, snapshot | reason }`, like every runner).
+ *
+ * Nothing here writes: the instance, template and version are read, assets are
+ * read, and the model is built in memory. Opening a preview from this capture
+ * is a pure read of the note.
  */
-export async function buildTemplateExportFile({ identity, noteTitle, format }, deps = {}) {
-  const built = await createTemplateExportSnapshot({ identity, noteTitle }, deps);
-  if (!built.ok) return built;
-  const model = built.snapshot.model;
+export function captureTemplateExportSnapshot({ noteId, noteTitle } = {}, deps = {}) {
+  const loadInstance = deps.loadInstance || getNoteTemplateInstance;
+  const instance = noteId ? loadInstance(noteId) : null;
+  const identity = captureExportIdentity({
+    noteId,
+    view: NOTE_VIEW.TEMPLATE_FORM,
+    templateId: instance?.templateId ?? null,
+    templateVersionId: instance?.templateVersionId ?? null,
+  });
+  const model = identity
+    ? createTemplateExportSnapshot({ identity, noteTitle }, deps).catch(() => ({
+        ok: false,
+        reason: TEMPLATE_EXPORT_FAILURE.NO_MODEL,
+      }))
+    : Promise.resolve({ ok: false, reason: TEMPLATE_EXPORT_FAILURE.NO_NOTE });
+  return { view: NOTE_VIEW.TEMPLATE_FORM, noteId, noteTitle, identity, model };
+}
+
+/**
+ * One format's Template document, built from an ALREADY-CAPTURED snapshot and
+ * returned as a named Blob — nothing is downloaded. Used by the multi-note ZIP
+ * path (through buildTemplateExportFile) and by Document Preview, so a
+ * previewed Template document and an exported one are the same bytes.
+ *
+ * Beside `{ name, blob }` the formats that have an exact generated string carry
+ * it too, so a caller that only needs to DISPLAY it never re-reads a Blob:
+ * HTML and Markdown return `text` (the exact document / source); DOCX returns
+ * `previewHtml` — the exact html-to-docx INPUT, a separate field from `blob`
+ * so the approximation can never be confused with the real .docx. PDF returns
+ * the Blob alone.
+ */
+export async function buildTemplateExportArtifact(format, snapshot) {
+  const model = snapshot && snapshot.model;
+  if (!model) return { ok: false, reason: TEMPLATE_EXPORT_FAILURE.NO_MODEL };
 
   try {
     if (format === TEMPLATE_EXPORT_FORMAT.HTML) {
+      const text = buildTemplateExportDocument(model, {
+        flavor: EXPORT_FLAVOR.STANDALONE,
+      });
       return {
         ok: true,
         name: exportFilename(model, "html"),
-        blob: new Blob(
-          [buildTemplateExportDocument(model, { flavor: EXPORT_FLAVOR.STANDALONE })],
-          { type: "text/html;charset=utf-8" }
-        ),
+        blob: new Blob([text], { type: "text/html;charset=utf-8" }),
+        text,
       };
     }
     if (format === TEMPLATE_EXPORT_FORMAT.MD) {
+      const text = buildTemplateExportMarkdown(model);
       return {
         ok: true,
         name: exportFilename(model, "md"),
-        blob: new Blob([buildTemplateExportMarkdown(model)], {
-          type: "text/markdown;charset=utf-8",
-        }),
+        blob: new Blob([text], { type: "text/markdown;charset=utf-8" }),
+        text,
       };
     }
     if (format === TEMPLATE_EXPORT_FORMAT.DOCX) {
       const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
       const htmlToDocx = mod.default || mod;
-      const generated = await htmlToDocx(
-        buildTemplateExportDocument(model, { flavor: EXPORT_FLAVOR.DOCX }),
-        null,
-        { table: { row: { cantSplit: true } }, footer: true, pageNumber: true }
-      );
+      const previewHtml = buildTemplateExportDocument(model, {
+        flavor: EXPORT_FLAVOR.DOCX,
+      });
+      const generated = await htmlToDocx(previewHtml, null, {
+        table: { row: { cantSplit: true } },
+        footer: true,
+        pageNumber: true,
+      });
       return {
         ok: true,
         name: exportFilename(model, "docx"),
         blob: new Blob([generated], {
           type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }),
+        previewHtml,
       };
     }
     if (format === TEMPLATE_EXPORT_FORMAT.PDF) {
@@ -606,4 +653,14 @@ export async function buildTemplateExportFile({ identity, noteTitle, format }, d
   }
 
   return { ok: false, reason: TEMPLATE_EXPORT_RUNTIME_FAILURE.UNKNOWN_FORMAT };
+}
+
+/**
+ * A Template document as a named Blob, for the multi-note ZIP path. Nothing is
+ * downloaded here — the archive is assembled by the caller.
+ */
+export async function buildTemplateExportFile({ identity, noteTitle, format }, deps = {}) {
+  const built = await createTemplateExportSnapshot({ identity, noteTitle }, deps);
+  if (!built.ok) return built;
+  return buildTemplateExportArtifact(format, built.snapshot);
 }

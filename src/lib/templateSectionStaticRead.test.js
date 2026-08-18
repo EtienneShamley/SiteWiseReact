@@ -1,26 +1,31 @@
 // src/lib/templateSectionStaticRead.test.js
 //
-// PHASE F3 — THE UNIFIED STATIC READ PATH.
+// PHASE F3 (+ G) — THE UNIFIED STATIC READ PATH.
 //
 // An inactive flexible Template Section renders from the canonical body reader,
 // through the static Section view, one document block per segment. This suite
 // holds the two things that decision has to be true for:
 //
-//   1. PARITY. For every historical Section the document plan is the SAME plan
-//      the item list produces — same order, same block ids, same heights, same
-//      group, same head, same tail — so a row can switch between its static
-//      rendering and the legacy interactive one without the page moving, and so
-//      nothing about pagination changes for any existing note.
+//   1. HISTORICAL READ COMPATIBILITY. For every historical Section the document
+//      plan is the SAME plan the legacy item list always produced — same order,
+//      same block ids, same heights, same group, same head, same tail — so
+//      nothing about pagination changes for any existing note. Since Phase G
+//      the legacy per-item plan itself no longer exists in production, so that
+//      historical plan is stated here as a fixture ORACLE (`historicalLayout`)
+//      rather than computed by code that was retired.
 //
-//   2. BOUNDARIES. F3 switches reading and NOTHING else: no document is
-//      written, no Section editor exists, no Template writer, Refine and export
-//      are untouched, and not one legacy interaction helper was removed.
+//   2. MODERN INTERACTION / BOUNDARIES. Reading writes nothing; the static view
+//      constructs no editor; the ONLY interaction is the shared Section editor
+//      (a static segment of an owned row presses through to it, a row it may
+//      not own renders read-only); the static Section and the live one show
+//      the same document; no Template writer exists outside the editor's own
+//      update path; export reads through the same reader.
 //
 // Component-level facts are source assertions. That is this project's
 // convention for React files that import `@tiptap/core` — which no Jest test in
 // this project can load at all (see sectionEditorExtensions.js and
 // .claude/NOTEWISE_HANDOFF.md §30.5) — and ResizableTwoColTable reaches it
-// through TemplateTextCell.
+// through TemplateSectionEditor.
 import fs from "fs";
 import path from "path";
 import {
@@ -29,7 +34,12 @@ import {
   sectionSegmentMinHeight,
 } from "./templateRowContent";
 import { SECTION_SEGMENT_KIND, sectionDocSegments } from "./templateSectionDocSegments";
-import { SECTION_BODY_SOURCE, isSectionDocumentBody, resolveSectionBody } from "./templateSectionBody";
+import {
+  SECTION_BODY_SOURCE,
+  isLegacyMediaBody,
+  isSectionDocumentBody,
+  resolveSectionBody,
+} from "./templateSectionBody";
 import { SECTION_DOC_FORMAT } from "./templateSectionDoc";
 
 const SRC = path.join(__dirname, "..");
@@ -75,7 +85,12 @@ const file = (over = {}) => ({
 
 const row = (over = {}) => ({ id: ROW, label: "Observations", px: 120, type: "text", ...over });
 
-/** The two plans of ONE row, from ONE stored instance. */
+/**
+ * The document plan of ONE row, from ONE stored instance — exactly what the
+ * form hands the planner: the segments of the body the canonical reader
+ * resolved. `historical` is the fixture ORACLE of the plan the legacy per-item
+ * renderer produced for the same stored list (see `historicalLayout`).
+ */
 function bothPlans(instance, over = {}) {
   const body = resolveSectionBody({ instance, rowId: ROW, rowType: "text", ...over.body });
   const common = {
@@ -85,11 +100,49 @@ function bothPlans(instance, over = {}) {
     evidence: instance.evidence || null,
     sectionExtraHeight: instance.sectionExtraHeight || null,
   };
+  const items = (instance.sectionContent && instance.sectionContent[ROW]) || [];
   return {
     body,
-    legacy: planRowBlocks({ ...common, sectionContent: instance.sectionContent || null }),
+    historical: historicalLayout(items, {
+      rowId: ROW,
+      extraPx: (instance.sectionExtraHeight && instance.sectionExtraHeight[ROW]) || 0,
+    }),
     document: planRowBlocks({ ...common, sectionSegments: sectionDocSegments(body) }),
   };
+}
+
+/**
+ * HISTORICAL ORACLE — the layout the legacy per-item plan (`SECTION_ITEM`, one
+ * block per stored `sectionContent` item; retired in Phase G) produced for one
+ * row, restated as data so a historical note can be shown to paginate exactly
+ * as it always did:
+ *
+ *   - the FIRST item is the row head and keeps the row's own block id;
+ *   - every later item is `${rowId}::sec-${item.id}`;
+ *   - a single item has no group and no keepWithNext; several share the row's
+ *     group, the head keeps with the next, nothing else does;
+ *   - text 24 / photo 60 / file 36 (a file the document cannot represent kept
+ *     its 36 through the compatibility renderer), never splittable;
+ *   - the trailing working space lands on the LAST item and nowhere else.
+ */
+const HISTORICAL_ITEM_MIN_HEIGHT = { text: 24, photo: 60, file: 36 };
+function historicalLayout(items, { rowId, extraPx = 0 } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const many = list.length > 1;
+  return list.map((item, index) => {
+    const isRowHead = index === 0;
+    const isSectionTail = index === list.length - 1;
+    return {
+      id: isRowHead ? rowId : `${rowId}::sec-${item.id}`,
+      group: many ? rowId : null,
+      keepWithNext: isRowHead && many,
+      minHeight: HISTORICAL_ITEM_MIN_HEIGHT[item.kind] + (isSectionTail ? extraPx : 0),
+      splittable: false,
+      isRowHead,
+      isSectionTail,
+      sectionExtraPx: isSectionTail ? extraPx : 0,
+    };
+  });
 }
 
 /** Everything about a planned block that governs where it lands on a page. */
@@ -107,7 +160,7 @@ const layoutOf = (blocks) =>
 
 /* ============ 46. static and legacy plan the SAME page ================ */
 
-describe("46. the document plan and the item plan are the same plan", () => {
+describe("46. HISTORICAL READ COMPATIBILITY: the document plan IS the plan the item list always produced", () => {
   const CASES = {
     "text only": [text("t1", "One paragraph")],
     "text, photo, text, file": [text("t1", "A"), photo(), text("t2", "B"), file()],
@@ -127,19 +180,34 @@ describe("46. the document plan and the item plan are the same plan", () => {
     ],
   };
 
-  test.each(Object.keys(CASES))("%s plans identically either way", (name) => {
-    const { legacy, document } = bothPlans({ sectionContent: { [ROW]: CASES[name] } });
-    expect(layoutOf(document)).toEqual(layoutOf(legacy));
+  test.each(Object.keys(CASES))("%s plans exactly as its stored items always did", (name) => {
+    const { historical, document } = bothPlans({ sectionContent: { [ROW]: CASES[name] } });
+    expect(layoutOf(document)).toEqual(historical);
   });
 
-  test("only the block KIND differs — the same positions, renamed for the renderer", () => {
-    const { legacy, document } = bothPlans({
+  test.each(Object.keys(CASES))("%s: the trailing working space lands where it always did", (name) => {
+    const { historical, document } = bothPlans({
+      sectionContent: { [ROW]: CASES[name] },
+      sectionExtraHeight: { [ROW]: 90 },
+    });
+    expect(layoutOf(document)).toEqual(historical);
+  });
+
+  test("G. every block is a SEGMENT block — the per-item plan no longer exists", () => {
+    const { document } = bothPlans({
       sectionContent: { [ROW]: CASES["text, photo, text, file"] },
     });
-    expect(legacy.map((b) => b.kind)).toEqual(Array(4).fill(ROW_BLOCK_KIND.SECTION_ITEM));
     expect(document.map((b) => b.kind)).toEqual(
       Array(4).fill(ROW_BLOCK_KIND.SECTION_SEGMENT)
     );
+    expect(ROW_BLOCK_KIND.SECTION_ITEM).toBeUndefined();
+    // A raw `sectionContent` handed to the planner is no longer a plan of its
+    // own: the row plans exactly as a row with no body does.
+    const stray = planRowBlocks({
+      row: row(),
+      sectionContent: { [ROW]: CASES["text, photo, text, file"] },
+    });
+    expect(stray.map((b) => b.kind)).toEqual([ROW_BLOCK_KIND.ROW]);
   });
 
   test("every document block carries the segment its renderer needs, and no item", () => {
@@ -148,20 +216,21 @@ describe("46. the document plan and the item plan are the same plan", () => {
     });
     for (const block of document) {
       expect(block.sectionSegment).toBeTruthy();
-      expect(block.sectionItem).toBeNull();
+      expect(block.sectionItem).toBeUndefined();
+      expect(block.item).toBeUndefined();
     }
   });
 
-  test("47. a Quick Add write to sectionContent shows up on the next read, with no migration", () => {
+  test("47. a later item on a stored list shows up on the next read, with no migration", () => {
     const before = bothPlans({ sectionContent: { [ROW]: [text("t1", "A")] } });
     expect(before.document).toHaveLength(1);
-    // Exactly what appendSectionText/appendSectionAttachment persist: one more
-    // item on the raw list. Nothing else changes anywhere.
+    // A historical note whose list grew (the retired Quick Add append wrote
+    // exactly this shape) reads as one more block — nothing else changes.
     const after = bothPlans({
       sectionContent: { [ROW]: [text("t1", "A"), photo(), text("t2", "Sent")] },
     });
     expect(after.document).toHaveLength(3);
-    expect(layoutOf(after.document)).toEqual(layoutOf(after.legacy));
+    expect(layoutOf(after.document)).toEqual(after.historical);
   });
 });
 
@@ -300,12 +369,18 @@ describe("27-29. a structured row keeps its typed value first and separate", () 
     expect(document.every((b) => (b.sectionExtraPx || 0) === 0)).toBe(true);
   });
 
-  test("the plan is identical either way for a structured row too", () => {
-    const { legacy, document } = bothPlans(instance, {
+  test("the supplementary body plans exactly as its stored items always did", () => {
+    const { document } = bothPlans(instance, {
       row: { type: "number" },
       body: { rowType: "number" },
     });
-    expect(layoutOf(document)).toEqual(layoutOf(legacy));
+    // The historical oracle for a body BENEATH a typed control: no segment is
+    // the row head (the ROW block is), so every segment carries its own id, in
+    // the row's group, none keeping with the next.
+    expect(layoutOf(document.slice(1))).toEqual([
+      { id: `${ROW}::sec-t1`, group: ROW, keepWithNext: false, minHeight: 24, splittable: false, isRowHead: false, isSectionTail: false, sectionExtraPx: 0 },
+      { id: `${ROW}::sec-item-photo`, group: ROW, keepWithNext: false, minHeight: 60, splittable: false, isRowHead: false, isSectionTail: false, sectionExtraPx: 0 },
+    ]);
   });
 });
 
@@ -327,7 +402,7 @@ describe("30/31. a custom row reads through the same boundary, by its own id", (
     expect(sectionDocSegments(body).map((s) => s.key)).toEqual(["c1", "item-photo"]);
   });
 
-  test("30. it plans exactly as a master Section does", () => {
+  test("30. it plans exactly as a master Section does — and as its stored items always did", () => {
     const body = resolveSectionBody({
       instance,
       rowId: CUSTOM,
@@ -335,12 +410,14 @@ describe("30/31. a custom row reads through the same boundary, by its own id", (
       isCustomRow: true,
     });
     const customRow = { id: CUSTOM, label: "Extra", px: 120, type: "text", isCustom: true };
-    expect(
-      layoutOf(planRowBlocks({ row: customRow, sectionSegments: sectionDocSegments(body) }))
-    ).toEqual(
-      layoutOf(
-        planRowBlocks({ row: customRow, sectionContent: instance.sectionContent })
-      )
+    const custom = layoutOf(
+      planRowBlocks({ row: customRow, sectionSegments: sectionDocSegments(body) })
+    );
+    expect(custom).toEqual(historicalLayout(instance.sectionContent[CUSTOM], { rowId: CUSTOM }));
+    // …which is the master Section's plan with the row id swapped, nothing else.
+    const master = bothPlans({ sectionContent: { [ROW]: instance.sectionContent[CUSTOM] } });
+    expect(custom).toEqual(
+      layoutOf(master.document).map((b) => ({ ...b, id: b.id.replace(ROW, CUSTOM), group: b.group && CUSTOM }))
     );
   });
 });
@@ -374,20 +451,24 @@ describe("32/33. legacy Photo/File primary rows stay compatibility rows", () => 
     expect(JSON.stringify(body.nodes)).not.toContain("att-1");
   });
 
-  test("the plan is identical either way", () => {
-    const { legacy, document } = bothPlans(instance, {
+  test("the supplement plans exactly as its stored items always did, after the primary blocks", () => {
+    const { document } = bothPlans(instance, {
       isAttachmentField: true,
       row: { type: "photo" },
       body: { rowType: "photo", isAttachmentField: true },
     });
-    expect(layoutOf(document)).toEqual(layoutOf(legacy));
+    expect(document[0].id).toBe(ROW);
+    expect(document[1].id).toBe(`${ROW}::att-att-1`);
+    expect(layoutOf(document.slice(2))).toEqual([
+      { id: `${ROW}::sec-t1`, group: ROW, keepWithNext: false, minHeight: 24, splittable: false, isRowHead: false, isSectionTail: false, sectionExtraPx: 0 },
+    ]);
   });
 });
 
 /* ============ 5/34-37. rows that have no document body yet ============ */
 
-describe("5/34-37. a row still on its legacy answer/evidence is not published as a document", () => {
-  test("34. answer + evidence has no document body yet — it keeps its legacy plan", () => {
+describe("5/34-37. a row still on its legacy answer/evidence: what the reader says, and what renders statically", () => {
+  test("34. answer + evidence is a LEGACY body, not a document body — but it carries MEDIA", () => {
     const body = resolveSectionBody({
       instance: { answers: { [ROW]: "Old answer" }, evidence: { [ROW]: [photo()] } },
       rowId: ROW,
@@ -395,6 +476,14 @@ describe("5/34-37. a row still on its legacy answer/evidence is not published as
     });
     expect(body.source).toBe(SECTION_BODY_SOURCE.LEGACY);
     expect(isSectionDocumentBody(body)).toBe(false);
+    // Since Phase G such a row renders statically as the SAME segments it
+    // edits as, so its evidence appears exactly once and activation changes
+    // nothing the user can see.
+    expect(isLegacyMediaBody(body)).toBe(true);
+    expect(sectionDocSegments(body).map((s) => s.kind)).toEqual([
+      SECTION_SEGMENT_KIND.TEXT,
+      SECTION_SEGMENT_KIND.IMAGE,
+    ]);
   });
 
   test("35/36. evidence-only, and several evidence items, likewise", () => {
@@ -405,10 +494,40 @@ describe("5/34-37. a row still on its legacy answer/evidence is not published as
         rowType: "text",
       });
       expect(isSectionDocumentBody(body)).toBe(false);
+      expect(isLegacyMediaBody(body)).toBe(true);
+      // Every evidence item is a media segment, exactly once — and the document
+      // BEGINS with the media. A Text row whose answer says nothing contributes
+      // no paragraph here: manufacturing one to represent the absence of text
+      // would put a blank line and a prompt above the picture (Phase G
+      // correction). Ordering, ids and the frozen stored answer are untouched.
+      const segments = sectionDocSegments(body);
+      expect(segments.map((s) => s.kind)).toEqual(
+        evidence.map((e) => (e.kind === "file" ? SECTION_SEGMENT_KIND.FILE : SECTION_SEGMENT_KIND.IMAGE))
+      );
+      expect(segments.filter((s) => s.kind === SECTION_SEGMENT_KIND.TEXT)).toHaveLength(0);
     }
   });
 
-  test("5. such a row plans the blocks it always has — the legacy answer and its evidence", () => {
+  test("G. a legacy body with media plans as document segments — its evidence is never rendered twice", () => {
+    const instance = { answers: { [ROW]: "Old answer" }, evidence: { [ROW]: [photo()] } };
+    const body = resolveSectionBody({ instance, rowId: ROW, rowType: "text" });
+    const blocks = planRowBlocks({
+      row: row(),
+      evidence: instance.evidence,
+      sectionSegments: sectionDocSegments(body),
+    });
+    expect(blocks.map((b) => b.kind)).toEqual([
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
+      ROW_BLOCK_KIND.SECTION_SEGMENT,
+    ]);
+    expect(blocks.some((b) => b.kind === ROW_BLOCK_KIND.EVIDENCE)).toBe(false);
+    // `evidence[rowId]` itself is untouched — it stays in storage, frozen.
+    expect(instance.evidence[ROW]).toEqual([photo()]);
+  });
+
+  test("5. a row with NO segments plans the blocks it always has — the legacy answer and its evidence", () => {
+    // A refused row (unrepresentable material) has no segments and keeps its
+    // compatibility plan: the ROW block and one EVIDENCE block per item.
     const blocks = planRowBlocks({
       row: row(),
       evidence: { [ROW]: [photo()] },
@@ -431,16 +550,27 @@ describe("5/34-37. a row still on its legacy answer/evidence is not published as
     });
     expect(body.source).toBe(SECTION_BODY_SOURCE.LEGACY);
     expect(isSectionDocumentBody(body)).toBe(false);
+    // Prose only: while inactive it keeps rendering as the row's own answer
+    // box, at the row's designed height.
+    expect(isLegacyMediaBody(body)).toBe(false);
   });
 
-  test("only document bodies are published for STATIC rendering", () => {
-    // The one gate, stated once: NoteTemplateDoc publishes a body for static
-    // rendering only when the reader called it a document. (Phase F4 resolves
-    // each body once and derives two things from it — what renders statically,
-    // and which Sections the shared editor may open — but the static gate is
-    // unchanged.)
-    expect(NOTE_DOC_CODE).toContain("const isDocument = isSectionDocumentBody(body);");
-    expect(NOTE_DOC_CODE).toContain("if (isDocument) bodies[row.id] = body;");
+  test("document bodies AND legacy-with-media bodies are published for STATIC rendering; legacy prose is not", () => {
+    // The one gate, stated once in NoteTemplateDoc: a body renders statically
+    // as segments when the reader called it a document, or (Phase G) when it is
+    // a legacy body carrying media. A legacy prose-only body keeps its answer
+    // box. Every eligible body — all three — is editable.
+    const memo = NOTE_DOC_CODE.slice(
+      NOTE_DOC_CODE.indexOf("const sectionState = useMemo("),
+      NOTE_DOC_CODE.indexOf("const sectionBodies = sectionState.bodies")
+    );
+    expect(memo).toContain("const isDocument = isSectionDocumentBody(body);");
+    expect(memo).toContain("const legacyMedia = isLegacyMediaBody(body);");
+    expect(memo).toContain("if (isDocument || legacyMedia) bodies[row.id] = body;");
+    // A REFUSED document body still renders statically (its document plus its
+    // compat segments); a refused legacy body keeps its legacy blocks.
+    expect(memo).toContain("if (isDocument) bodies[row.id] = body;");
+    expect(memo).toContain("editable[row.id] = {");
   });
 });
 
@@ -479,7 +609,8 @@ describe("48-50. rendering a note writes nothing at all", () => {
     expect(memo).toContain("resolveSectionBody");
     // It decides which Sections may be EDITED as well, and that decision is a
     // pure read too: it creates no editor and touches no registry.
-    expect(memo).toContain("canEditSectionBody");
+    expect(memo).toContain("sectionEditorEligibility(body)");
+    expect(memo).toContain("resolveSectionQuickAddRoute(body)");
     expect(memo).not.toContain("getOrCreate");
     expect(memo).not.toContain("createSectionEditor");
     for (const forbidden of [
@@ -629,11 +760,8 @@ describe("the row's prompt follows the same rule it always has", () => {
     expect(TABLE_CODE).toContain(
       "entry.segments.find((s) => s.kind === SECTION_SEGMENT_KIND.TEXT)"
     );
-    const legacyRule = TABLE_CODE.slice(
-      TABLE_CODE.indexOf("const isPromptItem"),
-      TABLE_CODE.indexOf("const isPromptItem") + 160
-    );
-    expect(legacyRule).toContain("firstText");
+    // The legacy answer box (a prose-only legacy row) keeps the same prompt.
+    expect(TABLE_CODE).toContain("Enter details for this field...");
     // Both the head and every later segment ask the same question.
     expect(TABLE_CODE).toContain("isPrompt: isPromptSegment(row, headSegment)");
     expect(TABLE_CODE).toContain("isPrompt: isPromptSegment(row, segment)");
@@ -642,7 +770,7 @@ describe("the row's prompt follows the same rule it always has", () => {
   test("an empty prose segment still keeps its blank line — only the placeholder is conditional", () => {
     const empty = TABLE_CODE.slice(
       TABLE_CODE.indexOf("function isEmptySegmentText"),
-      TABLE_CODE.indexOf("function activateSectionTextSegment")
+      TABLE_CODE.indexOf("function renderSectionDocText")
     );
     expect(empty).toContain('block.type === "paragraph"');
     expect(empty).toContain('node.type === "break"');
@@ -689,24 +817,33 @@ describe("3. files use the SHARED file card, read-only (Phase F4)", () => {
   });
 });
 
-/* ==================== 11/51-55. what F3 did NOT do ==================== */
+/* ============ 11/51-55. MODERN INTERACTION and boundaries ============ */
 
-describe("51-55. the legacy interaction still owns editing, and everything else is untouched", () => {
-  test("55. not one interaction helper was removed", () => {
+describe("51-55. MODERN INTERACTION: the shared editor is the only one, and everything else is untouched", () => {
+  test("55/G. the legacy interaction helpers are gone; the READ boundary survives", () => {
     for (const file of [
       "components/template/TemplateRowEditor.js",
       "components/template/TemplateTextCell.js",
-      "components/template/PhotoAttachment.js",
-      "components/template/FileAttachmentRow.js",
       "lib/templateSectionItemDrop.js",
       "lib/templateSectionItemDragSession.js",
       "lib/templateSectionTextPoint.js",
       "lib/templateSectionTextSplit.js",
-      "lib/templateSectionTextHeal.js",
       "lib/templateSectionLeadingText.js",
       "lib/templateSectionImagePlacement.js",
       "lib/templateSectionImageResize.js",
       "lib/templateSectionReorder.js",
+    ]) {
+      expect({ file, exists: fs.existsSync(path.join(SRC, file)) }).toEqual({
+        file,
+        exists: false,
+      });
+    }
+    for (const file of [
+      "components/template/PhotoAttachment.js",
+      "components/template/FileAttachmentRow.js",
+      "lib/templateSectionTextHeal.js",
+      "components/template/TemplateSectionDocView.js",
+      "components/template/TemplateSectionEditor.js",
     ]) {
       expect({ file, exists: fs.existsSync(path.join(SRC, file)) }).toEqual({
         file,
@@ -715,90 +852,182 @@ describe("51-55. the legacy interaction still owns editing, and everything else 
     }
   });
 
-  test("11. the legacy per-item rendering is still wired, and still reachable", () => {
-    // The row hands itself back to it the moment the user presses its text.
-    expect(TABLE_CODE).toContain("renderSectionItemBody");
-    expect(TABLE_CODE).toContain("renderSectionSegment(row, sectionItem");
-    expect(TABLE_CODE).toContain("TemplateTextCell");
-    expect(TABLE_CODE).toContain("PhotoAttachment");
-    expect(TABLE_CODE).toContain("richText.onActivate(row.id, item.id)");
-    expect(TABLE_CODE).toContain("onResizeSectionPhoto");
-    expect(TABLE_CODE).toContain("startItemDrag");
+  test("11. a static segment of an OWNED row presses through to the shared editor", () => {
+    // Prose: the same static textbox an inactive answer has always been.
+    const prose = TABLE_CODE.slice(
+      TABLE_CODE.indexOf("function renderSectionDocText(row, segment"),
+      TABLE_CODE.indexOf("function renderSectionDocMedia(row, segment)")
+    );
+    expect(prose).toContain('role="textbox"');
+    expect(prose).toContain("activateSectionEditor(row, event);");
+    expect(prose).toContain("onFocus={() => activateSectionEditor(row, null)}");
+    // An IMAGE *and* a FILE segment are pressable too — a picture-only or
+    // file-only Section has no prose box to press (Phase G correction). A press
+    // on the file card's OWN controls is left alone.
+    const media = TABLE_CODE.slice(
+      TABLE_CODE.indexOf("function renderSectionDocMedia(row, segment)"),
+      TABLE_CODE.indexOf("function renderSectionDocSegmentBody(row, segment)")
+    );
+    expect(media).toContain("twocol-section-media--pressable");
+    expect(media).toContain("segment.kind === SECTION_SEGMENT_KIND.IMAGE");
+    expect(media).toContain("segment.kind === SECTION_SEGMENT_KIND.FILE");
+    expect(media).toContain("if (pressIsOnMediaControl(event)) return;");
+    expect(media).toContain("activateSectionEditor(row, event);");
+    expect(TEMPLATE_CSS).toContain(".twocol-section-media--pressable {");
+    expect(TEMPLATE_CSS).toContain(".twocol-section-media--card {");
+    // The lead-in above a media-headed owned Section activates it as well.
+    expect(TABLE_CODE).toContain("if (sectionEditorOwnsRow(row)) return renderSectionEditorLeadIn(row);");
+    // The legacy per-item surfaces are not wired anywhere.
+    for (const gone of [
+      "renderSectionItemBody",
+      "renderSectionSegment(row, sectionItem",
+      "TemplateTextCell",
+      "richText.onActivate",
+      "onResizeSectionPhoto",
+      "startItemDrag",
+    ]) {
+      expect({ gone, hit: TABLE_CODE.includes(gone) }).toEqual({ gone, hit: false });
+    }
+    // The static compat renderer still uses the read-only Photo presentation.
+    expect(TABLE_CODE).toContain("<PhotoAttachment attachment={entry} readOnly />");
   });
 
-  test("a Section that is being edited is NOT read statically", () => {
+  test("a row the editor may NOT own renders READ-ONLY, with no press handler", () => {
+    const readOnly = TABLE_CODE.slice(
+      TABLE_CODE.indexOf("function renderSectionReadOnlyAnswer(row, value)"),
+      TABLE_CODE.indexOf("function renderAnswerSlot(row, headSegment = null)")
+    );
+    expect(readOnly).toContain("twocol-rich twocol-rich--readonly");
+    expect(readOnly).not.toContain('role="textbox"');
+    expect(readOnly).not.toContain("onMouseDown");
+    expect(readOnly).not.toContain("activateSectionEditor");
+    expect(TEMPLATE_CSS).toContain(".twocol-rich--readonly {");
+    // Its prose segments are plain boxes, and its answer control routes there.
+    expect(TABLE_CODE).toContain('return <div className="twocol-rich">{body}</div>;');
+    expect(TABLE_CODE).toContain("return renderSectionReadOnlyAnswer(row, value);");
+    // A media-headed refused row gets no lead-in either.
+    const slot = TABLE_CODE.slice(
+      TABLE_CODE.indexOf("function renderAnswerSlot(row, headSegment = null)"),
+      TABLE_CODE.indexOf("function renderHeadMediaSlot(row, headSegment = null)")
+    );
+    expect(slot).toContain("if (sectionEditorOwnsRow(row)) return renderSectionEditorLeadIn(row);");
+    expect(slot).toContain("return null;");
+  });
+
+  test("a Section that is being edited is NOT read statically — it is ONE editor segment", () => {
     const gate = TABLE_CODE.slice(
       TABLE_CODE.indexOf("function sectionStaticSegments(row)"),
-      TABLE_CODE.indexOf("function segmentLegacyItem")
+      TABLE_CODE.indexOf("function activateSectionEditor(row, event)")
     );
-    expect(gate).toContain("richText.activeRowId === row.id");
-    expect(gate).toContain("richText.leadingRowId === row.id");
+    expect(gate).toContain("if (isSectionEditorActive(row)) {");
+    expect(gate).toContain("sectionEditorSegment({");
+    expect(gate).toContain("minHeightPx: sectionEditor.editableRows[row.id].minHeightPx");
     expect(gate).toContain("return null");
+    // STATIC ↔ LIVE PARITY: both open the SAME serialization of the SAME body.
+    expect(NOTE_DOC_CODE).toContain("html: sectionBodyHtml(body)");
+    expect(TABLE_CODE).toContain("sectionDocSegments(body)");
   });
 
-  test("a MODERN document row cannot hand itself to the legacy interaction", () => {
-    // The legacy plan renders stored ITEMS. A row whose body is a modern
-    // document has none behind it, so handing it over would show a different
-    // document — the frozen legacy answer, or nothing at all. Both the text
-    // activation and the leading caret refuse it, from one predicate.
-    expect(TABLE_CODE).toContain("editable: body.source === SECTION_BODY_SOURCE.SECTION_CONTENT");
-    expect(TABLE_CODE).toContain("function sectionCanHandBackToLegacy(row)");
+  test("there is no legacy hand-back: every activation is the shared editor's, gated on ownership", () => {
+    for (const gone of [
+      "sectionCanHandBackToLegacy",
+      "activateSectionTextSegment",
+      "pendingCaretFor",
+      "pendingSectionCaret",
+      "isSectionCaretPending",
+      "focusOnActivate=",
+      "caretPoint=",
+      "richText",
+      "SECTION_BODY_SOURCE",
+    ]) {
+      expect({ gone, hit: TABLE_CODE.includes(gone) }).toEqual({ gone, hit: false });
+    }
     const activation = TABLE_CODE.slice(
-      TABLE_CODE.indexOf("function activateSectionTextSegment"),
-      TABLE_CODE.indexOf("function pendingCaretFor")
+      TABLE_CODE.indexOf("function activateSectionEditor(row, event)"),
+      TABLE_CODE.indexOf("function renderSectionEditor(row)")
     );
-    expect(activation).toContain("if (!sectionCanHandBackToLegacy(row)) return;");
-    const slot = TABLE_CODE.slice(
-      TABLE_CODE.indexOf("function renderAnswerSlot"),
-      TABLE_CODE.indexOf("function renderHeadMediaSlot")
+    expect(activation).toContain("if (!sectionEditorOwnsRow(row)) return false;");
+    expect(activation).toContain("sectionEditor.onActivate(row.id)");
+    // Ownership is the parent's eligibility answer, never re-derived here.
+    const owns = TABLE_CODE.slice(
+      TABLE_CODE.indexOf("function sectionEditorOwnsRow(row)"),
+      TABLE_CODE.indexOf("function isSectionEditorActive(row)")
     );
-    expect(slot).toContain("if (!sectionCanHandBackToLegacy(row)) return null;");
+    expect(owns).toContain("sectionEditor.editableRows[row.id]");
   });
 
-  test("the caret the user pressed survives the hand-back, stamped with its own target", () => {
-    // Activation re-plans the row onto the legacy blocks, so the cell that ends
-    // up carrying the editor is a NEW instance. The point is matched on the
-    // editor IDENTITY, so it can only ever open the target it was aimed at.
-    expect(TABLE_CODE).toContain("pendingSectionCaret");
-    expect(TABLE_CODE).toContain("pending.identity !== identity");
-    expect(TABLE_CODE).toContain("focusOnActivate={isSectionCaretPending(identity)}");
-    expect(TABLE_CODE).toContain("caretPoint={pendingCaretFor(identity)}");
-    const cell = stripComments(read("components/template/TemplateTextCell.js"));
-    expect(cell).toContain('caretPoint && typeof caretPoint.left === "number"');
-    expect(cell).toContain('{ mode: "point", left: caretPoint.left, top: caretPoint.top, identity }');
+  test("the caret the user pressed survives activation, stamped with its own editor identity", () => {
+    // Activation re-plans the row onto ONE editor segment, so the component
+    // that finally carries the editor is a different one from the static box
+    // the user pressed. The point is stamped with the editor IDENTITY, so it
+    // can only ever open the target it was aimed at.
+    expect(TABLE_CODE).toContain("const sectionEditorCaret = useRef(null);");
+    expect(TABLE_CODE).toContain(
+      '{ mode: "point", left: event.clientX, top: event.clientY, identity }'
+    );
+    expect(TABLE_CODE).toContain('{ mode: "end", identity }');
+    expect(TABLE_CODE).toContain("caretHintRef={sectionEditorCaret}");
+    const editor = stripComments(read("components/template/TemplateSectionEditor.js"));
+    expect(editor).toContain("if (hint.identity && hint.identity !== identity) return;");
+    // Consumed once: the hint is cleared as it is read.
+    expect(editor).toContain("if (caretHintRef) caretHintRef.current = null;");
   });
 
-  test("52. no new Template writer exists — the section writers are untouched", () => {
-    const writers = stripComments(read("lib/templateSectionAttachments.js"));
-    expect(writers).toContain("appendSectionAttachment");
+  test("52. no Template writer exists outside the editor's own update path", () => {
+    // The legacy section writers are gone entirely…
+    for (const file of [
+      "lib/templateSectionAttachments.js",
+      "lib/templateSectionText.js",
+      "lib/templateSectionLeadingText.js",
+    ]) {
+      expect({ file, exists: fs.existsSync(path.join(SRC, file)) }).toEqual({
+        file,
+        exists: false,
+      });
+    }
+    // …and the render layer writes nothing at all.
     for (const source of [TABLE_CODE, DOC_VIEW_CODE]) {
       for (const writer of [
         "appendSectionText",
         "appendSectionAttachment",
         "setRowSectionItems",
         "saveNoteTemplateInstance",
+        "persistSectionDoc",
+        "setRowSectionDoc",
+        "saveInstanceConfirmed",
       ]) {
         expect({ writer, hit: source.includes(writer) }).toEqual({ writer, hit: false });
       }
     }
+    // The form has ONE writer, called from the editor's update handler only.
+    expect((NOTE_DOC_CODE.match(/persistSectionDoc\(rowId, html\)/g) || []).length).toBe(1);
+    expect(NOTE_DOC_CODE).not.toContain("persistSectionContent");
   });
 
-  test("18. Quick Add still writes the ordered item list, through the paths it always has", () => {
+  test("18. Quick Add writes through the Section editor, routed two ways, never to sectionContent", () => {
     expect(NOTE_DOC_CODE).toContain("appendComposedAttachment");
     expect(NOTE_DOC_CODE).toContain("appendComposedText");
-    expect(NOTE_DOC_CODE).toContain("persistSectionContent");
+    expect(NOTE_DOC_CODE).toContain("const sectionDocQuickAddTarget = useCallback(");
+    expect(NOTE_DOC_CODE).toContain("quickAdd[row.id] = resolveSectionQuickAddRoute(body);");
+    expect(NOTE_DOC_CODE).toContain("SECTION_QUICK_ADD_ROUTE.REFUSE");
+    expect(NOTE_DOC_CODE).not.toContain("SECTION_QUICK_ADD_ROUTE.LEGACY");
+    expect(NOTE_DOC_CODE).not.toContain("appendSectionText");
+    expect(NOTE_DOC_CODE).not.toContain("appendSectionAttachment");
   });
 
-  test("53. Refine is unchanged — still per stored TEXT ITEM, addressed by its own id", () => {
-    expect(TABLE_CODE).toContain("sectionItemAcceptsAiRefine");
-    expect(TABLE_CODE).toContain("rowRefineTargetKey");
+  test("53. Refine is the modern text-run Refine, addressed by run — the per-item Refine is gone", () => {
+    expect(TABLE_CODE).toContain("function modernRefineTarget(row, segment)");
+    expect(TABLE_CODE).toContain("sectionRefineTargetKey({ rowId: row.id, segmentIndex: runIndex })");
+    for (const gone of ["sectionItemAcceptsAiRefine", "rowAcceptsAiRefine", "rowRefineTargetKey"]) {
+      expect({ gone, hit: TABLE_CODE.includes(gone) }).toEqual({ gone, hit: false });
+    }
     const refine = stripComments(read("lib/templateRowRefine.js"));
+    // The status/message model stays surface-agnostic: it names no segment, no
+    // body reader and no legacy target writer.
     expect(refine).not.toContain("segment");
     expect(refine).not.toContain("templateSectionBody");
-    // A static prose segment offers the SAME per-item trigger, on the same item.
-    expect(TABLE_CODE).toContain(
-      "sectionItemAcceptsAiRefine(row, item)"
-    );
+    expect(refine).not.toContain("applySectionTextItemToInstance");
+    expect(refine).not.toContain("applyRowAnswerToInstance");
   });
 
   test("54. export expands a DOCUMENT when a row has one, and the ordered list otherwise", () => {
@@ -833,7 +1062,7 @@ describe("51-55. the legacy interaction still owns editing, and everything else 
     // `sectionBodies` is note-mode only, exactly like attachments and evidence.
     const memo = TABLE_CODE.slice(
       TABLE_CODE.indexOf("const documentBodySegments = useMemo("),
-      TABLE_CODE.indexOf("const pendingSectionCaret")
+      TABLE_CODE.indexOf("const sectionEditorCaret = useRef(null);")
     );
     expect(memo).toContain("!showRightEditor");
   });

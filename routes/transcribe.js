@@ -48,23 +48,28 @@ router.post("/transcribe", upload.single("audio"), async (req, res) => {
 
     const file = await toFile(req.file.buffer, `audio.${ext}`, { type: mime });
 
+    // The language hint is validated to a bare ISO-639-1 code (or "auto") —
+    // it is user-controlled form data and is forwarded to a provider.
+    const explicitLanguage = /^[a-z]{2}$/.test(language) ? language : null;
+
     let text = "";
     try {
-      // Primary: 4o-mini-transcribe (auto-detects language internally)
-      const r1 = await openai.audio.transcriptions.create({
-        model: "gpt-4o-mini-transcribe",
-        file,
-        // Most models ignore unknown params; we omit language so it truly auto-detects.
-      });
+      // Primary: gpt-4o-mini-transcribe. With NO language it genuinely
+      // auto-detects; an explicit choice is passed as the language to
+      // transcribe in (the model accepts ISO-639-1). Neither model reports the
+      // language it detected, so the client never claims to know it.
+      const primary = { model: "gpt-4o-mini-transcribe", file };
+      if (explicitLanguage) primary.language = explicitLanguage;
+      const r1 = await openai.audio.transcriptions.create(primary);
       text = r1?.text || r1?.data?.text || "";
     } catch (e) {
-      // Fallback: whisper-1 (supports optional language ISO-639-1)
+      // Fallback: whisper-1 (same optional ISO-639-1 language)
       const opts = {
         model: "whisper-1",
         file,
       };
-      if (language && language !== "auto") {
-        opts.language = language; // e.g., "en", "es", "tl"
+      if (explicitLanguage) {
+        opts.language = explicitLanguage; // e.g., "en", "es", "tl"
       }
       const r2 = await openai.audio.transcriptions.create(opts);
       text = r2?.text || r2?.data?.text || "";

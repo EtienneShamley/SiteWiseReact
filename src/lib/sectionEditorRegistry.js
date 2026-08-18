@@ -38,13 +38,14 @@
 /**
  * The identity of ONE Section's editor.
  *
- * Deliberately NOT `templateRowEditorIdentity` (src/lib/editorToolbarState.js):
- * that token addresses the LEGACY per-item row editor, and with no `itemId` it
- * is byte-identical to a legacy row's own token. The two interaction systems
- * must never be able to claim the same identity — a Section editor and a legacy
- * row editor for the same row would otherwise register over one another and a
- * change from one could be committed as if it came from the other. The scope
- * prefix makes them different by construction.
+ * SCOPE-PREFIXED (`"sectiondoc/1"` first). Until Phase G a second interaction
+ * system — the legacy per-item row editor, `templateRowEditorIdentity` in
+ * src/lib/editorToolbarState.js — produced identity tokens for the same rows,
+ * and with no `itemId` such a token was a bare `[note, template, version, row,
+ * isCustom]` tuple; the prefix made the two impossible to confuse. That legacy
+ * system is retired, but the prefix stays: it is what any FUTURE identity
+ * minted for the same row (another surface, another document kind) must
+ * differ from, and it costs nothing.
  *
  * It carries the note, the template, the pinned version, the row and whether
  * the row is note-specific, so re-pinning a note to another template or version

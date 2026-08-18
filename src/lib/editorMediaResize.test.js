@@ -1,13 +1,15 @@
 // src/lib/editorMediaResize.test.js
 //
-// The shared resize boundary. The arithmetic itself is proven in depth by
-// templateSectionImageResize.test.js; these tests assert the shared surface —
-// that the media-core names expose the SAME proven rules (so the two consumers
-// can never disagree), plus the behaviours a shared consumer will rely on.
-// They are written against behaviour, not against the aliasing, so they keep
-// holding when Phase G moves the implementation's home into this module.
+// The shared resize boundary. Since Phase G this module OWNS the arithmetic
+// (it moved here verbatim from the retired templateSectionImageResize.js);
+// these tests assert the shared surface — the media-core names, the numeric
+// rules every consumer relies on — and that no legacy home remains.
 
+import fs from "fs";
+import path from "path";
 import {
+  MEDIA_MAX_WIDTH_PCT,
+  MEDIA_MIN_WIDTH_PCT,
   MEDIA_RESIZE_CORNER,
   MEDIA_RESIZE_CORNERS,
   MEDIA_WIDTH_KEY_STEP_PCT,
@@ -19,6 +21,16 @@ import {
   mediaWidthPctFromPointer,
   nudgeMediaWidthPct,
 } from "./editorMediaResize";
+
+describe("the ONE home of the resize arithmetic (Phase G)", () => {
+  test("editorMediaResize owns the arithmetic — it no longer wraps a Template module", () => {
+    const src = fs.readFileSync(path.join(__dirname, "editorMediaResize.js"), "utf8");
+    expect(src).not.toMatch(/from ["']\.\/templateSectionImageResize/);
+    expect(fs.existsSync(path.join(__dirname, "templateSectionImageResize.js"))).toBe(false);
+    expect(MEDIA_MIN_WIDTH_PCT).toBe(15);
+    expect(MEDIA_MAX_WIDTH_PCT).toBe(100);
+  });
+});
 
 describe("the corner vocabulary", () => {
   test("four corners, in a stable order", () => {

@@ -14,9 +14,15 @@
 //   - the staged queue and its object-URL lifecycle:   quickAddDraft.test.js
 //   - which destinations compose, and the Send route:  quickAddDraft.test.js
 //   - order, partial success, text-after-attachments:  quickAddDelivery.test.js
-//   - the attachment write/removal sequences:  templateSectionAttachments.test.js
-//   - the text append + materialise-once rule:     templateSectionText.test.js
+//   - where ONE capture goes (DOCUMENT | REFUSE):     templateSectionBody.test.js
+//   - the shared editor registry the route opens:      sectionEditorRegistry.test.js
 //   - what a destination may accept:                  quickAddTarget.test.js
+//
+// Since Phase G a Section capture is delivered ONLY through the document
+// route: NoteTemplateDoc's `sectionDocQuickAddTarget(rowId)` answers
+// `{ editor, active } | { refuse } | null`, and the two composer halves insert
+// into that editor. There is no legacy `sectionContent` writer and no LEGACY
+// branch anywhere on the path.
 import fs from "fs";
 import path from "path";
 
@@ -288,7 +294,7 @@ describe("the Template composition is delivered to one captured destination", ()
 /* 4. Text and voice                                                           */
 /* -------------------------------------------------------------------------- */
 
-describe("Template Quick Add text becomes section content, never an answer", () => {
+describe("Template Quick Add text becomes Section document content, never an answer", () => {
   test("a Template row routes its text through the composer", () => {
     expect(bottomBar).toMatch(
       /const textUsesComposer = target\?\.kind === QUICK_ADD_KIND\.TEMPLATE_ROW/
@@ -296,84 +302,161 @@ describe("Template Quick Add text becomes section content, never an answer", () 
     expect(bottomBar).toMatch(/textUsesComposer,/);
   });
 
-  test("the text half calls the section text primitive", () => {
-    expect(templateDoc).toMatch(/const result = appendSectionText\(\{/);
+  test("the text half inserts into the routed Section editor, through the answer boundary", () => {
     const appendText = between(
       templateDoc,
       "const appendComposedText = useCallback(",
       "const templateComposeApi"
     );
-    // It has no answers channel at all.
+    expect(appendText).toMatch(/const target = sectionDocQuickAddTarget\(rowId\)/);
+    // Sanitized through the EXISTING answer boundary — no HTML passed through.
+    expect(appendText).toMatch(/const html = modelToHtml\(answerToModel\(value\)\)/);
+    // ACTIVE: at the current selection. INACTIVE: at the end of the document.
+    expect(appendText).toMatch(/editor\.chain\(\)\.insertContent\(html\)\.run\(\)/);
+    expect(appendText).toMatch(
+      /insertContentAt\(editor\.state\.doc\.content\.size, html\)/
+    );
+    // It has no answers channel at all, and no legacy section writer.
     expect(appendText).not.toMatch(/setRowText|rowTextRef\.current =|handleRightChange|appendTextToAnswer/);
     expect(appendText).not.toMatch(/persistCustomRows|handleCustomRowPatch/);
-    expect(appendText).toMatch(/persist: persistSectionContent/);
+    expect(appendText).not.toMatch(/appendSectionText|persistSectionContent|sectionContent/);
   });
 
-  test("voice only fills the composer's text draft", () => {
+  test("the composer's microphone only opens the Live Transcript workspace — it records and sends nothing itself", () => {
+    // 2026-08-18: the composer's private recorder is gone; the ONE
+    // transcription session lives in LiveTranscriptProvider and inserts
+    // through MainArea's shared paths (liveTranscriptWiring.test.js).
     const voice = between(bottomBar, "const handleVoiceClick", "const runRefine");
-    expect(voice).toMatch(/setRefinedDraft\(|setInput\(/);
-    expect(voice).not.toMatch(/onSendComposer|handleSend|draftStoreRef|onInsertText/);
-    // A result whose destination has moved is discarded, not redirected.
-    expect(voice).toMatch(/capturedTarget !== targetTokenRef\.current/);
+    expect(voice).toMatch(/onOpenLiveTranscript\(e\.currentTarget\)/);
+    expect(voice).not.toMatch(/onSendComposer|handleSend|draftStoreRef|onInsertText|MediaRecorder|transcribeBlob|setInput\(|setRefinedDraft\(/);
   });
 });
 
 /* -------------------------------------------------------------------------- */
-/* 5. The live-editor transition                                               */
+/* 5. The document route — ONE writer per row                                  */
 /* -------------------------------------------------------------------------- */
 
-describe("a live legacy editor is transitioned, not left writing the frozen answer", () => {
-  const structural = between(
+describe("a Section capture goes through the document route only", () => {
+  const routeFn = between(
     templateDoc,
-    "const handleSectionStructuralChange = useCallback(",
-    "const sectionMaterialisationFor"
+    "const sectionDocQuickAddTarget = useCallback(",
+    "const openSectionQuickAddSeparator"
+  );
+  const attach = between(
+    templateDoc,
+    "const appendComposedAttachment = useCallback(",
+    "const appendComposedText"
+  );
+  const text = between(
+    templateDoc,
+    "const appendComposedText = useCallback(",
+    "const templateComposeApi"
   );
 
-  test("onStructuralChange is wired to the real handler on BOTH primitives", () => {
-    const attachments = (templateDoc.match(/onStructuralChange: handleSectionStructuralChange/g) || []);
-    expect(attachments.length).toBeGreaterThanOrEqual(2);
-    expect(templateDoc).not.toMatch(/onStructuralChange: \(\) => \{\}/);
-    expect(templateDoc).not.toMatch(/onStructuralChange: noop/);
-  });
-
-  test("materialisedTextItemId is ADOPTED by the editing session", () => {
-    expect(structural).toMatch(/if \(materialisedTextItemId\)/);
-    expect(structural).toMatch(/activeTextRowIdRef\.current === rowId/);
-    expect(structural).toMatch(/!activeSectionItemIdRef\.current/);
-    expect(structural).toMatch(/itemId: materialisedTextItemId/);
-    expect(structural).toMatch(/materializedSectionRef\.current = record/);
-    expect(structural).toMatch(/setMaterializedSection\(record\)/);
-  });
-
-  test("adoption is what makes the next keystroke reach the new item", () => {
-    // Route 1 of the change handler uses exactly this record.
-    expect(templateDoc).toMatch(
-      /activeSectionItemIdRef\.current \|\|\s*\n?\s*\(materialized && materialized\.rowId === rowId \? materialized\.itemId : null\)/
+  test("the route answers { refuse } | { editor, active } | null, and nothing else", () => {
+    expect(routeFn).toMatch(/if \(!rowId \|\| !rowIsPresent\(rowId\)\) return null;/);
+    expect(routeFn).toMatch(/route === SECTION_QUICK_ADD_ROUTE\.REFUSE/);
+    expect(routeFn).toMatch(/return \{\s*refuse:/);
+    expect(routeFn).toMatch(
+      /return \{ editor, active: activeSectionRowIdRef\.current === rowId \}/
     );
-    expect(templateDoc).toMatch(/if \(itemId\) \{[\s\S]{0,400}?updateTextSectionItemValue/);
+    // No LEGACY route exists any more.
+    expect(routeFn).not.toMatch(/SECTION_QUICK_ADD_ROUTE\.LEGACY|legacy:/);
+    expect(templateDoc).not.toMatch(/SECTION_QUICK_ADD_ROUTE\.LEGACY/);
+    expect(read("lib/templateSectionBody.js")).not.toMatch(/LEGACY: "legacy-section"|QUICK_ADD_ROUTE\.LEGACY/);
   });
 
-  test("a removed item's session is dropped, and never re-pointed at a neighbour", () => {
-    // Superseded by the Word-flow correction: the handler now delegates to
-    // `forgetRemovedSectionItems`, which HEALING also uses (a heal removes a
-    // continuation item exactly as a removal removes an attachment). The rule
-    // itself is unchanged — the item is named by its own id, and nothing looks
-    // for a neighbour to fall back on.
-    expect(structural).toMatch(
-      /if \(removedItemId\) forgetRemovedSectionItems\(rowId, \[removedItemId\]\)/
-    );
-    const forget = templateDoc.slice(
-      templateDoc.indexOf("const forgetRemovedSectionItems = useCallback("),
-      templateDoc.indexOf("const persistSectionContentHealed")
-    );
-    expect(forget).toMatch(/ids\.includes\(materializing\.itemId\)/);
-    expect(forget).toMatch(/clearMaterializedSection\(\)/);
-    // No search for "some other text item" anywhere in the cleanup.
-    expect(forget).not.toMatch(/findIndex\(/);
+  test("the route is the reader's verdict, published once per row", () => {
+    expect(templateDoc).toMatch(/quickAdd\[row\.id\] = resolveSectionQuickAddRoute\(body\)/);
+    expect(templateDoc).toMatch(/sectionQuickAddRouteRef\.current = sectionState\.quickAdd/);
+    expect(routeFn).toMatch(/const route = sectionQuickAddRouteRef\.current\[rowId\]/);
   });
 
-  test("the editor's identity is carried into the record, not invented", () => {
-    expect(structural).toMatch(/identity: activeRowIdentityRef\.current/);
+  test("a row with no editable entry opens an EMPTY document — nothing existed to lose", () => {
+    expect(routeFn).toMatch(/const entry = sectionEditableRef\.current\[rowId\]/);
+    expect(routeFn).toMatch(/html: entry \? entry\.html : ""/);
+    expect(routeFn).toMatch(/registry\.getOrCreate\(identity, \{/);
+    expect(routeFn).toMatch(/setSectionEditorLive\(rowId, true\)/);
+  });
+
+  test("opening the editor writes nothing — only the capture's own transaction persists", () => {
+    // The document is supplied at construction; the ONE write path is the
+    // editor's own update handler → persistSectionDoc.
+    expect(routeFn).not.toMatch(/persist|saveInstanceConfirmed|saveNoteTemplateInstance/);
+    expect(templateDoc).toMatch(/onUpdate: \(\{ editor \}\) =>\s*sectionDocUpdateRef\.current\?\.\(identity, context\?\.rowId, editor\)/);
+    expect(templateDoc).toMatch(/const handleSectionDocUpdate = useCallback\(/);
+    expect(templateDoc).toMatch(/persistSectionDoc\(rowId, html\)/);
+  });
+
+  test("BOTH composer halves take the route, and have NO legacy branch", () => {
+    for (const half of [attach, text]) {
+      expect(half).toMatch(/const target = sectionDocQuickAddTarget\(rowId\)/);
+      expect(half).toMatch(/if \(!target \|\| !target\.editor\)/);
+      expect(half).toMatch(/\(target && target\.refuse\)/);
+      expect(half).not.toMatch(/appendSectionAttachment|appendSectionText/);
+      expect(half).not.toMatch(/persistSectionContent|sectionMaterialisationFor|materialisation:/);
+      expect(half).not.toMatch(/target\.legacy|route === SECTION_QUICK_ADD_ROUTE/);
+    }
+    // The legacy writers are not even imported.
+    expect(templateDoc).not.toMatch(/from "\.\.\/\.\.\/lib\/templateSectionAttachments"/);
+    expect(templateDoc).not.toMatch(/from "\.\.\/\.\.\/lib\/templateSectionText"/);
+    expect(templateDoc).not.toMatch(/appendSectionAttachment|appendSectionText/);
+    expect(mainArea).not.toMatch(/appendSectionAttachment|appendSectionText/);
+  });
+
+  test("the attachment half uses the SHARED insertion pipeline with the Template's own policy", () => {
+    expect(attach).toMatch(/await insertLocalImageAsset\(/);
+    expect(attach).toMatch(/await insertFreeformFileAttachment\(/);
+    expect(attach).toMatch(/validate: validateComposedPhoto/);
+    expect(attach).toMatch(/validate: validateSectionFile/);
+    expect(attach).toMatch(/createPhotoAsset\(blob, options\?\.metadata, options\?\.name\)/);
+    expect(attach).toMatch(/createNoteFileAsset\(blob, options\?\.metadata\)/);
+    expect(attach).toMatch(/removeAsset: deleteAsset/);
+    // ACTIVE inserts at the live selection; INACTIVE at the end of the document.
+    expect(attach).toMatch(/const beforeInsert = target\.active\s*\?\s*undefined\s*:\s*\(\) => placeSectionCaretAtEnd\(editor\)/);
+    // A stale result is forwarded, never reported as a per-field failure.
+    expect(attach).toMatch(/if \(result\.stale\) return \{ ok: false, stale: true \}/);
+  });
+
+  test("the separator between staged items is a no-op unless the row is the ACTIVE Section", () => {
+    const separator = between(
+      templateDoc,
+      "const openSectionQuickAddSeparator = useCallback(",
+      "const validateSectionFile"
+    );
+    expect(separator).toMatch(/if \(!rowId \|\| activeSectionRowIdRef\.current !== rowId\) return;/);
+    expect(separator).toMatch(/insertContentAt\(pos, \{ type: "paragraph" \}\)/);
+    expect(templateDoc).toMatch(/openBlockAfterAttachment: openSectionQuickAddSeparator/);
+  });
+
+  test("the retired per-item session machinery is gone from NoteTemplateDoc", () => {
+    for (const gone of [
+      "activeTextRowId",
+      "activeSectionItemId",
+      "materializedSection",
+      "handleSectionStructuralChange",
+      "forgetRemovedSectionItems",
+      "persistSectionContentHealed",
+      "handleRowEditorChange",
+      "removeSectionAttachment",
+      "setSectionPhotoDisplay",
+      "reorderSectionItem",
+      "moveSectionItemIntoText",
+      "handleRefineRow",
+      "handleRevertRowRefine",
+      "rowRefineBackups",
+    ]) {
+      expect(templateDoc).not.toContain(gone);
+    }
+    // MainArea passes only the Section-refine backup trio, and imports only the
+    // generic backup-map helpers from templateRowRefine.
+    expect(mainArea).toMatch(/sectionRefineBackups=\{sectionRefineBackups\}/);
+    expect(mainArea).toMatch(/onSetSectionRefineBackup=\{/);
+    expect(mainArea).toMatch(/onClearSectionRefineBackup=\{/);
+    expect(mainArea).not.toMatch(/rowRefineBackups=|onSetRowRefineBackup|onClearRowRefineBackup/);
+    expect(mainArea).toMatch(
+      /import \{\s*clearRowRefineBackup,\s*pruneRowRefineBackups,\s*\} from "\.\.\/lib\/templateRowRefine"/
+    );
   });
 });
 
@@ -391,24 +474,24 @@ describe("primary values are untouched by a Quick Add composition", () => {
   test("neither composer writes answers, custom-row answers or attachments", () => {
     expect(composeBlock).not.toMatch(/setRowText|setRowAttachments|setRowEvidence/);
     expect(composeBlock).not.toMatch(/persistAttachments|persistEvidence|persistCustomRows/);
-    expect(composeBlock).toMatch(/persist: persistSectionContent/);
+    // And no frozen legacy list either — the ONE writer is the editor's own
+    // update handler.
+    expect(composeBlock).not.toMatch(/persistSectionContent|sectionContent/);
   });
 
-  test("a structured and a legacy Photo/File row are never materialised", () => {
-    const materialisation = between(
-      templateDoc,
-      "const sectionMaterialisationFor = useCallback(",
-      "const appendComposedAttachment"
-    );
-    // isTextAnswerRow is false for number/date/time/checkbox/yes-no/select and
-    // for the legacy photo/file types, so those pass materialisation: null.
-    expect(materialisation).toMatch(/if \(!isTextAnswerRow\(rowId\)\) return null;/);
-    expect(materialisation).toMatch(/evidence: rowEvidenceRef\.current\?\.\[rowId\]/);
+  test("a structured row's typed value and a legacy Photo/File primary are never document content", () => {
+    // The composers reach the instance only through the routed editor, whose
+    // document the reader built WITHOUT the typed value / primary attachments
+    // (`sectionReplacesRowAnswer` decides, once, in the reader).
+    expect(composeBlock).not.toMatch(/rowTextRef|rowAttachmentsRef|customRowsRef/);
+    const reader = withoutComments(read("lib/templateSectionBody.js"));
+    expect(reader).toMatch(/const includeAnswer = sectionReplacesRowAnswer\(rowType, isAttachmentField\)/);
+    expect(reader).toMatch(/answer: includeAnswer \? legacyAnswerFor\(source, rowId, isCustomRow\) : undefined/);
   });
 
   test("the section save carries answers/attachments/evidence through unchanged", () => {
     expect(templateDoc).toMatch(
-      /const persistSectionContent = useCallback\([\s\S]{0,600}?answers: rowTextRef\.current,[\s\S]{0,120}?attachments: rowAttachmentsRef\.current,[\s\S]{0,120}?evidence: rowEvidenceRef\.current,/
+      /const persistSectionDoc = useCallback\([\s\S]{0,600}?answers: rowTextRef\.current,[\s\S]{0,120}?attachments: rowAttachmentsRef\.current,[\s\S]{0,120}?evidence: rowEvidenceRef\.current,[\s\S]{0,160}?sectionDoc: setRowSectionDoc\(/
     );
   });
 
@@ -426,30 +509,43 @@ describe("primary values are untouched by a Quick Add composition", () => {
   });
 });
 
-describe("persisted section photos keep their display metadata read-only", () => {
+/* -------------------------------------------------------------------------- */
+/* 7. Historical section photos: read-only compatibility rendering             */
+/* -------------------------------------------------------------------------- */
+
+describe("HISTORICAL READ COMPATIBILITY — a stored section photo the document cannot hold renders read-only", () => {
   const table = withoutComments(read("components/template/ResizableTwoColTable.js"));
-  const sectionBody = between(
+  const compat = between(
     table,
-    "function renderSectionItemBody",
-    "function renderSectionSegment"
+    "function renderCompatSegmentBody",
+    "function renderSectionDocSegment("
   );
 
-  test("a section photo renders with readOnly and no legacy display toolbar", () => {
-    // The Small/Normal/Large/Full-width presets and the alignment buttons are
-    // removed, not re-exposed: a section image is sized by its own proportional
-    // corner handles instead. Per-item REMOVE is a separate capability and is
-    // proved in templateSectionComposition.test.js.
-    expect(sectionBody).toMatch(
-      /<PhotoAttachment\s+attachment=\{item\}\s+readOnly\s+onRemove=\{removeItem\}/
-    );
-    expect(sectionBody).not.toMatch(/onChangeDisplay/);
+  test("a compatibility photo renders with readOnly, no display toolbar and no Remove", () => {
+    expect(compat).toMatch(/<PhotoAttachment attachment=\{entry\} readOnly \/>/);
+    expect(compat).not.toMatch(/onChangeDisplay|onRemove/);
   });
 
-  test("the display primitive is reached ONLY by the corner-resize handler", () => {
-    // Its first and only caller writes a width percentage, and nothing else.
-    // Details are pinned in templateSectionImageUx.test.js.
-    expect(templateDoc.match(/setSectionPhotoDisplay/g)).toHaveLength(2); // import + call
-    expect(templateDoc).toMatch(/const resizeSectionPhoto = useCallback\(/);
-    expect(templateDoc).toMatch(/patch: \{ widthPct \}/);
+  test("a document IMAGE segment of an owned row is pressable — it activates the shared editor", () => {
+    const media = between(table, "function renderSectionDocMedia", "function renderSectionDocSegmentBody");
+    expect(media).toMatch(/twocol-section-media--pressable/);
+    expect(media).toMatch(/activateSectionEditor\(row, event\)/);
+    expect(read("components/template/template.css")).toContain(".twocol-section-media--pressable");
+  });
+
+  test("PhotoAttachment has no move surface and no corner resize any more", () => {
+    const photo = withoutComments(read("components/template/PhotoAttachment.js"));
+    expect(photo).not.toMatch(/onMoveStart|onResizeWidth/);
+    expect(photo).not.toMatch(/photo-att-corner|photo-att-img--movable|photo-att-frame--resizing/);
+    expect(photo).toMatch(/readOnly/);
+    expect(photo).toMatch(/onChangeDisplay/);
+    // The retired per-item modules that fed it are gone.
+    for (const gone of [
+      "lib/templateSectionImageResize.js",
+      "lib/templateSectionImageMove.js",
+      "lib/templateSectionItemDragSession.js",
+    ]) {
+      expect(fs.existsSync(path.join(SRC, gone))).toBe(false);
+    }
   });
 });

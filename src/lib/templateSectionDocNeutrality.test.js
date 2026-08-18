@@ -3,21 +3,24 @@
 // WHAT THE MODERN SECTION DOCUMENT IS STILL NOT ALLOWED TO DO.
 //
 // F1 added the model, the legacy adapter, the canonical authority reader and
-// the deletion-gate scan, and switched nothing at all. F3 switches exactly ONE
-// thing — the READ path: an inactive flexible Section now renders from the
-// canonical reader, through the static Section view, one block per document
-// segment. Everything else F1 asserted is still asserted here:
+// the deletion-gate scan, and switched nothing at all. F3 switched the READ
+// path (an inactive flexible Section renders from the canonical reader), F4
+// added the ONE writer, and Phase G retired the legacy per-item interaction so
+// the shared editor is the only one. What is still asserted here, because it
+// is what keeps every historical note readable without a migration:
 //
-//   - NO WRITER. Nothing mints the format string, nothing persists a document,
-//     and merely rendering a note writes nothing at all.
-//   - NO EDITOR. No Section editor is constructed; the legacy per-item
-//     interaction still owns every edit.
-//   - EXPORT, QUICK ADD AND REFINE ARE UNTOUCHED.
+//   - ONE WRITER. Nothing but the Section editor's own update handler
+//     persists a document; the format string is minted in one place; merely
+//     rendering a note writes nothing at all; NO BULK MIGRATION exists.
+//   - The READ path constructs no editor: a Section nobody is editing costs no
+//     ProseMirror at all.
 //   - NOTHING outside the reader decides which representation is authoritative:
-//     no render site, no planner and no writer names `sectionDoc` at all.
-//
-// The read-path wiring F3 DID add is enumerated exactly, so a later phase that
-// switches something it was not supposed to still fails loudly.
+//     no render site, no planner and no writer names `sectionDoc` at all. The
+//     reader has EXACTLY TWO production callers (the form and the exporter).
+//   - The reader and the adapter stay PURE, and the deletion gate is intact.
+//   - The legacy interaction modules are GONE, and no production file imports
+//     them (Phase G) — the READ boundary (adapter, in-memory heal, compat
+//     segments) is what survives.
 //
 // Behavioural tests cannot show an absence, so these are source-text
 // assertions — the same technique, and the same comment-stripping convention,
@@ -65,9 +68,11 @@ const READ_PATH_CONSUMERS = [
   "lib/templateRowContent.js",
 ];
 
-/** Every runtime path that must still be exactly as it was. */
+/**
+ * Every OTHER runtime path this suite watches: none of them may know the
+ * stored map exists, resolve a body, mint a document or construct an editor.
+ */
 const UNCHANGED_RUNTIME = [
-  "components/template/TemplateRowEditor.js",
   "components/template/PhotoAttachment.js",
   "components/template/FileAttachmentRow.js",
   "components/template/PagedDocument.js",
@@ -82,13 +87,7 @@ const UNCHANGED_RUNTIME = [
   "lib/templateExportAssets.js",
   "lib/templateSectionContent.js",
   "lib/templateSectionEditing.js",
-  "lib/templateSectionAttachments.js",
-  "lib/templateSectionText.js",
-  "lib/templateSectionReorder.js",
-  "lib/templateSectionTextSplit.js",
   "lib/templateSectionTextHeal.js",
-  "lib/templateSectionLeadingText.js",
-  "lib/templateSectionItemDrop.js",
   "lib/templateRowRefine.js",
   "lib/quickAddDelivery.js",
   "lib/quickAddDraft.js",
@@ -100,16 +99,52 @@ const UNCHANGED_RUNTIME = [
   "lib/editorFileInsert.js",
 ];
 
+/**
+ * The legacy per-item Section interaction, retired in Phase G. Each of these
+ * modules is gone, and no production file may import it. What some of them
+ * carried that the shared core needed MOVED to the shared editorMedia* modules
+ * (asserted where those live); the rest served only the retired interaction.
+ */
+const RETIRED_MODULES = [
+  "components/template/TemplateRowEditor.js",
+  "components/template/TemplateTextCell.js",
+  "lib/templateSectionImageResize.js",
+  "lib/templateSectionImageMove.js",
+  "lib/templateSectionItemDragSession.js",
+  "lib/templateSectionItemDrop.js",
+  "lib/templateSectionTextPoint.js",
+  "lib/templateSectionTextSplit.js",
+  "lib/templateSectionReorder.js",
+  "lib/templateSectionLeadingText.js",
+  "lib/templateSectionText.js",
+  "lib/templateSectionAttachments.js",
+  "lib/templateSectionImagePlacement.js",
+];
+
 const SOURCE = Object.fromEntries(
   [
     ...NEW_MODULES,
     ...READ_PATH,
     ...READ_PATH_CONSUMERS,
     ...UNCHANGED_RUNTIME,
-    "components/template/TemplateTextCell.js",
     "lib/templateModel.js",
   ].map((f) => [f, withoutComments(read(f))])
 );
+
+/** Every production (non-test) source file under src/, comment-stripped. */
+function listProductionSources(dir = SRC, out = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      listProductionSources(full, out);
+      continue;
+    }
+    if (!/\.(js|jsx)$/.test(entry.name)) continue;
+    if (/\.test\.jsx?$/.test(entry.name)) continue;
+    out.push(path.relative(SRC, full));
+  }
+  return out;
+}
 
 /* ==================== 36-41. nothing switched over ==================== */
 
@@ -173,13 +208,10 @@ describe("36-41. no runtime path reads or writes the modern document for itself"
     // the raw document module are reachable ONLY through the reader.
     const READ_PATH_ALLOWED = {
       "components/template/NoteTemplateDoc.js": ["templateSectionBody"],
-      // The table imports the reader ONLY for its source vocabulary — which
-      // representation a body came from decides whether the legacy per-item
-      // interaction can take that row over. It never calls the reader.
-      "components/template/ResizableTwoColTable.js": [
-        "templateSectionDocSegments",
-        "templateSectionBody",
-      ],
+      // Since Phase G the table no longer needs the reader's source vocabulary
+      // (nothing hands a row back to a legacy interaction): it renders what the
+      // form resolved, through the projection only.
+      "components/template/ResizableTwoColTable.js": ["templateSectionDocSegments"],
       "lib/templateRowContent.js": ["templateSectionDocSegments"],
       "lib/templateSectionDocSegments.js": ["templateSectionDoc"],
       "components/template/TemplateSectionDocView.js": ["templateSectionDocSegments"],
@@ -225,15 +257,16 @@ describe("36-41. no runtime path reads or writes the modern document for itself"
     // down. The only other caller is the export model (Phase F6b), which must
     // hold the SAME opinion about authority as the screen — asking the reader
     // is how it does so without a second opinion. No render site, planner or
-    // interaction file may call it.
+    // interaction file may call it — checked across EVERY production file.
     const CALLERS = new Set([
       "components/template/NoteTemplateDoc.js",
       "lib/templateExportModel.js",
     ]);
-    for (const [file, source] of Object.entries(SOURCE)) {
+    for (const file of listProductionSources()) {
       if (file === "lib/templateSectionBody.js") continue;
+      const source = withoutComments(read(file));
       const expected = CALLERS.has(file);
-      expect({ file, calls: source.includes("resolveSectionBody") }).toEqual({
+      expect({ file, calls: source.includes("resolveSectionBody(") }).toEqual({
         file,
         calls: expected,
       });
@@ -299,17 +332,62 @@ describe("36-41. no runtime path reads or writes the modern document for itself"
     }
   });
 
-  test("the Template planner plans BOTH ways and decides authority neither way", () => {
+  test("the Template planner plans ONLY from segments and decides authority never", () => {
     const planner = SOURCE["lib/templateRowContent.js"];
-    // The legacy per-item plan is intact — it is what an ACTIVE Section still
-    // renders, and every legacy interaction still addresses.
-    expect(planner).toContain("sectionItemsForRow");
-    expect(planner).toContain("ROW_BLOCK_KIND.SECTION_ITEM");
-    // The document plan is driven entirely by what the caller hands down.
+    // Since Phase G there is no second (per-item) plan for the same body: a
+    // flexible body is planned only from the segments the caller hands down,
+    // and a row with none plans exactly the blocks it always did.
     expect(planner).toContain("sectionSegments");
+    expect(planner).toContain("SECTION_SEGMENT");
+    expect(planner).not.toContain("ROW_BLOCK_KIND.SECTION_ITEM");
+    expect(planner).not.toContain("SECTION_ITEM:");
+    expect(planner).not.toContain("sectionItemsForRow");
+    expect(planner).not.toContain("rowSectionItems");
+    expect(planner).not.toContain("hasRowSectionContent");
     // It never resolves a body itself, and never touches a raw document.
     expect(planner).not.toContain("resolveSectionBody");
     expect(planner).not.toContain("adaptSectionItemsToNodes");
+  });
+
+  test("G. the legacy interaction modules no longer exist, and no production file imports them", () => {
+    const production = listProductionSources().map((f) => [f, withoutComments(read(f))]);
+    for (const file of RETIRED_MODULES) {
+      expect({ file, exists: fs.existsSync(path.join(SRC, file)) }).toEqual({
+        file,
+        exists: false,
+      });
+      const base = path.basename(file, ".js");
+      const specifier = new RegExp(`from\\s+["'][^"']*/${base}["']`);
+      for (const [name, source] of production) {
+        expect({ file, importer: name, hit: specifier.test(source) }).toEqual({
+          file,
+          importer: name,
+          hit: false,
+        });
+      }
+    }
+  });
+
+  test("G. NO BULK MIGRATION: no production file walks a note's rows to write documents", () => {
+    // The only writer is the Section editor's own update handler, one row per
+    // genuine edit. Nothing iterates `sectionContent` / `answers` / `evidence`
+    // to mint `sectionDoc` entries, on load or anywhere else.
+    const production = listProductionSources().map((f) => [f, withoutComments(read(f))]);
+    for (const [name, source] of production) {
+      if (name === "lib/templateSectionDoc.js") continue;
+      expect({ name, hit: source.includes("makeSectionDocValue") }).toEqual({ name, hit: false });
+      expect({ name, hit: /migrateSectionDoc|migrateSectionContent|bulkMigrat|materializeRowSectionItems/.test(source) }).toEqual({
+        name,
+        hit: false,
+      });
+    }
+    // The ONE writer writes exactly one row, and the read is pure.
+    const form = SOURCE["components/template/NoteTemplateDoc.js"];
+    expect((form.match(/setRowSectionDoc\(/g) || []).length).toBe(1);
+    expect(form).toContain("sectionDoc: setRowSectionDoc(instanceRef.current?.sectionDoc, rowId, html),");
+    const reader = SOURCE["lib/templateSectionBody.js"];
+    expect(reader).not.toContain("setRowSectionDoc");
+    expect(reader).not.toContain("saveNoteTemplateInstance");
   });
 
   test("the exporter reads the document through the SAME reader, and still expands items underneath it", () => {

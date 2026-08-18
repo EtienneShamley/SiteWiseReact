@@ -245,21 +245,28 @@ describe("sanitization is parser-based, not pattern-based", () => {
     expect(value).toBe("ab");
   });
 
-  test("unsupported tags are removed but their readable text remains", () => {
-    expect(serializeAnswerFromHtml("<h1>Heading text</h1>")).toBe("Heading text");
-    expect(serializeAnswerFromHtml("<blockquote><p>quoted</p></blockquote>")).toBe(
-      "quoted"
+  test("document structure the model carries is KEPT as structure (headings, quotes, code, tables)", () => {
+    // Since the Template Section document vocabulary was widened (2026-08-18)
+    // these are first-class model blocks, not stripped containers.
+    expect(serializeAnswerFromHtml("<h1>Heading text</h1>")).toEqual(rich("<h1>Heading text</h1>"));
+    expect(serializeAnswerFromHtml("<blockquote><p>quoted</p></blockquote>")).toEqual(
+      rich("<blockquote><p>quoted</p></blockquote>")
     );
-    expect(serializeAnswerFromHtml("<pre>code text</pre>")).toBe("code text");
-    expect(serializeAnswerFromHtml("<p>a <code>b</code> c</p>")).toBe("a b c");
+    expect(serializeAnswerFromHtml("<pre>code text</pre>")).toEqual(
+      rich("<pre><code>code text</code></pre>")
+    );
+    expect(serializeAnswerFromHtml("<p>a <code>b</code> c</p>")).toEqual(
+      rich("<p>a <code>b</code> c</p>")
+    );
+    expect(
+      serializeAnswerFromHtml("<table><tbody><tr><td>Left</td><td>Right</td></tr></tbody></table>")
+    ).toEqual(rich("<table><tbody><tr><td><p>Left</p></td><td><p>Right</p></td></tr></tbody></table>"));
   });
 
-  test("a pasted table keeps its words, one cell per line, and no table", () => {
-    const value = serializeAnswerFromHtml(
-      "<table><tbody><tr><td>Left</td><td>Right</td></tr></tbody></table>"
-    );
-    expect(value).toBe("Left\nRight");
-    expect(String(value)).not.toMatch(/<t[dr]/);
+  test("unknown containers are removed but their readable text remains", () => {
+    expect(serializeAnswerFromHtml("<section><div>Heading text</div></section>")).toBe("Heading text");
+    expect(serializeAnswerFromHtml("<dl><dt>a</dt><dd>b</dd></dl>")).toBe("a\nb");
+    expect(serializeAnswerFromHtml("<p>a <abbr>b</abbr> <font face=\"x\">c</font></p>")).toBe("a b c");
   });
 
   test("event-handler attributes never survive", () => {
@@ -581,7 +588,11 @@ describe("active and inactive rows carry the same content", () => {
       )
     );
     const tags = (html.match(/<([a-z0-9]+)/gi) || []).map((t) => t.slice(1).toLowerCase());
-    const allowed = new Set(["p", "br", "strong", "em", "u", "s", "ul", "ol", "li", "span", "mark", "a"]);
+    const allowed = new Set([
+      "p", "h1", "h2", "h3", "h4", "h5", "h6", "br", "strong", "em", "u", "s", "sub", "sup",
+      "code", "pre", "blockquote", "hr", "ul", "ol", "li", "table", "tbody", "tr", "td", "th",
+      "span", "mark", "a",
+    ]);
     for (const tag of tags) expect(allowed.has(tag)).toBe(true);
   });
 
@@ -678,8 +689,10 @@ describe("rendering and export boundaries", () => {
     // that naming it in a comment stays allowed.
     for (const file of [
       "components/template/TemplateRichTextView.js",
-      "components/template/TemplateTextCell.js",
-      "components/template/TemplateRowEditor.js",
+      // Phase G: TemplateTextCell.js / TemplateRowEditor.js are gone; the
+      // shared Section editor and the static document view took their place.
+      "components/template/TemplateSectionEditor.js",
+      "components/template/TemplateSectionDocView.js",
       "components/template/ResizableTwoColTable.js",
       "components/template/NoteTemplateDoc.js",
     ]) {

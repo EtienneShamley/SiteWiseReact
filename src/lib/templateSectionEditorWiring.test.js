@@ -5,9 +5,9 @@
 // Source-text assertions over the component layer, for the reason recorded in
 // src/components/editor/sectionEditorExtensions.js: this project's Jest
 // configuration cannot import `@tiptap/core` at all, so every file that touches
-// a real editor (AssetImage.js, FileAttachment.js, TemplateRowEditor.js, and
-// now sectionEditorFactory.js / TemplateSectionEditor.js) is verified this way
-// and by Etienne's manual testing. The PURE halves are exercised for real in
+// a real editor (AssetImage.js, FileAttachment.js, sectionEditorFactory.js /
+// TemplateSectionEditor.js) is verified this way and by Etienne's manual
+// testing. The PURE halves are exercised for real in
 // sectionEditorRegistry.test.js and templateSectionDocWrite.test.js.
 //
 // What these tests are actually protecting:
@@ -16,7 +16,9 @@
 //     never by a Template copy of them;
 //   - activating, focusing, selecting, dragging and merely looking at a Section
 //     writes nothing;
-//   - the two interaction systems never own one row at once;
+//   - since Phase G the shared editor is the ONLY interaction a Section has:
+//     every eligible row opens in it, a refused row renders read-only, and no
+//     legacy per-item interaction module remains to own a row;
 //   - a capture, a refinement and an export can never disappear behind a
 //     modern document.
 
@@ -97,7 +99,7 @@ describe("1-6. the retained registry is owned by the note's form", () => {
     const deactivate = between(
       NOTE_DOC,
       "const deactivateSectionEditor = useCallback(",
-      "const discardSectionEditorFor = useCallback("
+      "const handleStructuredFocus = useCallback("
     );
     expect(deactivate).toContain("setActiveSectionRowId(null)");
     for (const forbidden of ["dispose", "destroy", "getOrCreate"]) {
@@ -231,7 +233,8 @@ describe("24-37/55. images and files are the shared core's, not a Template copy"
     // The whole media/file interaction arrives with the shared nodes.
     const extensions = read("components/editor/sectionEditorExtensions.js");
     expect(extensions).toContain("AssetImage");
-    expect(extensions).toContain("FileAttachment.configure(");
+    expect(extensions).toContain(".configure({\n      acceptedAssetKinds: fileKinds,");
+    expect(extensions).toContain("FileAttachment.extend({ group: SECTION_MEDIA_GROUP })");
   });
 
   test("55. no Template file re-implements selection, resize, drag, wrap or Remove", () => {
@@ -263,39 +266,110 @@ describe("24-37/55. images and files are the shared core's, not a Template copy"
     }
   });
 
-  test("56. the LEGACY interaction is never reachable on a Section the editor owns", () => {
-    // One statement, in one place: a row the shared editor may own refuses the
-    // hand-back outright, so the old split/heal/drag machinery can never run
-    // over a modern Section.
-    const handBack = between(
-      TABLE,
-      "function sectionCanHandBackToLegacy(row)",
-      "function activateSectionEditor(row, event)"
-    );
-    expect(handBack).toContain("if (sectionEditorOwnsRow(row)) return false;");
-    // …and pressing static prose prefers the shared editor.
+  test("56/G. the shared editor is the ONLY interaction: pressing an owned row's static content activates it", () => {
+    // Since Phase G there is no legacy hand-back for the editor to be preferred
+    // over. Every static surface of an OWNED row — the prose of a static
+    // document, the legacy answer box, a static IMAGE segment and the lead-in
+    // above a media-headed Section — presses through to ONE function.
+    for (const gone of [
+      "sectionCanHandBackToLegacy",
+      "activateSectionTextSegment",
+      "pendingSectionCaret",
+      "pendingCaretFor",
+      "richText.onActivate",
+      "TemplateTextCell",
+      "TemplateRowEditor",
+      "onDropSectionItemIntoText",
+      "onReorderSectionItem",
+      "onRemoveSectionItem",
+      "onResizeSectionPhoto",
+      "onOpenSectionLeadingText",
+    ]) {
+      expect({ gone, hit: TABLE.includes(gone) }).toEqual({ gone, hit: false });
+    }
+    expect(TABLE).toContain("function activateSectionEditor(row, event)");
     const activate = between(
       TABLE,
-      "function activateSectionTextSegment(row, segment, event)",
-      "function pendingCaretFor(identity)"
+      "function activateSectionEditor(row, event)",
+      "function renderSectionEditor(row)"
     );
-    expect(activate).toContain("if (activateSectionEditor(row, event)) return;");
+    expect(activate).toContain("if (!sectionEditorOwnsRow(row)) return false;");
+    expect(activate).toContain("sectionEditor.onActivate(row.id)");
+    // Static prose of an owned row (a document head/segment, or the legacy
+    // answer box) is a textbox that presses through to the editor…
+    const docText = between(TABLE, "function renderSectionDocText(row, segment", "function renderSectionDocMedia(row, segment)");
+    expect(docText).toContain('role="textbox"');
+    expect(docText).toContain("activateSectionEditor(row, event);");
+    expect(docText).toContain("onFocus={() => activateSectionEditor(row, null)}");
+    const staticAnswer = between(TABLE, "function renderSectionStaticAnswer(row, value)", "function renderSectionReadOnlyAnswer(row, value)");
+    expect(staticAnswer).toContain('role="textbox"');
+    expect(staticAnswer).toContain("activateSectionEditor(row, event);");
+    // …a static IMAGE or FILE segment of an owned row is pressable too, with the
+    // file card's own controls deliberately left alone (Phase G correction)…
+    const media = between(TABLE, "function renderSectionDocMedia(row, segment)", "function renderSectionDocSegmentBody(row, segment)");
+    expect(media).toContain("twocol-section-media--pressable");
+    expect(media).toContain("activateSectionEditor(row, event);");
+    expect(media).toContain("segment.kind === SECTION_SEGMENT_KIND.IMAGE");
+    expect(media).toContain("segment.kind === SECTION_SEGMENT_KIND.FILE");
+    expect(media).toContain("if (pressIsOnMediaControl(event)) return;");
+    // …and so is the lead-in above a media-headed owned Section.
+    const leadIn = between(TABLE, "function renderSectionEditorLeadIn(row)", "function renderSectionStaticAnswer(row, value)");
+    expect(leadIn).toContain("twocol-section-lead");
+    expect(leadIn).toContain("activateSectionEditor(row, e);");
+    expect(TABLE).toContain("if (sectionEditorOwnsRow(row)) return renderSectionEditorLeadIn(row);");
   });
 
-  test("the two activation concepts are separate, and each clears the other", () => {
-    // Activating the Section editor leaves the legacy roving editor entirely.
+  test("G. a row the editor may NOT own renders READ-ONLY: no textbox, no press handler", () => {
+    // The refused (UNREPRESENTABLE) row keeps every stored thing visible and
+    // offers nothing a press could open — there is no other editor.
+    const readOnly = between(TABLE, "function renderSectionReadOnlyAnswer(row, value)", "function renderAnswerSlot(row, headSegment = null)");
+    expect(readOnly).toContain("twocol-rich twocol-rich--readonly");
+    expect(readOnly).not.toContain('role="textbox"');
+    expect(readOnly).not.toContain("onMouseDown");
+    expect(readOnly).not.toContain("onFocus");
+    expect(readOnly).not.toContain("activateSectionEditor");
+    // The answer control routes a non-owned Text row there.
+    const control = between(TABLE, "function renderAnswerControl(row)", "function renderFieldTypeEditor(row)");
+    expect(control).toContain("if (sectionEditorOwnsRow(row)) {");
+    expect(control).toContain("return renderSectionReadOnlyAnswer(row, value);");
+    // A non-owned document row's prose is a plain box, and its media is the
+    // plain static view.
+    const docText = between(TABLE, "function renderSectionDocText(row, segment", "function renderSectionDocMedia(row, segment)");
+    expect(docText).toContain("if (!sectionEditorOwnsRow(row)) {");
+    expect(docText).toContain('return <div className="twocol-rich">{body}</div>;');
+    // …and the CSS for both new surfaces exists.
+    const css = fs.readFileSync(path.join(SRC, "components/template/template.css"), "utf8");
+    expect(css).toContain(".twocol-rich--readonly {");
+    expect(css).toContain(".twocol-section-media--pressable {");
+  });
+
+  test("the ONE activation concept: activating selects the row; structured/label focus deactivates", () => {
+    // Since Phase G there is no legacy roving row editor to clear: activation
+    // touches exactly the Section-editor state and the Quick Add selection.
     const activate = between(
       NOTE_DOC,
       "const activateSectionEditor = useCallback(",
-      "const activeRowIdentity = useMemo("
+      "const setFieldError = useCallback("
     );
-    expect(activate).toContain("setActiveTextRowId(null)");
-    expect(activate).toContain("setActiveSectionItemId(null)");
-    expect(activate).toContain("clearMaterializedSection()");
-    expect(activate).toContain("clearLeadingCaret()");
-    // …and activating ANY legacy target deactivates the Section editor first.
+    expect(activate).toContain("setActiveSectionRowId(rowId)");
+    expect(activate).toContain("onSelectRow(rowId, rowMetaFor(rowId))");
+    for (const gone of [
+      "setActiveTextRowId",
+      "setActiveSectionItemId",
+      "clearMaterializedSection",
+      "clearLeadingCaret",
+      "activeTextRowId",
+      "activeSectionItemId",
+      "materializedSection",
+      "leadingCaret",
+      "rowEditorToken",
+      "handleRowEditorChange",
+      "handleAnswerFocus",
+    ]) {
+      expect({ gone, hit: NOTE_DOC.includes(gone) }).toEqual({ gone, hit: false });
+    }
+    // …and focusing ANY non-Section target deactivates the Section editor first.
     for (const handler of [
-      "const handleAnswerFocus = useCallback(",
       "const handleStructuredFocus = useCallback(",
       "const handleLabelFocus = useCallback(",
     ]) {
@@ -329,7 +403,10 @@ describe("24-37/55. images and files are the shared core's, not a Template copy"
     // configurations, neither able to open the other's Blobs.
     const shared = read("lib/editorFileAttachments.js");
     expect(shared).toContain("DEFAULT_FILE_ATTACHMENT_ASSET_KINDS");
-    expect(MAIN_AREA).toContain("FileAttachment,");
+    // The Free-form note takes the shared core's default (unconfigured) file node.
+    const core = read("components/editor/editorCoreExtensions.js");
+    expect(core).toContain("file = FileAttachment,");
+    expect(MAIN_AREA).toContain("extensions: editorCoreExtensions()");
     expect(MAIN_AREA).not.toContain("FileAttachment.configure(");
   });
 });
@@ -353,24 +430,30 @@ describe("13. native history owns every modern Section operation", () => {
   });
 
   test("history comes from StarterKit and is never disabled", () => {
+    // The Section builds on the shared core; the core's StarterKit keeps its
+    // undo/redo history on for every surface.
     const extensions = read("components/editor/sectionEditorExtensions.js");
-    expect(extensions).toContain("StarterKit.configure({");
-    expect(extensions).not.toMatch(/undoRedo:\s*false/);
-    expect(extensions).not.toMatch(/history:\s*false/);
+    const core = read("components/editor/editorCoreExtensions.js");
+    expect(extensions).toContain("editorCoreExtensions({");
+    expect(core).toContain("StarterKit.configure({");
+    for (const src of [extensions, core]) {
+      expect(src).not.toMatch(/undoRedo:\s*false/);
+      expect(src).not.toMatch(/history:\s*false/);
+    }
   });
 
-  test("the ONE thing that destroys a Section's history is named and justified", () => {
-    // A programmatic replacement outside the editor (Refine / Revert) is the
-    // only path that discards an instance; Phase F6 replaces it with an
-    // undoable transaction.
-    const discard = between(
-      NOTE_DOC,
-      "const discardSectionEditorFor = useCallback(",
-      "const handleAnswerFocus = useCallback("
-    );
-    expect(discard).toContain("disposeRow(rowId)");
-    const calls = NOTE_DOC.match(/discardSectionEditorFor\(rowId\)/g) || [];
-    expect(calls).toHaveLength(2); // refine apply, and revert
+  test("the ONE thing that destroys a Section's history individually is row deletion", () => {
+    // F4's `discardSectionEditorFor` existed for the legacy Refine / Revert
+    // writes that happened outside the editor. Phase F6a made Refine an
+    // undoable transaction and Phase G removed the legacy writer, so no
+    // programmatic replacement outside the editor exists any more: the only
+    // individual disposal is deleting the row itself (the registry as a whole
+    // goes with the note / template / pinned version).
+    expect(NOTE_DOC).not.toContain("discardSectionEditorFor");
+    const calls = NOTE_DOC.match(/sectionRegistryRef\.current\.disposeRow\(rowId\)/g) || [];
+    expect(calls).toHaveLength(1);
+    const del = between(NOTE_DOC, "const handleDeleteRow = useCallback(", "const handleRowHeightChange");
+    expect(del).toContain("disposeRow(rowId)");
   });
 });
 
@@ -419,11 +502,14 @@ describe("41-45. the static Section and the live one show the same document", ()
     // The head segment keeps the row's own block id in the planner, exactly as
     // the head ITEM does — so activation never changes a React key.
     const planner = read("lib/templateRowContent.js");
-    expect(planner).toContain("id: isRowHead ? rowId : `${rowId}::sec-${segment ? segment.key : item.id}`");
+    expect(planner).toContain("id: isRowHead ? rowId : `${rowId}::sec-${segment.key}`");
   });
 
-  test("a row still on its legacy answer keeps its dragged height while active", () => {
-    expect(NOTE_DOC).toContain("minHeightPx: isDocument ? 0 : row.px || 0");
+  test("a row still on its legacy prose answer keeps its dragged height while active", () => {
+    // A legacy body carrying MEDIA renders (and edits) as document segments,
+    // so it is content-driven like a document; a prose-only one keeps `row.px`.
+    expect(NOTE_DOC).toContain("minHeightPx: isDocument || legacyMedia ? 0 : row.px || 0");
+    expect(NOTE_DOC).toContain("const legacyMedia = isLegacyMediaBody(body);");
     const planner = read("lib/templateRowContent.js");
     expect(planner).toContain("case SECTION_SEGMENT_KIND.EDITOR:");
     expect(planner).toContain("Number(segment.minHeightPx) > 0");
@@ -488,46 +574,53 @@ describe("50. Quick Add cannot create hidden content", () => {
     "const validateSectionFile = useCallback("
   );
 
-  test("routing is delegated to the ONE pure rule, not re-decided here", () => {
-    expect(target).toContain("const isModern = rowHasModernSectionDoc(rowId);");
+  test("routing is delegated to the ONE pure rule, resolved by the body memo, not re-decided here", () => {
+    // The route is a pure function of the RESOLVED BODY, computed once per row
+    // in the body memo and read here — never re-derived from the registry or
+    // from whether a sectionDoc exists.
+    const memo = between(NOTE_DOC, "const sectionState = useMemo(", "const sectionBodies = sectionState.bodies");
+    expect(memo).toContain("quickAdd[row.id] = resolveSectionQuickAddRoute(body);");
+    expect(NOTE_DOC).toContain("sectionQuickAddRouteRef.current = sectionState.quickAdd;");
+    expect(target).toContain("const route = sectionQuickAddRouteRef.current[rowId];");
     expect(target).toContain("const entry = sectionEditableRef.current[rowId];");
-    expect(target).toContain("resolveSectionQuickAddRoute({");
-    expect(target).toContain("isModern,");
-    expect(target).toContain("hasLiveEditor: registry.has(identity),");
-    expect(target).toContain("eligible: !!entry,");
+    expect(target).not.toContain("resolveSectionQuickAddRoute(");
+    expect(target).not.toContain("rowHasModernSectionDoc");
+    expect(target).not.toContain("registry.has(identity)");
     expect(NOTE_DOC).toContain("resolveSectionQuickAddRoute,");
     expect(NOTE_DOC).toContain("SECTION_QUICK_ADD_ROUTE,");
     expect(NOTE_DOC).toContain('} from "../../lib/templateSectionBody";');
   });
 
-  test("LEGACY route (F5): not modern, no live editor, not eligible — unchanged sectionContent path", () => {
-    expect(target).toContain(
-      "if (route === SECTION_QUICK_ADD_ROUTE.LEGACY) return null;"
-    );
+  test("G: routing is TWO-WAY — DOCUMENT or REFUSE; the LEGACY sectionContent route is gone", () => {
+    expect(target).not.toContain("SECTION_QUICK_ADD_ROUTE.LEGACY");
+    expect(NOTE_DOC).not.toContain("SECTION_QUICK_ADD_ROUTE.LEGACY");
+    const body = read("lib/templateSectionBody.js");
+    const routes = between(body, "export const SECTION_QUICK_ADD_ROUTE = {", "};");
+    expect(routes).toContain('DOCUMENT: "document"');
+    expect(routes).toContain('REFUSE: "refuse"');
+    expect(routes).not.toContain("LEGACY");
+    // No sectionContent writer remains for a legacy route to reach.
+    for (const gone of ["appendSectionAttachment", "appendSectionText", "persistSectionContent", "setRowSectionItems"]) {
+      expect({ gone, hit: NOTE_DOC.includes(gone) }).toEqual({ gone, hit: false });
+    }
   });
 
-  test("…and also whenever a LIVE editor exists, whose next transaction would erase it", () => {
-    // A legacy write into `sectionContent` while an editor is open would be
-    // overwritten by the first keystroke that persists the document.
-    expect(target).toContain("hasLiveEditor: registry.has(identity),");
+  test("G: an eligible-but-untouched row AND a row with NO body both go to the document", () => {
+    // An untouched eligible row opens with the document activation would open;
+    // a row with no body at all (no `entry`) opens an EMPTY document — nothing
+    // existed to lose. Either way its first capture is its first modern write.
+    expect(target).toContain('html: entry ? entry.html : "",');
+    expect(target).toContain("registry.getOrCreate(identity, {");
+    expect(target).not.toContain("if (!entry) return null;");
   });
 
-  test("F5: an UNTOUCHED but eligible row is now routed to the document too", () => {
-    // Before F5 this branch required `isModern || registry.has(identity)`;
-    // the gate now also opens for a row that has simply never been touched
-    // but is safely eligible (`entry` truthy) — its first capture becomes
-    // the row's first modern write instead of one more sectionContent append.
-    expect(target).not.toContain(
-      "if (!isModern && !registry.has(identity)) return null;"
-    );
-    expect(target).toContain("eligible: !!entry,");
-  });
-
-  test("a capture is REFUSED, visibly, when neither destination is safe", () => {
-    expect(target).toContain("route === SECTION_QUICK_ADD_ROUTE.REFUSE");
+  test("a capture is REFUSED, visibly, when the row holds unrepresentable material", () => {
+    expect(target).toContain("if (route === SECTION_QUICK_ADD_ROUTE.REFUSE) {");
     expect(target).toContain("refuse:");
-    expect(NOTE_DOC).toContain("if (target && target.refuse) {");
-    expect(NOTE_DOC).toContain("setFieldError(rowId, target.refuse);");
+    // Both composer writers surface the refusal as the row's own field error.
+    const refusals = NOTE_DOC.match(/\(target && target\.refuse\) \|\|/g) || [];
+    expect(refusals).toHaveLength(2);
+    expect(NOTE_DOC).toContain("setFieldError(rowId, message);");
   });
 
   test("creating the editor for an eligible route writes nothing by itself", () => {
@@ -569,8 +662,8 @@ describe("50. Quick Add cannot create hidden content", () => {
       "const appendComposedAttachment = useCallback(",
       "const appendComposedText = useCallback("
     );
-    expect(attach).toContain(
-      "const beforeInsert = target.active\n            ? undefined\n            : () => placeSectionCaretAtEnd(editor);"
+    expect(attach).toMatch(
+      /const beforeInsert = target\.active\s*\?\s*undefined\s*:\s*\(\) => placeSectionCaretAtEnd\(editor\);/
     );
     expect(attach).toContain("beforeInsert,");
     // The inactive rule is unchanged, not reimplemented — same helper.
@@ -613,51 +706,103 @@ describe("50. Quick Add cannot create hidden content", () => {
     );
   });
 
-  test("a legacy row's Quick Add path is completely unchanged", () => {
-    expect(NOTE_DOC).toContain("appendSectionAttachment({");
-    expect(NOTE_DOC).toContain("appendSectionText({");
-    expect(NOTE_DOC).toContain("persist: persistSectionContent");
+  test("G: Quick Add has exactly ONE writer per destination — the editor transaction", () => {
+    // Both composer writers resolve their destination through the ONE routing
+    // function, and neither touches `answers`, `customRows` or `sectionContent`.
+    const attach = between(
+      NOTE_DOC,
+      "const appendComposedAttachment = useCallback(",
+      "const appendComposedText = useCallback("
+    );
+    const textPath = between(
+      NOTE_DOC,
+      "const appendComposedText = useCallback(",
+      "const templateComposeApi = useMemo("
+    );
+    for (const writer of [attach, textPath]) {
+      expect(writer).toContain("const target = sectionDocQuickAddTarget(rowId);");
+      for (const forbidden of ["sectionContent", "rowTextRef", "customRows", "persistSectionDoc", "saveInstanceConfirmed"]) {
+        expect({ forbidden, hit: writer.includes(forbidden) }).toEqual({ forbidden, hit: false });
+      }
+    }
   });
 });
 
 describe("51. Refine cannot create hidden content", () => {
-  test("a row with a modern document is refused before a request is spent", () => {
-    expect(NOTE_DOC).toContain("if (rowHasModernSectionDoc(rowId)) return;");
+  test("G: there is no legacy Refine writer left to land under a document", () => {
+    // F4 refused the legacy writer for a modern row (before the request, on
+    // arrival, and on Revert). Phase G removed that writer altogether: the
+    // ONLY Refine is the modern text-run bridge, whose apply is an editor
+    // transaction persisted by the sectionDoc update handler.
+    for (const gone of [
+      "rowHasModernSectionDoc",
+      "handleRefineRow",
+      "handleRevertRowRefine",
+      "applySectionTextItemToInstance",
+      "applyRowAnswerToInstance",
+      "discardSectionEditorFor",
+      "rowRefineBackups",
+    ]) {
+      expect({ gone, hit: NOTE_DOC.includes(gone) }).toEqual({ gone, hit: false });
+    }
+    expect(NOTE_DOC).toContain("const handleRefineSectionSegment = useCallback(");
+    expect(NOTE_DOC).toContain("const handleRevertSectionRefine = useCallback(");
+    expect(NOTE_DOC).toContain("applySectionRefineContent(editor, check, result.refined)");
   });
 
-  test("…and again on arrival, in case the row became modern mid-flight", () => {
-    expect(NOTE_DOC).toContain("if (sectionDocForRow(target?.sectionDoc, rowId)) {");
+  test("G: Refine is offered for every eligible row and for no other", () => {
+    const memo = between(NOTE_DOC, "const sectionRefine = useMemo(", "  }, [");
+    expect(memo).toContain("Object.keys(sectionState.editable)");
+    expect(memo).toContain("eligible: true,");
+    // The table renders the modern trigger only; the legacy per-row / per-item
+    // predicates and renderers are gone.
+    for (const gone of [
+      "rowAcceptsAiRefine",
+      "sectionItemAcceptsAiRefine",
+      "renderRefineAction(",
+      "renderRowRefineStatus(",
+      "segmentLegacyItem",
+      "onRefineRow",
+      "onRevertRowRefine",
+    ]) {
+      expect({ gone, hit: TABLE.includes(gone) }).toEqual({ gone, hit: false });
+    }
+    expect(TABLE).toContain("function modernRefineOwnsRow(row)");
+    expect(TABLE).toContain("function renderSectionRefineAction(row, target)");
   });
 
-  test("Revert is held to the same rule", () => {
-    expect(NOTE_DOC).toContain("if (sectionDocForRow(live?.sectionDoc, rowId)) return;");
-  });
-
-  test("no Refine trigger is even rendered for a row whose body is a document", () => {
-    const accepts = between(TABLE, "function rowAcceptsAiRefine(row)", "function sectionItemAcceptsAiRefine(row, item)");
-    expect(accepts).toContain("!documentBodySegments.has(row.id)");
-    // A modern document names no legacy item, so the per-item trigger has no
-    // target either.
-    expect(TABLE).toContain("function segmentLegacyItem(row, segment)");
-  });
-
-  test("a successful refinement discards the retained editor holding the old text", () => {
-    expect(NOTE_DOC).toContain("discardSectionEditorFor(rowId);");
+  test("a successful refinement is an editor transaction: the retained editor and its history survive", () => {
+    const handler = between(
+      NOTE_DOC,
+      "const handleRefineSectionSegment = useCallback(",
+      "const handleRevertSectionRefine = useCallback("
+    );
+    expect(handler).not.toContain("disposeRow");
+    expect(handler).not.toContain("persistSectionDoc");
+    expect(handler).not.toContain("saveInstanceConfirmed");
   });
 });
 
 /* ============ 53-54. what F4 deliberately leaves alone ============ */
 
-describe("53-54. compatibility rows keep the path they already have", () => {
-  test("53. an unsupported Section is still readable, and still editable the old way", () => {
+describe("53-54. HISTORICAL READ COMPATIBILITY: refused and primary rows keep what they render", () => {
+  test("53. an unsupported Section is still readable — and, since Phase G, READ-ONLY", () => {
     // Eligibility is the parent's decision; the table simply asks.
     expect(TABLE).toContain("function sectionEditorOwnsRow(row)");
     expect(TABLE).toContain("sectionEditor.editableRows[row.id]");
-    // A body the editor may not own can still hand itself back to the legacy
-    // per-item interaction (a `sectionContent` body), or keeps its own answer
-    // control (a legacy body).
-    expect(TABLE).toContain("function sectionCanHandBackToLegacy(row)");
-    expect(TABLE).toContain("renderCompatSegmentBody");
+    // A body the editor may not own has NO other editor to hand itself to: its
+    // stored items keep rendering, in their stored positions, through the
+    // compatibility renderer, and its Text answer renders read-only.
+    expect(TABLE).not.toContain("sectionCanHandBackToLegacy");
+    expect(TABLE).toContain("function renderCompatSegmentBody(row, segment)");
+    expect(TABLE).toContain("function renderSectionReadOnlyAnswer(row, value)");
+    const compat = between(TABLE, "function renderCompatSegmentBody(row, segment)", "function renderSectionDocSegment(row, segment, ctx, section = null)");
+    expect(compat).toContain("<PhotoAttachment attachment={entry} readOnly />");
+    expect(compat).toContain("<FileAttachmentRow");
+    expect(compat).not.toContain("onRemove");
+    // …and the frozen list's unrepresentable material still renders AFTER a
+    // modern document, never dropped (see templateSectionStaticRead.test.js).
+    expect(TABLE).toContain("SECTION_SEGMENT_KIND.COMPAT");
   });
 
   test("54. a legacy Photo/File PRIMARY row keeps its own control and upload path", () => {
@@ -668,23 +813,51 @@ describe("53-54. compatibility rows keep the path they already have", () => {
     expect(NOTE_DOC).toContain("isAttachmentField: type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE");
   });
 
-  test("not one legacy interaction module was deleted", () => {
+  test("G: the legacy interaction modules are gone; only the READ boundary survives", () => {
+    // Retired with Phase G — no production file may import them.
     for (const file of [
       "components/template/TemplateRowEditor.js",
       "components/template/TemplateTextCell.js",
-      "components/template/PhotoAttachment.js",
-      "components/template/FileAttachmentRow.js",
       "lib/templateSectionItemDrop.js",
       "lib/templateSectionTextSplit.js",
-      "lib/templateSectionTextHeal.js",
+      "lib/templateSectionTextPoint.js",
       "lib/templateSectionLeadingText.js",
       "lib/templateSectionReorder.js",
       "lib/templateSectionImageResize.js",
+      "lib/templateSectionImageMove.js",
+      "lib/templateSectionItemDragSession.js",
+      "lib/templateSectionText.js",
+      "lib/templateSectionAttachments.js",
+      "lib/templateSectionImagePlacement.js",
+    ]) {
+      expect({ file, exists: fs.existsSync(path.join(SRC, file)) }).toEqual({
+        file,
+        exists: false,
+      });
+      const base = path.basename(file, ".js");
+      for (const [name, source] of [["NoteTemplateDoc", NOTE_DOC], ["ResizableTwoColTable", TABLE], ["MainArea", MAIN_AREA]]) {
+        expect({ name, base, hit: source.includes(`/${base}"`) }).toEqual({ name, base, hit: false });
+      }
+    }
+    // What survives is READ compatibility: the static components the compat
+    // segments render with, and the in-memory heal reader.
+    for (const file of [
+      "components/template/PhotoAttachment.js",
+      "components/template/FileAttachmentRow.js",
+      "lib/templateSectionTextHeal.js",
+      "lib/templateSectionDocAdapter.js",
+      "lib/templateSectionBody.js",
     ]) {
       expect({ file, exists: fs.existsSync(path.join(SRC, file)) }).toEqual({
         file,
         exists: true,
       });
+    }
+    // PhotoAttachment lost its move / corner-resize surfaces with the legacy
+    // interaction; the static presentation is what remains.
+    const photo = read("components/template/PhotoAttachment.js");
+    for (const gone of ["onMoveStart", "onResizeWidth", "photo-att-img--movable", "photo-att-frame--resizing", "photo-att-corner"]) {
+      expect({ gone, hit: photo.includes(gone) }).toEqual({ gone, hit: false });
     }
   });
 });

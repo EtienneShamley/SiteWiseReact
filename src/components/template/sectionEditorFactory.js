@@ -2,14 +2,15 @@
 //
 // THE ONE PLACE A FLEXIBLE TEMPLATE SECTION'S EDITOR IS CONSTRUCTED.
 //
-// It builds a real Tiptap `Editor` from the shared NoteWise editor core: the
-// restrained Section extension set (src/components/editor/sectionEditorExtensions.js
-// — today's Template rich-text vocabulary PLUS the shared `AssetImage` and the
-// shared `FileAttachment`, configured with the Section's own accepted asset
-// kind). Nothing about images, files, selection, resize, drag, wrap or history
-// is implemented here or anywhere else on the Template side: those live in the
-// shared nodes and their shared NodeViews, and a Section gets them by using the
-// same extensions the Free-form note uses.
+// It builds a real Tiptap `Editor` from the shared NoteWise editor core
+// (src/components/editor/sectionEditorExtensions.js — the ONE shared extension
+// list, configured with the Section policy: the full document vocabulary the
+// top toolbar exposes PLUS the shared `AssetImage` and the shared
+// `FileAttachment`, placed at the top level and configured with the Section's
+// own accepted asset kind). Nothing about images, files, selection, resize,
+// drag, wrap or history is implemented here or anywhere else on the Template
+// side: those live in the shared nodes and their shared NodeViews, and a
+// Section gets them by using the same extensions the Free-form note uses.
 //
 // WHY `new Editor` AND NOT `useEditor`
 // -----------------------------------

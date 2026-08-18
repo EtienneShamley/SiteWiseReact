@@ -16,7 +16,10 @@
 //   - a Photo is scaled down proportionally (width only, aspect ratio intact)
 //     so a single image can always fit the usable page area;
 //   - content that genuinely cannot be split small enough is a FAILURE, not a
-//     truncation. The caller stops the export.
+//     truncation. The caller stops the export;
+//   - the document vocabulary splits at ITS safe boundaries — task-list items,
+//     a quote's inner blocks, code-block lines, complete table rows that break
+//     no rowspan — and a heading or a rule is atomic (see `splitUnit`).
 //
 // Splitting a paragraph at a hard line break turns that break into a paragraph
 // boundary, which is the closest faithful rendering available when the two
@@ -232,7 +235,105 @@ export function splitUnit(unit) {
   if (block.type === "bulletList" || block.type === "orderedList") {
     return splitList(block);
   }
+  // THE DOCUMENT VOCABULARY (2026-08-18) — each with a deterministic policy:
+  //   heading          atomic (a heading taller than a page is not real content)
+  //   horizontal rule  atomic
+  //   task list        at ITEM boundaries, exactly like a list
+  //   blockquote       at its inner block boundaries, then inside one block —
+  //                    every piece stays a quote
+  //   code block       at LINE boundaries, byte-preserving; one line is atomic
+  //   table            at complete ROW boundaries that break no rowspan (the
+  //                    same rowspan-safe rule the Free-form PDF applies); a
+  //                    table with no safe cut is atomic and, if it cannot fit
+  //                    a page, is a reported failure — never clipped
+  if (block.type === "taskList") return splitTaskList(block);
+  if (block.type === "blockquote") return splitBlockquote(block);
+  if (block.type === "codeBlock") return splitCodeBlock(block);
+  if (block.type === "table") return splitTable(block);
   return [];
+}
+
+function blockUnit(block) {
+  return { type: EXPORT_UNIT.BLOCK, block };
+}
+
+function splitTaskList(block) {
+  const items = Array.isArray(block.items) ? block.items : [];
+  if (items.length < 2) return [];
+  const middle = Math.ceil(items.length / 2);
+  return [
+    blockUnit({ type: "taskList", items: items.slice(0, middle) }),
+    blockUnit({ type: "taskList", items: items.slice(middle) }),
+  ];
+}
+
+function splitBlockquote(block) {
+  const blocks = Array.isArray(block.blocks) ? block.blocks : [];
+  if (blocks.length >= 2) {
+    const middle = Math.ceil(blocks.length / 2);
+    return [
+      blockUnit({ type: "blockquote", blocks: blocks.slice(0, middle) }),
+      blockUnit({ type: "blockquote", blocks: blocks.slice(middle) }),
+    ];
+  }
+  if (blocks.length === 1) {
+    return splitUnit(blockUnit(blocks[0])).map((piece) =>
+      blockUnit({ type: "blockquote", blocks: [piece.block] })
+    );
+  }
+  return [];
+}
+
+function splitCodeBlock(block) {
+  const text = typeof block.text === "string" ? block.text : "";
+  const lines = text.split("\n");
+  if (lines.length < 2) return [];
+  const middle = Math.ceil(lines.length / 2);
+  return [
+    blockUnit({ type: "codeBlock", language: block.language || null, text: lines.slice(0, middle).join("\n") }),
+    blockUnit({ type: "codeBlock", language: block.language || null, text: lines.slice(middle).join("\n") }),
+  ];
+}
+
+/**
+ * Row counts at which a table may be divided without breaking a rowspan: a
+ * cell that spans past the cut cannot be honoured on either side, so that
+ * boundary is simply not offered.
+ */
+export function safeTableRowSplitPoints(rows) {
+  const safe = [];
+  const list = Array.isArray(rows) ? rows : [];
+  for (let k = 1; k < list.length; k += 1) {
+    let ok = true;
+    for (let i = 0; i < k && ok; i += 1) {
+      for (const cell of (list[i] && list[i].cells) || []) {
+        const span = Number(cell && cell.rowspan);
+        if (Number.isFinite(span) && span > 1 && i + span > k) {
+          ok = false;
+          break;
+        }
+      }
+    }
+    if (ok) safe.push(k);
+  }
+  return safe;
+}
+
+function splitTable(block) {
+  const rows = Array.isArray(block.rows) ? block.rows : [];
+  if (rows.length < 2) return [];
+  const points = safeTableRowSplitPoints(rows);
+  if (!points.length) return [];
+  // The safe cut nearest the middle.
+  const middle = rows.length / 2;
+  let cut = points[0];
+  for (const point of points) {
+    if (Math.abs(point - middle) < Math.abs(cut - middle)) cut = point;
+  }
+  return [
+    blockUnit({ type: "table", rows: rows.slice(0, cut) }),
+    blockUnit({ type: "table", rows: rows.slice(cut) }),
+  ];
 }
 
 /* ------------------------------------------------------------------------ */

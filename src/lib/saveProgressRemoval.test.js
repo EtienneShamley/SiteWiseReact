@@ -91,11 +91,16 @@ describe("the temporary restore-point feature is gone", () => {
 
 describe("the autosave status replaced it", () => {
   test("the note editor renders the status from the pure model", () => {
+    // MainArea derives the label from the pure model and hands it to the
+    // formatting toolbar, which renders the ONE live region (2026-08-18: it
+    // moved there so it survives every layout state).
     const mainArea = read("components/MainArea.js");
+    const toolbar = read("components/EditorToolbar.js");
     expect(mainArea).toMatch(/saveStatusLabel/);
-    expect(mainArea).toMatch(/SAVED_LOCALLY_HINT/);
-    expect(mainArea).toMatch(/SAVE_FAILED_DETAIL/);
-    expect(mainArea).toMatch(/aria-live="polite"/);
+    expect(mainArea).toMatch(/saveStatus=\{\{ label: activeSaveLabel, failed: activeSaveFailed \}\}/);
+    expect(toolbar).toMatch(/SAVED_LOCALLY_HINT/);
+    expect(toolbar).toMatch(/SAVE_FAILED_DETAIL/);
+    expect(toolbar).toMatch(/aria-live="polite"/);
   });
 
   test("the removed persistence-error banner is not duplicated", () => {
@@ -105,10 +110,15 @@ describe("the autosave status replaced it", () => {
   });
 
   test("the note-view labels still come from one definition", () => {
+    // The view switch now lives in the sidebar as the note-surface group; its
+    // labels are the same NOTE_VIEW_LABEL definition, re-exported through
+    // src/lib/noteSurfaces.js — one definition, still.
+    const surfaces = read("lib/noteSurfaces.js");
+    expect(surfaces).toMatch(/from "\.\/noteViews"/);
+    expect(surfaces).toMatch(/NOTE_VIEW_LABEL\[NOTE_VIEW\.TEMPLATE_FORM\]/);
+    expect(surfaces).toMatch(/NOTE_VIEW_LABEL\[NOTE_VIEW\.FREEFORM\]/);
     const mainArea = read("components/MainArea.js");
-    expect(mainArea).toMatch(/from "\.\.\/lib\/noteViews"/);
-    expect(mainArea).toMatch(/NOTE_VIEW_LABEL\[NOTE_VIEW\.TEMPLATE_FORM\]/);
-    expect(mainArea).toMatch(/NOTE_VIEW_LABEL\[NOTE_VIEW\.FREEFORM\]/);
+    expect(mainArea).toMatch(/from "\.\.\/lib\/noteSurfaces"/);
   });
 });
 
@@ -133,10 +143,16 @@ describe("the recovery features that were NOT removed", () => {
     expect(mainArea).toMatch(/refineBackups/);
   });
 
-  test("Template-row AI Revert is still offered", () => {
+  test("Template Section AI Revert is still offered", () => {
+    // Phase G: the legacy per-row revert (handleRevertRowRefine /
+    // onRevertRowRefine) went with the per-item editor; the shared Section
+    // editor's Revert took its place, with the backups owned by MainArea.
     const doc = read("components/template/NoteTemplateDoc.js");
-    expect(doc).toMatch(/handleRevertRowRefine/);
-    expect(doc).toMatch(/onRevertRowRefine/);
+    expect(doc).toMatch(/handleRevertSectionRefine/);
+    expect(doc).toMatch(/sectionRefineBackups/);
+    const mainArea = read("components/MainArea.js");
+    expect(mainArea).toMatch(/onClearSectionRefineBackup/);
     expect(exists("lib/templateRowRefine.js")).toBe(true);
+    expect(exists("lib/templateSectionRefine.js")).toBe(true);
   });
 });

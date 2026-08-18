@@ -11,8 +11,11 @@
 //     attachments are never turned into document content.
 import {
   SECTION_BODY_SOURCE,
+  SECTION_EDITOR_REFUSAL,
+  isLegacyMediaBody,
   resolveSectionBody,
   resolveSectionQuickAddRoute,
+  sectionEditorEligibility,
   SECTION_QUICK_ADD_ROUTE,
 } from "./templateSectionBody";
 import { SECTION_DOC_FORMAT, SECTION_DOC_NODE, sectionDocHtmlFromNodes } from "./templateSectionDoc";
@@ -410,41 +413,178 @@ describe("22. an ordinary Section row with nothing but an answer", () => {
   });
 });
 
-describe("Phase F5 — resolveSectionQuickAddRoute: where does ONE capture go", () => {
-  test("not modern, no live editor, not eligible -> LEGACY (unchanged sectionContent path)", () => {
-    expect(
-      resolveSectionQuickAddRoute({ isModern: false, hasLiveEditor: false, eligible: false })
-    ).toBe(SECTION_QUICK_ADD_ROUTE.LEGACY);
+describe("Phase G — resolveSectionQuickAddRoute(body): where does ONE capture go", () => {
+  // Since Phase G the route is a pure function of the RESOLVED BODY's
+  // eligibility — never of whether an editor happens to exist — and there are
+  // exactly two destinations. There is no LEGACY route and no sectionContent
+  // writer any more.
+  test("the vocabulary is DOCUMENT | REFUSE — nothing else", () => {
+    expect(Object.values(SECTION_QUICK_ADD_ROUTE).sort()).toEqual(["document", "refuse"]);
+    expect(SECTION_QUICK_ADD_ROUTE.LEGACY).toBeUndefined();
   });
 
-  test("F5: untouched but eligible -> DOCUMENT (first capture becomes the first modern write)", () => {
-    expect(
-      resolveSectionQuickAddRoute({ isModern: false, hasLiveEditor: false, eligible: true })
-    ).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+  test("an eligible body -> DOCUMENT (a modern document, an ordered list, or an untouched legacy row)", () => {
+    const modern = resolveSectionBody({
+      instance: { sectionDoc: { [ROW]: doc("<p>Modern</p>") } },
+      rowId: ROW,
+      rowType: "text",
+    });
+    const ordered = resolveSectionBody({
+      instance: { sectionContent: { [ROW]: [text("t1", "A"), photo()] } },
+      rowId: ROW,
+      rowType: "text",
+    });
+    const legacy = resolveSectionBody({
+      instance: { answers: { [ROW]: "Old" }, evidence: { [ROW]: [photo()] } },
+      rowId: ROW,
+      rowType: "text",
+    });
+    for (const body of [modern, ordered, legacy]) {
+      expect(sectionEditorEligibility(body).ok).toBe(true);
+      expect(resolveSectionQuickAddRoute(body)).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+    }
   });
 
-  test("already modern -> DOCUMENT when eligible, REFUSE when not (unrepresentable material)", () => {
-    expect(
-      resolveSectionQuickAddRoute({ isModern: true, hasLiveEditor: false, eligible: true })
-    ).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
-    expect(
-      resolveSectionQuickAddRoute({ isModern: true, hasLiveEditor: false, eligible: false })
-    ).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
+  test("NO_BODY -> DOCUMENT: Quick Add opens an empty document (nothing existed, nothing is lost)", () => {
+    const none = resolveSectionBody({ instance: {}, rowId: "row-unknown", rowType: "number" });
+    expect(sectionEditorEligibility(none).reason).toBe(SECTION_EDITOR_REFUSAL.NO_BODY);
+    expect(resolveSectionQuickAddRoute(none)).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+    // No body at all, likewise.
+    expect(resolveSectionQuickAddRoute(null)).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
+    expect(resolveSectionQuickAddRoute(undefined)).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
   });
 
-  test("a LIVE editor already holds this row's undo history -> DOCUMENT when eligible, REFUSE when not", () => {
-    // A legacy write into sectionContent while an editor is open would be
-    // overwritten by the first keystroke that persists the document, so a
-    // live editor routes into the document exactly like an already-modern row.
-    expect(
-      resolveSectionQuickAddRoute({ isModern: false, hasLiveEditor: true, eligible: true })
-    ).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
-    expect(
-      resolveSectionQuickAddRoute({ isModern: false, hasLiveEditor: true, eligible: false })
-    ).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
+  test("EMPTY_DOCUMENT -> DOCUMENT", () => {
+    const empty = { source: SECTION_BODY_SOURCE.SECTION_DOC, nodes: [], sources: [], skipped: [] };
+    expect(sectionEditorEligibility(empty).reason).toBe(SECTION_EDITOR_REFUSAL.EMPTY_DOCUMENT);
+    expect(resolveSectionQuickAddRoute(empty)).toBe(SECTION_QUICK_ADD_ROUTE.DOCUMENT);
   });
 
-  test("defaults to LEGACY when called with nothing", () => {
-    expect(resolveSectionQuickAddRoute()).toBe(SECTION_QUICK_ADD_ROUTE.LEGACY);
+  test("UNREPRESENTABLE -> REFUSE, and ONLY that refuses", () => {
+    const withSkipped = resolveSectionBody({
+      instance: {
+        answers: { [ROW]: "Answer" },
+        evidence: { [ROW]: ["data:image/png;base64,AAAA", photo()] },
+      },
+      rowId: ROW,
+      rowType: "text",
+    });
+    expect(sectionEditorEligibility(withSkipped).reason).toBe(
+      SECTION_EDITOR_REFUSAL.UNREPRESENTABLE
+    );
+    expect(resolveSectionQuickAddRoute(withSkipped)).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
+    // A modern document whose frozen list still carries unrepresentable
+    // material is refused too — the capture would land in a document missing it.
+    const modernOverFrozen = resolveSectionBody({
+      instance: {
+        sectionDoc: { [ROW]: doc("<p>Modern</p>") },
+        sectionContent: { [ROW]: [text("t1", "A"), file({ assetId: "x" })] },
+      },
+      rowId: ROW,
+      rowType: "text",
+    });
+    expect(modernOverFrozen.skipped).toHaveLength(1);
+    expect(resolveSectionQuickAddRoute(modernOverFrozen)).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
+  });
+});
+
+describe("sectionEditorEligibility checks unrepresentable material BEFORE the empty-source check", () => {
+  test("an EMPTY-source body whose `skipped` is non-empty is UNREPRESENTABLE, not NO_BODY", () => {
+    // A row whose ONLY stored material is a legacy evidence entry the document
+    // cannot carry: no nodes, but the entry still renders through the
+    // compatibility path — offering an empty document would render on top of it.
+    const body = resolveSectionBody({
+      instance: { evidence: { [ROW]: ["data:image/png;base64,AAAA"] } },
+      rowId: ROW,
+      rowType: "number",
+    });
+    expect(body.source).toBe(SECTION_BODY_SOURCE.EMPTY);
+    expect(body.nodes).toHaveLength(0);
+    expect(body.skipped).toHaveLength(1);
+    expect(sectionEditorEligibility(body)).toEqual({
+      ok: false,
+      reason: SECTION_EDITOR_REFUSAL.UNREPRESENTABLE,
+    });
+    expect(resolveSectionQuickAddRoute(body)).toBe(SECTION_QUICK_ADD_ROUTE.REFUSE);
+    // The same shape stated literally, so the ordering is pinned independently
+    // of the reader.
+    expect(
+      sectionEditorEligibility({
+        source: SECTION_BODY_SOURCE.EMPTY,
+        nodes: [],
+        sources: [],
+        skipped: [{ reason: "legacy-evidence", index: 0, id: null, kind: null, entry: "x" }],
+      }).reason
+    ).toBe(SECTION_EDITOR_REFUSAL.UNREPRESENTABLE);
+  });
+
+  test("an EMPTY-source body with nothing skipped is still NO_BODY", () => {
+    expect(
+      sectionEditorEligibility({ source: SECTION_BODY_SOURCE.EMPTY, nodes: [], sources: [], skipped: [] })
+        .reason
+    ).toBe(SECTION_EDITOR_REFUSAL.NO_BODY);
+  });
+});
+
+describe("isLegacyMediaBody — a legacy body that carries media renders as document segments", () => {
+  test("a LEGACY prose-only body is NOT a media body (it keeps its answer box while inactive)", () => {
+    const body = resolveSectionBody({
+      instance: { answers: { [ROW]: "Just words" } },
+      rowId: ROW,
+      rowType: "text",
+    });
+    expect(body.source).toBe(SECTION_BODY_SOURCE.LEGACY);
+    expect(isLegacyMediaBody(body)).toBe(false);
+    // An untouched empty legacy row, likewise.
+    expect(
+      isLegacyMediaBody(resolveSectionBody({ instance: {}, rowId: ROW, rowType: "text" }))
+    ).toBe(false);
+  });
+
+  test("a LEGACY body with an evidence image or file IS a media body", () => {
+    const withImage = resolveSectionBody({
+      instance: { answers: { [ROW]: "Words" }, evidence: { [ROW]: [photo()] } },
+      rowId: ROW,
+      rowType: "text",
+    });
+    expect(withImage.source).toBe(SECTION_BODY_SOURCE.LEGACY);
+    expect(isLegacyMediaBody(withImage)).toBe(true);
+
+    const fileOnly = resolveSectionBody({
+      instance: { evidence: { [ROW]: [file()] } },
+      rowId: ROW,
+      rowType: "number",
+    });
+    expect(fileOnly.source).toBe(SECTION_BODY_SOURCE.LEGACY);
+    expect(isLegacyMediaBody(fileOnly)).toBe(true);
+  });
+
+  test("SECTION_CONTENT and SECTION_DOC bodies are never 'legacy media', whatever they hold", () => {
+    const ordered = resolveSectionBody({
+      instance: { sectionContent: { [ROW]: [text("t1", "A"), photo()] } },
+      rowId: ROW,
+      rowType: "text",
+    });
+    expect(ordered.source).toBe(SECTION_BODY_SOURCE.SECTION_CONTENT);
+    expect(isLegacyMediaBody(ordered)).toBe(false);
+
+    const modern = resolveSectionBody({
+      instance: {
+        sectionDoc: {
+          [ROW]: doc(`<p>A</p>${sectionDocHtmlFromNodes([{ type: SECTION_DOC_NODE.FILE, attrs: { assetId: FILE_ID, name: "Report.pdf", mimeType: "application/pdf", size: 2048 } }])}`),
+        },
+      },
+      rowId: ROW,
+      rowType: "text",
+    });
+    expect(modern.source).toBe(SECTION_BODY_SOURCE.SECTION_DOC);
+    expect(isLegacyMediaBody(modern)).toBe(false);
+  });
+
+  test("no body, an empty body and junk are not media bodies", () => {
+    expect(isLegacyMediaBody(null)).toBe(false);
+    expect(isLegacyMediaBody(undefined)).toBe(false);
+    expect(isLegacyMediaBody({ source: SECTION_BODY_SOURCE.EMPTY, nodes: [] })).toBe(false);
+    expect(isLegacyMediaBody({ source: SECTION_BODY_SOURCE.LEGACY, nodes: "nope" })).toBe(false);
   });
 });

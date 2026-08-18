@@ -39,10 +39,10 @@
 //      as any other edit.
 //
 // The ghost geometry (how large the floating preview is drawn, and where) was
-// proven on Template section images; it is re-exported here under media-core
-// names, wrapping — not copying — src/lib/templateSectionImageMove.js, exactly
-// as editorMediaResize.js wraps the resize arithmetic. Consolidating the
-// implementation's home is Phase G.
+// proven on Template section images. Until Phase G it was re-exported here
+// wrapping the legacy `templateSectionImageMove.js`; Phase G retired that
+// interaction and the geometry now lives HERE, unchanged in behaviour — exactly
+// as editorMediaResize.js now owns the resize arithmetic.
 //
 // No React, no DOM, no storage: the view is injected, and everything else is
 // ProseMirror state in and ProseMirror transactions out.
@@ -50,27 +50,81 @@
 import { Fragment, Slice } from "@tiptap/pm/model";
 import { NodeSelection } from "@tiptap/pm/state";
 import { dropPoint } from "@tiptap/pm/transform";
-import {
-  IMAGE_DRAG_PREVIEW_MAX_PX,
-  imageDragPreviewGeometry,
-} from "./templateSectionImageMove";
 import { MEDIA_LAYOUT_MODE, normalizeMediaLayout } from "./editorMediaLayout";
 
 /** The node type a media body drag moves. One name, shared with updateMediaAttrs. */
 export const MEDIA_IMAGE_NODE_NAME = "image";
 
-/** The largest edge the floating drag preview may be drawn at. */
-export const MEDIA_DRAG_GHOST_MAX_PX = IMAGE_DRAG_PREVIEW_MAX_PX;
+/**
+ * The largest edge the floating drag preview may be drawn at.
+ *
+ * A document image is commonly the full width of the content column, and a
+ * ghost that size would cover the document the user is trying to aim at —
+ * including the insertion indicator that tells them where it will land. So a
+ * large image's preview is scaled DOWN, proportionally; a small one is shown at
+ * its real size. It is a preview of the thing being held, not a second copy of
+ * the page.
+ */
+export const MEDIA_DRAG_GHOST_MAX_PX = 240;
+
+function finite(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function usableRect(rect) {
+  if (!rect) return null;
+  const { left, top, width, height } = rect;
+  if (!finite(left) || !finite(top) || !finite(width) || !finite(height)) return null;
+  if (width <= 0 || height <= 0) return null;
+  return { left, top, width, height };
+}
 
 /**
  * Where the floating preview sits for a pointer position — scaled down
  * proportionally past the cap, grab point preserved under the pointer.
- * The proven Template rule, wrapped under its media-core name.
+ *
+ * The preview exists so the image feels HELD: it follows the pointer, keeps the
+ * proportions of the picture on the page, and stays under the same point of the
+ * image the user pressed on (scaled with it), so it does not jump to a corner
+ * the moment the gesture arms.
+ *
+ * Purely presentational — this decides pixels on the screen and nothing else.
+ * It touches no document and no stored data, and the original node keeps its
+ * place while it is shown, so the layout underneath never moves.
+ *
+ * Returns null for an unusable rect or point, and a caller then simply draws no
+ * preview: a drag with no ghost is still a working drag.
  */
-export const mediaDragGhostGeometry = imageDragPreviewGeometry;
+export function mediaDragGhostGeometry({
+  rect,
+  grabX,
+  grabY,
+  clientX,
+  clientY,
+  maxPx = MEDIA_DRAG_GHOST_MAX_PX,
+} = {}) {
+  const box = usableRect(rect);
+  if (!box) return null;
+  if (!finite(clientX) || !finite(clientY)) return null;
 
-function finite(value) {
-  return typeof value === "number" && Number.isFinite(value);
+  const limit = finite(maxPx) && maxPx > 0 ? maxPx : MEDIA_DRAG_GHOST_MAX_PX;
+  // Scaled by WIDTH only, and height follows — the aspect ratio is preserved by
+  // construction rather than by clamping two dimensions independently.
+  const scale = box.width > limit ? limit / box.width : 1;
+  const width = box.width * scale;
+  const height = box.height * scale;
+
+  // The grab point, in the preview's own coordinates. An unusable grab point
+  // falls back to the centre, which is still "held" rather than misplaced.
+  const offsetX = finite(grabX) ? (grabX - box.left) * scale : width / 2;
+  const offsetY = finite(grabY) ? (grabY - box.top) * scale : height / 2;
+
+  return {
+    left: clientX - offsetX,
+    top: clientY - offsetY,
+    width,
+    height,
+  };
 }
 
 /** The image node at `pos`, or null when `pos` does not hold one. */

@@ -37,6 +37,63 @@ function noEditor() {
   return { ok: false, error: null };
 }
 
+/* ------------------------------------------------------------------------ */
+/* Where a block node may be inserted                                        */
+/* ------------------------------------------------------------------------ */
+
+// Does this node type's content expression admit `nodeType` ANYWHERE — not
+// merely at the start? Walks the content DFA once (public ContentMatch API).
+function typeAllowedIn(parentType, nodeType) {
+  if (!parentType || !nodeType || !parentType.contentMatch) return false;
+  const seen = new Set();
+  const stack = [parentType.contentMatch];
+  while (stack.length) {
+    const match = stack.pop();
+    if (!match || seen.has(match)) continue;
+    seen.add(match);
+    for (let i = 0; i < match.edgeCount; i += 1) {
+      const edge = match.edge(i);
+      if (edge.type === nodeType) return true;
+      stack.push(edge.next);
+    }
+  }
+  return false;
+}
+
+/**
+ * The document position a BLOCK node of `nodeType` should be inserted at for
+ * the current selection, or null when the ordinary selection-based insertion
+ * is correct.
+ *
+ * SCHEMA-DRIVEN, so it means something different on each surface without
+ * either surface having its own rule: when the block enclosing the caret
+ * admits the node (a Free-form table cell admits an image; any surface's
+ * document does), null — Tiptap's own insertion applies, splitting the
+ * paragraph as it always has. When it does NOT (a Template Section's media are
+ * top-level page blocks, so a Section table cell, list item or blockquote
+ * admits none), the answer is the position AFTER the nearest enclosing block
+ * that an admitting ancestor holds — a photo inserted with the caret in a
+ * Section table cell lands directly below the table. Without this ProseMirror's
+ * generic fitting would split the table around the image (verified), which is
+ * neither what the user meant nor a document the static view can lay out.
+ */
+export function blockInsertPositionFor(state, nodeType) {
+  if (!state || !state.selection || !nodeType) return null;
+  const { $from } = state.selection;
+  const parentDepth = $from.parent && $from.parent.isTextblock ? $from.depth - 1 : $from.depth;
+  if (parentDepth < 0) return null;
+  if (typeAllowedIn($from.node(parentDepth).type, nodeType)) return null;
+  for (let depth = parentDepth - 1; depth >= 0; depth -= 1) {
+    if (typeAllowedIn($from.node(depth).type, nodeType)) return $from.after(depth + 1);
+  }
+  return null;
+}
+
+function nodeTypeNamed(editor, name) {
+  const nodes = editor && editor.schema && editor.schema.nodes;
+  return nodes && nodes[name] ? nodes[name] : null;
+}
+
 /**
  * Text colour — one committed colour, one command.
  *
@@ -164,23 +221,29 @@ export function insertImageAsset(
   // every existing call site inserts the same node it always did.
   const layout = normalizeMediaLayout({ mode: layoutMode, side: layoutSide });
 
+  const attrs = {
+    assetId: id,
+    src: null,
+    alt: typeof alt === "string" && alt.trim() ? alt.trim() : null,
+    width: Number(width) > 0 ? Math.round(Number(width)) : null,
+    height: Number(height) > 0 ? Math.round(Number(height)) : null,
+    widthPct: normalizeMediaWidthPct(widthPct),
+    layoutMode: layout.mode,
+    layoutSide: layout.side,
+  };
+
   let applied = false;
   try {
+    // Where the surface's schema admits an image at the caret, the node's own
+    // command applies; where it does not, the schema-driven position rule
+    // above places it after the enclosing block (see blockInsertPositionFor).
+    const at = blockInsertPositionFor(editor.state, nodeTypeNamed(editor, "image"));
+    const chain = editor.chain().focus();
     applied =
-      editor
-        .chain()
-        .focus()
-        .setImage({
-          assetId: id,
-          src: null,
-          alt: typeof alt === "string" && alt.trim() ? alt.trim() : null,
-          width: Number(width) > 0 ? Math.round(Number(width)) : null,
-          height: Number(height) > 0 ? Math.round(Number(height)) : null,
-          widthPct: normalizeMediaWidthPct(widthPct),
-          layoutMode: layout.mode,
-          layoutSide: layout.side,
-        })
-        .run() !== false;
+      (at === null
+        ? chain.setImage(attrs)
+        : chain.insertContentAt(at, { type: "image", attrs })
+      ).run() !== false;
   } catch {
     applied = false;
   }
@@ -340,12 +403,14 @@ export function insertFileAttachment(
 
   let applied = false;
   try {
+    // Same schema-driven placement rule as an image (blockInsertPositionFor).
+    const at = blockInsertPositionFor(editor.state, nodeTypeNamed(editor, FILE_ATTACHMENT_NODE_NAME));
+    const chain = editor.chain().focus();
     applied =
-      editor
-        .chain()
-        .focus()
-        .insertContent({ type: FILE_ATTACHMENT_NODE_NAME, attrs })
-        .run() !== false;
+      (at === null
+        ? chain.insertContent({ type: FILE_ATTACHMENT_NODE_NAME, attrs })
+        : chain.insertContentAt(at, { type: FILE_ATTACHMENT_NODE_NAME, attrs })
+      ).run() !== false;
   } catch {
     applied = false;
   }

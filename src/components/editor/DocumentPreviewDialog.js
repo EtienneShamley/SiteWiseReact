@@ -42,6 +42,7 @@
 import React, { useRef } from "react";
 import useOutsideClose from "../../hooks/useOutsideClose";
 import { actionButtonClass } from "../../lib/interactionStyles";
+import { exportFailureMessage } from "../../lib/exportIdentity";
 import {
   DOCUMENT_PREVIEW_FORMAT,
   DOCUMENT_PREVIEW_KIND,
@@ -54,6 +55,10 @@ import {
 
 export default function DocumentPreviewDialog({
   open,
+  // The note view being previewed (NOTE_VIEW) — used only to word the
+  // fallback failure sentence for the right view; the message itself always
+  // comes from the producer path.
+  view = null,
   noteTitle,
   format,
   formats,
@@ -82,6 +87,7 @@ export default function DocumentPreviewDialog({
     : "Document Preview";
   const formatLabel = documentPreviewFormatLabel(format);
   const downloadLabel = `Download ${formatLabel}`;
+  const failureFallback = exportFailureMessage(view);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4">
@@ -223,7 +229,7 @@ export default function DocumentPreviewDialog({
                 role="alert"
                 className="text-sm text-red-600 dark:text-red-400 text-center max-w-md"
               >
-                {message || "The Free-form note could not be exported."}
+                {message || failureFallback}
               </p>
             </div>
           )}
@@ -233,7 +239,7 @@ export default function DocumentPreviewDialog({
           {failed && hasContent && (
             <div className="absolute top-2 right-2 px-2 py-1 rounded-md bg-white/95 dark:bg-gray-900/95 border border-red-300 dark:border-red-800 shadow-sm max-w-xs">
               <p role="alert" className="text-xs text-red-600 dark:text-red-400">
-                {message || "The Free-form note could not be exported."}
+                {message || failureFallback}
               </p>
             </div>
           )}

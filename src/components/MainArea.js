@@ -2,38 +2,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppState } from "../context/AppStateContext";
 import { useEditor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import Underline from "@tiptap/extension-underline";
-import Link from "@tiptap/extension-link";
-import {
-  Table,
-  TableRow,
-  TableHeader,
-  TableCell,
-} from "@tiptap/extension-table";
-import Highlight from "@tiptap/extension-highlight";
-import TaskList from "@tiptap/extension-task-list";
-import TaskItem from "@tiptap/extension-task-item";
-import Blockquote from "@tiptap/extension-blockquote";
-import HorizontalRule from "@tiptap/extension-horizontal-rule";
-import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
-import { createLowlight } from "lowlight";
 import EditorToolbar from "./EditorToolbar";
+import ExportMenu from "./editor/ExportMenu";
+import DocumentPreview from "./editor/DocumentPreview";
 import BottomBar from "./BottomBar";
-import FontFamily from "@tiptap/extension-font-family";
-import { TextStyle, FontSize } from "@tiptap/extension-text-style";
-import Color from "@tiptap/extension-color";
 // import FullNoteAIBar from "./FullNoteAIBar";
 import PdfEditorTab from "./editor/PdfEditorTab";
 import PdfLibrary from "./PdfLibrary";
-import {
-  ListIndentKeymap,
-  TextAlign,
-  Subscript,
-  Superscript,
-} from "./editor/extensions";
-import { AssetImage } from "./editor/AssetImage";
-import { FileAttachment } from "./editor/FileAttachment";
+import { editorCoreExtensions } from "./editor/editorCoreExtensions";
 import FreeformPagedEditor from "./editor/FreeformPagedEditor";
 import "./editor/editor.css";
 import { useRefine } from "../hooks/useRefine";
@@ -57,7 +33,6 @@ import {
   settleRefine,
 } from "../lib/refineLifecycle";
 import {
-  TEMPLATE_TEXT_CONTROLS,
   TEMPLATE_TOOLBAR_HINT,
   TOOLBAR_OWNER,
   canRefine as canRefineNow,
@@ -69,9 +44,9 @@ import { MEDIA_EDITOR_ROOT_CLASS } from "../lib/editorMediaLayout";
 import {
   clearRowRefineBackup,
   pruneRowRefineBackups,
-  setRowRefineBackup,
 } from "../lib/templateRowRefine";
 import { setSectionRefineBackup } from "../lib/templateSectionRefine";
+import { SECTION_TOOLBAR_IMAGE_POLICY } from "../lib/templateSectionToolbarImage";
 import { insertLocalImageAsset } from "../lib/editorImageInsert";
 import { insertFreeformFileAttachment } from "../lib/editorFileInsert";
 import {
@@ -83,9 +58,12 @@ import useTransientMessage from "../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import { ATTACHMENT_KIND } from "../lib/noteAttachments";
-import ListenInPanel from "./ListenInPanel";
-import { NOTE_VIEW, NOTE_VIEW_LABEL } from "../lib/noteViews";
-import { actionButtonClass, tabClass } from "../lib/interactionStyles";
+import { useLiveTranscriptSession } from "../context/LiveTranscriptContext";
+import { FaChevronDown, FaChevronUp } from "react-icons/fa";
+import { NOTE_VIEW } from "../lib/noteViews";
+import { currentNoteSurface, noteSurfaceLabel } from "../lib/noteSurfaces";
+import { LIVE_TRANSCRIPT_MESSAGE } from "../lib/liveTranscript";
+import { actionButtonClass, iconButtonClass } from "../lib/interactionStyles";
 import useSaveStatus from "../hooks/useSaveStatus";
 import {
   QUICK_ADD_KIND,
@@ -106,15 +84,16 @@ import {
   quickAddHintMessage,
 } from "../lib/quickAddHint";
 import {
-  SAVED_LOCALLY_HINT,
-  SAVE_FAILED_DETAIL,
   getSaveStatus,
   isSaveFailed,
   saveStatusLabel,
 } from "../lib/saveStatus";
 
-const lowlight = createLowlight();
 const EMPTY_DOC = "<p></p>";
+
+// The Quick Add composer's collapse/restore wording (exported for the tests).
+export const COMPOSER_COLLAPSE_LABEL = "Collapse Quick Add composer";
+export const COMPOSER_RESTORE_LABEL = "Restore Quick Add composer";
 const STORAGE_KEY = "sitewise-notes";
 
 // Secondary metadata line for a PDF workspace header (muted grey).
@@ -145,6 +124,8 @@ export default function MainArea() {
     setCurrentPdfId,
     activeNoteView,
     setActiveNoteView,
+    noteWorkspaceTab,
+    setNoteWorkspaceTab,
   } = useAppState();
   const { refineText } = useRefine();
 
@@ -157,7 +138,38 @@ export default function MainArea() {
     }
   });
 
-  const [activeTab, setActiveTab] = useState("note");
+  // Whether the note view or the linked PDF is showing ("note" | "pdf"). It
+  // lives in AppStateContext because the left sidebar's "This note" navigation
+  // selects it (src/lib/noteSurfaces.js) and this component renders it; the
+  // local names below are unchanged so every transition here still reads as
+  // it did.
+  const activeTab = noteWorkspaceTab;
+  const setActiveTab = setNoteWorkspaceTab;
+  // Expanded document workspace: transient UI state only (never persisted).
+  // While expanded, the note title and the control bar above the document are
+  // NOT RENDERED so the scrollable document viewport gains their height; the
+  // toolbar (which carries the restore control) and the document itself stay
+  // exactly where they are — nothing inside #chatWindow is touched, so no
+  // editor is unmounted, recreated or re-registered by expanding/collapsing.
+  const [workspaceExpanded, setWorkspaceExpanded] = useState(false);
+  const toggleWorkspaceExpanded = useCallback(
+    () => setWorkspaceExpanded((prev) => !prev),
+    []
+  );
+  // Collapsible Quick Add composer: transient UI state, EXPANDED by default,
+  // never persisted and never note data. Collapsing HIDES the composer
+  // (display:none) rather than unmounting it, so an unsent draft — typed text,
+  // refine state, staged attachments — is exactly where it was on restore.
+  const [composerCollapsed, setComposerCollapsed] = useState(false);
+  const toggleComposerCollapsed = useCallback(
+    () => setComposerCollapsed((prev) => !prev),
+    []
+  );
+  // Whether the hidden composer holds an unsent draft — reported by the
+  // composer itself, so the collapsed handle can say so honestly.
+  const [composerHasDraft, setComposerHasDraft] = useState(false);
+  // The one Live Transcript session (App-level provider).
+  const liveTranscript = useLiveTranscriptSession();
   // Which note view is showing. The stored identifiers are unchanged
   // ("natural" | "template"); the USER-FACING names are "Free-form note" and
   // "Template form" (see NOTE_VIEW_LABEL).
@@ -190,23 +202,21 @@ export default function MainArea() {
   // note id. Session-only — the REVERTED CONTENT persists through docState,
   // the backup slot does not.
   const [refineBackups, setRefineBackups] = useState({});
-  // Template form ROW-level Refine backups: { [noteId]: { [rowId]: answer } }.
-  // One previous value per note per row, deliberately separate from the
-  // Free-form backup above.
+  // Template Section Refine backups:
+  // { [noteId]: { [targetKey]: { previous, applied } } } — one PAIR per note
+  // per text run (the run's previous value and the text the refinement wrote:
+  // a document run has no stored id, so the refined text itself is what Revert
+  // addresses it by — see src/lib/templateSectionRefine.js). Deliberately
+  // separate from the Free-form backup above.
   //
   // They live HERE rather than in NoteTemplateDoc because that component is
   // keyed by note id and is therefore destroyed on every note switch: a backup
   // held there would vanish the moment the user looked at another note, and a
   // refinement that lands in the background could not record one at all. Here,
-  // Note A's row backup is recorded and still offered when the user returns.
-  // Session-only, like every other history in this component.
-  const [rowRefineBackups, setRowRefineBackups] = useState({});
-  // The same store, for a MODERN Section's document-range refinements. It is a
-  // separate map because its value is a PAIR — the run's previous value and the
-  // text the refinement wrote — not a bare answer: a document run has no stored
-  // id, so the refined text itself is what Revert addresses it by (see
-  // src/lib/templateSectionRefine.js). The note keying, the lifetime and the
-  // pruning are identical, so both are pruned by the same helper below.
+  // Note A's backup is recorded and still offered when the user returns.
+  // Session-only, like every other history in this component. (The legacy
+  // per-row / per-TextItem answer backups that once sat beside this map were
+  // retired with the legacy Template Section interaction in Phase G.)
   const [sectionRefineBackups, setSectionRefineBackups] = useState({});
   // Monotonic request id, read synchronously so two clicks in one tick cannot
   // both start a request before React re-renders the disabled button.
@@ -261,14 +271,15 @@ export default function MainArea() {
   // Template integration.
   //
   // There is exactly ONE Template destination for a Quick Add capture: the
-  // selected row's ordered `sectionContent`, through the composer below.
+  // selected row's Section document, through the composer below.
   //
   // Three earlier registrations are gone (Phase 10): a text-insert handler that
   // wrote `answers[rowId]`, a primary-attachment handler that wrote
   // `attachments[rowId]`, and an evidence handler that wrote `evidence[rowId]`.
-  // Every Quick Add route — text, image, file, camera — has composed into
-  // `sectionContent` since Phase 4, so none of the three could be reached: a
-  // selected row always stages and always Sends through `onSendComposer`, and
+  // Every Quick Add route — text, image, file, camera — composes through
+  // `onSendComposer` (into the ordered `sectionContent` list from Phase 4, and
+  // into the Section's ProseMirror document since Phase F5/G), so none of the
+  // three could be reached: a selected row always stages and always Sends, and
   // with no row selected both capture controls are disabled and text may not be
   // sent at all. They were removed rather than left as fallbacks because their
   // destinations contradict the section model — see docs/PROJECT_DECISIONS.md.
@@ -293,12 +304,14 @@ export default function MainArea() {
     setActiveTemplateRowId(rowId || null);
     setActiveTemplateRowMeta(rowId ? meta || null : null);
   }, []);
-  // The single active Template Text-row editor, registered by NoteTemplateDoc.
+  // The active Template SECTION's shared editor, registered by NoteTemplateDoc
+  // (which receives it from the mounted TemplateSectionEditor). This is the
+  // toolbar's Template-form target; see the ownership note below.
   // It is what the shared formatting toolbar targets while the Template form is
   // showing — never the hidden Free-form editor.
-  const [templateRowEditor, setTemplateRowEditor] = useState(null);
-  const handleRegisterTemplateRowEditor = useCallback((rowEditor) => {
-    setTemplateRowEditor(rowEditor || null);
+  const [templateSectionEditor, setTemplateSectionEditor] = useState(null);
+  const handleRegisterTemplateSectionEditor = useCallback((sectionEditor) => {
+    setTemplateSectionEditor(sectionEditor || null);
   }, []);
 
   // Free-form notes whose change is waiting for the write below: noteId -> the
@@ -396,7 +409,7 @@ export default function MainArea() {
     // document that no longer exists.
     freeformInsertPointRef.current = null;
     freeformRevisionRef.current = 0;
-  }, [noteKey, setNoteLayout]);
+  }, [noteKey, setNoteLayout, setActiveTab]);
 
   // Leaving the Template form drops the selected row as well: a row id kept
   // across a view change could otherwise receive a BottomBar insertion meant
@@ -417,53 +430,13 @@ export default function MainArea() {
 
   const editor = useEditor(
     {
-      extensions: [
-        // StarterKit v3 already bundles these five; they must be disabled
-        // here so the standalone registrations below are the only ones —
-        // duplicate registrations produce conflicting schema/keymap entries.
-        StarterKit.configure({
-          underline: false,
-          link: false,
-          blockquote: false,
-          horizontalRule: false,
-          codeBlock: false,
-        }),
-        Underline,
-        // openOnClick would navigate away when clicking a link to edit it
-        Link.configure({ openOnClick: false }),
-        // multicolor is required for the toolbar's highlight colour picker
-        Highlight.configure({ multicolor: true }),
-        Blockquote,
-        HorizontalRule,
-        Table.configure({ resizable: true }),
-        TableRow,
-        TableHeader,
-        TableCell,
-        // The image node extended with an IndexedDB asset reference: bytes go
-        // to the asset store and the document carries only an assetId, so note
-        // HTML never holds image data. It also parses legacy data: images,
-        // which the stock extension silently drops. See ./editor/AssetImage.js.
-        AssetImage,
-        // A file attached to this note: a selectable atom block carrying only
-        // an IndexedDB reference and its display metadata. The bytes never
-        // enter the document, and nothing the card does at runtime is
-        // persisted. See ./editor/FileAttachment.js.
-        FileAttachment,
-        TaskList,
-        // nested is required for the toolbar's indent inside task lists
-        TaskItem.configure({ nested: true }),
-        // Locally defined (see ./editor/extensions.js): corrected list
-        // indent/outdent keymap, alignment, subscript, superscript.
-        ListIndentKeymap,
-        TextAlign,
-        Subscript,
-        Superscript,
-        CodeBlockLowlight.configure({ lowlight }),
-        FontFamily,
-        TextStyle,
-        FontSize,
-        Color,
-      ],
+      // THE SHARED NOTEWISE EDITOR CORE (src/components/editor/editorCoreExtensions.js):
+      // the one extension set the Free-form note and every flexible Template
+      // Section are built from — same nodes, marks, commands and keymaps, so
+      // the one toolbar's capabilities are identical on both surfaces. The
+      // Free-form note takes the core's defaults (StarterKit's TrailingNode on,
+      // the shared media nodes unconfigured, the stock Document).
+      extensions: editorCoreExtensions(),
       content: noteKey && docState[noteKey] ? docState[noteKey] : EMPTY_DOC,
       editable: !!noteTitle,
       editorProps: {
@@ -944,14 +917,12 @@ export default function MainArea() {
    * previous insertion left behind and overwrite it. There is one composition
    * semantic in this application, not two.
    *
-   * The destination MODEL differs, and is entirely NoteTemplateDoc's decision
-   * (`sectionDocQuickAddTarget` — see NoteTemplateDoc.js): a row on the legacy
-   * `sectionContent` route still appends at the end, with no position placed
-   * and no block opened between items, exactly as before. A row on the modern
-   * document route inserts at the ACTIVE Section's current cursor, or at the
-   * END of an inactive one's document — this file has no opinion on which;
-   * it only forwards the composer's own separator, unconditionally, exactly
-   * as it does for Free-form below.
+   * The destination POSITION is entirely NoteTemplateDoc's decision
+   * (`sectionDocQuickAddTarget` — see NoteTemplateDoc.js): a capture inserts
+   * at the ACTIVE Section's current cursor, or at the END of an inactive one's
+   * document — this file has no opinion on which; it only forwards the
+   * composer's own separator, unconditionally, exactly as it does for
+   * Free-form below.
    *
    * THE DESTINATION IS CAPTURED ONCE, HERE. `activeTemplateRowId` (via the
    * resolved target) remains the only authority for which row that is — there is
@@ -1185,7 +1156,7 @@ export default function MainArea() {
   //
   // A Template row's text is not routed here at all: it is part of the same
   // composition as that row's attachments and takes the composer route into the
-  // row's ordered `sectionContent` (see handleTemplateComposerSend, and
+  // row's Section document (see handleTemplateComposerSend, and
   // `textUsesComposer` in src/lib/quickAddDraft.js). The Template branch that
   // used to append into `answers[rowId]` was removed in Phase 10; the guard
   // below stays, because a text-only send while the Template form is showing
@@ -1211,6 +1182,68 @@ export default function MainArea() {
     return true;
   }
 
+  // Live Transcript → note. The SAME two insertion paths Quick Add text takes,
+  // resolved at the moment of insertion:
+  //   Template form + a selected Section → that Section's composer route
+  //     (`appendText`: a normal editor transaction into the retained Section
+  //     editor at its Quick Add position — undo, autosave and sectionDoc
+  //     authority exactly as typed text);
+  //   Free-form note → the Free-form caret (`handleInsertTextAtCursor`);
+  //   Template form with no Section selected → refused with the same inline
+  //     notice Quick Add gives, never a guessed destination.
+  // Returns true only when the text was actually delivered. Nothing here
+  // writes storage directly.
+  function handleLiveTranscriptInsert(text) {
+    if (!text || !noteTitle) return false;
+    if (noteLayout === "template") {
+      const target = quickAddTarget;
+      const compose = templateComposeRef.current;
+      if (target.kind !== QUICK_ADD_KIND.TEMPLATE_ROW || !compose) {
+        showInsertNoticeError(
+          "Select a template section first, then the transcript will be inserted into it."
+        );
+        return false;
+      }
+      const outcome = compose.appendText(target.rowId, text);
+      if (!outcome || outcome.ok !== true) {
+        showInsertNoticeError(outcome?.error || QUICK_ADD_DELIVERY_MESSAGE);
+        return false;
+      }
+      return true;
+    }
+    return handleBottomBarInsert(text);
+  }
+
+  // WHERE a live transcript would go, registered with the one session. The
+  // WORKSPACE itself is rendered by App.js (it must exist in every workspace,
+  // including PDFs, which this component's note branch never renders); this
+  // registers only the destination and how to reach it.
+  //
+  // A destination exists when the note workspace is showing a note. With no
+  // note — or while the PDFs workspace is showing — the session keeps
+  // recording and the transcript keeps growing; only Insert waits, and says
+  // why. Nothing is picked, created or substituted.
+  const liveTranscriptInsertRef = useRef(null);
+  liveTranscriptInsertRef.current = handleLiveTranscriptInsert;
+  const registerTranscriptTarget = liveTranscript?.registerInsertTarget;
+  const transcriptTargetReady = workspace === "projects" && !!noteTitle;
+  useEffect(() => {
+    if (typeof registerTranscriptTarget !== "function") return undefined;
+    registerTranscriptTarget({
+      canInsert: transcriptTargetReady,
+      noteTitle: transcriptTargetReady ? noteTitle : "",
+      reason: transcriptTargetReady
+        ? ""
+        : workspace === "projects"
+        ? LIVE_TRANSCRIPT_MESSAGE.NO_NOTE
+        : LIVE_TRANSCRIPT_MESSAGE.NOT_IN_NOTE_WORKSPACE,
+      // Reads the CURRENT handler, so re-registering cannot strand an action
+      // and the destination is resolved at the moment Insert is pressed.
+      insert: (text) => liveTranscriptInsertRef.current?.(text) === true,
+    });
+    return () => registerTranscriptTarget(null);
+  }, [registerTranscriptTarget, transcriptTargetReady, noteTitle, workspace]);
+
   /* ============================ Autosave status =========================== */
 
   // The view the user is actually looking at, resolved on every render so the
@@ -1234,21 +1267,36 @@ export default function MainArea() {
    *
    * Derived explicitly rather than inferred from focus, so clicking a toolbar
    * button — which blurs whatever had focus — cannot change the target. In the
-   * Template form the target is the active Text row's editor and nothing else;
-   * with no active Text answer nobody owns the toolbar and every control is
-   * genuinely disabled, because the Free-form editor behind this view is merely
-   * hidden and must never be dispatched into.
+   * Template form the target is the ACTIVE SECTION's retained shared editor and
+   * nothing else; with no active Section nobody owns the toolbar and every
+   * control is genuinely disabled, because the Free-form editor behind this
+   * view is merely hidden and must never be dispatched into.
+   *
+   * `templateSectionEditor` is registered by the Section editor itself on mount
+   * and cleared on unmount (NoteTemplateDoc → `applyRowEditorRegistration`), so
+   * activating a Section binds the toolbar to it immediately, deactivating
+   * releases it, and a replaced or disposed instance can never remain the
+   * target. One editor instance therefore receives every command AND supplies
+   * every active-state read — the toolbar cannot write to one surface while
+   * reading from another.
    */
   const toolbarOwner = resolveToolbarOwner({
     hasNote: !!noteTitle,
     noteLayout,
     hasFreeformEditor: !!editor,
-    hasTemplateRowEditor: !!templateRowEditor,
+    hasTemplateSectionEditor: !!templateSectionEditor,
   });
   const templateFormVisible = noteLayout === "template";
   const toolbarEditor =
-    toolbarOwner === TOOLBAR_OWNER.TEMPLATE_ROW ? templateRowEditor : editor;
-  const toolbarControls = templateFormVisible ? TEMPLATE_TEXT_CONTROLS : null;
+    toolbarOwner === TOOLBAR_OWNER.TEMPLATE_SECTION ? templateSectionEditor : editor;
+  // The local-image picker's policy for whichever surface the toolbar owns: a
+  // Template Section takes `photo` assets and the Template's own validator, a
+  // Free-form note keeps its own (null). The write sequence is the same shared
+  // pipeline either way — only the policy differs.
+  const toolbarImagePolicy =
+    toolbarOwner === TOOLBAR_OWNER.TEMPLATE_SECTION
+      ? SECTION_TOOLBAR_IMAGE_POLICY
+      : null;
 
   const toolbarHint =
     templateFormVisible && toolbarOwner === TOOLBAR_OWNER.NONE
@@ -1283,7 +1331,6 @@ export default function MainArea() {
   const activeSaveStatus = getSaveStatus(saveStatusByNote, noteKey, activeView);
   const activeSaveLabel = saveStatusLabel(activeSaveStatus);
   const activeSaveFailed = isSaveFailed(activeSaveStatus);
-  const saveStatusHintId = "note-save-status-hint";
 
   /**
    * An EXISTING Free-form note whose stored content was read successfully is
@@ -1349,31 +1396,14 @@ export default function MainArea() {
     // this cannot loop.
     pruneSaveStatuses(liveNoteIds);
     setRefineBackups((prev) => pruneRefineBackups(prev, liveNoteIds));
-    setRowRefineBackups((prev) => pruneRowRefineBackups(prev, liveNoteIds));
     setSectionRefineBackups((prev) => pruneRowRefineBackups(prev, liveNoteIds));
   }, [liveNoteIds, pruneSaveStatuses]);
 
-  // Template Refine backup writers handed to NoteTemplateDoc. Both are stable,
-  // so the async handler that captured them can still record a backup for the
-  // note it started from after that note's form has been unmounted.
-  //
-  // `targetKey` (src/lib/templateRowRefine.js) is a bare row id for a legacy
-  // row and `rowId::item::itemId` for one ordered section text item, so two
-  // paragraphs of the same section hold two independent backups.
-  const handleSetRowRefineBackup = useCallback((targetNoteId, targetKey, previousAnswer) => {
-    setRowRefineBackups((prev) =>
-      setRowRefineBackup(prev, targetNoteId, targetKey, previousAnswer)
-    );
-  }, []);
-
-  const handleClearRowRefineBackup = useCallback((targetNoteId, targetKey) => {
-    setRowRefineBackups((prev) => clearRowRefineBackup(prev, targetNoteId, targetKey));
-  }, []);
-
-  // The MODERN Section equivalents (Phase F6a). `targetKey` is
-  // `rowId::seg::<runIndex>`, a different key space from the legacy `::item::`
-  // one, and the two maps are never mixed: one row is served by exactly one of
-  // the two Refine paths.
+  // Template Section Refine backup writers handed to NoteTemplateDoc. Both are
+  // stable, so the async handler that captured them can still record a backup
+  // for the note it started from after that note's form has been unmounted.
+  // `targetKey` is `rowId::seg::<runIndex>` (src/lib/templateSectionRefine.js),
+  // so two runs of the same Section hold two independent backups.
   const handleSetSectionRefineBackup = useCallback((targetNoteId, targetKey, backup) => {
     setSectionRefineBackups((prev) =>
       setSectionRefineBackup(prev, targetNoteId, targetKey, backup)
@@ -1549,19 +1579,13 @@ export default function MainArea() {
       className: "px-3 py-1.5 rounded-md text-xs font-medium",
     });
 
-  // Segmented view controls. `active` is the real view state, and no font-weight
-  // change is emitted — these pills sit side by side and a weight change would
-  // alter their measured width and shift the group between states.
-  const segmentBtnCls = (active) =>
-    tabClass({ active, className: "px-3 py-1.5 rounded-md text-sm" });
-
   /* ============================ PDFs workspace ============================= */
   // The global PDF workspace is independent of any project/folder/note. It shows
   // either the open PDF (canonical editor) or the global PDF library.
   if (workspace === "pdfs") {
     if (standalonePdf) {
       return (
-        <main className="flex-1 flex flex-col min-h-screen p-4 gap-3">
+        <main className="flex-1 min-w-0 h-full min-h-0 flex flex-col p-4 gap-3">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div className="min-w-0">
               <h1 className="text-xl font-semibold tracking-tight text-gray-900 dark:text-white truncate">
@@ -1595,244 +1619,212 @@ export default function MainArea() {
   // no note open. A note selection only controls whether note actions are
   // enabled and what the surface displays; it does NOT gate the shell. (The
   // earlier `if (!noteTitle) return <centered welcome>` gate is removed.)
+  // The upper workspace chrome that the expanded document mode collapses: the
+  // DOCUMENT HEADER (note identity + document actions). Only meaningful on
+  // the Note tab — the PDF tab has no document workspace toolbar to restore
+  // from, so its header is never collapsed. The formatting toolbar (with the
+  // save status and the restore control) is never collapsed.
+  const chromeCollapsed = workspaceExpanded && activeTab === "note";
+  const currentSurface = currentNoteSurface({ tab: activeTab, layout: noteLayout });
+  const currentSurfaceLabel = noteSurfaceLabel(currentSurface);
+
   return (
-    <main className="flex-1 flex flex-col min-h-screen p-4 gap-3">
-      {/* Open note title (white in dark mode) */}
-      {noteTitle && (
-        <h1 className="text-xl font-semibold tracking-tight text-gray-900 dark:text-white truncate">
-          {noteTitle}
-        </h1>
+    /* THE DOCUMENT WORKSPACE. `h-full min-h-0` bounds this column to the
+       viewport-tall application shell (App.js), so the flex/grid sizing below
+       resolves against real available height: the document header and the
+       toolbar take their natural height at the top, the Quick Add capture bar
+       its natural height at the bottom, and #chatWindow — the ONE scroll
+       container — gets everything in between and scrolls the document
+       internally. The toolbar is therefore outside the scrolling region and
+       stays reachable however far down a long document the selection is. No
+       fixed document heights anywhere: window resize, laptop and large
+       displays all resolve through the same flex chain.
+
+       Information architecture above the document (2026-08-18):
+         DOCUMENT HEADER  note identity (title + which surface) on the left;
+                          document ACTIONS on the right — AI Refine/Revert
+                          (Free-form, contextual), Export, Document Preview.
+                          Collapsed by the vertical expand control.
+         TOOLBAR          document FORMATTING + save status + expand/restore.
+       NAVIGATION (Template form / Free-form note / PDF, Projects, PDFs,
+       Template Library) lives in the left sidebar — see src/lib/noteSurfaces.js
+       and Sidebar.js — so nothing here switches views any more. */
+    <main className="flex-1 min-w-0 h-full min-h-0 flex flex-col p-4 gap-3">
+      {/* DOCUMENT HEADER. Not rendered while the document workspace is
+          expanded (Note tab) — the toolbar's restore control brings it back.
+          Nothing here owns an editor, so collapsing it cannot unmount,
+          recreate or re-register one. */}
+      {!chromeCollapsed && (
+        <div className="flex items-center justify-between gap-3 flex-wrap min-h-[2.25rem]">
+          {/* Note identity: the title, and — because view navigation now sits
+              in the sidebar, which may be collapsed to icons — which surface
+              of the note this is. Not a heading level larger than the
+              document deserves: the document is the point. */}
+          <div className="min-w-0 flex items-baseline gap-2">
+            {noteTitle ? (
+              <>
+                <h1 className="text-base font-semibold tracking-tight text-gray-900 dark:text-white truncate">
+                  {noteTitle}
+                </h1>
+                <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">
+                  {currentSurfaceLabel}
+                </span>
+              </>
+            ) : (
+              <span className="text-sm text-gray-500 dark:text-gray-400">
+                No note open
+              </span>
+            )}
+          </div>
+
+          {/* Document actions (Note tab only — the PDF surface has its own
+              toolbar and is not an export source). Grouped deliberately:
+              the contextual AI pair first, then the two output actions that
+              belong together — Export and the preview of exactly what Export
+              produces. */}
+          {activeTab === "note" && (
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              {/* AI Refine applies to the Free-form note only (a Template
+                  Section has its own Refine inside the document). It is
+                  unavailable in the Template form and never acts on the hidden
+                  editor — genuinely disabled, with the reason as its tooltip,
+                  rather than hidden. */}
+              <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
+                <button
+                  // Busy takes the disabled treatment; "Refining…" carries the
+                  // status. There is no lingering turquoise once it completes —
+                  // Refine owns nothing that stays open.
+                  className={chipBtnCls({
+                    busy: refineLoading,
+                    disabled: !canRefineNow({
+                      freeformEnabled: freeformEditingEnabled,
+                      hasContent: true,
+                      isLoading: refineLoading,
+                    }),
+                  })}
+                  onClick={refineNote}
+                  disabled={
+                    !canRefineNow({
+                      freeformEnabled: freeformEditingEnabled,
+                      hasContent: true,
+                      isLoading: refineLoading,
+                    })
+                  }
+                  aria-busy={refineLoading}
+                  title={
+                    noteLayout === "template"
+                      ? "AI Refine is available in the Free-form note only"
+                      : "Refine this Free-form note with AI"
+                  }
+                  aria-label="Refine this Free-form note with AI"
+                >
+                  {refineLoading ? "Refining…" : "Refine"}
+                </button>
+                <button
+                  // Revert restores content — it is not destructive, so it stays
+                  // in the neutral action family and is never styled red.
+                  className={chipBtnCls({
+                    disabled: !canRevertRefine({
+                      freeformEnabled: freeformEditingEnabled,
+                      hasBackup: refineBackupHtml !== null,
+                      isLoading: refineLoading,
+                    }),
+                  })}
+                  onClick={revertRefine}
+                  disabled={
+                    !canRevertRefine({
+                      freeformEnabled: freeformEditingEnabled,
+                      hasBackup: refineBackupHtml !== null,
+                      isLoading: refineLoading,
+                    })
+                  }
+                  title="Restore this note's content from before the last refinement"
+                  aria-label="Revert the last AI refinement of this Free-form note"
+                >
+                  Revert
+                </button>
+              </div>
+
+              {/* One restrained live region for the whole refine lifecycle:
+                  loading, success, unavailable and failure. */}
+              {(refineLoading || refineState.message) && (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className={[
+                    "text-xs",
+                    refineState.status === REFINE_STATUS.UNAVAILABLE ||
+                    refineState.status === REFINE_STATUS.FAILURE
+                      ? "text-red-600 dark:text-red-400"
+                      : "text-gray-500 dark:text-gray-400",
+                  ].join(" ")}
+                >
+                  {refineLoading ? "Refining this note…" : refineState.message}
+                </span>
+              )}
+
+              {/* One restrained live region for BOTH insertion kinds: busy
+                  while the photo is stamped, normalized and written or the
+                  file is validated and written, then the outcome. The message
+                  auto-dismisses and is cleared by a new attempt, a success,
+                  and any note or view change. */}
+              {(!!insertBusy || !!insertNotice.message) && (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className={[
+                    "text-xs",
+                    insertNotice.tone === MESSAGE_TONE.ERROR
+                      ? "text-red-600 dark:text-red-400"
+                      : "text-gray-500 dark:text-gray-400",
+                  ].join(" ")}
+                >
+                  {insertBusy === "image"
+                    ? "Adding image…"
+                    : insertBusy === "file"
+                    ? "Adding file…"
+                    : insertNotice.message}
+                </span>
+              )}
+
+              {/* Export + Document Preview: the export control is owned by the
+                  ACTIVE NOTE VIEW (never by the toolbar's editor), and the
+                  preview shows exactly what that export produces — the same
+                  `exportSource`, so the two can never disagree. */}
+              <ExportMenu source={exportSource} />
+              <DocumentPreview source={exportSource} />
+            </div>
+          )}
+        </div>
       )}
 
-      {/* Top toolbar (Note tab only — the PDF tab has its own toolbar).
+      {/* Formatting toolbar (Note tab only — the PDF tab has its own toolbar).
           ONE toolbar with one explicit owner: the Free-form editor in the
-          Free-form view, the active Template Text-row editor in the Template
+          Free-form view, the ACTIVE SECTION's shared editor in the Template
           form, and nobody at all when neither is available — in which case
           every control is genuinely disabled rather than acting on the hidden
-          Free-form document. */}
+          Free-form document. Which controls that owner supports is DERIVED by
+          the toolbar from the owning editor's own schema and commands
+          (src/lib/editorCapabilities.js), so a button is never enabled for a
+          command the owning editor has no extension for — and never disabled
+          for one it has. It also carries the save status (so it survives
+          every layout state) and the vertical expand/restore control. */}
       {activeTab === "note" && (
         <EditorToolbar
           editor={toolbarEditor}
           disabled={toolbarOwner === TOOLBAR_OWNER.NONE}
-          controls={toolbarControls}
+          imagePolicy={toolbarImagePolicy}
           disabledHint={toolbarHint}
-          exportSource={exportSource}
+          saveStatus={{ label: activeSaveLabel, failed: activeSaveFailed }}
+          workspaceExpanded={workspaceExpanded}
+          onToggleWorkspaceExpanded={toggleWorkspaceExpanded}
         />
       )}
 
-      {/* Control bar */}
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        {activeTab === "note" ? (
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Autosave status for the ACTIVE note and the ACTIVE view. There is
-              no manual save: editing persists continuously, and this reports
-              the confirmed result of those writes — "Saving…" only while a real
-              change is pending or being written, "Saved locally" only after a
-              write has actually completed (never merely because React state or
-              the editor updated), and "Save failed" only after a confirmed
-              failure. It is deliberately "Saved locally", never "Saved": there
-              is no cloud sync. The live region is always present so a change of
-              state is announced; the hint sits OUTSIDE it so the explanation is
-              not re-announced every time. */}
-          <div
-            className="flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-gray-800/70 px-2 py-1.5 min-h-[2rem]"
-            role="status"
-            aria-live="polite"
-          >
-            {activeSaveLabel && (
-              <span
-                tabIndex={0}
-                // On failure the explanation is visible beside the label and is
-                // read with it, so the "saved in this browser" description must
-                // not also be attached — it would describe the wrong outcome.
-                title={activeSaveFailed ? undefined : SAVED_LOCALLY_HINT}
-                aria-describedby={activeSaveFailed ? undefined : saveStatusHintId}
-                className={[
-                  // Focusable (it carries the "saved in this browser" hint), so
-                  // it takes the shared focus indicator rather than a second,
-                  // differently-coloured one beside the converted controls.
-                  "nw-focusable text-xs font-medium rounded",
-                  activeSaveFailed
-                    ? "text-red-600 dark:text-red-400"
-                    : "text-gray-600 dark:text-gray-300",
-                ].join(" ")}
-              >
-                {activeSaveLabel}
-              </span>
-            )}
-            {activeSaveFailed && (
-              <span className="text-xs text-red-600 dark:text-red-400">
-                {SAVE_FAILED_DETAIL}
-              </span>
-            )}
-          </div>
-          <span id={saveStatusHintId} className="sr-only">
-            {SAVED_LOCALLY_HINT}
-          </span>
-
-          {/* AI Refine applies to the Free-form note only. It is unavailable
-              in the Template form and never acts on the hidden editor. */}
-          <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
-            <button
-              // Busy takes the disabled treatment; "Refining…" carries the
-              // status. There is no lingering turquoise once it completes —
-              // Refine owns nothing that stays open.
-              className={chipBtnCls({
-                busy: refineLoading,
-                disabled: !canRefineNow({
-                  freeformEnabled: freeformEditingEnabled,
-                  hasContent: true,
-                  isLoading: refineLoading,
-                }),
-              })}
-              onClick={refineNote}
-              disabled={
-                !canRefineNow({
-                  freeformEnabled: freeformEditingEnabled,
-                  hasContent: true,
-                  isLoading: refineLoading,
-                })
-              }
-              aria-busy={refineLoading}
-              title={
-                noteLayout === "template"
-                  ? "AI Refine is available in the Free-form note only"
-                  : "Refine this Free-form note with AI"
-              }
-              aria-label="Refine this Free-form note with AI"
-            >
-              {refineLoading ? "Refining…" : "Refine"}
-            </button>
-            <button
-              // Revert restores content — it is not destructive, so it stays in
-              // the neutral action family and is never styled red.
-              className={chipBtnCls({
-                disabled: !canRevertRefine({
-                  freeformEnabled: freeformEditingEnabled,
-                  hasBackup: refineBackupHtml !== null,
-                  isLoading: refineLoading,
-                }),
-              })}
-              onClick={revertRefine}
-              disabled={
-                !canRevertRefine({
-                  freeformEnabled: freeformEditingEnabled,
-                  hasBackup: refineBackupHtml !== null,
-                  isLoading: refineLoading,
-                })
-              }
-              title="Restore this note's content from before the last refinement"
-              aria-label="Revert the last AI refinement of this Free-form note"
-            >
-              Revert
-            </button>
-          </div>
-
-          {/* One restrained live region for the whole refine lifecycle:
-              loading, success, unavailable and failure. */}
-          {(refineLoading || refineState.message) && (
-            <span
-              role="status"
-              aria-live="polite"
-              className={[
-                "text-xs",
-                refineState.status === REFINE_STATUS.UNAVAILABLE ||
-                refineState.status === REFINE_STATUS.FAILURE
-                  ? "text-red-600 dark:text-red-400"
-                  : "text-gray-500 dark:text-gray-400",
-              ].join(" ")}
-            >
-              {refineLoading ? "Refining this note…" : refineState.message}
-            </span>
-          )}
-
-          {/* One restrained live region for BOTH insertion kinds: busy while
-              the photo is stamped, normalized and written or the file is
-              validated and written, then the outcome. The message
-              auto-dismisses and is cleared by a new attempt, a success, and any
-              note or view change. */}
-          {(!!insertBusy || !!insertNotice.message) && (
-            <span
-              role="status"
-              aria-live="polite"
-              className={[
-                "text-xs",
-                insertNotice.tone === MESSAGE_TONE.ERROR
-                  ? "text-red-600 dark:text-red-400"
-                  : "text-gray-500 dark:text-gray-400",
-              ].join(" ")}
-            >
-              {insertBusy === "image"
-                ? "Adding image…"
-                : insertBusy === "file"
-                ? "Adding file…"
-                : insertNotice.message}
-            </span>
-          )}
-
-          {/* The two note views. "Template form" is the structured company
-              form assigned to THIS note; "Free-form note" is unrestricted
-              rich text. Neither creates or edits a reusable template — that is
-              Template Library in the toolbar. */}
-          <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-            <span className="font-medium">Note view</span>
-            <div
-              className="flex items-center rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1"
-              role="group"
-              aria-label="Note view"
-            >
-              <button
-                className={segmentBtnCls(noteLayout === "template")}
-                onClick={() => setNoteLayout("template")}
-                disabled={!noteTitle}
-                aria-pressed={noteLayout === "template"}
-                title="Complete the structured template form assigned to this note"
-              >
-                {NOTE_VIEW_LABEL[NOTE_VIEW.TEMPLATE_FORM]}
-              </button>
-              <button
-                className={segmentBtnCls(noteLayout === "natural")}
-                onClick={() => setNoteLayout("natural")}
-                disabled={!noteTitle}
-                aria-pressed={noteLayout === "natural"}
-                title="Write an unrestricted rich-text note"
-              >
-                {NOTE_VIEW_LABEL[NOTE_VIEW.FREEFORM]}
-              </button>
-            </div>
-          </div>
-        </div>
-        ) : (
-          <div />
-        )}
-
-        {/* The note workspace's two surfaces. Toggle buttons in a labelled
-            group, matching the Note view control above — deliberately not an
-            ARIA tablist (see docs/DESIGN_SYSTEM.md → Note view controls). The
-            selected state is `activeTab`, the same value that decides which
-            surface renders. */}
-        <div
-          className="flex items-center rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1"
-          role="group"
-          aria-label="Note workspace"
-        >
-          <button
-            className={segmentBtnCls(activeTab === "note")}
-            onClick={() => setActiveTab("note")}
-            aria-pressed={activeTab === "note"}
-          >
-            Note
-          </button>
-          <button
-            className={segmentBtnCls(activeTab === "pdf")}
-            onClick={() => setActiveTab("pdf")}
-            aria-pressed={activeTab === "pdf"}
-          >
-            PDF
-          </button>
-        </div>
-      </div>
-
+      {/* The document viewport (row 1, scrolls) and the Quick Add capture bar
+          (row 2, natural height). #chatWindow is a scroll container, so its
+          grid minimum is 0 and the `1fr` track is exactly the remaining
+          height — the document scrolls inside it and never grows the page. */}
       <div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">
         <div
           id="chatWindow"
@@ -1864,7 +1856,7 @@ export default function MainArea() {
                     noteId={noteKey}
                     key={noteKey}
                     viewActive={noteLayout === "template"}
-                    onRegisterRowEditor={handleRegisterTemplateRowEditor}
+                    onRegisterRowEditor={handleRegisterTemplateSectionEditor}
                     onRegisterTemplateCompose={(api) => {
                       templateComposeRef.current = api;
                     }}
@@ -1873,9 +1865,6 @@ export default function MainArea() {
                     onSaveBegin={beginTemplateSave}
                     onSaveSettle={settleTemplateSave}
                     onSaveLoaded={markTemplateLoaded}
-                    rowRefineBackups={rowRefineBackups}
-                    onSetRowRefineBackup={handleSetRowRefineBackup}
-                    onClearRowRefineBackup={handleClearRowRefineBackup}
                     sectionRefineBackups={sectionRefineBackups}
                     onSetSectionRefineBackup={handleSetSectionRefineBackup}
                     onClearSectionRefineBackup={handleClearSectionRefineBackup}
@@ -1952,12 +1941,57 @@ export default function MainArea() {
           </div>
         </div>
 
-        {/* Listen-In + BottomBar (Note tab only) */}
+        {/* The Quick Add capture bar (Note tab only). Live transcription is
+            NOT here any more: it is the sidebar's Capture → Live transcript
+            workspace (LiveTranscriptDialog below), a different tool with its
+            own surface — the composer's microphone merely opens it. */}
         <div
           className="bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800"
           style={{ display: activeTab === "note" ? "block" : "none" }}
         >
-          <div className="px-4 py-3 flex flex-col gap-2">
+          <div className={composerCollapsed ? "px-4 py-1.5 flex flex-col gap-2" : "px-4 py-3 flex flex-col gap-2"}>
+            {/* COMPOSER COLLAPSE — the third, VERTICAL space control (the
+                sidebar governs width; the workspace expand collapses the
+                chrome ABOVE the document; this collapses the capture area
+                BELOW it). One row: what is hidden, and the way back. */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                {composerCollapsed
+                  ? composerHasDraft
+                    ? "Quick Add composer hidden — your draft is kept"
+                    : "Quick Add composer hidden"
+                  : "Quick Add"}
+              </span>
+              <button
+                type="button"
+                className={iconButtonClass({
+                  pressed: composerCollapsed,
+                  className: "p-1.5 rounded-lg",
+                })}
+                onClick={toggleComposerCollapsed}
+                aria-pressed={composerCollapsed}
+                aria-label={
+                  composerCollapsed
+                    ? COMPOSER_RESTORE_LABEL
+                    : COMPOSER_COLLAPSE_LABEL
+                }
+                title={
+                  composerCollapsed
+                    ? COMPOSER_RESTORE_LABEL
+                    : COMPOSER_COLLAPSE_LABEL
+                }
+              >
+                {composerCollapsed ? (
+                  <FaChevronUp aria-hidden="true" />
+                ) : (
+                  <FaChevronDown aria-hidden="true" />
+                )}
+              </button>
+            </div>
+            {/* Everything below is HIDDEN, never unmounted, while collapsed:
+                the composer keeps its draft, refine state and staged
+                attachments, and restoring shows exactly what was there. */}
+            <div style={{ display: composerCollapsed ? "none" : "contents" }}>
             {/* First-use Quick Add hint. Beside the capture bar, never inside
                 the document; it takes no focus, blocks nothing, and disappears
                 on its own or when dismissed. */}
@@ -1979,7 +2013,6 @@ export default function MainArea() {
                 </button>
               </div>
             )}
-            {noteTitle && <ListenInPanel onInsert={handleBottomBarInsert} />}
             {/* No PDF prop: a PDF chosen through the BottomBar attachment
                 picker becomes a Free-form attachment card. Importing a PDF into
                 the PDF workspace remains the dedicated Note → PDF workflow
@@ -2010,10 +2043,18 @@ export default function MainArea() {
               // presses Send. The destination is resolved inside this handler,
               // at Send time, and re-checked before every item.
               onSendComposer={handleQuickAddComposerSend}
+              // The composer's microphone opens the ONE Live Transcript
+              // workspace (same session as the sidebar's Capture group) —
+              // it never records on its own.
+              onOpenLiveTranscript={(el) => liveTranscript?.openWorkspace(el)}
+              liveTranscriptRecording={!!liveTranscript?.recording}
+              onCompositionChange={setComposerHasDraft}
             />
+            </div>
           </div>
         </div>
       </div>
+
     </main>
   );
 }

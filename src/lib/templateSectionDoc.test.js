@@ -179,9 +179,13 @@ describe("parsing a stored document", () => {
 
   test("prose outside the supported schema is rebuilt, not passed through", () => {
     const nodes = parseSectionDocHtml(
-      '<p>Keep <strong>this</strong></p><script>alert(1)</script><h2>Heading</h2>'
+      '<p>Keep <strong>this</strong></p><script>alert(1)</script><h2>Heading</h2><section><font face="x">loose</font></section>'
     );
-    expect(sectionDocHtmlFromNodes(nodes)).toBe("<p>Keep <strong>this</strong></p><p>Heading</p>");
+    // Since 2026-08-18 a heading IS part of the supported schema (kept as a
+    // heading); script is dropped and an unknown container is unwrapped.
+    expect(sectionDocHtmlFromNodes(nodes)).toBe(
+      "<p>Keep <strong>this</strong></p><h2>Heading</h2><p>loose</p>"
+    );
   });
 
   test("an empty paragraph is a legitimate document", () => {

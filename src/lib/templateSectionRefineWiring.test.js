@@ -11,9 +11,10 @@
 //
 // What these tests are actually protecting:
 //
-//   - a modern Section's refinement can never reach a legacy slot, and a legacy
-//     row's can never disappear underneath an authoritative document;
-//   - one row is served by exactly ONE of the two Refine paths;
+//   - a modern Section's refinement can never reach a legacy slot, and (since
+//     Phase G) no legacy Refine writer exists at all for it to disappear under;
+//   - one row is served by exactly ONE Refine path — MODERN for every eligible
+//     row, including an untouched legacy one, and NONE for a refused row;
 //   - nothing about the request or the pending state writes to a note, and a
 //     successful apply writes through exactly one path;
 //   - the four provider presets, the transport and the endpoint are untouched.
@@ -79,7 +80,7 @@ describe("1-5. which rows and which segments are offered a modern Refine", () =>
     expect(memo).toContain("owner !== SECTION_REFINE_OWNER.MODERN");
   });
 
-  test("the row must still be modern AND openable at the moment it is used", () => {
+  test("the row must still be present AND openable at the moment it is used", () => {
     const resolver = between(
       NOTE_DOC,
       "const modernSectionRefineEditor = useCallback(",
@@ -87,11 +88,16 @@ describe("1-5. which rows and which segments are offered a modern Refine", () =>
     );
     expect(resolver).toContain("rowIsPresent(rowId)");
     expect(resolver).toContain("sectionEditableRef.current[rowId]");
-    // The same pure rule as the render memo, but asked of the REGISTRY, which
-    // is the truth at the moment a request would be spent.
-    expect(resolver).toContain("isModern: rowHasModernSectionDoc(rowId)");
+    // The same pure rule as the render memo, asked with the registry's and the
+    // stored document's facts — which since Phase G no longer change the
+    // answer: eligibility (`entry` exists) is the whole gate.
+    expect(resolver).toContain("isModern: !!sectionDocForRow(instanceRef.current?.sectionDoc, rowId)");
     expect(resolver).toContain("hasLiveEditor: registry.has(identity)");
     expect(resolver).toContain("owner !== SECTION_REFINE_OWNER.MODERN");
+    // An untouched (never-opened) eligible row is refined THROUGH the editor:
+    // the resolver creates it from the same document activation would open.
+    expect(resolver).toContain("registry.getOrCreate(identity, {");
+    expect(resolver).toContain("html: entry.html");
   });
 
   test("2-3. media segments carry no trigger: only a segment holding a RUN does", () => {
@@ -114,7 +120,12 @@ describe("1-5. which rows and which segments are offered a modern Refine", () =>
       "sectionRefineTargetKey({ rowId: row.id, segmentIndex: runIndex })"
     );
     expect(MODEL).toContain('export const SECTION_REFINE_KEY_SEPARATOR = "::seg::";');
-    expect(ROW_REFINE).toContain('export const ROW_REFINE_ITEM_KEY_SEPARATOR = "::item::";');
+    // The legacy per-TextItem key (`rowId::item::itemId`) went with the legacy
+    // Refine writer in Phase G; the run key is the ONLY Section Refine key.
+    expect(ROW_REFINE).not.toContain("ROW_REFINE_ITEM_KEY_SEPARATOR");
+    expect(ROW_REFINE).not.toContain("rowRefineTargetKey");
+    expect(NOTE_DOC).not.toContain("::item::");
+    expect(TABLE).not.toContain("::item::");
   });
 
   test("5. no structured or primary value is reachable from the modern path", () => {
@@ -196,12 +207,30 @@ describe("9-15. the apply gate is consulted before anything is written", () => {
     expect(refusal).toContain("dismiss();");
   });
 
-  test("the legacy path still refuses a row that has become modern", () => {
-    // F4's guards are NOT removed: they are what stops a legacy writer landing
-    // underneath an authoritative document.
-    expect(NOTE_DOC).toContain("if (rowHasModernSectionDoc(rowId)) return;");
-    expect(NOTE_DOC).toContain("if (sectionDocForRow(target?.sectionDoc, rowId)) {");
-    expect(NOTE_DOC).toContain("if (sectionDocForRow(live?.sectionDoc, rowId)) return;");
+  test("G. there is no legacy Refine path left to land underneath a document", () => {
+    // F4's guards stopped a legacy writer landing under an authoritative
+    // document. Phase G retired that writer entirely, so the guards — and the
+    // handlers they guarded — no longer exist: the ONLY Refine writer is the
+    // editor transaction, whose persistence is the sectionDoc update handler.
+    for (const legacy of [
+      "handleRefineRow",
+      "handleRevertRowRefine",
+      "rowHasModernSectionDoc",
+      "applySectionTextItemToInstance",
+      "applyRowAnswerToInstance",
+      "makeRowRefineRequest",
+      "canApplyRowRefineResponse",
+      "rowRefineBackups",
+      "onSetRowRefineBackup",
+      "onClearRowRefineBackup",
+    ]) {
+      expect(NOTE_DOC).not.toContain(legacy);
+      expect(MAIN_AREA).not.toContain(legacy);
+    }
+    // MainArea keeps only the modern backups, pruned with their note.
+    expect(MAIN_AREA).toContain("clearRowRefineBackup,");
+    expect(MAIN_AREA).toContain("pruneRowRefineBackups,");
+    expect(MAIN_AREA).not.toContain("setRowRefineBackup");
   });
 });
 
@@ -234,11 +263,14 @@ describe("16-23. one transaction, one undo step, one persistence path", () => {
   test("a modern apply never discards the retained editor", () => {
     // F4 destroyed the instance (and its history) after a legacy refinement,
     // because that write happened outside the editor. A modern one IS the
-    // editor's own transaction, so there is nothing stale to discard.
+    // editor's own transaction, so there is nothing stale to discard — and
+    // since Phase G no write outside the editor exists, so the discard helper
+    // itself is gone. The ONE place an editor is destroyed individually is row
+    // deletion.
     expect(REFINE_HANDLER()).not.toContain("discardSectionEditorFor");
     expect(REVERT_HANDLER()).not.toContain("discardSectionEditorFor");
-    // …and the legacy paths still do, exactly as before.
-    expect((NOTE_DOC.match(/discardSectionEditorFor\(rowId\)/g) || []).length).toBe(2);
+    expect(NOTE_DOC).not.toContain("discardSectionEditorFor");
+    expect((NOTE_DOC.match(/sectionRegistryRef\.current\.disposeRow\(rowId\)/g) || []).length).toBe(1);
   });
 });
 
@@ -317,14 +349,28 @@ describe("29-32. active and inactive Sections", () => {
 /* ================= 33-36. legacy compatibility ================= */
 
 describe("33-36. each row has exactly ONE applicable Refine path", () => {
-  test("33. a legacy row keeps the legacy trigger, unchanged", () => {
-    const accepts = between(
-      TABLE,
-      "function rowAcceptsAiRefine(row)",
-      "function sectionItemAcceptsAiRefine(row, item)"
-    );
-    expect(accepts).toContain("!documentBodySegments.has(row.id)");
-    expect(TABLE).toContain("function sectionItemAcceptsAiRefine(row, item)");
+  test("33/G. the legacy trigger is gone: the row-level trigger is the modern target or nothing", () => {
+    for (const legacy of [
+      "function rowAcceptsAiRefine(",
+      "function sectionItemAcceptsAiRefine(",
+      "function renderRefineAction(",
+      "function renderRowRefineStatus(",
+      "function headRefineItem(",
+      "canAiRefine",
+      "onRefineRow",
+      "onRevertRowRefine",
+      "refineRevertableTargetKeys",
+    ]) {
+      expect(TABLE).not.toContain(legacy);
+    }
+    expect(TABLE).toContain("function renderRowActions(row, modernTarget = null)");
+    const actions = between(TABLE, "function renderRowActions(row, modernTarget = null)", "function renderSectionRefineStatus(row, target)");
+    expect(actions).toContain("const modern = modernTarget || null;");
+    expect(actions).toContain("{modern && renderSectionRefineAction(row, modern)}");
+    // The row head passes the modern target; a row it does not serve passes
+    // nothing and therefore renders no Refine trigger at all.
+    expect(TABLE).toContain("const headModernTarget = rowModernRefineTarget(row, headSegment);");
+    expect(TABLE).toContain("{renderRowActions(row, headModernTarget)}");
   });
 
   test("34. a modern Section can never invoke the legacy TextItem writer", () => {
@@ -339,30 +385,33 @@ describe("33-36. each row has exactly ONE applicable Refine path", () => {
     ]) {
       expect(handler).not.toContain(legacy);
       expect(REVERT_HANDLER()).not.toContain(legacy);
+      // …and the writers themselves no longer exist anywhere.
+      expect(ROW_REFINE).not.toContain(`export function ${legacy}`);
     }
     // …and the modern model imports none of the legacy writers either.
     expect(MODEL).not.toContain("applySectionTextItemToInstance");
     expect(MODEL).not.toContain("templateSectionEditing");
   });
 
-  test("12. the two paths cannot be offered on one row at once", () => {
-    // BOTH legacy predicates stand down for a row the modern path owns…
-    const rowAccepts = between(
+  test("12/G. one row, one path: MODERN for every eligible row, NONE otherwise", () => {
+    expect(MODEL).toContain("MODERN: \"modern\",");
+    expect(MODEL).toContain("NONE: \"none\",");
+    expect(MODEL).not.toContain("LEGACY: \"legacy\"");
+    const rule = between(MODEL, "export function resolveSectionRefineOwner({", "const SECTION_MEDIA_NODE_NAMES");
+    expect(rule).toContain("if (!eligible) return SECTION_REFINE_OWNER.NONE;");
+    expect(rule).toContain("return SECTION_REFINE_OWNER.MODERN;");
+    // The table asks the parent's answer and never re-derives it.
+    expect(TABLE).toContain("function modernRefineOwnsRow(row)");
+    expect(TABLE).toContain("sectionRefine.rows[row.id]");
+    // A row-level trigger for an eligible LEGACY prose row (no document
+    // segments, no editor yet) targets its ONE run — run 0.
+    const target = between(
       TABLE,
-      "function rowAcceptsAiRefine(row)",
-      "function sectionItemAcceptsAiRefine(row, item)"
+      "function rowModernRefineTarget(row, headSegment)",
+      "function renderSectionRefineAction(row, target)"
     );
-    expect(rowAccepts).toContain("!modernRefineOwnsRow(row)");
-    const itemAccepts = between(
-      TABLE,
-      "function sectionItemAcceptsAiRefine(row, item)",
-      "function headRefineItem(sectionHeadItem)"
-    );
-    expect(itemAccepts).toContain("!modernRefineOwnsRow(row)");
-    // …and in both action areas the modern target is taken ONLY when the legacy
-    // one was not, so the exclusion holds from both directions.
-    expect(TABLE).toContain("const modern = !canAiRefine && modernTarget ? modernTarget : null;");
-    expect(TABLE).toContain("const modern = canAiRefine ? null : modernRefineTarget(row, segment);");
+    expect(target).toContain("if (documentBodySegments.has(row.id)) return null;");
+    expect(target).toContain("segmentIndex: 0");
   });
 
   test("36. no hidden sectionContent change can happen under a document", () => {
@@ -370,6 +419,9 @@ describe("33-36. each row has exactly ONE applicable Refine path", () => {
     expect(handler).not.toContain("sectionContent");
     expect(handler).not.toContain("setRowSectionItems");
     expect(REVERT_HANDLER()).not.toContain("sectionContent");
+    // The legacy sectionContent writers no longer exist to be called.
+    expect(NOTE_DOC).not.toContain("setRowSectionItems");
+    expect(NOTE_DOC).not.toContain("persistSectionContent");
   });
 });
 
@@ -418,10 +470,11 @@ describe("F6a-b. a Section with a live editor but no sectionDoc yet", () => {
     // Marked at EVERY construction…
     const created = NOTE_DOC.match(/setSectionEditorLive\(rowId, true\)/g) || [];
     expect(created).toHaveLength(3); // activation, Quick Add, Refine
-    // …and cleared at every individual disposal, plus wholesale when the
-    // registry itself goes.
+    // …and cleared at the ONE individual disposal (row deletion — the legacy
+    // refine/revert discard is gone with the legacy writer), plus wholesale
+    // when the registry itself goes.
     const cleared = NOTE_DOC.match(/setSectionEditorLive\(rowId, false\)/g) || [];
-    expect(cleared).toHaveLength(2); // discard (legacy refine/revert), row deletion
+    expect(cleared).toHaveLength(1);
     expect(NOTE_DOC).toContain("setSectionLiveRows({});");
   });
 
@@ -431,7 +484,7 @@ describe("F6a-b. a Section with a live editor but no sectionDoc yet", () => {
     const activate = between(
       NOTE_DOC,
       "const activateSectionEditor = useCallback(",
-      "const persistSectionContent = useCallback("
+      "const setFieldError = useCallback("
     );
     expect(activate).not.toContain("persistSectionDoc");
     expect(activate).not.toContain("saveInstanceConfirmed");
@@ -509,7 +562,11 @@ describe("F6a-b. a Section with a live editor but no sectionDoc yet", () => {
       "const sectionState = useMemo(",
       "const sectionBodies = sectionState.bodies"
     );
-    expect(state).toContain("canEditSectionBody(body)");
+    expect(state).toContain("if (!sectionEditorEligibility(body).ok) {");
+    // Refused rows are not editable; every eligible one — including a legacy
+    // prose-only or legacy-with-media body — is.
+    expect(state).toContain("editable[row.id] = {");
+    expect(state).toContain("html: sectionBodyHtml(body),");
   });
 });
 
@@ -618,7 +675,8 @@ describe("41-45. what F6a deliberately does not touch", () => {
 
   test("44. Quick Add routing is untouched", () => {
     expect(NOTE_DOC).toContain("const sectionDocQuickAddTarget = useCallback(");
-    expect(NOTE_DOC).toContain("resolveSectionQuickAddRoute({");
+    expect(NOTE_DOC).toContain("quickAdd[row.id] = resolveSectionQuickAddRoute(body);");
+    expect(NOTE_DOC).toContain("sectionQuickAddRouteRef.current[rowId]");
     // Quick Add and Refine share the registry, and nothing else.
     expect(REFINE_HANDLER()).not.toContain("sectionDocQuickAddTarget");
     expect(REFINE_HANDLER()).not.toContain("appendComposed");

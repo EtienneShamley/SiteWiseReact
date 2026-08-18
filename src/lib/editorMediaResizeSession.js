@@ -2,10 +2,10 @@
 //
 // THE LIFETIME OF ONE MEDIA POINTER GESTURE — begun synchronously at
 // pointerdown. Surface-agnostic: this is the shared-core generalisation of the
-// pointer lifecycle proven on Template section images (see
-// templateSectionItemDragSession.js, whose Template-facing copy remains in
-// place until Phase G consolidation — docs/PROJECT_DECISIONS.md → "Shared
-// NoteWise Editor Core").
+// pointer lifecycle proven on Template section images (the legacy
+// `templateSectionItemDragSession.js`, retired in Phase G once the Template
+// surface moved onto this core — docs/PROJECT_DECISIONS.md → "Shared NoteWise
+// Editor Core"). This is now the ONE home of that lifecycle.
 //
 // The defect this lifecycle closes was proven in a browser: listeners
 // installed by a React effect exist only after React commits, and a fast human

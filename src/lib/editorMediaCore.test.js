@@ -65,29 +65,23 @@ describe("the shared media core is surface-agnostic", () => {
     }
   });
 
-  test("the new core modules import no Template code at all — except the sanctioned wraps", () => {
-    // Three modules deliberately WRAP proven rules where they still live
-    // (consolidation is Phase G); nothing else may reach into a
-    // template-named module, and the sanctioned three may reach ONLY the
-    // modules they wrap.
-    expect(CORE_LIB["lib/editorMediaResize.js"]).toMatch(/from "\.\/templateSectionImageResize"/);
-    expect(CORE_LIB["lib/editorMediaDrag.js"]).toMatch(/from "\.\/templateSectionImageMove"/);
-    expect(CORE_LIB["lib/editorMediaDragGesture.js"]).toMatch(/from "\.\/templateSectionImageMove"/);
-    expect(CORE_LIB["lib/editorMediaDragGesture.js"]).toMatch(
-      /from "\.\/templateSectionItemDragSession"/
-    );
-    const sanctioned = {
-      "lib/editorMediaResize.js": [/templateSectionImageResize/g],
-      "lib/editorMediaDrag.js": [/templateSectionImageMove/g],
-      "lib/editorMediaDragGesture.js": [
-        /templateSectionImageMove/g,
-        /templateSectionItemDragSession/g,
-      ],
-    };
+  test("the new core modules import no Template code at all — Phase G retired the wraps", () => {
+    // Until Phase G three modules WRAPPED proven rules that still lived in
+    // template-named modules (templateSectionImageResize / ImageMove /
+    // ItemDragSession). Those modules are gone; the arithmetic moved into the
+    // core verbatim, so NO core module may reach a template-named module.
     for (const [file, source] of Object.entries(CORE_LIB)) {
-      let stripped = source;
-      for (const re of sanctioned[file] || []) stripped = stripped.replace(re, "");
-      expect({ file, hit: /templateSection/.test(stripped) }).toEqual({ file, hit: false });
+      expect({ file, hit: /templateSection/.test(source) }).toEqual({ file, hit: false });
+    }
+    for (const retired of [
+      "lib/templateSectionImageResize.js",
+      "lib/templateSectionImageMove.js",
+      "lib/templateSectionItemDragSession.js",
+    ]) {
+      expect({ retired, exists: fs.existsSync(path.join(SRC, retired)) }).toEqual({
+        retired,
+        exists: false,
+      });
     }
   });
 
@@ -204,7 +198,13 @@ describe("the C1 NodeView is built ON the shared core, not beside it", () => {
     // editor-root CLASS NAME CONSTANT (a plain string, no resize/drag/layout
     // logic) — asserted precisely below rather than by a blanket ban that
     // would make that deliberate, in-scope import look like a violation.
-    expect(MAIN_AREA.match(/AssetImage/g).length).toBeGreaterThanOrEqual(1);
+    // Since the shared editor core (2026-08-18) MainArea registers the media
+    // nodes THROUGH `editorCoreExtensions()` — the one list both surfaces are
+    // built from — so AssetImage appears in the core exactly once and MainArea
+    // names no extension of its own.
+    const CORE = read("components/editor/editorCoreExtensions.js");
+    expect(CORE.match(/\bAssetImage\b/g).length).toBeGreaterThanOrEqual(1);
+    expect(MAIN_AREA).toContain("extensions: editorCoreExtensions()");
     expect(MAIN_AREA).not.toMatch(/editorMediaResize|editorMediaDrag/);
     const editorMediaLayoutMentions = MAIN_AREA.match(/editorMediaLayout/g) || [];
     expect(editorMediaLayoutMentions).toHaveLength(1);

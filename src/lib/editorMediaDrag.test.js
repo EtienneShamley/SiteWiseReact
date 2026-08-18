@@ -18,10 +18,8 @@ import {
   resolveMediaDragDestination,
   wrapTargetHasText,
 } from "./editorMediaDrag";
-import {
-  IMAGE_DRAG_PREVIEW_MAX_PX,
-  imageDragPreviewGeometry,
-} from "./templateSectionImageMove";
+import fs from "fs";
+import path from "path";
 
 /* A stand-in for the note editor's schema: paragraphs and a block-atom image
    carrying the full shared attribute set, so attribute preservation is proven
@@ -513,9 +511,99 @@ describe("moveMediaNode", () => {
   });
 });
 
-describe("ghost geometry wrap", () => {
-  test("the ghost geometry and its cap are the proven Template rules, wrapped not copied", () => {
-    expect(mediaDragGhostGeometry).toBe(imageDragPreviewGeometry);
-    expect(MEDIA_DRAG_GHOST_MAX_PX).toBe(IMAGE_DRAG_PREVIEW_MAX_PX);
+describe("ghost geometry — the ONE home (Phase G)", () => {
+  // The rules that used to live in templateSectionImageMove.js now live HERE
+  // verbatim; the numbers below are the historical expectations, unchanged.
+  const rect = { left: 100, top: 200, width: 400, height: 300 };
+  const grab = { grabX: 200, grabY: 300 };
+
+  test("editorMediaDrag no longer wraps a Template module — the geometry is its own", () => {
+    const src = fs.readFileSync(path.join(__dirname, "editorMediaDrag.js"), "utf8");
+    expect(src).not.toMatch(/from ["']\.\/templateSection/);
+    expect(src).not.toMatch(/require\(["']\.\/templateSection/);
+    expect(MEDIA_DRAG_GHOST_MAX_PX).toBe(240);
+    expect(typeof mediaDragGhostGeometry).toBe("function");
+  });
+
+  test("11. the ghost follows the pointer on BOTH axes", () => {
+    const a = mediaDragGhostGeometry({ rect, ...grab, clientX: 200, clientY: 300 });
+    const b = mediaDragGhostGeometry({ rect, ...grab, clientX: 260, clientY: 340 });
+    expect(b.left - a.left).toBeCloseTo(60);
+    expect(b.top - a.top).toBeCloseTo(40);
+  });
+
+  test("11. it stays under the point of the image that was grabbed", () => {
+    const small = { left: 0, top: 0, width: 100, height: 80 };
+    const geo = mediaDragGhostGeometry({
+      rect: small,
+      grabX: 30,
+      grabY: 20,
+      clientX: 500,
+      clientY: 400,
+    });
+    expect(geo).toEqual({ left: 470, top: 380, width: 100, height: 80 });
+  });
+
+  test("12. the ghost keeps the image's aspect ratio exactly", () => {
+    const geo = mediaDragGhostGeometry({ rect, ...grab, clientX: 0, clientY: 0 });
+    expect(geo.width / geo.height).toBeCloseTo(rect.width / rect.height);
+  });
+
+  test("12. a small image is previewed at its displayed size", () => {
+    const small = { left: 0, top: 0, width: 120, height: 90 };
+    const geo = mediaDragGhostGeometry({
+      rect: small,
+      grabX: 10,
+      grabY: 10,
+      clientX: 10,
+      clientY: 10,
+    });
+    expect(geo.width).toBe(120);
+    expect(geo.height).toBe(90);
+  });
+
+  test("12. a full-width image is scaled DOWN proportionally to the cap, never cropped", () => {
+    const wide = { left: 0, top: 0, width: 720, height: 540 };
+    const geo = mediaDragGhostGeometry({
+      rect: wide,
+      grabX: 360,
+      grabY: 270,
+      clientX: 100,
+      clientY: 100,
+    });
+    expect(geo.width).toBe(MEDIA_DRAG_GHOST_MAX_PX);
+    expect(geo.width / geo.height).toBeCloseTo(720 / 540);
+  });
+
+  test("the grab offset is scaled with the ghost, so it does not jump", () => {
+    const wide = { left: 0, top: 0, width: 480, height: 360 };
+    const geo = mediaDragGhostGeometry({
+      rect: wide,
+      grabX: 240,
+      grabY: 180,
+      clientX: 1000,
+      clientY: 800,
+    });
+    expect(geo.left).toBeCloseTo(1000 - geo.width / 2);
+    expect(geo.top).toBeCloseTo(800 - geo.height / 2);
+  });
+
+  test("an unusable grab point falls back to the centre rather than a corner", () => {
+    const geo = mediaDragGhostGeometry({ rect, clientX: 500, clientY: 500 });
+    expect(geo.left).toBeCloseTo(500 - geo.width / 2);
+    expect(geo.top).toBeCloseTo(500 - geo.height / 2);
+  });
+
+  test("an unusable rect or pointer produces no ghost at all", () => {
+    expect(mediaDragGhostGeometry({ rect: null, clientX: 1, clientY: 1 })).toBeNull();
+    expect(
+      mediaDragGhostGeometry({
+        rect: { left: 0, top: 0, width: 0, height: 0 },
+        clientX: 1,
+        clientY: 1,
+      })
+    ).toBeNull();
+    expect(mediaDragGhostGeometry({ rect, clientX: undefined, clientY: 1 })).toBeNull();
+    expect(mediaDragGhostGeometry()).toBeNull();
   });
 });

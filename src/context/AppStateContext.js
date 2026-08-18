@@ -96,6 +96,15 @@ export function AppStateProvider({ children }) {
   // deliberately no per-note preferred export source.
   const [activeNoteView, setActiveNoteView] = useState("natural");
 
+  // Whether the open note shows its NOTE VIEW or its LINKED PDF ("note" |
+  // "pdf"). It lives here — beside `activeNoteView` — because the left
+  // sidebar's "This note" navigation selects surfaces (Template form /
+  // Free-form note / PDF, see src/lib/noteSurfaces.js) and MainArea renders
+  // them; the two must read one value. Transient, never persisted. It does NOT
+  // feed the export source: `activeNoteView` alone does, so switching to the
+  // PDF and back leaves the note view — and what an export exports — untouched.
+  const [noteWorkspaceTab, setNoteWorkspaceTab] = useState("note");
+
   // Top-level workspace mode: "projects" (Project → Folder → Note) or "pdfs"
   // (the global standalone PDF library/editor). PDFs are reachable without any
   // project/folder/note; workspace mode — not note/PDF precedence — decides
@@ -842,6 +851,9 @@ export function AppStateProvider({ children }) {
         // Transient; it is what an export uses to decide its SOURCE.
         activeNoteView,
         setActiveNoteView,
+        // whether the note view or the linked PDF is showing ("note" | "pdf")
+        noteWorkspaceTab,
+        setNoteWorkspaceTab,
 
         // top-level workspace mode ("projects" | "pdfs")
         workspace,

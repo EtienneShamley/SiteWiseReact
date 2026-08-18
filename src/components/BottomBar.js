@@ -8,12 +8,10 @@ import {
   FaUndo,
   FaTrash,
   FaPaperclip,
-} from "react-icons/fa"; // NEW: FaTrash
-import VoiceButton from "./VoiceButton";
-import VoiceLanguageSelect from "./VoiceLanguageSelect";
+  FaMicrophone,
+} from "react-icons/fa";
 import StylePresetSelect from "./StylePresetSelect";
 import { useRefine } from "../hooks/useRefine";
-import { useTranscription } from "../hooks/useTranscription";
 import { useAppState } from "../context/AppStateContext";
 import {
   QUICK_ADD_KIND,
@@ -22,7 +20,6 @@ import {
   quickAddChipDescription,
   quickAddChipLabel,
   quickAddInputLabel,
-  quickAddPlaceholder,
 } from "../lib/quickAddTarget";
 import {
   QUICK_ADD_SEND_ROUTE,
@@ -94,7 +91,6 @@ function loadImageFromBlobURL(url) {
 }
 // ------------------------------------------------------
 
-const VOICE_LANG_MEM_KEY = "sitewise-note-voice-lang-v1";
 const STYLE_MEM_KEY = "sitewise-note-style-v1";
 const COORD_SYS_KEY = "sitewise-coord-system-v1"; // per-note memory
 
@@ -159,6 +155,17 @@ export default function BottomBar({
   //
   //   (style) => void
   onStyleChange,
+  // LIVE TRANSCRIPT. The composer records nothing itself any more: its
+  // microphone is a shortcut that opens the ONE Live Transcript workspace
+  // (sidebar → Capture → Live transcript, LiveTranscriptProvider) — the same
+  // session, never a second recorder. `(triggerElement) => void`.
+  onOpenLiveTranscript,
+  // Whether that session is recording right now — the shortcut shows it.
+  liveTranscriptRecording = false,
+  // Reports whether an unsent composition (text or staged attachments) exists,
+  // so a collapsed composer's handle can say a draft is kept.
+  //   (hasComposition: boolean) => void
+  onCompositionChange,
 }) {
   const { currentNoteId } = useAppState();
 
@@ -169,8 +176,8 @@ export default function BottomBar({
 
   // Busy states
   const [busy, setBusy] = useState(false);
-  const [transcribeStatus, setTranscribeStatus] = useState("idle");
-  const [transcribeError, setTranscribeError] = useState("");
+  // The composer's own inline failure line (an AI refine that could not run).
+  const [composerError, setComposerError] = useState("");
   // A composer Send in flight. Separate from `busy` (AI refine) so a delivery
   // cannot be started twice and cannot be confused with a refinement.
   const [sending, setSending] = useState(false);
@@ -199,9 +206,6 @@ export default function BottomBar({
     if (draftStoreRef.current.clear() > 0) syncStaged();
   };
 
-  // Voice language (per note memory)
-  const [transcribeLang, setTranscribeLang] = useState("auto");
-
   // Style preset (per note memory)
   const [stylePreset, setStylePreset] = useState("concise, professional");
 
@@ -211,8 +215,6 @@ export default function BottomBar({
   // Refs
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const chunksRef = useRef([]);
   // The LIVE destination, readable from a transcription that started before the
   // user moved. Kept in a ref because the async handler closed over the value
   // that was current when recording began — which is exactly the value it must
@@ -222,13 +224,11 @@ export default function BottomBar({
 
   // Hooks
   const { refineText } = useRefine();
-  const { transcribeBlob } = useTranscription();
 
   // Derived
   const currentText = refinedDraft ?? input;
   const hasText = useMemo(() => currentText.trim().length > 0, [currentText]);
-  const isDisabled =
-    disabled || busy || sending || transcribeStatus === "transcribing";
+  const isDisabled = disabled || busy || sending;
 
   /* ------------------------------ Quick Add ------------------------------- */
 
@@ -237,7 +237,10 @@ export default function BottomBar({
   // disagree about where a capture would land.
   const chipLabel = quickAddChipLabel(target);
   const chipDescription = quickAddChipDescription(target);
-  const placeholder = quickAddPlaceholder(target);
+  // One fixed placeholder — the destination is stated once, by the chip in
+  // the status row (and by the Send button's own tooltip/accessible name),
+  // never repeated here.
+  const placeholder = "Type, paste, or add media…";
   const inputLabel = quickAddInputLabel(target);
   const showClearTarget = canClearQuickAddTarget(target) && !!onClearTarget;
 
@@ -267,6 +270,11 @@ export default function BottomBar({
     canSendText: canSend,
   });
   const hasComposition = hasText || stagedAttachments.length > 0;
+  // Tell the owner whether a draft exists (used only to word the collapsed
+  // composer's handle — the draft itself never leaves this component).
+  useEffect(() => {
+    if (typeof onCompositionChange === "function") onCompositionChange(hasComposition);
+  }, [hasComposition, onCompositionChange]);
 
   const canCaptureImage = !!capture?.image;
   const canCaptureFile = !!capture?.file;
@@ -303,13 +311,6 @@ export default function BottomBar({
   const snapshotInsertPoint = () =>
     typeof onCaptureInsertPoint === "function" ? onCaptureInsertPoint() : undefined;
 
-  const hasMediaDevices = useMemo(() => {
-    return (
-      typeof navigator !== "undefined" &&
-      navigator.mediaDevices &&
-      typeof navigator.mediaDevices.getUserMedia === "function"
-    );
-  }, []);
 
   // An unsent attachment belongs to the composition it was staged for. Opening
   // another note must not carry it along — it would then be sent into a note it
@@ -343,29 +344,20 @@ export default function BottomBar({
 
   // Load per-note memory when note changes
   useEffect(() => {
-    const langMap = loadMap(VOICE_LANG_MEM_KEY);
     const styleMap = loadMap(STYLE_MEM_KEY);
     const sysMap = loadMap(COORD_SYS_KEY);
 
     if (currentNoteId) {
-      setTranscribeLang(langMap[currentNoteId] || "auto");
       setStylePreset(styleMap[currentNoteId] || "concise, professional");
       setCoordSystem(sysMap[currentNoteId] || DEFAULT_COORD_SYSTEM);
     } else {
-      setTranscribeLang("auto");
       setStylePreset("concise, professional");
       setCoordSystem(DEFAULT_COORD_SYSTEM);
     }
   }, [currentNoteId]);
 
-  // Persist language/style/system when changed
-  useEffect(() => {
-    if (!currentNoteId) return;
-    const langMap = loadMap(VOICE_LANG_MEM_KEY);
-    langMap[currentNoteId] = transcribeLang || "auto";
-    saveMap(VOICE_LANG_MEM_KEY, langMap);
-  }, [currentNoteId, transcribeLang]);
-
+  // Persist style/system when changed. (The transcription language is no
+  // longer this component's: see src/lib/transcriptionLanguage.js.)
   useEffect(() => {
     if (!currentNoteId) return;
     const styleMap = loadMap(STYLE_MEM_KEY);
@@ -695,7 +687,7 @@ export default function BottomBar({
     setInput("");
     setRefinedDraft(null);
     setOriginalBeforeRefine(null);
-    setTranscribeError("");
+    setComposerError("");
   };
 
   const handleSend = async () => {
@@ -907,112 +899,12 @@ export default function BottomBar({
     await insertPhoto(f, insertPoint, { stamp: true });
   };
 
-  // ---------------- Recording (plus cancel) ----------------
-  const pickMimeType = () => {
-    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
-    for (const type of candidates) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported?.(type)) return type;
-    }
-    return "";
-  };
-  const startRecording = async () => {
-    if (!hasMediaDevices || disabled || transcribeStatus !== "idle") return;
-    setTranscribeError("");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mimeType = pickMimeType();
-      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      chunksRef.current = [];
-      mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
-      mr.onstop = null;
-      mr.start();
-      mediaRecorderRef.current = mr;
-      setTranscribeStatus("recording");
-    } catch (err) {
-      setTranscribeError(err?.message || "Microphone permission denied");
-      setTranscribeStatus("idle");
-    }
-  };
-  const stopRecording = async () => {
-    if (transcribeStatus !== "recording" || !mediaRecorderRef.current) return null;
-    setTranscribeStatus("stopping");
-    return new Promise((resolve) => {
-      mediaRecorderRef.current.onstop = () => {
-        const type = mediaRecorderRef.current.mimeType || "audio/webm";
-        const blob = new Blob(chunksRef.current, { type });
-        resolve(blob);
-      };
-      mediaRecorderRef.current.stop();
-      mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
-    });
-  };
-
-  // NEW: cancel recording (trash while recording)
-  const cancelRecording = () => {
-    try {
-      if (mediaRecorderRef.current) {
-        try { mediaRecorderRef.current.onstop = null; } catch {}
-        try { mediaRecorderRef.current.stop(); } catch {}
-        try { mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop()); } catch {}
-      }
-    } finally {
-      chunksRef.current = [];
-      mediaRecorderRef.current = null;
-      setTranscribeStatus("idle");
-      setTranscribeError("");
-    }
-  };
-
-  const handleVoiceClick = async () => {
-    if (disabled || !editor || !hasMediaDevices) {
-      if (!hasMediaDevices) setTranscribeError("Microphone not available in this browser.");
-      return;
-    }
-    if (transcribeStatus === "idle") {
-      await startRecording();
-      return;
-    }
-    if (transcribeStatus === "recording") {
-      const blob = await stopRecording();
-      if (!blob) {
-        setTranscribeStatus("idle");
-        setTranscribeError("No audio captured");
-        return;
-      }
-      const url = URL.createObjectURL(blob);
-      editor.chain().focus().insertContent(
-        `<p><audio controls src="${url}" preload="metadata"></audio></p>`
-      ).run();
-      setTranscribeStatus("transcribing");
-      // The destination is captured WHEN THE VOICE ACTION BEGINS, exactly like
-      // the Free-form insertion point. Transcription is asynchronous and the
-      // user is free to select another row, switch view or open another note
-      // while it runs.
-      const capturedTarget = targetToken;
-      try {
-        const text = await transcribeBlob(blob, transcribeLang);
-        setTranscribeStatus("idle");
-        if (!text) {
-          setTranscribeError("Empty transcription");
-          return;
-        }
-        // A result whose destination has moved is REJECTED, not redirected.
-        // Silently retargeting would put dictated words into a row the user
-        // never dictated them for — the one outcome worse than losing them.
-        if (capturedTarget !== targetTokenRef.current) {
-          setTranscribeError(
-            "The Quick Add destination changed while this was transcribing, so it was discarded."
-          );
-          return;
-        }
-        if (refinedDraft != null) setRefinedDraft((p) => (p ? `${p} ${text}` : text));
-        else setInput((p) => (p ? `${p} ${text}` : text));
-      } catch (e) {
-        setTranscribeStatus("idle");
-        setTranscribeError(e?.message || "Transcription failed");
-      }
-      return;
-    }
+  // ---------------- Live transcript shortcut ----------------
+  // The composer no longer records or transcribes on its own (that second
+  // recorder is gone): the microphone opens the ONE Live Transcript
+  // workspace, whose session is owned by LiveTranscriptProvider.
+  const handleVoiceClick = (e) => {
+    if (typeof onOpenLiveTranscript === "function") onOpenLiveTranscript(e.currentTarget);
   };
   // ----------------------------------------------------------
 
@@ -1025,14 +917,14 @@ export default function BottomBar({
     if (!text || busy) return;
 
     setBusy(true);
-    setTranscribeError("");
+    setComposerError("");
     const result = await refineText({ text, style: stylePreset });
     setBusy(false);
 
     if (!result.ok) {
       // Nothing is written back: no draft change, and no revert point, so the
       // Revert control cannot offer to undo something that never happened.
-      setTranscribeError(result.message);
+      setComposerError(result.message);
       return;
     }
 
@@ -1056,35 +948,6 @@ export default function BottomBar({
           "px-3 pt-3 pb-12",
         ].join(" ")}
       >
-        {/* DESTINATION CHIP — what Quick Add would add to. Restrained, wraps
-            rather than overflowing, truncates a long row name in CSS while the
-            title and the accessible description keep the full text. */}
-        {!!chipLabel && (
-          <div className="flex items-center gap-1 flex-wrap mb-2">
-            <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">
-              Quick Add to
-            </span>
-            <span
-              className="nw-quickadd-chip"
-              title={chipDescription}
-              aria-label={chipDescription}
-            >
-              <span className="nw-quickadd-chip-label">{chipLabel}</span>
-              {showClearTarget && (
-                <button
-                  type="button"
-                  className="nw-quickadd-chip-clear"
-                  onClick={onClearTarget}
-                  aria-label="Clear Quick Add target"
-                  title="Clear Quick Add target"
-                >
-                  <span aria-hidden="true">×</span>
-                </button>
-              )}
-            </span>
-          </div>
-        )}
-
         {/* STAGED ATTACHMENTS — held by the composer, not yet in the note.
             They wrap rather than overflowing, stay visually subordinate to the
             document, and each one carries its own named remove control. */}
@@ -1132,7 +995,7 @@ export default function BottomBar({
 
         <textarea
           className="w-full resize-none bg-transparent outline-none text-sm text-black dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-          placeholder={transcribeStatus === "transcribing" ? "Transcribing…" : placeholder}
+          placeholder={placeholder}
           aria-label={inputLabel}
           rows={5}
           disabled={disabled}
@@ -1157,16 +1020,38 @@ export default function BottomBar({
 
         {/* Status row (left) */}
         <div className="absolute left-3 bottom-2 flex items-center gap-3">
-          <VoiceLanguageSelect
-            value={transcribeLang}
-            onChange={setTranscribeLang}
-            disabled={isDisabled}
-          />
           <StylePresetSelect
             value={stylePreset}
             onChange={setStylePreset}
             disabled={isDisabled}
           />
+
+          {/* DESTINATION CHIP — where Quick Add sends this capture. The one
+              place this is stated: no "Quick Add to" label repeats the
+              feature's own name (the collapsible header already carries it),
+              and no second mention sits above the textarea. Restrained,
+              truncates a long row name in CSS while the title and the
+              accessible description keep the full text. */}
+          {!!chipLabel && (
+            <span
+              className="nw-quickadd-chip"
+              title={chipDescription}
+              aria-label={chipDescription}
+            >
+              <span className="nw-quickadd-chip-label">{chipLabel}</span>
+              {showClearTarget && (
+                <button
+                  type="button"
+                  className="nw-quickadd-chip-clear"
+                  onClick={onClearTarget}
+                  aria-label="Clear Quick Add target"
+                  title="Clear Quick Add target"
+                >
+                  <span aria-hidden="true">×</span>
+                </button>
+              )}
+            </span>
+          )}
 
           {/* Converter dropdown (no label, no button). Same shared field class
               and same padding/radius/type scale as the two selects beside it,
@@ -1185,14 +1070,9 @@ export default function BottomBar({
             ))}
           </select>
 
-          {transcribeStatus === "transcribing" && (
-            <span className="text-xs px-2 py-1 rounded bg-yellow-100 text-yellow-900 dark:bg-yellow-900/40 dark:text-yellow-200 border border-yellow-300 dark:border-yellow-700">
-              Transcribing…
-            </span>
-          )}
-          {!!transcribeError && (
-            <span className="text-xs px-2 py-1 rounded bg-red-100 text-red-900 dark:bg-red-900/40 dark:text-red-200 border border-red-300 dark:border-red-700">
-              {transcribeError}
+          {!!composerError && (
+            <span className="text-xs px-2 py-1 rounded bg-red-100 text-red-900 dark:bg-red-900/40 dark:text-red-200 border border-red-300 dark:border-red-700" role="alert">
+              {composerError}
             </span>
           )}
         </div>
@@ -1253,25 +1133,25 @@ export default function BottomBar({
             <FaCamera />
           </button>
 
-          {/* NEW: red trash to cancel current recording */}
-          {transcribeStatus === "recording" && (
-            <button
-              type="button"
-              onClick={cancelRecording}
-              title="Discard recording"
-              className="p-2 rounded-full bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 text-red-700 dark:text-red-200"
-            >
-              <FaTrash />
-            </button>
-          )}
-
-          <div className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200" title="Record voice">
-            <VoiceButton
-              phase={transcribeStatus}
-              disabled={disabled || !hasMediaDevices}
-              onClick={handleVoiceClick}
-            />
-          </div>
+          {/* Live transcript shortcut: opens the sidebar's Capture workspace
+              (same session), red while that session is recording. It records
+              nothing itself. */}
+          <button
+            type="button"
+            onClick={handleVoiceClick}
+            disabled={disabled}
+            className={[
+              "p-2 rounded-full border disabled:opacity-60",
+              liveTranscriptRecording
+                ? "bg-red-50 dark:bg-red-900/30 border-red-300 dark:border-red-700 text-red-700 dark:text-red-200"
+                : "bg-white dark:bg-[#1b1b1b] border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200",
+            ].join(" ")}
+            aria-label={liveTranscriptRecording ? "Open Live transcript — recording" : "Open Live transcript"}
+            title={liveTranscriptRecording ? "Live transcript — recording" : "Live transcript"}
+            aria-haspopup="dialog"
+          >
+            <FaMicrophone aria-hidden="true" />
+          </button>
 
           <button
             type="button"

@@ -12,11 +12,8 @@ import {
   mediaDragExceedsThreshold,
   suppressMediaGestureTrailingClick,
 } from "./editorMediaDragGesture";
-import {
-  IMAGE_MOVE_THRESHOLD_PX,
-  exceedsMoveThreshold,
-} from "./templateSectionImageMove";
-import { suppressGestureTrailingClick } from "./templateSectionItemDragSession";
+import fs from "fs";
+import path from "path";
 
 function makeWindow() {
   const listeners = new Map();
@@ -96,10 +93,65 @@ describe("threshold: click vs drag", () => {
     expect(gesture.isArmed()).toBe(true);
   });
 
-  test("the threshold is the proven ~4px straight-line rule, wrapped not copied", () => {
-    expect(MEDIA_BODY_DRAG_THRESHOLD_PX).toBe(IMAGE_MOVE_THRESHOLD_PX);
+  test("the threshold is the proven ~4px straight-line rule — owned here since Phase G", () => {
+    const src = fs.readFileSync(path.join(__dirname, "editorMediaDragGesture.js"), "utf8");
+    expect(src).not.toMatch(/from ["']\.\/templateSection/);
+    expect(src).not.toMatch(/require\(["']\.\/templateSection/);
     expect(MEDIA_BODY_DRAG_THRESHOLD_PX).toBe(4);
-    expect(mediaDragExceedsThreshold).toBe(exceedsMoveThreshold);
+    expect(typeof mediaDragExceedsThreshold).toBe("function");
+  });
+});
+
+describe("5/6/7. a short click is a click; only real travel arms a drag (historical numbers)", () => {
+  const from = { startX: 300, startY: 350 };
+
+  test("6. no movement at all stays a click", () => {
+    expect(mediaDragExceedsThreshold({ ...from, clientX: 300, clientY: 350 })).toBe(false);
+  });
+
+  test("6. movement BELOW the threshold stays a click", () => {
+    expect(mediaDragExceedsThreshold({ ...from, clientX: 302, clientY: 351 })).toBe(false);
+    expect(
+      mediaDragExceedsThreshold({
+        ...from,
+        clientX: 300 + MEDIA_BODY_DRAG_THRESHOLD_PX - 1,
+        clientY: 350,
+      })
+    ).toBe(false);
+  });
+
+  test("exactly AT the threshold is still a click — a drag must be unambiguous", () => {
+    expect(
+      mediaDragExceedsThreshold({ ...from, clientX: 300 + MEDIA_BODY_DRAG_THRESHOLD_PX, clientY: 350 })
+    ).toBe(false);
+  });
+
+  test("7. movement ABOVE the threshold arms the drag", () => {
+    expect(
+      mediaDragExceedsThreshold({
+        ...from,
+        clientX: 300 + MEDIA_BODY_DRAG_THRESHOLD_PX + 1,
+        clientY: 350,
+      })
+    ).toBe(true);
+    expect(mediaDragExceedsThreshold({ ...from, clientX: 300, clientY: 400 })).toBe(true);
+  });
+
+  test("travel in ANY direction counts the same", () => {
+    const far = MEDIA_BODY_DRAG_THRESHOLD_PX + 5;
+    expect(mediaDragExceedsThreshold({ ...from, clientX: 300 - far, clientY: 350 })).toBe(true);
+    expect(mediaDragExceedsThreshold({ ...from, clientX: 300, clientY: 350 - far })).toBe(true);
+    // Diagonal travel that is under the threshold on each axis but over it in a
+    // straight line.
+    expect(mediaDragExceedsThreshold({ ...from, clientX: 303, clientY: 354 })).toBe(true);
+  });
+
+  test("an unusable coordinate never arms a drag", () => {
+    expect(mediaDragExceedsThreshold({ ...from, clientX: undefined, clientY: 400 })).toBe(false);
+    expect(
+      mediaDragExceedsThreshold({ startX: null, startY: null, clientX: 1, clientY: 1 })
+    ).toBe(false);
+    expect(mediaDragExceedsThreshold()).toBe(false);
   });
 });
 
@@ -190,8 +242,9 @@ describe("unusable inputs", () => {
 });
 
 describe("trailing-click suppression", () => {
-  test("the suppression is the proven Template rule, wrapped not copied", () => {
-    expect(suppressMediaGestureTrailingClick).toBe(suppressGestureTrailingClick);
+  test("the suppression is the real implementation here — no Template session module survives", () => {
+    expect(typeof suppressMediaGestureTrailingClick).toBe("function");
+    expect(fs.existsSync(path.join(__dirname, "templateSectionItemDragSession.js"))).toBe(false);
   });
 
   test("the very next click is consumed exactly once; the one after behaves normally", () => {

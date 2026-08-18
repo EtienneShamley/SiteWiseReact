@@ -103,9 +103,14 @@ describe("the dedicated Note → PDF workflow is unchanged", () => {
 describe("the attachment node is registered and persistent", () => {
   const mainArea = withoutComments(read("components/MainArea.js"));
 
-  test("MainArea registers the FileAttachment node on the Free-form editor", () => {
-    expect(mainArea).toMatch(/import \{ FileAttachment \}/);
-    expect(mainArea).toMatch(/^\s*FileAttachment,\s*$/m);
+  test("MainArea registers the FileAttachment node on the Free-form editor (through the shared core)", () => {
+    // Since the shared editor core (2026-08-18) MainArea builds its editor from
+    // `editorCoreExtensions()`, which registers the shared FileAttachment node
+    // (unconfigured — Free-form's own default asset kind).
+    const core = withoutComments(read("components/editor/editorCoreExtensions.js"));
+    expect(mainArea).toMatch(/extensions: editorCoreExtensions\(\)/);
+    expect(core).toMatch(/import \{ FileAttachment \}/);
+    expect(core).toMatch(/file = FileAttachment,/);
   });
 
   test("insertion goes through the one shared write sequence", () => {

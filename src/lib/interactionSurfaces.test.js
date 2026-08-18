@@ -226,14 +226,16 @@ describe("motion and focus follow the approved rules", () => {
 
 describe("active state follows real application state", () => {
   test("the top-level workspace switch reads `workspace`", () => {
-    expect(sidebar).toMatch(/active:\s*workspace === "projects"/);
-    expect(sidebar).toMatch(/active:\s*workspace === "pdfs"/);
+    expect(sidebar).toMatch(/active=\{workspace === "projects"\}/);
+    expect(sidebar).toMatch(/active=\{workspace === "pdfs"\}/);
   });
 
   test("PDFs stays current for as long as the PDF workspace is open", () => {
     // It is the workspace value itself, so it cannot be cleared by opening a
     // PDF, returning to the library, or anything else inside that workspace.
-    expect(sidebar).toMatch(/aria-current=\{workspace === "pdfs" \? "page" : undefined\}/);
+    // The shared sidebar row renders aria-current="page" from `active`.
+    expect(sidebar).toMatch(/active=\{workspace === "pdfs"\}\s*\n\s*current="page"/);
+    expect(sidebar).toMatch(/aria-current=\{active \? current \|\| "true" : undefined\}/);
   });
 
   test("a project is current only while no folder inside it is selected", () => {
@@ -246,11 +248,15 @@ describe("active state follows real application state", () => {
     expect(middlePane).toContain("currentNoteId === note.id");
   });
 
-  test("the note workspace and note view read the values that render them", () => {
-    expect(mainArea).toContain('segmentBtnCls(activeTab === "note")');
-    expect(mainArea).toContain('segmentBtnCls(activeTab === "pdf")');
-    expect(mainArea).toContain('segmentBtnCls(noteLayout === "template")');
-    expect(mainArea).toContain('segmentBtnCls(noteLayout === "natural")');
+  test("the note surfaces (sidebar) read the values that render them", () => {
+    // Since 2026-08-18 the note view / note workspace switches live in the
+    // left sidebar as ONE "This note" group; the current surface is derived
+    // from the same two values MainArea renders from (src/lib/noteSurfaces.js).
+    expect(sidebar).toMatch(/const currentSurface = currentNoteSurface\(\{\s*tab: noteWorkspaceTab,\s*layout: activeNoteView,\s*\}\);/);
+    expect(sidebar).toContain("active={currentSurface === surface}");
+    expect(mainArea).toContain("const activeTab = noteWorkspaceTab;");
+    expect(mainArea).toContain('style={{ display: activeTab === "note" ? "block" : "none" }}');
+    expect(mainArea).toContain('noteLayout === "template" ? "block" : "none"');
   });
 
   test("no active state is derived from hover, focus or the DOM", () => {
@@ -295,15 +301,22 @@ describe("actions are actions, not locations", () => {
   });
 
   test("Template Library takes the open state from its modal's own state", () => {
-    expect(editorToolbar).toContain("open: showTemplateBuilder");
-    expect(editorToolbar).toContain("setShowTemplateBuilder(false)");
+    // The trigger lives in the sidebar's Workspace group; the modal and its
+    // open state live in App.js — the trigger reads that state, never a
+    // click memory.
+    expect(sidebar).toContain("open: templateLibraryOpen,");
+    expect(appJs).toContain("const [templateLibraryOpen, setTemplateLibraryOpen] = useState(false);");
+    expect(appJs).toContain("onClose={() => setTemplateLibraryOpen(false)}");
   });
 
   test("Template Library announces a dialog and does not misuse aria-expanded", () => {
     // aria-expanded describes a control that expands a region it owns; an
-    // ordinary dialog trigger does not.
-    expect(editorToolbar).toContain('aria-haspopup="dialog"');
-    expect(editorToolbar).not.toContain("aria-expanded");
+    // ordinary dialog trigger does not. (The sidebar's own collapse control
+    // DOES expand a region it owns — the sidebar — and is the one control in
+    // that file allowed aria-expanded.)
+    const trigger = sidebar.slice(sidebar.indexOf("onClick={onOpenTemplateLibrary}"), sidebar.indexOf("</button>", sidebar.indexOf("onClick={onOpenTemplateLibrary}")));
+    expect(trigger).toContain('aria-haspopup="dialog"');
+    expect(trigger).not.toContain("aria-expanded");
   });
 
   test("Refine reports busy honestly and never keeps an open state", () => {
@@ -333,18 +346,19 @@ describe("actions are actions, not locations", () => {
 });
 
 describe("the left pane's utility controls are actions, not locations", () => {
-  // Hide, + New Project, + New Folder and + New Note.
+  // + New Project, + New Folder and + New Note. (The former "Hide" control was
+  // replaced 2026-08-18 by the sidebar's collapse-to-rail control, asserted in
+  // applicationShell.test.js.)
   const UTILITY_HANDLERS = [
-    ["Hide", "onClick={() => setHidden(true)}"],
     ["New Project", "onClick={createProject}"],
     ["New Folder", "createFolder(activeProjectId)"],
     ["New Note", "onClick={createRootNote}"],
   ];
 
-  test("all four use the shared action variant", () => {
+  test("all three use the shared action variant", () => {
     const uses = sidebar.match(/actionButtonClass\(\{ className: "px-[23] py-1 rounded text-(xs|sm)" \}\)/g);
     expect(uses).not.toBeNull();
-    expect(uses).toHaveLength(4);
+    expect(uses).toHaveLength(3);
   });
 
   test("none carries a hardcoded idle, hover or text colour any more", () => {
@@ -362,7 +376,7 @@ describe("the left pane's utility controls are actions, not locations", () => {
     // action too, asserted separately below — is not counted among the four.
     const utilityCalls =
       sidebar.match(/actionButtonClass\(\{ className: "px-[23] py-1 rounded text-(?:xs|sm)" \}\)/g) || [];
-    expect(utilityCalls.length).toBe(4);
+    expect(utilityCalls.length).toBe(3);
     for (const call of utilityCalls) {
       expect(call).not.toContain("nw-nav-item");
       expect(call).not.toContain("nw-seg");
@@ -375,7 +389,9 @@ describe("the left pane's utility controls are actions, not locations", () => {
     // aria-current appears in this file only on the genuine navigation rows.
     const ariaCurrent = sidebar.match(/aria-current=\{[^}]*\}/g) || [];
     for (const attr of ariaCurrent) {
-      expect(attr).toMatch(/workspace ===|isRootFolderActive|isActive|isProjectActive|isFolderActive/);
+      // `active ? current || "true"` is the shared navigation row's own
+      // derivation from real state (SidebarNavItem).
+      expect(attr).toMatch(/active \? current|isRootFolderActive|isActive|isProjectActive|isFolderActive/);
     }
   });
 
@@ -385,6 +401,11 @@ describe("the left pane's utility controls are actions, not locations", () => {
     expect(navCssCode).toMatch(/\.nw-action:active[^{]*\{/);
     expect(sidebar).not.toContain("nw-action--open");
     expect(sidebar).not.toContain("nw-action--primary");
+    // The two `open:`s in the sidebar are Template Library (its modal's own
+    // state, asserted above) and Live transcript (its workspace's own open
+    // state) — never these utility controls.
+    expect((sidebar.match(/open:/g) || []).length).toBe(2);
+    expect(sidebar).toContain("open: liveTranscript.open,");
   });
 
   test.each(UTILITY_HANDLERS)("the %s handler is unchanged", (_label, handler) => {
@@ -416,10 +437,13 @@ describe("the left pane's utility controls are actions, not locations", () => {
 
 describe("the Template Library and Builder share the interaction system", () => {
   test("the whole modal family is enumerated — no render path is assumed", () => {
-    // EditorToolbar -> TemplateBuilderModal -> TemplateLibrary (list) or
-    // TemplateBuilderDoc (editor). There is no separate template sidebar and no
-    // three-dot menu in this family; every action is a labelled button.
-    expect(editorToolbar).toContain("TemplateBuilderModal");
+    // Sidebar (Template Library action) -> App.js (TemplateBuilderModal) ->
+    // TemplateLibrary (list) or TemplateBuilderDoc (editor). There is no
+    // separate template sidebar and no three-dot menu in this family; every
+    // action is a labelled button.
+    expect(appJs).toContain("<TemplateBuilderModal");
+    expect(sidebar).toContain("onClick={onOpenTemplateLibrary}");
+    expect(editorToolbar).not.toContain("TemplateBuilderModal");
     expect(templateBuilderModal).toContain("TemplateLibrary");
     expect(templateBuilderModal).toContain("TemplateBuilderDoc");
     expect(templateLibrary).not.toContain("ThreeDotMenu");
@@ -632,16 +656,13 @@ describe("the Notes pane is one implementation, fully converted", () => {
 });
 
 describe("the Sidebar's own hidden-pane restore control", () => {
-  test("uses the shared action variant and claims no location or open state", () => {
-    expect(sidebar).toContain('className: "fixed top-2 left-2 px-2 py-1 rounded z-50"');
-    expect(sidebar).toContain("onClick={() => setHidden(false)}");
-    const restore = sidebar.match(/if \(hidden\) \{[\s\S]*?\n  \}/);
-    expect(restore).not.toBeNull();
-    expect(restore[0]).not.toContain("nw-nav-item");
-    expect(restore[0]).not.toContain("nw-seg");
-    expect(restore[0]).not.toContain("aria-current");
-    expect(restore[0]).not.toContain("primary:");
-    expect(restore[0]).not.toContain("open:");
+  test("is replaced by the collapse-to-rail control — the whole pane is never hidden without a visible way back", () => {
+    // 2026-08-18: the "Hide" + floating "Projects" restore pair is gone; the
+    // sidebar collapses to an icon rail whose expand control is always
+    // visible (asserted in detail in applicationShell.test.js).
+    expect(sidebar).not.toContain('className: "fixed top-2 left-2 px-2 py-1 rounded z-50"');
+    expect(sidebar).not.toContain("setHidden(");
+    expect(sidebar).toContain("onClick={onToggleCollapsed}");
   });
 
   test("does not keep the old filled-grey utility styling", () => {
@@ -674,8 +695,8 @@ describe("the Notes-pane restore control ('Show notes') lives in the Sidebar hea
   });
 
   test("Sidebar receives the state and handler as props, not from AppStateContext", () => {
-    expect(sidebar).toContain(
-      "export default function Sidebar({ middlePaneHidden, onShowMiddlePane }) {"
+    expect(sidebar).toMatch(
+      /export default function Sidebar\(\{\s*middlePaneHidden,\s*onShowMiddlePane,/
     );
     const destructure = sidebar.match(/const \{([\s\S]*?)\} = useAppState\(\);/);
     expect(destructure).not.toBeNull();
@@ -712,7 +733,6 @@ describe("the Notes-pane restore control ('Show notes') lives in the Sidebar hea
   test("uses the shared turquoise primary/highlighted variant, not a one-off colour", () => {
     const call = sidebar.match(/actionButtonClass\(\{\s*primary: true,[\s\S]*?\}\)/);
     expect(call).not.toBeNull();
-    expect(call[0]).toContain("ml-auto");
     expect(call[0]).toContain("shrink-0");
   });
 
@@ -726,10 +746,9 @@ describe("the Notes-pane restore control ('Show notes') lives in the Sidebar hea
     expect(call).not.toMatch(/-m[lrtb]?-\d/); // no negative margins
   });
 
-  test("the Sidebar's own restore control and width are unchanged", () => {
-    expect(sidebar).toContain('className: "fixed top-2 left-2 px-2 py-1 rounded z-50"');
-    expect(sidebar).toContain("Projects\n      </button>");
-    expect(sidebar).toContain('className="w-64');
+  test("the Sidebar's expanded width is unchanged (w-64) and the rail is narrower", () => {
+    expect(sidebar).toContain('SIDEBAR_EXPANDED_WIDTH_CLASS = "w-64"');
+    expect(sidebar).toContain('SIDEBAR_RAIL_WIDTH_CLASS = "w-14"');
   });
 
   test("focus and pressed styling reach it through the shared variant", () => {
@@ -798,18 +817,23 @@ describe("the pressed state is temporary by construction", () => {
   });
 });
 
-describe("segmented controls keep their recorded toggle-button model", () => {
-  test("both groups are labelled groups of aria-pressed toggles", () => {
-    expect(mainArea).toContain('aria-label="Note view"');
-    expect(mainArea).toContain('aria-label="Note workspace"');
-    expect(mainArea).toContain('aria-pressed={activeTab === "note"}');
-    expect(mainArea).toContain('aria-pressed={activeTab === "pdf"}');
+describe("the note surfaces are sidebar navigation, not tabs", () => {
+  test("they are labelled navigation groups with aria-current — no aria-pressed toggles above the document remain", () => {
+    // 2026-08-18: the "Note view" / "Note workspace" segmented groups above the
+    // document were replaced by the sidebar's "This note" navigation group.
+    expect(sidebar).toContain('aria-label="This note"');
+    expect(sidebar).toContain('aria-label="Workspace"');
+    expect(mainArea).not.toContain('aria-label="Note view"');
+    expect(mainArea).not.toContain('aria-label="Note workspace"');
+    expect(mainArea).not.toContain("aria-pressed={activeTab");
   });
 
   test("they are not converted to an ARIA tablist by this feature", () => {
-    expect(mainArea).not.toContain('role="tablist"');
-    expect(mainArea).not.toContain('role="tab"');
-    expect(mainArea).not.toContain("aria-selected");
+    for (const source of [mainArea, sidebar]) {
+      expect(source).not.toContain('role="tablist"');
+      expect(source).not.toContain('role="tab"');
+      expect(source).not.toContain("aria-selected");
+    }
   });
 });
 

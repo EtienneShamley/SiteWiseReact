@@ -17,7 +17,8 @@ module.exports = {
       ...config,
       moduleNameMapper: {
         ...(config.moduleNameMapper || {}),
-        "^@tiptap/pm/(model|state|view|transform|history)$": "prosemirror-$1",
+        "^@tiptap/pm/([a-z-]+)$": "prosemirror-$1",
+        "^@tiptap/core/(jsx-runtime|jsx-dev-runtime)$": "@tiptap/core/$1/index.cjs",
       },
     }),
   },
