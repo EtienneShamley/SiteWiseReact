@@ -148,79 +148,90 @@ describe("clearRefineMessage", () => {
   });
 });
 
+// A range backup as editorRangeRefine produces it: the replaced content as a
+// serialized Slice, plus the text the refinement wrote.
+const rb = (label) => ({
+  previous: { content: [{ type: "paragraph", content: [{ type: "text", text: label }] }] },
+  appliedText: `${label} refined`,
+});
+
 describe("Refine backup (Refine history)", () => {
   test("keeps exactly one previous state per note", () => {
     expect(REFINE_BACKUP_DEPTH).toBe(1);
-    let backups = setRefineBackup({}, NOTE_A, "<p>first</p>");
-    backups = setRefineBackup(backups, NOTE_A, "<p>second</p>");
-    expect(getRefineBackup(backups, NOTE_A)).toBe("<p>second</p>");
+    let backups = setRefineBackup({}, NOTE_A, rb("first"));
+    backups = setRefineBackup(backups, NOTE_A, rb("second"));
+    expect(getRefineBackup(backups, NOTE_A)).toEqual(rb("second"));
     expect(Object.keys(backups)).toEqual([NOTE_A]);
   });
 
   test("is scoped by note id — Note A's backup is invisible from Note B", () => {
-    const backups = setRefineBackup({}, NOTE_A, "<p>A before</p>");
-    expect(getRefineBackup(backups, NOTE_A)).toBe("<p>A before</p>");
+    const backups = setRefineBackup({}, NOTE_A, rb("A before"));
+    expect(getRefineBackup(backups, NOTE_A)).toEqual(rb("A before"));
     expect(getRefineBackup(backups, NOTE_B)).toBeNull();
     expect(hasRefineBackup(backups, NOTE_B)).toBe(false);
   });
 
   test("two notes keep independent backups", () => {
-    let backups = setRefineBackup({}, NOTE_A, "<p>A</p>");
-    backups = setRefineBackup(backups, NOTE_B, "<p>B</p>");
-    expect(getRefineBackup(backups, NOTE_A)).toBe("<p>A</p>");
-    expect(getRefineBackup(backups, NOTE_B)).toBe("<p>B</p>");
+    let backups = setRefineBackup({}, NOTE_A, rb("A"));
+    backups = setRefineBackup(backups, NOTE_B, rb("B"));
+    expect(getRefineBackup(backups, NOTE_A)).toEqual(rb("A"));
+    expect(getRefineBackup(backups, NOTE_B)).toEqual(rb("B"));
   });
 
-  test("a failed refine records nothing — setRefineBackup refuses a non-string", () => {
+  test("a failed refine records nothing — setRefineBackup refuses anything but a range backup", () => {
     expect(setRefineBackup({}, NOTE_A, null)).toEqual({});
     expect(setRefineBackup({}, NOTE_A, undefined)).toEqual({});
+    expect(setRefineBackup({}, NOTE_A, "<p>whole note html</p>")).toEqual({});
+    expect(setRefineBackup({}, NOTE_A, { previous: {}, appliedText: "" })).toEqual({});
     expect(hasRefineBackup(setRefineBackup({}, NOTE_A, null), NOTE_A)).toBe(false);
   });
 
   test("a backup is never filed without a note id", () => {
-    expect(setRefineBackup({}, null, "<p>x</p>")).toEqual({});
-    expect(setRefineBackup({}, "", "<p>x</p>")).toEqual({});
+    expect(setRefineBackup({}, null, rb("x"))).toEqual({});
+    expect(setRefineBackup({}, "", rb("x"))).toEqual({});
   });
 
-  test("an empty-string backup is legitimate and is preserved", () => {
-    // An empty note is a real pre-refine state; it must be revertible.
-    const backups = setRefineBackup({}, NOTE_A, "");
-    expect(getRefineBackup(backups, NOTE_A)).toBe("");
+  test("a backup whose previous content was empty is legitimate and is preserved", () => {
+    // Refining an empty paragraph range is a real pre-refine state; it must be
+    // revertible. (What matters is that the refinement WROTE something.)
+    const backup = { previous: { content: [] }, appliedText: "written" };
+    const backups = setRefineBackup({}, NOTE_A, backup);
+    expect(getRefineBackup(backups, NOTE_A)).toEqual(backup);
     expect(hasRefineBackup(backups, NOTE_A)).toBe(true);
   });
 
   test("clearing one note's backup leaves the other note's alone", () => {
-    let backups = setRefineBackup({}, NOTE_A, "<p>A</p>");
-    backups = setRefineBackup(backups, NOTE_B, "<p>B</p>");
+    let backups = setRefineBackup({}, NOTE_A, rb("A"));
+    backups = setRefineBackup(backups, NOTE_B, rb("B"));
     const after = clearRefineBackup(backups, NOTE_A);
     expect(hasRefineBackup(after, NOTE_A)).toBe(false);
-    expect(getRefineBackup(after, NOTE_B)).toBe("<p>B</p>");
+    expect(getRefineBackup(after, NOTE_B)).toEqual(rb("B"));
   });
 
   test("clearing an absent backup returns the same reference", () => {
-    const backups = setRefineBackup({}, NOTE_A, "<p>A</p>");
+    const backups = setRefineBackup({}, NOTE_A, rb("A"));
     expect(clearRefineBackup(backups, NOTE_B)).toBe(backups);
   });
 
   test("setRefineBackup does not mutate the input", () => {
-    const original = setRefineBackup({}, NOTE_A, "<p>A</p>");
+    const original = setRefineBackup({}, NOTE_A, rb("A"));
     const snapshot = { ...original };
-    setRefineBackup(original, NOTE_B, "<p>B</p>");
+    setRefineBackup(original, NOTE_B, rb("B"));
     expect(original).toEqual(snapshot);
   });
 });
 
 describe("pruneRefineBackups", () => {
   test("drops backups for deleted notes", () => {
-    let backups = setRefineBackup({}, NOTE_A, "<p>A</p>");
-    backups = setRefineBackup(backups, NOTE_B, "<p>B</p>");
+    let backups = setRefineBackup({}, NOTE_A, rb("A"));
+    backups = setRefineBackup(backups, NOTE_B, rb("B"));
     const pruned = pruneRefineBackups(backups, new Set([NOTE_B]));
     expect(hasRefineBackup(pruned, NOTE_A)).toBe(false);
-    expect(getRefineBackup(pruned, NOTE_B)).toBe("<p>B</p>");
+    expect(getRefineBackup(pruned, NOTE_B)).toEqual(rb("B"));
   });
 
   test("returns the same reference when nothing needs removing (no render loop)", () => {
-    const backups = setRefineBackup({}, NOTE_A, "<p>A</p>");
+    const backups = setRefineBackup({}, NOTE_A, rb("A"));
     expect(pruneRefineBackups(backups, new Set([NOTE_A]))).toBe(backups);
     expect(pruneRefineBackups({}, new Set())).toEqual({});
   });

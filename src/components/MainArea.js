@@ -13,13 +13,24 @@ import { editorCoreExtensions } from "./editor/editorCoreExtensions";
 import FreeformPagedEditor from "./editor/FreeformPagedEditor";
 import "./editor/editor.css";
 import { useRefine } from "../hooks/useRefine";
-import { refinedTextToParagraphHtml } from "../lib/refineClient";
+import RefineControl from "./RefineControl";
+import { REFINE_OUTCOME, isAllowedRefineStyle, refineMessageFor } from "../lib/refineContract";
+import { loadRefineMode, normalizeRefineMode, saveRefineMode } from "../lib/refinePreference";
+import { REFINE_SURFACE, refineSurfaceForOwner } from "../lib/refineControlModel";
 import {
-  DEFAULT_REFINE_STYLE,
-  REFINE_OUTCOME,
-  isAllowedRefineStyle,
-  refineMessageFor,
-} from "../lib/refineContract";
+  RANGE_REFINE_CHANGED_MESSAGE,
+  RANGE_REFINE_REJECTION,
+  RANGE_REFINE_REVERT_UNAVAILABLE_MESSAGE,
+  RANGE_REVERT_REJECTION,
+  REFINE_SCOPE,
+  REFINE_SCOPE_LABEL,
+  applyRangeRefine,
+  createRangeTracker,
+  makeRangeRefineBackup,
+  refineTargetForScope,
+  resolveRangeTarget,
+  revertRangeRefine,
+} from "../lib/editorRangeRefine";
 import {
   REFINE_STATUS,
   beginRefine,
@@ -35,8 +46,6 @@ import {
 import {
   TEMPLATE_TOOLBAR_HINT,
   TOOLBAR_OWNER,
-  canRefine as canRefineNow,
-  canRevertRefine,
   isFreeformEditingEnabled,
   resolveToolbarOwner,
 } from "../lib/editorToolbarState";
@@ -543,8 +552,7 @@ export default function MainArea() {
   }, [editor, noteKey]);
 
   // Live editor/note/content, readable from stable callbacks that must decide
-  // WHICH note they are acting on (see applyFreeformHtml) without being
-  // recreated on every render.
+  // WHICH note they are acting on without being recreated on every render.
   const editorRef = useRef(editor);
   editorRef.current = editor;
   const noteKeyRef = useRef(noteKey);
@@ -610,43 +618,6 @@ export default function MainArea() {
       return FREEFORM_INSERT_MODE.END;
     },
     [freeformInsertContext]
-  );
-
-  /**
-   * The ONE way Free-form note content is replaced programmatically.
-   *
-   * The target note is passed explicitly, never inferred from whatever is on
-   * screen, because a refine result can arrive after the user has moved on:
-   *   - docState is written for THAT note, so the result persists and survives
-   *     note switching and reload;
-   *   - the TipTap editor is only touched while it still represents that note,
-   *     so a background result can never overwrite the note now being viewed.
-   *
-   * docState is written explicitly rather than relying on setContent's update
-   * emission, so persistence does not depend on editor internals or on the
-   * editor being the visible one at all. Normal typing persistence is
-   * untouched — that still flows through the editor's own onUpdate.
-   */
-  const applyFreeformHtml = useCallback(
-    (targetNoteId, html) => {
-      if (!targetNoteId || typeof html !== "string") return false;
-      // This write is what persists, and it reports through the SAME confirmed
-      // status path as typing — for the note it belongs to, not the note on
-      // screen. The editor update below is suppressed so one change produces
-      // exactly one pending write and one status transition.
-      markFreeformDirty(targetNoteId);
-      setDocState((prev) => ({ ...prev, [targetNoteId]: html }));
-      if (editorRef.current && noteKeyRef.current === targetNoteId) {
-        editorRef.current.commands.setContent(html, { emitUpdate: false });
-        // `emitUpdate: false` deliberately suppresses onUpdate, so the revision
-        // has to be bumped here: the whole document was just replaced, and any
-        // Quick Add position captured against the previous one is meaningless.
-        freeformRevisionRef.current += 1;
-        freeformInsertPointRef.current = null;
-      }
-      return true;
-    },
-    [markFreeformDirty]
   );
 
   /* ============================== Quick Add =============================== */
@@ -1342,6 +1313,7 @@ export default function MainArea() {
       ? TEMPLATE_TOOLBAR_HINT
       : null;
 
+
   /**
    * WHICH NOTE VIEW the export control exports — deliberately separate from
    * `toolbarEditor` above.
@@ -1456,50 +1428,76 @@ export default function MainArea() {
   /* ============================== AI Refine =============================== */
 
   const refineLoading = isRefineLoading(refineState);
-  const refineBackupHtml = getRefineBackup(refineBackups, noteKey);
+  const refineBackup = getRefineBackup(refineBackups, noteKey);
 
   /**
-   * The AI WRITING STYLE the user has selected in the bottom bar.
-   *
-   * The control is a general one ("AI writing style"), but the note-level
-   * Refine lives here and previously had no way to see it: it always sent
-   * DEFAULT_REFINE_STYLE, so choosing Formal report, Summary or Casual memo and
-   * pressing Refine silently produced a concise-professional rewrite and three
-   * of the four modes never reached the provider at all.
-   *
-   * Held in a ref because it is read at CLICK time, not rendered: a style
-   * change must not re-render this component or invalidate the refine handler.
-   * The value is re-checked against the shared allowlist before it is used, so
-   * a stale or malformed report can never become an instruction.
+   * THE CURRENT REFINE MODE — one app-wide UI preference
+   * (src/lib/refinePreference.js), shown and changed by the header Refine
+   * control AND the Quick Add composer's style select. It is never note data:
+   * nothing here writes it into a note, a Template Section document or a
+   * TemplateVersion. Re-validated against the shared allowlist at every point
+   * of use, so a stale or malformed value can never become an instruction.
    */
-  const selectedRefineStyleRef = useRef(DEFAULT_REFINE_STYLE);
-  const handleRefineStyleChange = useCallback((style) => {
-    selectedRefineStyleRef.current = isAllowedRefineStyle(style)
-      ? style
-      : DEFAULT_REFINE_STYLE;
+  const [refineMode, setRefineMode] = useState(loadRefineMode);
+  const handleRefineModeChange = useCallback((style) => {
+    const next = normalizeRefineMode(style);
+    setRefineMode(next);
+    saveRefineMode(next);
+  }, []);
+  const refineModeRef = useRef(refineMode);
+  refineModeRef.current = refineMode;
+
+  /**
+   * The Template Section Refine API, registered by NoteTemplateDoc while a
+   * note's form is mounted (`{ refine({ scope, style }), revert(), hasRevert,
+   * loading }`), or null. The header Refine control drives the ACTIVE Section
+   * through it — the same handlers the row-level "Refine with AI" trigger
+   * uses — so a Template Section and the Free-form note are two surfaces of
+   * ONE Refine model, not two features.
+   */
+  const [sectionRefineApi, setSectionRefineApi] = useState(null);
+  const handleRegisterSectionRefine = useCallback((api) => {
+    setSectionRefineApi(api || null);
   }, []);
 
   /**
-   * Refine the ACTIVE Free-form note.
+   * Refine ONE RANGE of the ACTIVE Free-form note: the selection, the
+   * paragraph at the caret, or the whole note — resolved by the shared
+   * editor-range primitive (src/lib/editorRangeRefine.js), which also decides
+   * what is a safe target (never an image, a file, a table or a code block).
    *
-   * Applies to that note and nothing else: not the Template form, not its
-   * answers, custom rows or attachments, and not another note. Exactly one
-   * provider request per click, with no automatic retry.
+   * Exactly one provider request per action, no automatic retry. The range is
+   * followed through every edit made while the request is out and the result
+   * is applied only if that range still holds exactly the text that was sent
+   * — as ONE editor transaction, persisted by the editor's own onUpdate like
+   * any typing. Everything outside the range is untouched in every path.
    */
-  const refineNote = async () => {
+  const refineFreeform = async ({ scope, style: requestedStyle, target: captured } = {}) => {
     // Never runs from the Template form, and never against a hidden editor.
     if (!freeformEditingEnabled || !editor || !noteKey) return;
-    // Synchronous re-entry guard: the disabled button covers the rendered
-    // case, and refineInFlightRef covers two clicks inside a single tick,
-    // before React has re-rendered the button as disabled.
+    // Synchronous re-entry guard: the disabled control covers the rendered
+    // case, and refineInFlightRef covers two actions inside a single tick,
+    // before React has re-rendered the control as disabled.
     if (refineLoading || refineInFlightRef.current) return;
 
-    const plain = editor.getText().trim();
-    if (!plain) {
+    // THE TARGET. For "Selected text" the header control hands over the range
+    // it CAPTURED when its popover opened and has been tracking since (see
+    // RefineControl / editor/refineTargetPlugin.js), so choosing a style or
+    // toggling scope cannot redirect the refinement and the user never has to
+    // select the text twice. Its position is re-read from the live document by
+    // the control immediately before this call; everything downstream — the
+    // tracker, the stale gate, the apply — is unchanged and still guards the
+    // asynchronous part. Every other scope is resolved here from the document
+    // exactly as before.
+    const target =
+      captured && Number.isInteger(captured.from) && Number.isInteger(captured.to)
+        ? { ok: true, ...captured }
+        : refineTargetForScope(editor, scope);
+    if (!target.ok) {
       setRefineState((prev) => ({
         ...prev,
         status: REFINE_STATUS.FAILURE,
-        message: "There is nothing to refine in this note yet.",
+        message: target.message,
       }));
       return;
     }
@@ -1514,88 +1512,173 @@ export default function MainArea() {
 
     // The style the user actually chose. Re-validated here rather than trusted:
     // this is the value that selects the backend's transformation mode.
-    const style = isAllowedRefineStyle(selectedRefineStyleRef.current)
-      ? selectedRefineStyleRef.current
-      : DEFAULT_REFINE_STYLE;
-    const result = await refineText({ text: plain, style });
-
-    refineInFlightRef.current = false;
-    // A superseded request may neither write content nor clear the loading
-    // state of the request that replaced it.
-    if (refineRequestRef.current !== requestId) return;
-
-    if (!result.ok) {
-      // Nothing is applied and NO backup is recorded — a failed refinement
-      // must not leave a Revert action offering a state that was never left.
-      setRefineState((prev) =>
-        settleRefine(prev, {
-          requestId,
-          outcome:
-            result.outcome === REFINE_OUTCOME.UNAVAILABLE
-              ? REFINE_STATUS.UNAVAILABLE
-              : REFINE_STATUS.FAILURE,
-          message: result.message,
-        })
-      );
-      return;
-    }
-
-    const html = refinedTextToParagraphHtml(result.refined);
-    if (!html) {
-      // Valid transport, unusable output: treated as a failure, note untouched.
-      setRefineState((prev) =>
-        settleRefine(prev, {
-          requestId,
-          outcome: REFINE_STATUS.FAILURE,
-          message: refineMessageFor(REFINE_OUTCOME.FAILURE),
-        })
-      );
-      return;
-    }
-
-    // The pre-refine state is captured only here — after a valid result and
-    // immediately before it is applied. If the user has moved to another note
-    // the live editor no longer holds this note's content, so the persisted
-    // copy is the correct source.
-    const previousHtml =
-      noteKeyRef.current === originNoteId && editorRef.current
-        ? editorRef.current.getHTML()
-        : docStateRef.current[originNoteId];
-
-    if (typeof previousHtml === "string") {
-      setRefineBackups((prev) => setRefineBackup(prev, originNoteId, previousHtml));
-    }
-    applyFreeformHtml(originNoteId, html);
-
-    const appliedInBackground = noteKeyRef.current !== originNoteId;
-    setRefineState((prev) =>
-      settleRefine(prev, {
-        requestId,
-        outcome: REFINE_STATUS.SUCCESS,
-        message: appliedInBackground
-          ? "Refinement applied to the note it was started from."
-          : "Note refined",
-      })
+    const style = normalizeRefineMode(
+      isAllowedRefineStyle(requestedStyle) ? requestedStyle : refineModeRef.current
     );
+    // Follow the range through every edit made while the request is out. Raw
+    // positions are never trusted afterwards.
+    const tracker = createRangeTracker(editor, target);
+    let result;
+    try {
+      result = await refineText({ text: target.text, style });
+    } finally {
+      refineInFlightRef.current = false;
+    }
+    try {
+      // A superseded request may neither write content nor clear the loading
+      // state of the request that replaced it.
+      if (refineRequestRef.current !== requestId) return;
+
+      if (!result || !result.ok) {
+        // Nothing is applied and NO backup is recorded — a failed refinement
+        // must not leave a Revert action offering a state that was never left.
+        setRefineState((prev) =>
+          settleRefine(prev, {
+            requestId,
+            outcome:
+              result && result.outcome === REFINE_OUTCOME.UNAVAILABLE
+                ? REFINE_STATUS.UNAVAILABLE
+                : REFINE_STATUS.FAILURE,
+            message: (result && result.message) || refineMessageFor(REFINE_OUTCOME.FAILURE),
+          })
+        );
+        return;
+      }
+
+      // The apply gate. The live editor must still hold THIS note (a range is
+      // meaningless in another note's document), the request's range — mapped
+      // forward through everything that has happened since — must still exist,
+      // and it must still hold exactly the text that was sent. Anything else
+      // discards the response without touching anything: the user's newer
+      // text always wins.
+      const liveEditor = editorRef.current;
+      if (noteKeyRef.current !== originNoteId || !liveEditor || liveEditor !== editor) {
+        setRefineState((prev) =>
+          settleRefine(prev, {
+            requestId,
+            outcome: REFINE_STATUS.FAILURE,
+            message:
+              "The note was closed while AI was working, so the refinement was not applied. Nothing was changed.",
+          })
+        );
+        return;
+      }
+      const check = resolveRangeTarget({
+        editor: liveEditor,
+        mapped: tracker.resolve(),
+        sentText: target.text,
+      });
+      if (!check.ok) {
+        setRefineState((prev) =>
+          settleRefine(prev, {
+            requestId,
+            outcome: REFINE_STATUS.FAILURE,
+            message:
+              check.reason === RANGE_REFINE_REJECTION.TEXT_CHANGED
+                ? RANGE_REFINE_CHANGED_MESSAGE
+                : "That text was removed while AI was working, so the refinement was not applied. Nothing was changed.",
+          })
+        );
+        return;
+      }
+
+      // ONE transaction, on the range and nothing else. Persistence is the
+      // editor's own update handler — there is deliberately no second write.
+      const applied = applyRangeRefine(liveEditor, check, result.refined, {
+        reselect: scope === REFINE_SCOPE.SELECTION,
+      });
+      if (!applied.ok) {
+        setRefineState((prev) =>
+          settleRefine(prev, {
+            requestId,
+            outcome: REFINE_STATUS.FAILURE,
+            message: refineMessageFor(REFINE_OUTCOME.FAILURE),
+          })
+        );
+        return;
+      }
+
+      // The backup is recorded ONLY here, after the document genuinely
+      // changed, and it is RANGE-specific: the replaced content, plus what the
+      // refinement actually wrote (read back from the document), which is how
+      // Revert finds its target later. Never a copy of the whole note.
+      const backup = makeRangeRefineBackup(applied.previous, applied.appliedText);
+      if (backup) {
+        setRefineBackups((prev) => setRefineBackup(prev, originNoteId, backup));
+      }
+      setRefineState((prev) =>
+        settleRefine(prev, {
+          requestId,
+          outcome: REFINE_STATUS.SUCCESS,
+          message: `${REFINE_SCOPE_LABEL[scope] || "Text"} refined`,
+        })
+      );
+    } finally {
+      tracker.dispose();
+    }
   };
 
   /**
-   * Revert the active note's refinement. Scoped by note id, so Note A's
-   * backup can never be applied to Note B, and written through the shared
-   * helper so the reverted content persists and survives reload.
+   * Revert the active note's last refinement — the ONE range it rewrote —
+   * where its refined text still stands. Scoped by note id, so Note A's
+   * backup can never be applied to Note B. One editor transaction, persisted
+   * by the editor's own onUpdate; a range whose refined text has since been
+   * edited away is refused with a message, and nothing is written.
    */
   const revertRefine = () => {
-    if (!noteKey) return;
-    const html = getRefineBackup(refineBackups, noteKey);
-    if (html === null) return;
+    if (!noteKey || !editor || !freeformEditingEnabled) return;
+    const backup = getRefineBackup(refineBackups, noteKey);
+    if (!backup) return;
 
-    applyFreeformHtml(noteKey, html);
+    const reverted = revertRangeRefine(editor, backup);
+    if (!reverted.ok) {
+      setRefineState((prev) => ({
+        ...prev,
+        status: REFINE_STATUS.FAILURE,
+        message:
+          reverted.reason === RANGE_REVERT_REJECTION.NOT_FOUND
+            ? RANGE_REFINE_REVERT_UNAVAILABLE_MESSAGE
+            : refineMessageFor(REFINE_OUTCOME.FAILURE),
+      }));
+      return;
+    }
     setRefineBackups((prev) => clearRefineBackup(prev, noteKey));
     setRefineState((prev) => ({
       ...prev,
       status: REFINE_STATUS.SUCCESS,
       message: "Refinement reverted",
     }));
+  };
+
+  /**
+   * WHICH SURFACE the header Refine control acts on — the toolbar owner's
+   * surface, so "Refine" and "Bold" always mean the same document. Its busy
+   * state, its Run and its Revert are routed to that surface's own handlers:
+   * the Free-form range handlers above, or the Template Section API
+   * NoteTemplateDoc registers.
+   */
+  const refineSurface = refineSurfaceForOwner(toolbarOwner);
+  const refineBusy =
+    refineSurface === REFINE_SURFACE.TEMPLATE_SECTION
+      ? !!(sectionRefineApi && sectionRefineApi.loading)
+      : refineLoading;
+  const canRevert =
+    refineSurface === REFINE_SURFACE.TEMPLATE_SECTION
+      ? !!(sectionRefineApi && sectionRefineApi.hasRevert && !sectionRefineApi.loading)
+      : refineSurface === REFINE_SURFACE.FREEFORM && !!refineBackup && !refineLoading;
+  const runRefine = ({ scope, style }) => {
+    if (refineSurface === REFINE_SURFACE.TEMPLATE_SECTION) {
+      sectionRefineApi?.refine?.({ scope, style });
+      return;
+    }
+    if (refineSurface === REFINE_SURFACE.FREEFORM) refineFreeform({ scope, style });
+  };
+  const runRevert = () => {
+    if (refineSurface === REFINE_SURFACE.TEMPLATE_SECTION) {
+      sectionRefineApi?.revert?.();
+      return;
+    }
+    if (refineSurface === REFINE_SURFACE.FREEFORM) revertRefine();
   };
 
   // Drop a refine or image message that no longer describes what the user is
@@ -1723,62 +1806,42 @@ export default function MainArea() {
               produces. */}
           {activeTab === "note" && (
             <div className="flex items-center gap-2 flex-wrap justify-end">
-              {/* AI Refine applies to the Free-form note only (a Template
-                  Section has its own Refine inside the document). It is
-                  unavailable in the Template form and never acts on the hidden
-                  editor — genuinely disabled, with the reason as its tooltip,
-                  rather than hidden. */}
+              {/* AI Refine follows the SAME owner as the formatting toolbar:
+                  the Free-form editor in the Free-form note, the ACTIVE
+                  Section's editor in the Template form. No owner (Template
+                  form, no active Section) — genuinely disabled, with the
+                  reason as its tooltip, rather than hidden. The control shows
+                  the current mode and the scope BEFORE anything is sent; the
+                  mode is the one app-wide Refine preference the composer's
+                  select also shows. */}
               <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800/70 p-1">
-                <button
-                  // Busy takes the disabled treatment; "Refining…" carries the
-                  // status. There is no lingering turquoise once it completes —
-                  // Refine owns nothing that stays open.
-                  className={chipBtnCls({
-                    busy: refineLoading,
-                    disabled: !canRefineNow({
-                      freeformEnabled: freeformEditingEnabled,
-                      hasContent: true,
-                      isLoading: refineLoading,
-                    }),
-                  })}
-                  onClick={refineNote}
-                  disabled={
-                    !canRefineNow({
-                      freeformEnabled: freeformEditingEnabled,
-                      hasContent: true,
-                      isLoading: refineLoading,
-                    })
-                  }
-                  aria-busy={refineLoading}
-                  title={
-                    noteLayout === "template"
-                      ? "AI Refine is available in the Free-form note only"
-                      : "Refine this Free-form note with AI"
-                  }
-                  aria-label="Refine this Free-form note with AI"
-                >
-                  {refineLoading ? "Refining…" : "Refine"}
-                </button>
+                <RefineControl
+                  editor={toolbarEditor}
+                  surface={refineSurface}
+                  hasNote={!!noteTitle}
+                  mode={refineMode}
+                  onModeChange={handleRefineModeChange}
+                  onRun={runRefine}
+                  loading={refineBusy}
+                />
                 <button
                   // Revert restores content — it is not destructive, so it stays
-                  // in the neutral action family and is never styled red.
-                  className={chipBtnCls({
-                    disabled: !canRevertRefine({
-                      freeformEnabled: freeformEditingEnabled,
-                      hasBackup: refineBackupHtml !== null,
-                      isLoading: refineLoading,
-                    }),
-                  })}
-                  onClick={revertRefine}
-                  disabled={
-                    !canRevertRefine({
-                      freeformEnabled: freeformEditingEnabled,
-                      hasBackup: refineBackupHtml !== null,
-                      isLoading: refineLoading,
-                    })
+                  // in the neutral action family and is never styled red. It
+                  // reverts the last refinement of whichever surface Refine
+                  // owns right now.
+                  className={chipBtnCls({ disabled: !canRevert })}
+                  onClick={runRevert}
+                  disabled={!canRevert}
+                  title={
+                    refineSurface === REFINE_SURFACE.TEMPLATE_SECTION
+                      ? "Restore this section's last AI-refined text"
+                      : "Restore this note's last AI-refined text"
                   }
-                  title="Restore this note's content from before the last refinement"
-                  aria-label="Revert the last AI refinement of this Free-form note"
+                  aria-label={
+                    refineSurface === REFINE_SURFACE.TEMPLATE_SECTION
+                      ? "Revert the last AI refinement of the active Template Section"
+                      : "Revert the last AI refinement of this Free-form note"
+                  }
                 >
                   Revert
                 </button>
@@ -1798,7 +1861,7 @@ export default function MainArea() {
                       : "text-gray-500 dark:text-gray-400",
                   ].join(" ")}
                 >
-                  {refineLoading ? "Refining this note…" : refineState.message}
+                  {refineLoading ? "Refining…" : refineState.message}
                 </span>
               )}
 
@@ -1924,6 +1987,9 @@ export default function MainArea() {
                     key={noteKey}
                     viewActive={noteLayout === "template"}
                     onRegisterRowEditor={handleRegisterTemplateSectionEditor}
+                    // The active Section's Refine/Revert, driven by the header
+                    // Refine control (see refineSurface above).
+                    onRegisterSectionRefine={handleRegisterSectionRefine}
                     onRegisterTemplateCompose={(api) => {
                       templateComposeRef.current = api;
                     }}
@@ -2092,9 +2158,11 @@ export default function MainArea() {
               onInsertFile={handleInsertFileAtCursor}
               onFileError={handleInsertError}
               disabled={!noteTitle || !editor}
-              // The note-level Refine above reads this; see
-              // handleRefineStyleChange.
-              onStyleChange={handleRefineStyleChange}
+              // ONE current Refine mode for the whole app: the composer's
+              // select shows and changes the same preference the header
+              // Refine control does (src/lib/refinePreference.js).
+              stylePreset={refineMode}
+              onStyleChange={handleRefineModeChange}
               // Quick Add destination. The bar names it, gates capture on it,
               // and stamps asynchronous captures with it — it never decides it.
               target={quickAddTarget}

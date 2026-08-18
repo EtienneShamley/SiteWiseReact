@@ -57,6 +57,7 @@ import Color from "@tiptap/extension-color";
 import { ListIndentKeymap, Subscript, Superscript, TextAlign } from "./extensions";
 import { AssetImage } from "./AssetImage";
 import { FileAttachment } from "./FileAttachment";
+import { RefineTargetHighlight } from "./refineTargetPlugin";
 
 /**
  * @param trailingNode  keep StarterKit's TrailingNode (default true)
@@ -107,6 +108,11 @@ export function editorCoreExtensions({
     TextStyle,
     FontSize,
     Color,
+    // The pending AI Refine target's highlight (see ./refineTargetPlugin.js).
+    // Decoration only: it never changes the document, never records history and
+    // never triggers a save, and it lives in the SHARED core so the Free-form
+    // note and every Template Section show the target the same way.
+    RefineTargetHighlight,
   ];
 }
 

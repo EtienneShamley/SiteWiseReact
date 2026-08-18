@@ -91,7 +91,9 @@ function loadImageFromBlobURL(url) {
 }
 // ------------------------------------------------------
 
-const STYLE_MEM_KEY = "sitewise-note-style-v1";
+// The former per-note "AI writing style" map ("sitewise-note-style-v1") is
+// retired: the Refine mode is one app-wide preference now
+// (src/lib/refinePreference.js). The old key is left in storage untouched.
 const COORD_SYS_KEY = "sitewise-coord-system-v1"; // per-note memory
 
 function loadMap(key) {
@@ -144,16 +146,15 @@ export default function BottomBar({
   //   ({ text, attachments }) => Promise<{ ok, deliveredIds, textDelivered, stale }>
   // The composer clears only what `deliveredIds` says actually landed.
   onSendComposer,
-  // The AI WRITING STYLE the user has selected, reported upward whenever it
-  // changes (and on note restore).
+  // The CURRENT REFINE MODE — one app-wide UI preference owned by MainArea
+  // (src/lib/refinePreference.js) and shown here as the composer's "AI writing
+  // style" select. Controlled: this component neither stores it nor keeps a
+  // per-note memory of it any more (the retired per-note map is described in
+  // refinePreference.js). The header Refine control shows and changes the SAME
+  // value, so there is never one mode here and another there.
   //
-  // The control is presented as "AI writing style" — a general choice, not a
-  // composer-only one — but the note-level Refine lives in MainArea and had no
-  // way to see it, so it always sent the default preset. Selecting "Summary"
-  // and pressing Refine therefore produced a concise-professional rewrite, and
-  // three of the four modes never reached the provider at all.
-  //
-  //   (style) => void
+  //   stylePreset: an allowlisted preset value; onStyleChange: (style) => void
+  stylePreset,
   onStyleChange,
   // LIVE TRANSCRIPT. The composer records nothing itself any more: its
   // microphone is a shortcut that opens the ONE Live Transcript workspace
@@ -205,9 +206,6 @@ export default function BottomBar({
   const clearStaged = () => {
     if (draftStoreRef.current.clear() > 0) syncStaged();
   };
-
-  // Style preset (per note memory)
-  const [stylePreset, setStylePreset] = useState("concise, professional");
 
   // NEW: coordinate system state (default Mount Eden 2000)
   const [coordSystem, setCoordSystem] = useState(DEFAULT_COORD_SYSTEM);
@@ -342,37 +340,13 @@ export default function BottomBar({
     return () => store.clear();
   }, []);
 
-  // Load per-note memory when note changes
+  // Load per-note memory when note changes. (The Refine mode is no longer
+  // per note — see `stylePreset` above; the transcription language is not
+  // this component's either: src/lib/transcriptionLanguage.js.)
   useEffect(() => {
-    const styleMap = loadMap(STYLE_MEM_KEY);
     const sysMap = loadMap(COORD_SYS_KEY);
-
-    if (currentNoteId) {
-      setStylePreset(styleMap[currentNoteId] || "concise, professional");
-      setCoordSystem(sysMap[currentNoteId] || DEFAULT_COORD_SYSTEM);
-    } else {
-      setStylePreset("concise, professional");
-      setCoordSystem(DEFAULT_COORD_SYSTEM);
-    }
+    setCoordSystem((currentNoteId && sysMap[currentNoteId]) || DEFAULT_COORD_SYSTEM);
   }, [currentNoteId]);
-
-  // Persist style/system when changed. (The transcription language is no
-  // longer this component's: see src/lib/transcriptionLanguage.js.)
-  useEffect(() => {
-    if (!currentNoteId) return;
-    const styleMap = loadMap(STYLE_MEM_KEY);
-    styleMap[currentNoteId] = stylePreset || "concise, professional";
-    saveMap(STYLE_MEM_KEY, styleMap);
-  }, [currentNoteId, stylePreset]);
-
-  // The selected style, reported to the owner of the note-level Refine. Held in
-  // a ref so a parent that hands down a fresh callback on every render cannot
-  // turn this into a render loop; the effect reacts to the STYLE changing.
-  const onStyleChangeRef = useRef(onStyleChange);
-  onStyleChangeRef.current = onStyleChange;
-  useEffect(() => {
-    onStyleChangeRef.current?.(stylePreset);
-  }, [stylePreset]);
 
   useEffect(() => {
     if (!currentNoteId) return;
@@ -1022,7 +996,7 @@ export default function BottomBar({
         <div className="absolute left-3 bottom-2 flex items-center gap-3">
           <StylePresetSelect
             value={stylePreset}
-            onChange={setStylePreset}
+            onChange={onStyleChange}
             disabled={isDisabled}
           />
 

@@ -93,7 +93,7 @@ const isDev = process.env.NODE_ENV !== "production";
 // of being diagnosed from impossible outputs. Silent in the test runner, which
 // loads this module hundreds of times.
 const REFINE_ROUTE_CONTRACT =
-  "four-mode contract, source-shape guidance, transform validation, one corrective retry";
+  "five-mode contract (Improve writing default), source-shape guidance, transform validation, one corrective retry";
 if (isDev && process.env.NODE_ENV !== "test") {
   // eslint-disable-next-line no-console
   console.log(`[refine] route loaded: model ${MODEL}; ${REFINE_ROUTE_CONTRACT}`);

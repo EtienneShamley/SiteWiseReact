@@ -167,6 +167,12 @@ const MIN_VALIDATED_SOURCE_CHARS = 600;
 
 /** The upper bound each mode's output may not exceed, as a fraction of source. */
 const MAX_OUTPUT_RATIO = {
+  // Improve writing edits in place: grammar, clarity, natural phrasing. A
+  // clarified sentence may legitimately grow a little (an article here, a
+  // conjunction there); a result 40% longer than its source was elaborated,
+  // not corrected. Deliberately loose so a genuine grammar pass is never
+  // rejected for a few extra words.
+  [REFINE_MODE.IMPROVE]: 1.4,
   // The prompt asks for 55-70%; anything at or beyond 80% clearly did not
   // compress.
   [REFINE_MODE.PROFESSIONAL]: 0.8,
@@ -177,6 +183,19 @@ const MAX_OUTPUT_RATIO = {
   // for 45-65%.
   [REFINE_MODE.CASUAL]: 1.0,
   // Formal report may legitimately grow: no length rule at all.
+};
+
+/**
+ * The LOWER bound a mode's output may not fall below, as a fraction of source.
+ *
+ * Only Improve writing has one: its job forbids summarising, so a result that
+ * lost more than a third of the source was condensed rather than corrected.
+ * Repetition removal and tightened grammar rarely take more than a few percent
+ * off; the floor is deliberately far below that so it only catches a summary
+ * wearing the wrong mode.
+ */
+const MIN_OUTPUT_RATIO = {
+  [REFINE_MODE.IMPROVE]: 0.65,
 };
 
 /**
@@ -209,6 +228,8 @@ const STRUCTURE_IS_THE_JOB = [REFINE_MODE.REPORT, REFINE_MODE.MEETING];
 const REFINE_VALIDATION = {
   /** The output is too long for this mode's job. */
   TOO_LONG: "too-long",
+  /** The output is too short for this mode's job (it was condensed). */
+  TOO_SHORT: "too-short",
   /** A prose source came back as headings and lists. */
   STRUCTURE_ADDED: "structure-added",
   /** A report of multi-theme prose came back with no report structure. */
@@ -264,6 +285,17 @@ function validateRefineTransform({ mode, shape, source, output } = {}) {
     }
   }
 
+  // 1b. A FLOOR, for the one mode whose job forbids condensing. Same size rule
+  //     as the ceiling: only once the source is long enough for a ratio to
+  //     mean anything.
+  const minRatio = MIN_OUTPUT_RATIO[mode];
+  if (longEnough && typeof minRatio === "number") {
+    const ratio = refineOutputRatio(source, output);
+    if (ratio < minRatio) {
+      return fail(REFINE_VALIDATION.TOO_SHORT, { ratio, minRatio });
+    }
+  }
+
   // 2. STRUCTURAL EXPLOSION. A prose source that comes back as a heading-and-
   //    bullet document has been turned into a different kind of document. The
   //    report is the one mode whose job that is.
@@ -314,6 +346,14 @@ function validateRefineTransform({ mode, shape, source, output } = {}) {
 // more instruction that this application wrote.
 
 const REFINE_CORRECTION = Object.freeze({
+  [REFINE_MODE.IMPROVE]: {
+    [REFINE_VALIDATION.TOO_LONG]:
+      "Your previous response expanded the source. This mode only corrects and clarifies: return the same text with its grammar, sentence construction, clarity and punctuation improved, at close to the same length, adding no information, examples, headings or lists.",
+    [REFINE_VALIDATION.TOO_SHORT]:
+      "Your previous response condensed the source. This mode never summarises: return the whole text, sentence for sentence and paragraph for paragraph, with only its grammar, sentence construction, clarity and punctuation improved, at close to the same length.",
+    [REFINE_VALIDATION.STRUCTURE_ADDED]:
+      "Your previous response turned prose into headings or a list. This mode keeps the source's structure: return the same paragraphs as prose, with no headings and no bullet points, improving only the wording.",
+  },
   [REFINE_MODE.PROFESSIONAL]: {
     [REFINE_VALIDATION.TOO_LONG]:
       "Your previous response expanded the source instead of making it concise. Rewrite it far more tightly: merge overlapping points, cut repetition and elaboration, and aim for roughly 55-70% of the source length. Preserve the general document type and do not introduce headings or lists.",
@@ -360,6 +400,7 @@ module.exports = {
 
   MIN_VALIDATED_SOURCE_CHARS,
   MAX_OUTPUT_RATIO,
+  MIN_OUTPUT_RATIO,
   STRUCTURE_IS_THE_JOB,
   REFINE_VALIDATION,
   refineOutputRatio,

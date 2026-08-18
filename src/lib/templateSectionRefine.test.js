@@ -176,6 +176,9 @@ function makeEditor(nodes, { plugins = [history()] } = {}) {
       return listeners.size;
     },
     dispatch,
+    // The shared range primitive dispatches through the editor's VIEW, as the
+    // real Tiptap editor exposes it.
+    view: { dispatch: (tr) => dispatch(tr) },
     select(from, to = from) {
       dispatch(state.tr.setSelection(TextSelection.create(state.doc, from, to)));
     },

@@ -532,10 +532,23 @@
   gap: 4px;
 }
 
-/* Position/reveal mechanics only — colour comes entirely from `.twocol-icon-btn`
-   (combined in the component's className), so idle/hover/pressed/open/danger
-   stay in the one light-locked palette below instead of a second hardcoded
-   set living here. */
+/* THE ROW-ACTIONS TRIGGER (⋯) — restored as a discoverable control
+   (2026-08-18). It used to be fully transparent until the row was hovered,
+   and its idle colour was the ordinary muted grey shared with every other
+   icon button, so on a form of many rows nothing said "there is a menu here":
+   users hunted for it or never found it. It now rests VISIBLE — a quiet
+   turquoise-tinted glyph at reduced opacity, deliberately dimmer than the
+   document text so it never competes with the content — and steps up on row
+   hover / focus-within (full opacity, faint accent surface and border) and
+   again on its own hover/focus/open (denser accent surface). Restrained on
+   purpose: one 26px glyph per row, no fill at rest, no motion beyond the
+   shared 140ms colour transition. Still overlaid (no measured height, so
+   pagination is unchanged) and still hidden in print.
+
+   Position/reveal mechanics live here; the open/pressed/danger/disabled
+   palette still comes from `.twocol-icon-btn` (combined in the component's
+   className), so the open state stays the shared turquoise "menu is open"
+   treatment. */
 .twocol-row-actions-btn {
   position: relative;
   display: flex;
@@ -546,11 +559,15 @@
   border-radius: 6px;
   font-size: 15px;
   line-height: 1;
-  opacity: 0;
+  opacity: 0.55;
   cursor: pointer;
-  /* Invisible == inert: a hidden trigger must never swallow a click meant for
-     the field underneath it. It becomes clickable exactly when it is shown. */
-  pointer-events: none;
+  pointer-events: auto;
+}
+
+/* Idle: the accent hue, quiet. Specific enough to win over `.twocol-icon-btn`'s
+   idle grey (same specificity, later in the file, plus the reveal rules below). */
+.twocol-row-actions-btn.twocol-icon-btn:not(.twocol-icon-btn--open):not(.twocol-icon-btn--danger) {
+  color: #0b6e78;
 }
 
 /* Touch-friendly hit area without enlarging the visible control. */
@@ -560,12 +577,27 @@
   inset: -8px;
 }
 
+/* Row hover / keyboard focus anywhere in the row: fully visible, with a faint
+   accent surface so it reads as a control. Its own hover/focus/open: denser. */
 .twocol-row:hover .twocol-row-actions-btn,
 .twocol-row:focus-within .twocol-row-actions-btn,
 .twocol-row-actions-btn:focus-visible,
 .twocol-row-actions-btn[aria-expanded="true"] {
   opacity: 1;
   pointer-events: auto;
+}
+
+.twocol-row:hover .twocol-row-actions-btn.twocol-icon-btn:not(.twocol-icon-btn--open):not(.twocol-icon-btn--danger),
+.twocol-row:focus-within .twocol-row-actions-btn.twocol-icon-btn:not(.twocol-icon-btn--open):not(.twocol-icon-btn--danger) {
+  background-color: rgba(11, 110, 120, 0.08);
+  border-color: rgba(11, 110, 120, 0.25);
+}
+
+.twocol-row-actions-btn.twocol-icon-btn:hover:not(.twocol-icon-btn--open):not(.twocol-icon-btn--danger):not(:disabled),
+.twocol-row-actions-btn.twocol-icon-btn:focus-visible:not(.twocol-icon-btn--open):not(.twocol-icon-btn--danger) {
+  color: #0b6e78;
+  background-color: rgba(11, 110, 120, 0.14);
+  border-color: rgba(11, 110, 120, 0.45);
 }
 
 /* Row-level "Refine with AI" trigger. It shares the row-actions container, and
@@ -629,7 +661,6 @@
 @media (pointer: coarse) {
   .twocol-row-actions-btn {
     opacity: 0.85;
-    pointer-events: auto;
     width: 32px;
     height: 32px;
   }

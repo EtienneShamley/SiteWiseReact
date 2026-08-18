@@ -78,9 +78,11 @@
 // the existing parsers): no React, no storage, no fetch, and nothing here is
 // ever written to a note.
 
-import { closeHistory } from "@tiptap/pm/history";
-import { Mapping } from "@tiptap/pm/transform";
-
+import {
+  applyRangeHtml,
+  createRangeTracker,
+  isRangeRefineBackup,
+} from "./editorRangeRefine";
 import { MEDIA_IMAGE_NODE_NAME } from "./editorMediaDrag";
 import { FILE_ATTACHMENT_NODE_NAME } from "./editorFileAttachments";
 import { SECTION_DOC_NODE, parseSectionDocHtml } from "./templateSectionDoc";
@@ -105,6 +107,29 @@ import { hasRefinableText } from "./templateRowRefine";
 // key must never be mistakable for one another, because they address two
 // different writers.
 export const SECTION_REFINE_KEY_SEPARATOR = "::seg::";
+
+// A SELECTION target's key (2026-08-18): `rowId::sel::<requestId>`. A
+// selection is not a run — it has no ordinal — so its status message and its
+// RANGE backup (src/lib/editorRangeRefine.js) are keyed by the request that
+// made it. A different separator again, so a run key, a selection key and the
+// retired legacy `::item::` key can never be mistaken for one another.
+export const SECTION_REFINE_SELECTION_KEY_SEPARATOR = "::sel::";
+
+/**
+ * The key of one SELECTION refinement of one row. Returns null when there is
+ * no addressable target.
+ */
+export function sectionRefineSelectionKey({ rowId, requestId } = {}) {
+  if (typeof rowId !== "string" || !rowId) return null;
+  if (!Number.isInteger(requestId) || requestId <= 0) return null;
+  return `${rowId}${SECTION_REFINE_SELECTION_KEY_SEPARATOR}${requestId}`;
+}
+
+export function isSectionRefineSelectionKey(targetKey) {
+  return (
+    typeof targetKey === "string" && targetKey.includes(SECTION_REFINE_SELECTION_KEY_SEPARATOR)
+  );
+}
 
 /**
  * The one string that identifies a modern refine target: one row, one text run.
@@ -131,7 +156,10 @@ export function sectionRefineTargetKey({ rowId, segmentIndex } = {}) {
 export function isSectionRefineKeyForRow(targetKey, rowId) {
   if (typeof targetKey !== "string" || !targetKey) return false;
   if (typeof rowId !== "string" || !rowId) return false;
-  return targetKey.startsWith(`${rowId}${SECTION_REFINE_KEY_SEPARATOR}`);
+  return (
+    targetKey.startsWith(`${rowId}${SECTION_REFINE_KEY_SEPARATOR}`) ||
+    targetKey.startsWith(`${rowId}${SECTION_REFINE_SELECTION_KEY_SEPARATOR}`)
+  );
 }
 
 /* ------------------------------------------------------------------------ */
@@ -459,71 +487,13 @@ export function makeSectionRefineRequest({
 /**
  * Follow ONE range through every document change made while a request is out.
  *
- * Raw positions recorded before an arbitrary edit are meaningless afterwards —
- * a paragraph typed above the target moves it, an image inserted below does
- * not, and nothing about the stored numbers says which happened. So the range
- * is carried forward through ProseMirror's own `Mapping`, accumulated from the
- * editor's transactions, which is the only description of what actually moved.
- *
- * The two association biases are deliberate: `from` biases RIGHT and `to`
- * biases LEFT, so content inserted exactly at either boundary stays OUTSIDE the
- * range. A picture dropped between two paragraphs can therefore never be
- * swallowed into the text that gets replaced.
- *
- * A range whose content was deleted maps to an empty span and resolves to null.
- * Mapping alone is never enough to apply, either — the caller still has to find
- * the mapped span as a WHOLE current range and still has to compare the text
- * (see `resolveSectionRefineTarget`).
+ * THE SHARED PRIMITIVE (src/lib/editorRangeRefine.js `createRangeTracker`),
+ * which grew out of this module: ProseMirror's own `Mapping`, accumulated from
+ * the editor's transactions; `from` biases RIGHT and `to` biases LEFT so
+ * content inserted exactly at a boundary stays OUTSIDE the range. Kept under
+ * its Section name so every caller and test reads as before.
  */
-export function createSectionRefineTracker(editor, { from, to } = {}) {
-  const mapping = new Mapping();
-  const handler = (payload) => {
-    const tr = payload && payload.transaction;
-    if (tr && tr.docChanged && tr.mapping) mapping.appendMapping(tr.mapping);
-  };
-
-  let live = false;
-  if (editor && typeof editor.on === "function") {
-    try {
-      editor.on("transaction", handler);
-      live = true;
-    } catch {
-      live = false;
-    }
-  }
-
-  return {
-    /** The range as it stands now, or null when it no longer exists. */
-    resolve() {
-      if (!live) return null;
-      if (!Number.isInteger(from) || !Number.isInteger(to)) return null;
-      try {
-        const mappedFrom = mapping.map(from, 1);
-        const mappedTo = mapping.map(to, -1);
-        if (!Number.isInteger(mappedFrom) || !Number.isInteger(mappedTo)) return null;
-        if (mappedTo <= mappedFrom) return null;
-        return { from: mappedFrom, to: mappedTo };
-      } catch {
-        return null;
-      }
-    },
-    /** Stop following. Safe to call more than once, and after a destroy. */
-    dispose() {
-      if (!live) return;
-      live = false;
-      try {
-        if (editor && typeof editor.off === "function") {
-          editor.off("transaction", handler);
-        }
-      } catch {
-        // An editor torn down underneath us has already dropped its listeners.
-      }
-    },
-    get live() {
-      return live;
-    },
-  };
-}
+export const createSectionRefineTracker = createRangeTracker;
 
 /* ------------------------------------------------------------------------ */
 /* May this response be applied?                                             */
@@ -631,26 +601,12 @@ export function applySectionRefineContent(editor, { from, to } = {}, value) {
   const html = modelToHtml(answerToModel(value));
   if (!html) return false;
 
-  try {
-    return (
-      editor
-        .chain()
-        // ONE apply is ONE undo step. ProseMirror's history groups adjacent
-        // changes made within its own time window, so without this a
-        // refinement that lands moments after the user's last keystroke could
-        // be undone together with it — and Revert could be undone together
-        // with the refinement it reverted. Closing the group first makes each
-        // one its own, deliberate step.
-        .command(({ tr }) => {
-          closeHistory(tr);
-          return true;
-        })
-        .insertContentAt({ from, to }, html)
-        .run() !== false
-    );
-  } catch {
-    return false;
-  }
+  // ONE transaction through the SHARED range primitive: `closeHistory` first
+  // (one apply is exactly one undo step, and Revert exactly one more), then a
+  // raw `replaceWith` of the parsed blocks — never Tiptap's `insertContentAt`,
+  // whose selection-dependent range widening could delete the image before a
+  // run (see editorRangeRefine.applyRangeHtml).
+  return applyRangeHtml(editor, { from, to }, html);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -695,17 +651,41 @@ export function makeSectionRefineBackup(previous, applied) {
 
 export function setSectionRefineBackup(backups, noteId, targetKey, backup) {
   const base = backups || {};
-  if (!noteId || !targetKey || !isSectionRefineBackup(backup)) return base;
+  if (!noteId || !targetKey) return base;
+  // Two shapes share this map: a RUN backup (`{ previous, applied }` answer
+  // values, keyed `::seg::`) and a SELECTION range backup
+  // (`{ previous: slice JSON, appliedText }`, keyed `::sel::`, the shared
+  // primitive's). Anything else is refused.
+  let stored = null;
+  if (isSectionRefineBackup(backup) && !isSectionRefineSelectionKey(targetKey)) {
+    stored = {
+      previous: normalizeAnswerValue(backup.previous),
+      applied: normalizeAnswerValue(backup.applied),
+    };
+  } else if (isRangeRefineBackup(backup) && isSectionRefineSelectionKey(targetKey)) {
+    stored = { previous: backup.previous, appliedText: backup.appliedText };
+  }
+  if (!stored) return base;
   return {
     ...base,
     [noteId]: {
       ...(base[noteId] || {}),
-      [targetKey]: {
-        previous: normalizeAnswerValue(backup.previous),
-        applied: normalizeAnswerValue(backup.applied),
-      },
+      [targetKey]: stored,
     },
   };
+}
+
+/**
+ * The SELECTION range backup for exactly this note AND this target, or null.
+ * The run-shaped reader above never returns one of these, and this never
+ * returns a run backup — each Revert path reads only the shape it can restore.
+ */
+export function getSectionRefineRangeBackup(backups, noteId, targetKey) {
+  if (!backups || !noteId || !targetKey) return null;
+  const forNote = backups[noteId];
+  if (!forNote || typeof forNote !== "object") return null;
+  const value = forNote[targetKey];
+  return isRangeRefineBackup(value) ? value : null;
 }
 
 /**

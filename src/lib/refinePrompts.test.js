@@ -58,6 +58,7 @@ const SOURCE = [
 
 /** Every mode's own block header, for "only one of these is present" checks. */
 const MODE_HEADERS = {
+  [REFINE_MODE.IMPROVE]: "MODE: IMPROVE WRITING",
   [REFINE_MODE.PROFESSIONAL]: "MODE: PROFESSIONAL / CONCISE",
   [REFINE_MODE.REPORT]: "MODE: FORMAL REPORT",
   [REFINE_MODE.SUMMARY]: "MODE: SUMMARY",
@@ -319,8 +320,9 @@ describe("10. no mode is a generic 'rewrite in X style' instruction", () => {
       expect(block.length).toBeGreaterThan(600);
       expect(block.split("\n").filter((l) => l.startsWith("- ")).length).toBeGreaterThanOrEqual(6);
     }
-    // The four user-facing jobs each say what a failed attempt looks like.
+    // The five user-facing jobs each say what a failed attempt looks like.
     for (const mode of [
+      REFINE_MODE.IMPROVE,
       REFINE_MODE.PROFESSIONAL,
       REFINE_MODE.REPORT,
       REFINE_MODE.SUMMARY,
@@ -534,11 +536,12 @@ describe("12-15. the surrounding contract is untouched", () => {
     expect(contract).not.toContain("process.env");
   });
 
-  test("the four user-facing modes carry their intended labels", () => {
+  test("the five user-facing modes carry their intended labels", () => {
     // The LABEL is display only. The `value` beside it is the stored/wire
     // identifier and is unchanged, which is what keeps every saved preference
     // and every in-flight request working across the label correction.
     expect(userFacingRefinePresets().map((p) => [p.value, p.label])).toEqual([
+      ["improve-writing", "Improve writing"],
       ["concise, professional", "Concise, professional"],
       ["formal, structured, objective", "Formal report"],
       ["brief, bullet points, action-focused", "Summary"],
@@ -583,11 +586,11 @@ describe("all four modes receive exactly the same source for one target", () => 
 
   test("1. every mode sends byte-identical text for the same target", () => {
     const requests = USER_FACING.map((style) => wireRequest(style, TARGET));
-    expect(requests).toHaveLength(4);
+    expect(requests).toHaveLength(5);
     expect(new Set(requests.map((r) => r.text)).size).toBe(1);
     expect(new Set(requests.map((r) => r.user)).size).toBe(1);
     // …while the instructions genuinely differ.
-    expect(new Set(requests.map((r) => r.system)).size).toBe(4);
+    expect(new Set(requests.map((r) => r.system)).size).toBe(5);
   });
 
   test("2. unrelated UI or note content cannot enter request.text", () => {
@@ -624,7 +627,7 @@ describe("all four modes receive exactly the same source for one target", () => 
     );
     expect(new Set(validated.map((v) => v.value.text)).size).toBe(1);
     expect(new Set(validated.map((v) => v.value.language)).size).toBe(1);
-    expect(new Set(validated.map((v) => v.value.mode)).size).toBe(4);
+    expect(new Set(validated.map((v) => v.value.mode)).size).toBe(5);
   });
 
   test("the request body carries the target text and nothing else", () => {
@@ -640,29 +643,33 @@ describe("all four modes receive exactly the same source for one target", () => 
     expect(route).toContain("buildRefineSourceMessage(text)");
   });
 
-  test("the note-level Refine sends the SELECTED style, not a hardcoded one", () => {
-    // The regression behind the report: the bottom bar's "AI writing style"
-    // control is a general one, but the note-level Refine could not see it and
-    // always sent DEFAULT_REFINE_STYLE — so three of the four modes never
-    // reached the provider, and every result was a concise-professional
-    // rewrite of the WHOLE note.
+  test("the note-level Refine sends the SELECTED mode, not a hardcoded one", () => {
+    // The regression behind the original report: the composer's "AI writing
+    // style" control is a general one, but the note-level Refine could not see
+    // it and always sent DEFAULT_REFINE_STYLE. Since 2026-08-18 there is ONE
+    // app-wide Refine mode (src/lib/refinePreference.js) owned by MainArea:
+    // the header RefineControl and the composer's select both show and change
+    // it, and the Free-form request re-validates it at the point of use.
     const mainArea = require("fs").readFileSync(
       `${__dirname}/../components/MainArea.js`,
       "utf8"
     );
-    expect(mainArea).toContain("const selectedRefineStyleRef = useRef(DEFAULT_REFINE_STYLE);");
-    expect(mainArea).toContain("await refineText({ text: plain, style });");
+    expect(mainArea).toContain("const [refineMode, setRefineMode] = useState(loadRefineMode);");
+    expect(mainArea).toContain("await refineText({ text: target.text, style });");
     expect(mainArea).not.toContain("refineText({ text: plain, style: DEFAULT_REFINE_STYLE })");
     // Re-validated at the point of use: a prop is never trusted to be an
     // allowlisted value.
-    expect(mainArea).toContain("isAllowedRefineStyle(selectedRefineStyleRef.current)");
-    // …and the bar reports it upward.
+    expect(mainArea).toContain("isAllowedRefineStyle(requestedStyle) ? requestedStyle : refineModeRef.current");
+    // …and the composer is CONTROLLED by the same value.
     const bottomBar = require("fs").readFileSync(
       `${__dirname}/../components/BottomBar.js`,
       "utf8"
     );
-    expect(bottomBar).toContain("onStyleChangeRef.current?.(stylePreset);");
-    expect(mainArea).toContain("onStyleChange={handleRefineStyleChange}");
+    expect(bottomBar).toContain("onChange={onStyleChange}");
+    expect(bottomBar).not.toContain("useState(\"concise, professional\")");
+    expect(mainArea).toContain("stylePreset={refineMode}");
+    expect(mainArea).toContain("onStyleChange={handleRefineModeChange}");
+    expect(mainArea).toContain("onModeChange={handleRefineModeChange}");
   });
 
   test("the Template Refine path still sends only its own target's text", () => {

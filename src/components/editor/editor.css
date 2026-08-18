@@ -644,3 +644,40 @@
 .note-editor.resize-cursor {
   cursor: col-resize;
 }
+
+/* ---------------------------------------------------------------------------
+ * THE PENDING AI REFINE TARGET (src/components/editor/refineTargetPlugin.js)
+ *
+ * "This is the text about to change." Drawn as a ProseMirror DECORATION, never
+ * as a stored mark, because a contenteditable loses its native selection
+ * highlight the moment focus moves into the Refine popover — and the Refine
+ * controls must stay keyboard-reachable, so the answer is to draw the target
+ * ourselves rather than to fight focus.
+ *
+ * It deliberately reads as a SELECTION rather than as a highlighter pen: the
+ * turquoise interaction accent at low alpha, no border, no outline, no shadow
+ * and no motion, so it sits under the document's own text without competing
+ * with content or with the highlight mark a user can actually apply (yellow,
+ * `<mark>`). Alpha is low enough that text colour, links, bold and highlight
+ * all stay legible through it, on the white paper both surfaces render as and
+ * in dark mode. Present only while the popover is open.
+ * ------------------------------------------------------------------------- */
+.nw-refine-target {
+  background-color: rgba(11, 110, 120, 0.18);
+  border-radius: 2px;
+  /* The decoration must never affect layout: no padding, no margin, no border,
+     so showing it cannot reflow a paragraph or move a page break. */
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.dark .nw-refine-target {
+  background-color: rgba(42, 229, 242, 0.22);
+}
+
+/* The document always prints without editing chrome. */
+@media print {
+  .nw-refine-target {
+    background-color: transparent;
+  }
+}

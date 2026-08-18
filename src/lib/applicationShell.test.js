@@ -243,8 +243,11 @@ describe("14/15/16. Template Library and Export have one home each; no duplicate
   });
 
   test("Refine/Revert: the document header's contextual AI group, once; the toolbar carries no actions", () => {
-    expect((HEADER.match(/onClick=\{refineNote\}/g) || []).length).toBe(1);
-    expect((HEADER.match(/onClick=\{revertRefine\}/g) || []).length).toBe(1);
+    // Since 2026-08-18 the header carries ONE RefineControl (mode + scope +
+    // run) and one Revert, both routed to whichever surface the toolbar owns.
+    expect((HEADER.match(/<RefineControl/g) || []).length).toBe(1);
+    expect((HEADER.match(/onRun=\{runRefine\}/g) || []).length).toBe(1);
+    expect((HEADER.match(/onClick=\{runRevert\}/g) || []).length).toBe(1);
     expect(TOOLBAR).not.toMatch(/refineNote|revertRefine|Refine/);
     // The old control bar's group labels are gone from MainArea.
     expect(MAIN_AREA).not.toMatch(/aria-label="Note view"|aria-label="Note workspace"|Note view<\/span>/);

@@ -79,7 +79,22 @@ import {
   sectionRefineTargets,
   sectionRefineTextRuns,
   sectionRefineRunValue,
+  sectionRefineSelectionKey,
+  getSectionRefineRangeBackup,
 } from "../../lib/templateSectionRefine";
+import {
+  RANGE_REFINE_CHANGED_MESSAGE,
+  RANGE_REFINE_REJECTION,
+  RANGE_REFINE_REVERT_UNAVAILABLE_MESSAGE,
+  RANGE_REVERT_REJECTION,
+  REFINE_SCOPE,
+  applyRangeRefine,
+  createRangeTracker,
+  makeRangeRefineBackup,
+  resolveRangeTarget,
+  revertRangeRefine,
+  selectionRefineTarget,
+} from "../../lib/editorRangeRefine";
 import {
   SECTION_DOC_FORMAT,
   removeRowSectionDoc,
@@ -261,6 +276,11 @@ export default function NoteTemplateDoc({
   sectionRefineBackups = {},
   onSetSectionRefineBackup, // (noteId, targetKey, { previous, applied }) => void
   onClearSectionRefineBackup, // (noteId, targetKey) => void
+  // The header Refine control's way into the ACTIVE Section: registered as
+  // `{ refine({ scope, style }), revert(), hasRevert, loading }` while this
+  // form is mounted, null on unmount. The handlers are the SAME ones the
+  // row-level "Refine with AI" trigger uses.
+  onRegisterSectionRefine, // (api | null) => void
 }) {
   // The instance pins this note to a specific template version; created
   // against the default template on first use. This component is remounted
@@ -2334,6 +2354,138 @@ export default function NoteTemplateDoc({
   );
 
   /**
+   * Refine the SELECTED TEXT of ONE active Section with AI (2026-08-18).
+   *
+   * The Section's other scope. Where `handleRefineSectionSegment` addresses a
+   * whole TEXT RUN, this addresses exactly the user's selection inside the
+   * live Section editor — through the SHARED editor-range primitive
+   * (src/lib/editorRangeRefine.js), the same one the Free-form note uses: the
+   * safe-target rule (never an image, file, table or code block), the mapped
+   * position tracking, the "still the same text?" gate, the single
+   * transaction and the range backup are all that module's. Only what is
+   * Section-specific lives here: the identity gate (the row must still
+   * resolve to the SAME editor instance the request was made on), the
+   * per-target status, and the backup's home in MainArea's map under a
+   * `rowId::sel::<n>` key.
+   *
+   * Structured values (Number, Date, Time, Yes/No, Select) are never
+   * reachable: only a Section EDITOR has a selection to refine.
+   */
+  const handleRefineSectionSelection = useCallback(
+    async (rowId, style, captured = null) => {
+      const current = instanceRef.current;
+      if (!rowId || !current?.noteId) return;
+
+      const resolved = modernSectionRefineEditor(rowId);
+      if (!resolved) return;
+      const { editor, identity } = resolved;
+
+      // The header control's CAPTURED range when it drove this (so a style
+      // change inside the popover cannot redirect the refinement), else the
+      // Section editor's live selection for the row-level trigger. Both are
+      // ranges of the SAME editor and travel through the identical gate below.
+      const target =
+        captured && Number.isInteger(captured.from) && Number.isInteger(captured.to)
+          ? { ok: true, ...captured }
+          : selectionRefineTarget(editor);
+      if (!target.ok) {
+        setFieldError(rowId, target.message);
+        return;
+      }
+      if (!isAllowedRefineStyle(style)) return;
+
+      const requestId = rowRefineRequestRef.current + 1;
+      rowRefineRequestRef.current = requestId;
+      const targetKey = sectionRefineSelectionKey({ rowId, requestId });
+      if (!targetKey) return;
+      // One selection refinement per row at a time.
+      const inFlightKey = `${rowId}::sel`;
+      if (rowRefineInFlightRef.current.has(inFlightKey)) return;
+      clearFieldError(rowId);
+      setSectionRefineRowKey((prev) => ({ ...prev, [rowId]: targetKey }));
+
+      const settle = (status, message) => {
+        if (!mountedRef.current) return;
+        setRowRefineStatus((prev) =>
+          settleRowRefine(prev, targetKey, { requestId, status, message })
+        );
+      };
+
+      const tracker = createRangeTracker(editor, target);
+      rowRefineInFlightRef.current.add(inFlightKey);
+      setRowRefineStatus((prev) => beginRowRefine(prev, targetKey, requestId));
+
+      let result = null;
+      try {
+        result = await refineText({ text: target.text, style });
+      } catch {
+        result = null;
+      } finally {
+        rowRefineInFlightRef.current.delete(inFlightKey);
+      }
+
+      try {
+        if (!result || !result.ok) {
+          settle(
+            result && result.outcome === REFINE_OUTCOME.UNAVAILABLE
+              ? ROW_REFINE_STATUS.UNAVAILABLE
+              : ROW_REFINE_STATUS.FAILURE,
+            rowRefineMessageFor(result && result.outcome)
+          );
+          return;
+        }
+        // The identity gate, exactly as for a run: the row still resolves to
+        // the request's identity and the registry still holds the SAME
+        // instance under it. Then the shared range gate: mapped range still
+        // there, text still what was sent.
+        if (
+          sectionIdentityFor(rowId) !== identity ||
+          getSectionRegistry().get(identity) !== editor
+        ) {
+          settle(ROW_REFINE_STATUS.FAILURE, RANGE_REFINE_CHANGED_MESSAGE);
+          return;
+        }
+        const check = resolveRangeTarget({
+          editor,
+          mapped: tracker.resolve(),
+          sentText: target.text,
+        });
+        if (!check.ok) {
+          settle(
+            ROW_REFINE_STATUS.FAILURE,
+            check.reason === RANGE_REFINE_REJECTION.TEXT_CHANGED
+              ? RANGE_REFINE_CHANGED_MESSAGE
+              : ROW_REFINE_CHANGED_MESSAGE
+          );
+          return;
+        }
+        // ONE transaction; persistence is the editor's own update handler.
+        const applied = applyRangeRefine(editor, check, result.refined, { reselect: true });
+        if (!applied.ok) {
+          settle(ROW_REFINE_STATUS.FAILURE, ROW_REFINE_SAVE_FAILED_MESSAGE);
+          return;
+        }
+        const backup = makeRangeRefineBackup(applied.previous, applied.appliedText);
+        if (backup && onSetSectionRefineBackup) {
+          onSetSectionRefineBackup(current.noteId, targetKey, backup);
+        }
+        settle(ROW_REFINE_STATUS.SUCCESS, ROW_REFINE_SUCCESS_MESSAGE);
+      } finally {
+        tracker.dispose();
+      }
+    },
+    [
+      refineText,
+      modernSectionRefineEditor,
+      sectionIdentityFor,
+      getSectionRegistry,
+      onSetSectionRefineBackup,
+      clearFieldError,
+      setFieldError,
+    ]
+  );
+
+  /**
    * Restore ONE modern text run's pre-refinement prose.
    *
    * The target is found by CONTENT — the run that still holds exactly what the
@@ -2346,6 +2498,33 @@ export default function NoteTemplateDoc({
     (rowId, targetKey) => {
       const current = instanceRef.current;
       if (!rowId || !targetKey || !current?.noteId) return;
+
+      // A SELECTION refinement's range backup: restored by the shared range
+      // primitive where its refined text still uniquely stands.
+      const rangeBackup = getSectionRefineRangeBackup(
+        sectionRefineBackups,
+        current.noteId,
+        targetKey
+      );
+      if (rangeBackup) {
+        const resolvedRange = modernSectionRefineEditor(rowId);
+        if (!resolvedRange) return;
+        const reverted = revertRangeRefine(resolvedRange.editor, rangeBackup);
+        if (!reverted.ok) {
+          showRowRefineMessage(
+            targetKey,
+            ROW_REFINE_STATUS.FAILURE,
+            reverted.reason === RANGE_REVERT_REJECTION.NOT_FOUND
+              ? RANGE_REFINE_REVERT_UNAVAILABLE_MESSAGE
+              : ROW_REFINE_REVERT_FAILED_MESSAGE
+          );
+          return;
+        }
+        if (onClearSectionRefineBackup) onClearSectionRefineBackup(current.noteId, targetKey);
+        showRowRefineMessage(targetKey, ROW_REFINE_STATUS.SUCCESS, ROW_REFINE_REVERTED_MESSAGE);
+        return;
+      }
+
       const backup = getSectionRefineBackup(
         sectionRefineBackups,
         current.noteId,
@@ -2450,6 +2629,55 @@ export default function NoteTemplateDoc({
     handleRefineSectionSegment,
     handleRevertSectionRefine,
   ]);
+
+  /* -------------------- Header Refine registration (active Section) -------- */
+
+  // The header Refine control's API for the ACTIVE Section: the same two
+  // handlers the row-level trigger uses, plus what the header needs to render
+  // — whether a Revert exists for the Section's last refinement, and whether
+  // that refinement is still in flight. Registered while a Section is active,
+  // null otherwise (the header then disables its Refine with a reason).
+  const activeRefineRowId = activeSectionRowId && sectionRefine.rows[activeSectionRowId]
+    ? activeSectionRowId
+    : null;
+  const activeRefineKey = activeRefineRowId ? sectionRefine.rowKeys[activeRefineRowId] || null : null;
+  const activeRefineHasRevert = !!(
+    activeRefineKey && sectionRefine.revertableKeys.has(activeRefineKey)
+  );
+  const activeRefineLoading =
+    !!activeRefineKey &&
+    (rowRefineStatus[activeRefineKey] || {}).status === ROW_REFINE_STATUS.LOADING;
+  const sectionRefineApi = useMemo(() => {
+    if (!activeRefineRowId) return null;
+    return {
+      refine: ({ scope, style, target } = {}) => {
+        if (scope === REFINE_SCOPE.SELECTION) {
+          handleRefineSectionSelection(activeRefineRowId, style, target);
+          return;
+        }
+        // The Section's no-selection scope: the TEXT RUN at the caret.
+        handleRefineSectionSegment(activeRefineRowId, null, style);
+      },
+      revert: () => {
+        if (activeRefineKey) handleRevertSectionRefine(activeRefineRowId, activeRefineKey);
+      },
+      hasRevert: activeRefineHasRevert,
+      loading: activeRefineLoading,
+    };
+  }, [
+    activeRefineRowId,
+    activeRefineKey,
+    activeRefineHasRevert,
+    activeRefineLoading,
+    handleRefineSectionSelection,
+    handleRefineSectionSegment,
+    handleRevertSectionRefine,
+  ]);
+  useEffect(() => {
+    if (!onRegisterSectionRefine) return;
+    onRegisterSectionRefine(viewActive ? sectionRefineApi : null);
+    return () => onRegisterSectionRefine(null);
+  }, [onRegisterSectionRefine, sectionRefineApi, viewActive]);
 
   /* ----------------------- Quick Add registration ------------------------- */
 

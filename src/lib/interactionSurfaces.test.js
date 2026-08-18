@@ -319,14 +319,20 @@ describe("actions are actions, not locations", () => {
     expect(trigger).not.toContain("aria-expanded");
   });
 
-  test("Refine reports busy honestly and never keeps an open state", () => {
-    expect(mainArea).toContain("busy: refineLoading");
-    expect(mainArea).toContain("aria-busy={refineLoading}");
+  test("Refine reports busy honestly and keeps an open state only for its own popover", () => {
+    // The header Refine is the shared RefineControl (2026-08-18): busy takes the
+    // disabled treatment with "Refining…" as the label, and `open` is driven
+    // by the control's OWN popover state — the one case an action may be open.
+    const refineControl = withoutComments(read("components/RefineControl.js"));
+    expect(mainArea).toContain("loading={refineBusy}");
+    expect(refineControl).toContain("busy: loading,");
+    expect(refineControl).toContain("aria-busy={loading}");
+    expect(refineControl).toMatch(/actionButtonClass\(\{\s*open,\s*busy: loading,/);
     expect(mainArea).not.toMatch(/chipBtnCls\(\{[^}]*open:/);
   });
 
   test("Revert is disabled when there is nothing to revert and is not destructive", () => {
-    expect(mainArea).toContain("disabled: !canRevertRefine({");
+    expect(mainArea).toContain("chipBtnCls({ disabled: !canRevert })");
     expect(mainArea).not.toMatch(/chipBtnCls\(\{[^}]*danger:/);
   });
 

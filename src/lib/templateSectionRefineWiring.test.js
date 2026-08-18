@@ -192,8 +192,13 @@ describe("9-15. the apply gate is consulted before anything is written", () => {
 
   test("positions are followed by a ProseMirror mapping, never trusted raw", () => {
     expect(REFINE_HANDLER()).toContain("createSectionRefineTracker(editor, {");
-    expect(MODEL).toContain('import { Mapping } from "@tiptap/pm/transform";');
-    expect(MODEL).toContain("mapping.appendMapping(tr.mapping)");
+    // The tracker IS the shared editor-range primitive's (2026-08-18), which
+    // carries the ProseMirror Mapping; the Section module re-exports it under
+    // its own name.
+    expect(MODEL).toContain("export const createSectionRefineTracker = createRangeTracker;");
+    const RANGE = read("lib/editorRangeRefine.js");
+    expect(RANGE).toContain('import { Mapping } from "@tiptap/pm/transform";');
+    expect(RANGE).toContain("mapping.appendMapping(tr.mapping)");
     // …and it is always released, on every path out.
     expect(REFINE_HANDLER()).toContain("tracker.dispose();");
   });
@@ -240,9 +245,14 @@ describe("16-23. one transaction, one undo step, one persistence path", () => {
   test("the apply is the ONLY mutation, and it is an editor transaction", () => {
     const handler = REFINE_HANDLER();
     expect(handler).toContain("applySectionRefineContent(editor, check, result.refined)");
-    expect(MODEL).toContain("insertContentAt({ from, to }, html)");
+    // The write goes through the SHARED range primitive: a raw block
+    // replacement, never Tiptap's selection-dependent `insertContentAt`.
+    expect(MODEL).toContain("return applyRangeHtml(editor, { from, to }, html);");
+    expect(MODEL).not.toContain("insertContentAt(");
+    const RANGE = read("lib/editorRangeRefine.js");
     // One undo step, deliberately closed off from the user's own last keystroke.
-    expect(MODEL).toContain("closeHistory(tr)");
+    expect(RANGE).toContain("closeHistory(tr)");
+    expect(RANGE).toContain("tr.replaceWith(from, to, parsed.content)");
   });
 
   test("22. persistence is the Section editor's existing update handler", () => {
@@ -645,6 +655,9 @@ describe("41-45. what F6a deliberately does not touch", () => {
     // strings are stored per note, and the backend enforces the same list.
     // F6a changes the TARGETING and the APPLY, never the prompts.
     expect(userFacingRefinePresets().map((p) => p.value)).toEqual([
+      // Improve writing joined the shared registry on 2026-08-18; the four
+      // transformation values are byte-for-byte as they were.
+      "improve-writing",
       "concise, professional",
       "formal, structured, objective",
       "brief, bullet points, action-focused",

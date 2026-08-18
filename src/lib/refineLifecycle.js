@@ -8,10 +8,17 @@
 // testable (no DOM testing library is installed — see docs/TESTING.md).
 //
 // Refine keeps exactly ONE automatic pre-refine state per note, created only
-// immediately before a valid AI result is applied. It is not a general editing
+// immediately AFTER a valid AI result is applied. It is not a general editing
 // history: TipTap owns undo/redo, and note content itself is saved
 // continuously (see src/lib/saveStatus.js). These never share storage and are
 // never merged.
+//
+// Since 2026-08-18 the backup is a RANGE backup (src/lib/editorRangeRefine.js
+// `{ previous, appliedText }`): the replaced content of the ONE range the
+// refinement rewrote, plus the text it wrote — never a copy of the whole note.
+// Revert restores that range where its refined text still uniquely stands.
+
+import { isRangeRefineBackup } from "./editorRangeRefine";
 
 export const REFINE_STATUS = {
   IDLE: "idle",
@@ -102,15 +109,16 @@ export function clearRefineMessage(state) {
 /* ------------------------------------------------------------------------ */
 
 /**
- * Record the pre-refine Free-form HTML for ONE note.
+ * Record the pre-refine RANGE backup for ONE note.
  *
- * Callers must only reach here after a valid AI result has been received —
+ * Callers must only reach here after a valid AI result has been APPLIED —
  * failure, unavailable, timeout, malformed and empty output must create no
  * backup at all, or Revert would offer to restore a state that was never left.
+ * Anything that is not a range backup is refused.
  */
-export function setRefineBackup(backups, noteId, html) {
-  if (!noteId || typeof html !== "string") return backups || {};
-  return { ...(backups || {}), [noteId]: html };
+export function setRefineBackup(backups, noteId, backup) {
+  if (!noteId || !isRangeRefineBackup(backup)) return backups || {};
+  return { ...(backups || {}), [noteId]: backup };
 }
 
 /**
@@ -119,8 +127,8 @@ export function setRefineBackup(backups, noteId, html) {
  */
 export function getRefineBackup(backups, noteId) {
   if (!backups || !noteId) return null;
-  const html = backups[noteId];
-  return typeof html === "string" ? html : null;
+  const backup = backups[noteId];
+  return isRangeRefineBackup(backup) ? backup : null;
 }
 
 export function hasRefineBackup(backups, noteId) {

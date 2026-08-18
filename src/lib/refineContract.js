@@ -24,10 +24,17 @@
 // Style presets
 // ---------------------------------------------------------------------------
 
-// The four user-facing presets are exactly the ones already offered by
-// src/components/StylePresetSelect.js, and their `value` strings are unchanged
-// because BottomBar persists the last-used value per note in localStorage —
-// changing them would silently discard every stored preference.
+// The four TRANSFORMATION presets are exactly the ones StylePresetSelect has
+// always offered, and their `value` strings are unchanged because the current
+// Refine mode is persisted in localStorage (src/lib/refinePreference.js) —
+// changing them would silently discard every stored preference. "Improve
+// writing" (2026-08-18) is the fifth user-facing preset and the default.
+//
+// THIS LIST IS THE ONE AUTHORITATIVE PRESET DEFINITION: key/value, label,
+// transformation job (mode → prompt block, shape guidance, validation ceilings
+// and corrective retry are all keyed by `mode`). Every UI — the top Refine
+// control, the Quick Add composer's style select, the Template row trigger —
+// reads `userFacingRefinePresets()`; none keeps a list of its own.
 //
 // "meeting-notes" is NOT a user-facing preset. It is the internal instruction
 // the Listen-In conversation-capture flow has always used; it is listed here
@@ -43,6 +50,13 @@
  * exactly as they are.
  */
 const REFINE_MODE = {
+  /**
+   * The DEFAULT job (2026-08-18): help the writer say what they already mean
+   * in clear, natural English — grammar, sentence construction, clarity,
+   * punctuation — while preserving meaning, voice, person, tense, tone,
+   * formality, facts and structure. Never a summary, never a report.
+   */
+  IMPROVE: "improve",
   PROFESSIONAL: "professional",
   REPORT: "report",
   SUMMARY: "summary",
@@ -60,6 +74,17 @@ const REFINE_MODE = {
 // LONGER what builds the prompt — REFINE_MODE_PROMPTS is — and is kept because
 // it is part of the validated request shape callers already receive.
 const REFINE_PRESETS = [
+  {
+    // NEW (2026-08-18) and FIRST because it is the default: ordinary writing
+    // assistance. Its wire value is a stable slug (like "meeting-notes"), not a
+    // tone description, and it is what the frontend stores as the current
+    // Refine mode preference (src/lib/refinePreference.js).
+    value: "improve-writing",
+    label: "Improve writing",
+    userFacing: true,
+    mode: REFINE_MODE.IMPROVE,
+    instruction: "clear, natural, correct English; meaning and voice preserved",
+  },
   {
     value: "concise, professional",
     label: "Concise, professional",
@@ -98,7 +123,11 @@ const REFINE_PRESETS = [
   },
 ];
 
-const DEFAULT_REFINE_STYLE = "concise, professional";
+// The default job is ordinary writing improvement (2026-08-18). The four
+// transformation presets keep their values; only which one is the default
+// changed, and a stored preference always wins over the default.
+const DEFAULT_REFINE_STYLE = "improve-writing";
+const IMPROVE_WRITING_STYLE = "improve-writing";
 const MEETING_NOTES_STYLE = "meeting-notes";
 
 const PRESET_BY_VALUE = new Map(REFINE_PRESETS.map((p) => [p.value, p]));
@@ -106,6 +135,17 @@ const PRESET_BY_VALUE = new Map(REFINE_PRESETS.map((p) => [p.value, p]));
 // Only the presets a user can actually pick in the UI.
 function userFacingRefinePresets() {
   return REFINE_PRESETS.filter((p) => p.userFacing);
+}
+
+/** The whole preset record for an allowlisted value, or null. */
+function refinePresetFor(style) {
+  return PRESET_BY_VALUE.get(style) || null;
+}
+
+/** The DISPLAY label for an allowlisted value, or null. */
+function refinePresetLabelFor(style) {
+  const preset = PRESET_BY_VALUE.get(style);
+  return preset ? preset.label : null;
 }
 
 function isAllowedRefineStyle(style) {
@@ -475,6 +515,38 @@ const REFINE_BASE_PROMPT = [
 // and none of them depends on the base for presentation.
 
 const REFINE_MODE_PROMPTS = Object.freeze({
+  [REFINE_MODE.IMPROVE]: [
+    "MODE: IMPROVE WRITING",
+    "",
+    "YOUR JOB:",
+    "Help the writer say what they already mean, in clear, correct and natural English. This is editing, not rewriting: correct the grammar, spelling and punctuation; fix awkward or broken sentence construction; make unclear phrasing clear; make unnatural wording sound natural; and remove obvious accidental repetition. Then stop.",
+    "",
+    "TRANSFORMATION RULES:",
+    "- This is a light-touch edit. Change only what needs changing; leave every clear, correct sentence as it is.",
+    "",
+    "PRESERVE, EXACTLY:",
+    "- The intended meaning of every sentence, every factual claim, every name, number, date and detail.",
+    "- The narrative person and point of view: first person stays first person, second stays second, third stays third.",
+    "- The tense, unless a genuine grammatical error requires correcting it.",
+    "- The writer's own voice, personality, cultural expression, emotional tone and level of formality. Casual stays casual; formal stays formal; personal testimony stays personal testimony.",
+    "- The paragraph structure and the order of ideas, unless a sentence is so broken that it must be split or joined to be readable.",
+    "- The document type and its shape: prose stays prose of about the same length, a list stays a list with the same items, a heading stays a heading.",
+    "- Any fragment boundary: the source may be a selected phrase, part of a sentence, or a passage cut from a larger text. Return only the improved version of exactly what was given. If it starts mid-sentence or ends without a full stop, so does your output. Do not complete it, introduce it, or add anything before or after it.",
+    "",
+    "DO NOT:",
+    "- Summarise, condense, expand, elaborate or add information, examples, headings, lists or conclusions.",
+    "- Make casual writing corporate, or personal writing impersonal.",
+    "- Replace plain words with grander synonyms, or reword sentences that were already clear and correct.",
+    "- Turn testimony, notes or a personal update into a report about the writer.",
+    "",
+    "YOU HAVE FAILED IF:",
+    "- The result is noticeably shorter or longer than the source, or has a different structure.",
+    "- The writer would not recognise the result as their own words, corrected.",
+    "- A meaning changed, a detail disappeared, or the person, tense or tone changed.",
+    "",
+    "The result should read as the same text, by the same writer, in clear natural English.",
+  ].join("\n"),
+
   [REFINE_MODE.PROFESSIONAL]: [
     "MODE: PROFESSIONAL / CONCISE",
     "",
@@ -597,6 +669,14 @@ const REFINE_MODE_PROMPTS = Object.freeze({
 // A shape that has no clause for a mode simply contributes nothing.
 
 const REFINE_SHAPE_GUIDANCE = Object.freeze({
+  [REFINE_MODE.IMPROVE]: {
+    prose:
+      "THIS SOURCE IS PROSE. Return prose with the same paragraphs. Do not add headings and do not turn any of it into a list.",
+    list_heavy:
+      "THIS SOURCE IS A LIST. Return the same list, item for item, with each item's wording improved. Do not merge, drop, add or reorder items.",
+    mixed:
+      "THIS SOURCE MIXES PROSE AND LISTS. Keep exactly that mix: improve the wording of each part where it stands.",
+  },
   [REFINE_MODE.PROFESSIONAL]: {
     prose:
       "THIS SOURCE IS PROSE. Your output must remain prose. Do not invent headings to organise it, and do not convert its sentences into a bullet list — that would be a different document, not a tighter one. Fewer, denser paragraphs is the shape you want.",
@@ -647,7 +727,7 @@ function refineModePrompt(mode) {
  * caller text of any kind, which is what keeps the frontend able to SELECT an
  * instruction and never to author one.
  *
- * EXACTLY ONE mode block is included. The other three (and the internal
+ * EXACTLY ONE mode block is included. The other user-facing blocks (and the internal
  * meeting-notes block) are never sent, so the model is never asked to choose
  * between competing jobs.
  *
@@ -715,7 +795,10 @@ module.exports = {
   REFINE_MODE,
   DEFAULT_REFINE_STYLE,
   MEETING_NOTES_STYLE,
+  IMPROVE_WRITING_STYLE,
   userFacingRefinePresets,
+  refinePresetFor,
+  refinePresetLabelFor,
   isAllowedRefineStyle,
   refineInstructionFor,
   refineModeFor,

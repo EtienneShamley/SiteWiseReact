@@ -1092,6 +1092,15 @@ export default function ResizableTwoColTable({
                 else menuAnchors.current.delete(row.id);
               }}
               onClick={() => setMenuRowId((prev) => (prev === row.id ? null : row.id))}
+              // Keyboard: Enter/Space open natively (a real button); Down arrow
+              // opens too, as a menu button conventionally does. The menu
+              // itself takes focus on open and returns it on Escape.
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown" && menuRowId !== row.id) {
+                  event.preventDefault();
+                  setMenuRowId(row.id);
+                }
+              }}
             >
               <span aria-hidden="true">⋯</span>
             </button>

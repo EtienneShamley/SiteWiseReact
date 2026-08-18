@@ -291,7 +291,9 @@ describe("7. no mode-specific prompt or shape clause contradicts the shared rule
 
 describe("8. validators, thresholds, model and retry architecture are unchanged", () => {
   test("thresholds", () => {
-    expect(MAX_OUTPUT_RATIO).toEqual({ professional: 0.8, summary: 0.4, casual: 1.0 });
+    // Improve writing (2026-08-18) adds a loose ceiling; the four transformation
+    // ceilings are unchanged.
+    expect(MAX_OUTPUT_RATIO).toEqual({ improve: 1.4, professional: 0.8, summary: 0.4, casual: 1.0 });
     expect(MIN_VALIDATED_SOURCE_CHARS).toBe(600);
     expect(MAX_REFINE_OUTPUT_TOKENS).toBe(4000);
   });
