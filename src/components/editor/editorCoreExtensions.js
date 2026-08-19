@@ -26,6 +26,12 @@
 //                  blocks — see SECTION MEDIA in sectionEditorExtensions.js).
 //   document       the surface's Document node when its top-level content
 //                  expression differs from StarterKit's `block+`.
+//   vocabulary     WHICH KIND OF SURFACE this is (see EDITOR_VOCABULARY below):
+//                  a full DOCUMENT (the Free-form note and a Template Section)
+//                  or TYPOGRAPHY only (the Template header text object). This is
+//                  a product distinction, not a capability the surface's older
+//                  code happened to lack: a document header is rich typography,
+//                  never a miniature body document.
 //
 // There is deliberately no other knob. A capability is never switched off for
 // one surface merely because that surface's older code lacked it.
@@ -60,17 +66,54 @@ import { FileAttachment } from "./FileAttachment";
 import { RefineTargetHighlight } from "./refineTargetPlugin";
 
 /**
+ * The two surface KINDS the core builds.
+ *
+ *   DOCUMENT    everything: headings, blockquotes, code blocks, bullet /
+ *               numbered / task lists and their nesting keymap, horizontal
+ *               rules, tables, the shared media nodes, highlight, sub/
+ *               superscript — plus the typography below. The Free-form note
+ *               and a Template Section, which must stay identical to each
+ *               other (src/lib/templateSectionToolbarParity.test.js).
+ *
+ *   TYPOGRAPHY  paragraphs, hard breaks and TEXT STYLING only: bold, italic,
+ *               underline, strikethrough, links, font family, font size, text
+ *               colour and paragraph alignment, with undo/redo. NO structural
+ *               block node (heading, blockquote, code block, list, task list,
+ *               horizontal rule, table), NO media node and no inline code /
+ *               highlight / sub / superscript mark is registered, so the
+ *               schema itself is what makes them unavailable — a command
+ *               cannot insert what the schema has no type for, a paste is
+ *               reduced to what the schema accepts, and the toolbar hides
+ *               those controls because capability is derived from the schema
+ *               (src/lib/editorCapabilities.js). Today's one user is the
+ *               Template header text object
+ *               (src/components/template/headerTextEditor.js): a document
+ *               header is rich typography, and its picture is the header's
+ *               separate LOGO object.
+ */
+export const EDITOR_VOCABULARY = Object.freeze({
+  DOCUMENT: "document",
+  TYPOGRAPHY: "typography",
+});
+
+/**
  * @param trailingNode  keep StarterKit's TrailingNode (default true)
  * @param image         the shared AssetImage node, possibly configured/extended
  * @param file          the shared FileAttachment node, possibly configured/extended
  * @param document      an override Document extension, or null for StarterKit's
+ * @param vocabulary    EDITOR_VOCABULARY.DOCUMENT (default) or TYPOGRAPHY
  */
 export function editorCoreExtensions({
   trailingNode = true,
   image = AssetImage,
   file = FileAttachment,
   document = null,
+  vocabulary = EDITOR_VOCABULARY.DOCUMENT,
 } = {}) {
+  // A typography surface registers no structural block node and no media node
+  // at all. Everything below reads this ONE flag, so the two vocabularies can
+  // never drift into a hand-maintained per-surface list.
+  const typographyOnly = vocabulary === EDITOR_VOCABULARY.TYPOGRAPHY;
   return [
     StarterKit.configure({
       // Registered below with `openOnClick: false`, so a link never navigates
@@ -78,32 +121,53 @@ export function editorCoreExtensions({
       link: false,
       trailingNode,
       ...(document ? { document: false } : {}),
+      // Structural document blocks, and the inline `code` mark that belongs
+      // with them. Absent from the schema, not merely hidden.
+      ...(typographyOnly
+        ? {
+            heading: false,
+            blockquote: false,
+            code: false,
+            codeBlock: false,
+            bulletList: false,
+            orderedList: false,
+            listItem: false,
+            listKeymap: false,
+            horizontalRule: false,
+          }
+        : {}),
     }),
     ...(document ? [document] : []),
     Link.configure({ openOnClick: false }),
-    // multicolor is required for the toolbar's highlight colour picker.
-    Highlight.configure({ multicolor: true }),
-    Table.configure({ resizable: true }),
-    TableRow,
-    TableHeader,
-    TableCell,
-    // The image node extended with an IndexedDB asset reference: bytes go to
-    // the asset store and the document carries only an assetId, so note HTML
-    // never holds image data. It also parses legacy data: images. See
-    // ./AssetImage.js.
-    image,
-    // A file attached to the note: a selectable atom block carrying only an
-    // IndexedDB reference and its display metadata. See ./FileAttachment.js.
-    file,
-    TaskList,
-    // nested is required for the toolbar's indent inside task lists.
-    TaskItem.configure({ nested: true }),
-    // Locally defined (see ./extensions.js): corrected list indent/outdent
-    // keymap, alignment, subscript, superscript.
-    ListIndentKeymap,
+    ...(typographyOnly
+      ? []
+      : [
+          // multicolor is required for the toolbar's highlight colour picker.
+          Highlight.configure({ multicolor: true }),
+          Table.configure({ resizable: true }),
+          TableRow,
+          TableHeader,
+          TableCell,
+          // The image node extended with an IndexedDB asset reference: bytes
+          // go to the asset store and the document carries only an assetId, so
+          // note HTML never holds image data. It also parses legacy data:
+          // images. See ./AssetImage.js.
+          image,
+          // A file attached to the note: a selectable atom block carrying only
+          // an IndexedDB reference and its display metadata. See
+          // ./FileAttachment.js.
+          file,
+          TaskList,
+          // nested is required for the toolbar's indent inside task lists.
+          TaskItem.configure({ nested: true }),
+          // Locally defined (see ./extensions.js): corrected list
+          // indent/outdent keymap.
+          ListIndentKeymap,
+        ]),
+    // Paragraph alignment — locally defined, and already schema-aware: it
+    // applies to whichever alignable types the surface actually has.
     TextAlign,
-    Subscript,
-    Superscript,
+    ...(typographyOnly ? [] : [Subscript, Superscript]),
     FontFamily,
     TextStyle,
     FontSize,

@@ -18,6 +18,7 @@
 // Pure: no React, no DOM, no storage.
 
 import { EXPORT_UNIT } from "./templateExportModel";
+import { headerTextPlain } from "./templateHeaderLayout";
 
 // Characters that would otherwise turn a user's literal text into markup.
 // Deliberately restrained: over-escaping makes ordinary prose unreadable.
@@ -233,9 +234,14 @@ export function buildTemplateExportMarkdown(model) {
   lines.push(`# ${escapeMd(model.note.title)}`);
   lines.push("");
 
-  const title = (model.branding?.title?.text || "").trim();
-  if (model.branding?.title?.enabled && title) {
-    lines.push(`## ${escapeMd(title)}`);
+  // The header text — the composed header's text object (Template Editor A1)
+  // or the legacy report title — through the one representation-agnostic
+  // reader. Multi-line header text becomes one heading line per paragraph.
+  const headerText = model.branding?.header?.enabled ? headerTextPlain(model.branding).trim() : "";
+  if (headerText) {
+    for (const line of headerText.split("\n")) {
+      if (line.trim()) lines.push(`## ${escapeMd(line.trim())}`);
+    }
     lines.push("");
   }
 

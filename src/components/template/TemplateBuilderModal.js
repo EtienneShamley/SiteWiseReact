@@ -58,8 +58,12 @@ export default function TemplateBuilderModal({ open, onClose }) {
           </button>
         </div>
 
-        {/* BODY */}
-        <div className="flex-1 overflow-auto p-4">
+        {/* BODY. While EDITING a template the body is a column that does not
+            scroll itself: TemplateBuilderDoc owns the Template editing ribbon
+            (fixed at the top) and the document scroller beneath it, so the
+            ribbon stays put while the A4 document scrolls under it. The
+            library view keeps its own scrolling body. */}
+        <div className={editing ? "flex-1 min-h-0 flex flex-col" : "flex-1 overflow-auto p-4"}>
           {editing ? (
             <TemplateBuilderDoc
               key={editingTemplateId}

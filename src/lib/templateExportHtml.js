@@ -32,6 +32,7 @@ import {
   layoutShowsLogo,
 } from "./templateBranding";
 import { RICH_BLOCK, modelToHtml } from "./templateRichText";
+import { headerTextModel, headerTextModelIsEmpty } from "./templateHeaderLayout";
 import { EXPORT_UNIT } from "./templateExportModel";
 import {
   MEDIA_LAYOUT_MODE,
@@ -427,10 +428,65 @@ export function rowHtml(fragment, ctx) {
 /* Branded header, title and document meta                                   */
 /* ------------------------------------------------------------------------ */
 
+// The composed header (Template Editor A1): the layout REGION — banner behind,
+// the logo and the header text flowing in one direction on top. Editing
+// affordances (the dashed boundary, the resize handle, selection outlines,
+// placeholders) are Template Editor classes that are simply never emitted here.
+function composedHeaderHtml(model, ctx, styles) {
+  const branding = ctx.branding;
+  const layout = branding.header.layout;
+  const showLogo = !!(model.logo && layout.logo.visible);
+  // The HEADER-RESTRICTED model — the same reader the on-screen header uses, so
+  // a header can never export a structural block the header contract forbids.
+  const textModel = headerTextModel(layout.text.value);
+  const textHtml = headerTextModelIsEmpty(textModel) ? "" : modelToHtml(textModel);
+
+  if (ctx.flavor === EXPORT_FLAVOR.DOCX) {
+    // Word has no flexbox: a row becomes a two-cell table (logo cell sized to
+    // the logo's share of the width), a column becomes stacked paragraphs.
+    const logoPx = Math.max(1, Math.floor((USABLE_WIDTH_PX * layout.logo.widthPct) / 100));
+    const logoCell = showLogo
+      ? `<img src="${escAttr(model.logo.dataUrl)}" alt="" width="${logoPx}" />`
+      : "";
+    const textCell = textHtml ? `<div class="nw-tpl-headtext">${textHtml}</div>` : "";
+    const first = layout.order === "text-first" ? textCell : logoCell;
+    const second = layout.order === "text-first" ? logoCell : textCell;
+    if (!first && !second) return "";
+    if (layout.direction === "row" && showLogo && textHtml) {
+      const logoW = Math.round(layout.logo.widthPct);
+      const textW = 100 - logoW;
+      const cells =
+        layout.order === "text-first"
+          ? `<td style="width: ${textW}%; vertical-align: middle;">${textCell}</td>` +
+            `<td style="width: ${logoW}%; vertical-align: middle;">${logoCell}</td>`
+          : `<td style="width: ${logoW}%; vertical-align: middle;">${logoCell}</td>` +
+            `<td style="width: ${textW}%; vertical-align: middle;">${textCell}</td>`;
+      return `<table class="nw-tpl-headrow" cellspacing="0" cellpadding="0" style="width: 100%;"><tbody><tr>${cells}</tr></tbody></table>`;
+    }
+    return (first ? `<p>${first}</p>` : "") + (second ? `<p>${second}</p>` : "");
+  }
+
+  const logoObj = showLogo
+    ? `<div class="nw-tpl-obj nw-tpl-obj-logo" style="${styleAttr(styles.composed.logo)}">` +
+      `<img class="nw-tpl-objlogo" alt="" src="${escAttr(model.logo.dataUrl)}" /></div>`
+    : "";
+  const textObj = textHtml ? `<div class="nw-tpl-obj nw-tpl-obj-text nw-tpl-headtext">${textHtml}</div>` : "";
+  const objects = layout.order === "text-first" ? textObj + logoObj : logoObj + textObj;
+  const dirClass = layout.direction === "column" ? "nw-tpl-objects--column" : "nw-tpl-objects--row";
+  return (
+    `<div class="nw-tpl-header nw-tpl-header--composed" style="${styleAttr(styles.composed.header)}">` +
+    `<div class="nw-tpl-banner" style="${styleAttr(styles.banner)}"></div>` +
+    `<div class="nw-tpl-objects ${dirClass}" style="${styleAttr(styles.composed.objects)}">${objects}</div>` +
+    `</div>`
+  );
+}
+
 function headerHtml(model, ctx) {
   const branding = ctx.branding;
   if (!branding.header.enabled) return "";
   const styles = brandingStyles(branding);
+
+  if (branding.header.layout) return composedHeaderHtml(model, ctx, styles);
 
   if (ctx.flavor === EXPORT_FLAVOR.DOCX) {
     // Word has no absolute positioning worth relying on: the logo is rendered
@@ -460,6 +516,9 @@ function headerHtml(model, ctx) {
 
 function titleHtml(model, ctx) {
   const title = ctx.branding.title;
+  // A composed header carries its text inside the region; the separate legacy
+  // title block belongs only to a version without a layout.
+  if (ctx.branding.header.layout) return "";
   if (!title.enabled) return "";
   const text = (title.text || "").trim();
   // A completed report never prints an empty title band.
@@ -673,6 +732,21 @@ export function templateExportComponentCss(flavor) {
     .nw-tpl-banner { position: absolute; }
     .nw-tpl-logobox { position: absolute; }
     .nw-tpl-logo { position: absolute; height: auto; display: block; }
+    .nw-tpl-header--composed { display: flex; flex-direction: column; height: auto; }
+    .nw-tpl-objects { position: relative; z-index: 1; display: flex; flex: 1 1 auto; width: 100%; min-width: 0; gap: 4mm; }
+    .nw-tpl-objects--column { align-items: stretch; }
+    .nw-tpl-obj { min-width: 0; }
+    .nw-tpl-obj-logo { flex: 0 0 auto; line-height: 0; }
+    .nw-tpl-objlogo { display: block; width: 100%; height: auto; }
+    .nw-tpl-obj-text { flex: 1 1 0; align-self: center; min-width: 0; overflow-wrap: anywhere; }
+    .nw-tpl-objects--column .nw-tpl-obj-text { flex: 0 0 auto; width: 100%; align-self: stretch; }
+    .nw-tpl-headtext { font-size: 16pt; line-height: 1.25; color: #111111; }
+    .nw-tpl-headtext p { margin: 0; }
+    .nw-tpl-headtext ul, .nw-tpl-headtext ol { margin: 0 0 4px 18px; padding: 0; }
+    .nw-tpl-headtext h1, .nw-tpl-headtext h2, .nw-tpl-headtext h3, .nw-tpl-headtext h4, .nw-tpl-headtext h5, .nw-tpl-headtext h6 { margin: 0; line-height: 1.25; }
+    .nw-tpl-headtext table { border-collapse: collapse; width: 100%; }
+    .nw-tpl-headtext td, .nw-tpl-headtext th { border: 1px solid #999999; padding: 2px 6px; vertical-align: top; }
+    .nw-tpl-headrow td { padding: 0; }
     .nw-tpl-title { margin: 0 0 4mm 0; padding: 0; }
     .nw-tpl-meta { margin: 0 0 3mm 0; font-size: 9pt; color: #555555; }
     .nw-tpl-notice { margin: 0 0 3mm 0; font-size: 9pt; color: #555555; }

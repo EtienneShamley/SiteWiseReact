@@ -52,7 +52,6 @@ import RowRefineAction from "./RowRefineAction";
 import { ROW_REFINE_STATUS } from "../../lib/templateRowRefine";
 import { sectionRefineTargetKey } from "../../lib/templateSectionRefine";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
-import useOutsideClose from "../../hooks/useOutsideClose";
 import ThreeDotMenu from "../ThreeDotMenu";
 import { BrandedHeaderBlock, BrandedTitleBlock } from "./BrandedDocumentHeader";
 import { brandingStyles, normalizeBranding } from "../../lib/templateBranding";
@@ -218,7 +217,14 @@ export default function ResizableTwoColTable({
   // Upload/replace/remove are NOT handled here — they live in the Builder's
   // Document branding panel. Only direct placement is edited on the document.
   branding = null,
-  onBrandingLogoChange, // ({ widthPct, xPct, yPct }) => void — commit on release
+  // Composed-header editing (Template Editor A1) — the Builder owns the header
+  // selection and the header text editor; a completed note passes none of
+  // these and renders the header read-only.
+  headerSelection = null, // HEADER_OBJECT id or null
+  onHeaderSelect, // (HEADER_OBJECT id | null) => void
+  onHeaderLogoWidthChange, // (widthPct) => void — commit on release
+  onHeaderHeightChange, // (heightMm) => void — commit on release
+  headerTextEditor = null,
   enableRightEditor = false,
   rightValues = {},
   onRightChange,
@@ -328,11 +334,8 @@ export default function ResizableTwoColTable({
   const [rowDrag, setRowDrag] = useState(null);
   const [colDrag, setColDrag] = useState(null);
   const [menuRowId, setMenuRowId] = useState(null);
-  // Logo selection lives here (not in the header component) because the header
-  // is re-created by a render callback on every pagination pass; selection must
-  // survive that.
-  const [logoSelected, setLogoSelected] = useState(false);
-  const headerBlockRef = useRef(null);
+  // Header object selection is OWNED BY THE BUILDER (it is read by the ribbon
+  // above this document as well as by the header block), and is passed in.
 
   // Defensive normalization at the component boundary: callers pass state they
   // already normalized, but a stored value must never reach a style object
@@ -343,11 +346,6 @@ export default function ResizableTwoColTable({
     [safeBranding]
   );
 
-  // Escape or a click outside the header deselects the logo (the hook binds
-  // both). Setting the same value is a no-op re-render in React, so this is
-  // harmless in note mode where nothing is ever selected.
-  const deselectLogo = useCallback(() => setLogoSelected(false), []);
-  useOutsideClose(headerBlockRef, deselectLogo);
   // Anchor elements for the per-row action menu (never affects layout).
   const menuAnchors = useRef(new Map());
   // Last height emitted during a row drag, so release can commit it once.
@@ -1239,23 +1237,23 @@ export default function ResizableTwoColTable({
   }
 
   // ---------- BLOCK RENDERERS (document content on the A4 pages) ----------
-  // The branded header: brand-colour banner plus the logo, bounded to the
-  // header area. Editable (select / drag / resize) in the Builder, read-only in
-  // a completed note. The wrapper ref is what "click outside to deselect" tests
-  // against.
+  // The branded header: brand-colour banner plus the header objects (logo and
+  // text) in the composed layout region, or the legacy positioned logo for a
+  // pre-A1 version. Editable (select / resize / type / drag the bottom edge) in
+  // the Template Editor, read-only in a completed note.
   function renderHeaderBlock() {
     return (
-      <div ref={headerBlockRef}>
-        <BrandedHeaderBlock
-          branding={safeBranding}
-          logoUrl={logoUrl}
-          logoStatus={logoStatus}
-          editable={!logoLocked}
-          selected={!logoLocked && logoSelected}
-          onSelect={() => setLogoSelected(true)}
-          onLogoPlacementChange={onBrandingLogoChange}
-        />
-      </div>
+      <BrandedHeaderBlock
+        branding={safeBranding}
+        logoUrl={logoUrl}
+        logoStatus={logoStatus}
+        editable={!logoLocked}
+        selection={logoLocked ? null : headerSelection}
+        onSelect={onHeaderSelect}
+        onLogoWidthChange={onHeaderLogoWidthChange}
+        onHeaderHeightChange={onHeaderHeightChange}
+        headerTextEditor={logoLocked ? null : headerTextEditor}
+      />
     );
   }
 
@@ -2068,11 +2066,14 @@ export default function ResizableTwoColTable({
     });
   }
 
-  // A title with no text still needs a block in the Builder (so the placeholder
-  // is reachable), but a completed note must never print an empty title band.
+  // The LEGACY report title block — only for a version without a composed
+  // header layout (a composed header carries its text as an object inside the
+  // region above). Read-only everywhere: a completed note never prints an
+  // empty title band, and the Template Editor never edits this representation.
   if (
+    !safeBranding.header.layout &&
     safeBranding.title.enabled &&
-    (safeBranding.title.text.trim() !== "" || !logoLocked)
+    safeBranding.title.text.trim() !== ""
   ) {
     blocks.push({
       id: TITLE_BLOCK_ID,

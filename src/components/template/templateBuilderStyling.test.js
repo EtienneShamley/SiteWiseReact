@@ -70,6 +70,9 @@ const modal = withoutComments(read("components/template/TemplateBuilderModal.js"
 const doc = withoutComments(read("components/template/TemplateBuilderDoc.js"));
 const table = withoutComments(read("components/template/ResizableTwoColTable.js"));
 const branding = withoutComments(read("components/template/BrandingPanel.js"));
+// Since Template Editor A1 (2026-08-19) the header/logo controls live on the
+// Template editing ribbon; the panel keeps the table colours.
+const ribbon = withoutComments(read("components/template/TemplateEditorRibbon.js"));
 const library = withoutComments(read("components/template/TemplateLibrary.js"));
 const threeDotMenu = withoutComments(read("components/ThreeDotMenu.js"));
 const noteTemplateDoc = withoutComments(read("components/template/NoteTemplateDoc.js"));
@@ -132,14 +135,15 @@ describe("Template Builder chrome buttons use the shared action variants", () =>
   });
 
   test("Remove logo is destructive and never turquoise", () => {
-    expect(branding).toMatch(/const dangerBtnCls = actionButtonClass\(\{\s*danger: true,/);
-    expect(branding).toMatch(/className=\{dangerBtnCls\}[\s\S]*?onClick=\{onLogoRemove\}/);
+    expect(ribbon).toMatch(/const dangerBtnCls = actionButtonClass\(\{ danger: true,/);
+    expect(ribbon).toMatch(/className=\{`\$\{dangerBtnCls\}[^`]*`\}[\s\S]*?onClick=\{onLogoRemove\}/);
   });
 
-  test("Restore default and Upload/Replace logo are ordinary actions sharing one btnCls", () => {
+  test("Restore default and Insert/Replace logo are ordinary actions sharing one btnCls", () => {
     expect(branding).toMatch(/const btnCls = actionButtonClass\(\{ className: "px-2 py-1 text-xs rounded" \}\);/);
     expect(branding).toMatch(/onClick=\{\(\) => onChange\(defaultValue\)\}/);
-    expect(branding).toContain("`${btnCls} cursor-pointer`");
+    expect(ribbon).toMatch(/const btnCls = actionButtonClass\(\{ className: "px-2 py-1 text-xs rounded" \}\);/);
+    expect(ribbon).toContain("`${btnCls} cursor-pointer");
   });
 
   test("no danger control in the Builder emits an open, primary or pressed class", () => {
@@ -165,13 +169,14 @@ describe("Template Builder chrome buttons use the shared action variants", () =>
 /* --------------------------------------------------------------- fields */
 
 describe("Template Builder chrome form controls use the shared field treatment", () => {
-  test("BrandingPanel's text/number/select inputs share one nw-field class", () => {
+  test("BrandingPanel's text/number inputs and the ribbon's fields share one nw-field class", () => {
     expect(branding).toContain('const inputCls = "nw-field px-2 py-1 text-sm rounded";');
-    // Every ColorField hex input, NumberField and SelectField goes through it.
-    expect(branding).toContain("${inputCls} w-28 font-mono");
+    // Every ColorField hex input and NumberField goes through it.
+    expect(branding).toContain('${inputCls} ${compact ? "w-24 text-xs" : "w-28"} font-mono');
     expect(branding).toContain("${inputCls} w-24");
-    expect(branding).toContain("${inputCls} flex-1 min-w-[14rem]");
-    expect(branding).toMatch(/className=\{inputCls\}\s*\n\s*value=\{value\}/);
+    // The ribbon's numeric fields and selects carry the same shared class.
+    expect(ribbon).toMatch(/const fieldCls =\s*\n?\s*"nw-field /);
+    expect(ribbon).toMatch(/const selectCls = "nw-field /);
   });
 
   test("the field-type select and dropdown-option input use the light-locked equivalent", () => {
@@ -197,9 +202,9 @@ describe("Template Builder chrome form controls use the shared field treatment",
   });
 
   test("every native select in the Builder chrome is preserved as a real <select>", () => {
-    expect(branding).toContain("<select");
+    expect(ribbon).toContain("<select");
     expect(table).toContain("<select");
-    for (const source of [branding, table]) {
+    for (const source of [ribbon, branding, table]) {
       expect(source).not.toMatch(/role="(listbox|combobox)"/);
       expect(source).not.toMatch(/import .* from "(react-select|downshift|@headlessui)/);
     }
@@ -222,7 +227,7 @@ describe("Template Builder chrome form controls use the shared field treatment",
 describe("colour inputs keep their native swatch and gain only a focus ring", () => {
   test("the colour picker stays a native input[type=color] with nw-focusable", () => {
     expect(branding).toContain('type="color"');
-    expect(branding).toContain('className="nw-focusable h-7 w-10 rounded border border-gray-300 dark:border-gray-700 bg-white"');
+    expect(branding).toContain('className="nw-focusable h-7 w-10 rounded border border-gray-300 dark:border-gray-700 bg-white disabled:opacity-40"');
   });
 
   test("nw-focusable adds only a focus ring, never a background or border colour", () => {
@@ -251,20 +256,20 @@ describe("colour inputs keep their native swatch and gain only a focus ring", ()
 
 /* --------------------------------------------------------------- logo */
 
-describe("logo controls are unchanged behaviourally, restyled only", () => {
-  test("upload, replace and remove call the same handlers", () => {
-    expect(branding).toContain("if (file && onLogoFile) onLogoFile(file);");
-    expect(branding).toContain("onClick={onLogoRemove}");
-    expect(branding).toContain('accept={LOGO_ACCEPT}');
+describe("logo controls are unchanged behaviourally, moved to the ribbon (A1)", () => {
+  test("insert, replace and remove call the same handlers", () => {
+    expect(ribbon).toContain("if (file && onLogoFile) onLogoFile(file);");
+    expect(ribbon).toContain("onClick={onLogoRemove}");
+    expect(ribbon).toContain('accept={LOGO_ACCEPT}');
   });
 
   test("Remove logo stays disabled when there is no logo", () => {
-    expect(branding).toContain("disabled={!hasLogo}");
+    expect(ribbon).toContain("disabled={!hasLogo || headerOff}");
   });
 
   test("file input stays visually hidden behind its label trigger, not removed", () => {
-    expect(branding).toContain('type="file"');
-    expect(branding).toContain('className="sr-only"');
+    expect(ribbon).toContain('type="file"');
+    expect(ribbon).toContain('className="sr-only"');
   });
 
   test("IndexedDB asset handling in TemplateBuilderDoc is untouched", () => {

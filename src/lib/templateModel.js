@@ -9,6 +9,7 @@ import {
 } from "../templates/defaultTwoColDoc";
 import { newId } from "./id";
 import { normalizeBranding } from "./templateBranding";
+import { brandingIdentity } from "./templateHeaderLayout";
 import { sectionContentReferencesAsset } from "./templateSectionContent";
 import { sectionDocReferencesAsset } from "./templateSectionDoc";
 
@@ -238,15 +239,21 @@ export function publishTemplateVersion(templateId, definition) {
   // legacy template stays a no-op instead of publishing a spurious version.
   // Key order is identical on both sides because normalizeBranding always
   // builds the object in one fixed order.
+  //
+  // Branding is compared by CANONICAL IDENTITY (src/lib/templateHeaderLayout.js):
+  // the Template Editor always edits the composed `header.layout`, projecting a
+  // legacy positioned header into it in the draft, so the stored legacy version
+  // is projected the same way for the comparison. An untouched legacy template
+  // therefore still publishes nothing, and no stored version is ever rewritten.
   if (
     current &&
     JSON.stringify({
       leftPct: current.leftPct,
       logoAssetId: current.logoAssetId ?? null,
       logoSrc: current.logoSrc ?? null,
-      branding: normalizeBranding(current.branding),
+      branding: brandingIdentity(current.branding),
       rows: current.rows,
-    }) === JSON.stringify(next)
+    }) === JSON.stringify({ ...next, branding: brandingIdentity(next.branding) })
   ) {
     return current;
   }

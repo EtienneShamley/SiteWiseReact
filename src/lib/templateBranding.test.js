@@ -261,9 +261,13 @@ describe("unknown properties are dropped, not interpreted", () => {
       "bannerShape",
       "enabled",
       "heightMm",
+      "layout",
       "layoutStyle",
       "logo",
     ]);
+    // A legacy/positioned header carries `layout: null` — never a projected
+    // object on the read path (see templateHeaderLayout.js).
+    expect(b.header.layout).toBeNull();
     expect(Object.keys(b.header.logo).sort()).toEqual(["widthPct", "xPct", "yPct"]);
     expect(Object.keys(b.title).sort()).toEqual([
       "alignment",

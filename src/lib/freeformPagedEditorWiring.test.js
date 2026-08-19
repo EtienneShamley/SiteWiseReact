@@ -54,7 +54,7 @@ describe("one continuous editor, not one per page", () => {
     for (const source of EDITOR_SIDE) expect(source).not.toMatch(/useEditor/);
   });
 
-  test("only two components render an EditorContent, and neither is per-page", () => {
+  test("only three components render an EditorContent, and none is per-page", () => {
     const files = fs
       .readdirSync(path.join(SRC, "components"), { recursive: true })
       .filter((name) => typeof name === "string" && name.endsWith(".js"));
@@ -67,6 +67,10 @@ describe("one continuous editor, not one per page", () => {
     // immediately.
     expect(renderers.sort()).toEqual([
       path.join("editor", "FreeformPagedEditor.js"),
+      // The Template header TEXT object's editor (Template Editor A1): ONE per
+      // Template Editor session, mounted inside the header block on page 1 —
+      // never one per page.
+      path.join("template", "BrandedDocumentHeader.js"),
       // The flexible Template Section's own editor: ONE per Section, mounted
       // only while that Section is active — never one per page, and never one
       // per stored item.

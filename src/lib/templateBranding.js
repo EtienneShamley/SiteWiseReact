@@ -30,6 +30,34 @@
 // text, white cells, neutral 1px borders, no title). Opening an old template
 // must not recolour it or change its pagination. Nothing here rewrites stored
 // data — normalization is read-time only, exactly like normalizeRows().
+//
+// HEADER LAYOUT (Template Editor A1, 2026-08-19) — `header.layout` is a second,
+// ADDITIVE and OPTIONAL representation of the header's COMPOSITION: a
+// constrained flex row/column of two header OBJECTS — the logo and the header
+// text — instead of a logo positioned by percentages inside a preset box plus
+// a separate title block below the header. It exists because the preset model
+// could not put a logo and a title on one row, sized the logo relative to a
+// preset sub-box (which is what made it tiny), and treated the title as
+// configuration rather than document text.
+//
+//   - A version WITHOUT `header.layout` (every version published before A1)
+//     keeps rendering through the legacy positioned renderer, exactly as
+//     before: `normalizeBranding` returns `layout: null` for it and nothing is
+//     projected on the read path. Pinned notes and their exports are unchanged.
+//   - The Template Editor ALWAYS edits the layout model. Opening a legacy
+//     version projects its preset into a layout IN THE DRAFT ONLY
+//     (`projectLegacyHeaderLayout`) — deterministic and pure — and publishing
+//     compares CANONICAL forms (`brandingIdentity`, which applies the same
+//     projection to both sides), so re-saving an untouched legacy template is
+//     still a no-op and no stored version is ever rewritten.
+//   - The header text is an ordinary Template rich-text VALUE (a plain string
+//     or `{ format: "richtext/1", html }`, src/lib/templateRichText.js), so it
+//     goes through the one sanitization boundary the product already trusts
+//     and renders through the one rich-text view and the one export serializer.
+//     This module only checks its SHAPE (exactly as `answers` are stored raw
+//     and sanitized on every read); the projection of a legacy title into a
+//     rich value and the canonical identity live in src/lib/templateHeaderLayout.js
+//     because they need the rich-text serializer, which imports this module.
 
 /* ------------------------------- enums ---------------------------------- */
 
@@ -48,11 +76,14 @@ export const HEADER_LAYOUT = {
   BANNER_ONLY: "banner-only",
 };
 
+// `bannerLabel` is the wording the Template Editor's ribbon uses: with the
+// composed layout (A1) the preset governs only WHERE THE BANNER SITS — the
+// logo's placement is the layout's own — so the label describes the banner.
 export const HEADER_LAYOUTS = [
-  { value: HEADER_LAYOUT.LOGO_LEFT, label: "Logo left, banner beside" },
-  { value: HEADER_LAYOUT.LOGO_OVER, label: "Logo over banner" },
-  { value: HEADER_LAYOUT.LOGO_ABOVE, label: "Logo above banner" },
-  { value: HEADER_LAYOUT.BANNER_ONLY, label: "Banner only" },
+  { value: HEADER_LAYOUT.LOGO_LEFT, label: "Logo left, banner beside", bannerLabel: "Banner beside a logo zone" },
+  { value: HEADER_LAYOUT.LOGO_OVER, label: "Logo over banner", bannerLabel: "Banner behind everything" },
+  { value: HEADER_LAYOUT.LOGO_ABOVE, label: "Logo above banner", bannerLabel: "Banner strip at the bottom" },
+  { value: HEADER_LAYOUT.BANNER_ONLY, label: "Banner only", bannerLabel: "Banner only (full width)" },
 ];
 
 // Shape of the banner's leading edge. Implemented with CONSTANT clip-path
@@ -84,6 +115,42 @@ export const TITLE_WEIGHTS = [
   { value: TITLE_WEIGHT.BOLD, label: "Bold" },
 ];
 
+// ---- Header layout (the composed model) ----
+// The header's two objects flow in ONE constrained direction. A row puts the
+// logo beside the text (the text takes the remaining width); a column stacks
+// them (the text takes the full width). This is deliberately a flow layout, not
+// a canvas: alignment and order are the whole vocabulary.
+export const HEADER_DIRECTION = { ROW: "row", COLUMN: "column" };
+
+export const HEADER_DIRECTIONS = [
+  { value: HEADER_DIRECTION.ROW, label: "Logo beside text" },
+  { value: HEADER_DIRECTION.COLUMN, label: "Logo above or below text" },
+];
+
+export const HEADER_ORDER = { LOGO_FIRST: "logo-first", TEXT_FIRST: "text-first" };
+
+export const HEADER_ORDERS = [
+  { value: HEADER_ORDER.LOGO_FIRST, label: "Logo first" },
+  { value: HEADER_ORDER.TEXT_FIRST, label: "Text first" },
+];
+
+// Cross-axis alignment of the logo object: in a ROW that is vertical
+// (top / middle / bottom), in a COLUMN it is horizontal (left / centre / right).
+export const HEADER_OBJECT_ALIGN = { START: "start", CENTER: "center", END: "end" };
+
+export const HEADER_OBJECT_ALIGNS = [
+  { value: HEADER_OBJECT_ALIGN.START, label: "Start" },
+  { value: HEADER_OBJECT_ALIGN.CENTER, label: "Centre" },
+  { value: HEADER_OBJECT_ALIGN.END, label: "End" },
+];
+
+// Human labels for the logo alignment, per direction (the ribbon reads these).
+export function headerObjectAlignLabels(direction) {
+  return direction === HEADER_DIRECTION.COLUMN
+    ? { start: "Left", center: "Centre", end: "Right" }
+    : { start: "Top", center: "Middle", end: "Bottom" };
+}
+
 /* ------------------------------- limits --------------------------------- */
 // Every numeric limit lives here so the Builder inputs, the clamps and the
 // tests all read the same values.
@@ -92,6 +159,19 @@ export const TITLE_WEIGHTS = [
 // fixed logo band, so an existing template's pagination is unchanged.
 export const HEADER_HEIGHT_MM = { min: 8, max: 80, default: 29 };
 export const LOGO_WIDTH_PCT = { min: 5, max: 100, default: 40 };
+// The composed model's logo width is a percentage of the HEADER's content
+// width — never of a preset sub-box — so 40% means 40% of the header.
+export const HEADER_LOGO_WIDTH_PCT = { min: 5, max: 100, default: 20 };
+// Sanity bounds for the header text value: a plain string is clamped, a rich
+// value whose markup is implausibly large is dropped to empty. Neither is a
+// security control — the value is sanitized on every read by the rich-text
+// boundary regardless.
+export const HEADER_TEXT_MAX_LENGTH = 2000;
+export const HEADER_TEXT_MAX_HTML_LENGTH = 40000;
+// The rich-text tag the header text may carry (mirrors templateRichText.js —
+// duplicated as a literal here only to keep this module free of that import
+// cycle; locked equal by test).
+const HEADER_TEXT_RICH_FORMAT = "richtext/1";
 export const LOGO_POS_PCT = { min: 0, max: 100, default: 50 };
 export const TITLE_FONT_SIZE_PT = { min: 10, max: 28, default: 16 };
 export const BORDER_WIDTH_PX = { min: 0, max: 3, default: 1 };
@@ -139,6 +219,9 @@ export const DEFAULT_BRANDING = Object.freeze({
       xPct: LOGO_POS_PCT.default,
       yPct: LOGO_POS_PCT.default,
     }),
+    // ABSENT by default: an absent layout means "legacy positioned header",
+    // which is what keeps every pre-A1 version rendering as it did.
+    layout: null,
   }),
   title: Object.freeze({
     enabled: false,
@@ -156,6 +239,21 @@ export const DEFAULT_BRANDING = Object.freeze({
     borderColor: DEFAULT_COLORS.border,
     borderWidthPx: BORDER_WIDTH_PX.default,
   }),
+});
+
+// The layout a NEW composed header starts from when nothing legacy is being
+// projected (see templateHeaderLayout.js — the Builder projects the legacy
+// defaults instead, so this is the shape reference and the fallback for a
+// partial stored layout).
+export const DEFAULT_HEADER_LAYOUT = Object.freeze({
+  direction: HEADER_DIRECTION.ROW,
+  order: HEADER_ORDER.LOGO_FIRST,
+  logo: Object.freeze({
+    visible: true,
+    widthPct: HEADER_LOGO_WIDTH_PCT.default,
+    align: HEADER_OBJECT_ALIGN.CENTER,
+  }),
+  text: Object.freeze({ value: "" }),
 });
 
 /* --------------------------- value normalizers --------------------------- */
@@ -219,6 +317,75 @@ const HEADER_LAYOUT_VALUES = HEADER_LAYOUTS.map((l) => l.value);
 const BANNER_SHAPE_VALUES = BANNER_SHAPES.map((s) => s.value);
 const TITLE_ALIGNMENT_VALUES = TITLE_ALIGNMENTS.map((a) => a.value);
 const TITLE_WEIGHT_VALUES = TITLE_WEIGHTS.map((w) => w.value);
+const HEADER_DIRECTION_VALUES = HEADER_DIRECTIONS.map((d) => d.value);
+const HEADER_ORDER_VALUES = HEADER_ORDERS.map((o) => o.value);
+const HEADER_OBJECT_ALIGN_VALUES = HEADER_OBJECT_ALIGNS.map((a) => a.value);
+
+/* ------------------------- header layout normalizer ----------------------- */
+
+// The header text value is an ordinary Template answer VALUE — a plain string
+// or a `{ format: "richtext/1", html }` object. Only its SHAPE is checked here
+// (a plain string never becomes markup, a malformed object becomes empty); its
+// markup is sanitized on every read by src/lib/templateRichText.js exactly as
+// a Section answer is. Nothing else is accepted.
+export function normalizeHeaderTextValue(value) {
+  if (typeof value === "string") return value.slice(0, HEADER_TEXT_MAX_LENGTH);
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.format === HEADER_TEXT_RICH_FORMAT &&
+    typeof value.html === "string" &&
+    value.html.length <= HEADER_TEXT_MAX_HTML_LENGTH
+  ) {
+    return { format: HEADER_TEXT_RICH_FORMAT, html: value.html };
+  }
+  return "";
+}
+
+// Read-time normalization of a stored `header.layout`. `null` (the documented
+// "legacy positioned header" state) for anything that is not an object; a
+// whitelisted object otherwise, with each part falling back to
+// DEFAULT_HEADER_LAYOUT. Never mutates its argument.
+export function normalizeHeaderLayout(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const logo = raw.logo && typeof raw.logo === "object" ? raw.logo : {};
+  const text = raw.text && typeof raw.text === "object" ? raw.text : {};
+  return {
+    direction: normalizeEnum(
+      raw.direction,
+      HEADER_DIRECTION_VALUES,
+      DEFAULT_HEADER_LAYOUT.direction
+    ),
+    order: normalizeEnum(raw.order, HEADER_ORDER_VALUES, DEFAULT_HEADER_LAYOUT.order),
+    logo: {
+      visible: normalizeBoolean(logo.visible, DEFAULT_HEADER_LAYOUT.logo.visible),
+      widthPct: roundTenth(clampNumber(logo.widthPct, HEADER_LOGO_WIDTH_PCT)),
+      align: normalizeEnum(
+        logo.align,
+        HEADER_OBJECT_ALIGN_VALUES,
+        DEFAULT_HEADER_LAYOUT.logo.align
+      ),
+    },
+    text: {
+      value: normalizeHeaderTextValue(text.value),
+    },
+  };
+}
+
+function roundTenth(n) {
+  return Math.round(n * 10) / 10;
+}
+
+// Clamps a dragged/typed composed-logo width to its range, rounded to 0.1%.
+export function clampHeaderLogoWidthPct(value) {
+  return roundTenth(clampNumber(value, HEADER_LOGO_WIDTH_PCT));
+}
+
+// Clamps a dragged/typed header height to its range, rounded to 0.1mm.
+export function clampHeaderHeightMm(value) {
+  return roundTenth(clampNumber(value, HEADER_HEIGHT_MM));
+}
 
 /* --------------------------- branding normalizer ------------------------- */
 
@@ -258,6 +425,9 @@ export function normalizeBranding(raw) {
         xPct: clampNumber(logo.xPct, LOGO_POS_PCT),
         yPct: clampNumber(logo.yPct, LOGO_POS_PCT),
       },
+      // The composed layout — `null` for a legacy version, never invented on
+      // the read path (see the module note and templateHeaderLayout.js).
+      layout: normalizeHeaderLayout(header.layout),
     },
     title: {
       enabled: normalizeBoolean(title.enabled, DEFAULT_BRANDING.title.enabled),
@@ -346,6 +516,21 @@ const LOGO_BOX = Object.freeze({
   [HEADER_LAYOUT.BANNER_ONLY]: null, // no logo in this preset
 });
 
+// Cross-axis alignment enum -> flexbox keyword. A constant map, so nothing
+// stored is ever interpolated into a style value.
+const FLEX_ALIGN = Object.freeze({
+  [HEADER_OBJECT_ALIGN.START]: "flex-start",
+  [HEADER_OBJECT_ALIGN.CENTER]: "center",
+  [HEADER_OBJECT_ALIGN.END]: "flex-end",
+});
+
+// The bounded box (percent of the header) a legacy preset placed its logo in —
+// exported so the legacy→layout projection can size the logo relative to the
+// HEADER instead of that box, which is what made the logo look tiny.
+export function legacyLogoBox(layoutStyle) {
+  return LOGO_BOX[normalizeEnum(layoutStyle, HEADER_LAYOUT_VALUES, DEFAULT_BRANDING.header.layoutStyle)];
+}
+
 export function bannerClipPath(shape) {
   return BANNER_CLIP_PATHS[normalizeEnum(shape, BANNER_SHAPE_VALUES, BANNER_SHAPE.STRAIGHT)];
 }
@@ -412,6 +597,21 @@ export function brandingStyles(rawBranding) {
       fontWeight: b.title.fontWeight === TITLE_WEIGHT.BOLD ? 700 : 400,
       textAlign: b.title.alignment,
     },
+    // The composed header (null for a legacy version). The header box takes
+    // `heightMm` as a MINIMUM height: the objects flow inside it and a taller
+    // logo or longer text grows the box rather than being clipped — the drag
+    // handle sets the minimum. The logo's width is a percentage of the header
+    // content width; height stays auto (aspect ratio can never be distorted).
+    composed: b.header.layout
+      ? {
+          header: { minHeight: `${b.header.heightMm}mm` },
+          objects: { flexDirection: b.header.layout.direction },
+          logo: {
+            width: `${b.header.layout.logo.widthPct}%`,
+            alignSelf: FLEX_ALIGN[b.header.layout.logo.align],
+          },
+        }
+      : null,
     // CSS custom properties consumed by template.css. They cascade from the
     // wrapper above <PagedDocument> to every row on every page, so master rows,
     // note-specific custom rows and Photo/File continuation rows all inherit

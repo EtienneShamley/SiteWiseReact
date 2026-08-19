@@ -72,36 +72,176 @@
   object-fit: contain;
 }
 
-/* Builder only: the logo becomes directly manipulable. touch-action:none stops
-   the browser claiming the gesture for scrolling, so touch drag works. */
-.brand-logo--editable {
-  cursor: move;
-  touch-action: none;
+/* ---- Composed header (Template Editor A1): the layout REGION ----
+ * `branding.header.layout` present. The header box takes heightMm as a
+ * MINIMUM height (inline); the banner sits absolutely behind; the two header
+ * OBJECTS flow in one constrained flex direction on top. */
+.brand-header--composed {
+  display: flex;
+  flex-direction: column;
+  height: auto; /* min-height is supplied inline from heightMm */
+  /* Nothing can bleed: the banner is bounded by percentages of this box and
+     the objects grow it. Visible so the selection outlines and the bottom
+     resize affordance are not clipped. */
+  overflow: visible;
+}
+
+.brand-objects {
+  position: relative; /* above the absolutely placed banner */
+  z-index: 1;
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  gap: 4mm;
+  /* flex-direction is supplied inline from the layout */
+}
+
+.brand-header--column .brand-objects {
+  align-items: stretch;
+}
+
+.brand-obj {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+/* The logo object: width is a percentage of the header content width (inline);
+   height stays auto — the aspect ratio can never be distorted and no max-height
+   cap can shrink it. */
+.brand-obj-logo {
+  position: relative;
+  flex: 0 0 auto;
+  line-height: 0;
+  /* align-self (cross-axis alignment) is supplied inline from the layout */
+}
+
+.brand-obj-logo .brand-logo-img {
+  width: 100%;
+  height: auto;
+  max-height: none;
+}
+
+/* The text object: in a row it takes the remaining width and centres
+   vertically; in a column it takes the full width. */
+.brand-obj-text {
+  position: relative;
+  flex: 1 1 0;
+  align-self: center;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.brand-header--column .brand-obj-text {
+  flex: 0 0 auto;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Header text typography — the base the rich-text marks (font, size, colour,
+   weight) build on. Same rules for the static view (`.twocol-rich`) and the
+   live editor (`.twocol-rich-input`), so activating the text cannot resize it. */
+.brand-obj-text.twocol-rich,
+.brand-obj-text .twocol-rich-input {
+  font-size: 16pt;
+  line-height: 1.25;
+  padding: 0;
+  min-height: 1.25em;
+  color: #111111;
+}
+
+/* Editing boundary and object affordances (Template Editor only). The export
+   never emits these classes and print hides them. */
+.brand-header--editable {
+  outline: 1px dashed rgba(57, 221, 233, 0.75);
+  outline-offset: -1px;
+}
+
+.brand-obj--editable {
+  cursor: pointer;
   outline: 1px dashed transparent;
   outline-offset: 3px;
 }
 
-.brand-logo--editable:hover {
+.brand-obj-text.brand-obj--editable {
+  cursor: text;
+}
+
+.brand-obj--editable:hover {
   outline-color: rgba(57, 221, 233, 0.55);
 }
 
-.brand-logo--editable:focus-visible {
+.brand-obj--editable:focus-visible,
+.brand-obj--selected,
+.brand-obj--selected:hover {
   outline: 2px solid #39dde9;
   outline-offset: 3px;
 }
 
-/* Visible selection state. */
-.brand-logo--selected,
-.brand-logo--selected:hover {
+/* Placeholder shown over an EMPTY, unselected header text object in the
+   Template Editor only. Absolutely placed so it adds no measured height. */
+.brand-obj-text-placeholder {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.3;
+  font-style: italic;
+  color: rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+}
+
+/* The header height RESIZE AFFORDANCE on the region's bottom edge (Template
+   Editor only). Absolutely placed and outside the flow, so it never changes
+   the header's measured height. touch-action:none so touch drags work. */
+.brand-header-resize {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -6px;
+  height: 12px;
+  z-index: 3;
+  cursor: ns-resize;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brand-header-resize-grip {
+  display: block;
+  width: 44px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(57, 221, 233, 0.75);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+
+.brand-header-resize:hover .brand-header-resize-grip,
+.brand-header-resize:focus-visible .brand-header-resize-grip {
+  background: #39dde9;
+  transform: scaleX(1.15);
+}
+
+.brand-header-resize:focus-visible {
   outline: 2px solid #39dde9;
-  outline-offset: 3px;
+  outline-offset: 1px;
+}
+
+@media (pointer: coarse) {
+  .brand-header-resize {
+    height: 20px;
+    bottom: -10px;
+  }
 }
 
 /* ---- Four corner resize handles (pointer/touch affordance) ----
- * Pointer-only by design: the keyboard and precision paths are arrow-key
- * movement on the focused logo and the numeric width/X/Y inputs in the
- * Document branding panel. They are absolutely positioned, so showing them
- * never changes the header block's measured height. */
+ * Shown on the SELECTED logo object. Pointer-only by design: the keyboard and
+ * precision paths are the arrow keys on the focused logo and the ribbon's
+ * numeric width field. They are absolutely positioned, so showing them never
+ * changes the header block's measured height. */
 .brand-logo-handle {
   position: absolute;
   width: 12px;
@@ -169,7 +309,8 @@
   }
 }
 
-/* ---- Logo placeholder / unavailable states ---- */
+/* ---- Logo placeholder / unavailable states ----
+ * Absolute inside a legacy logo box; static inside a composed logo object. */
 .brand-logo-state {
   position: absolute;
   display: flex;
@@ -196,6 +337,13 @@
   color: #991b1b;
 }
 
+.brand-logo-state--composed {
+  position: static;
+  width: 100%;
+  min-height: 12mm;
+  line-height: 1.3;
+}
+
 /* ---- Report title block ---- */
 .brand-title {
   box-sizing: border-box;
@@ -217,12 +365,16 @@
   .brand-logo-handle,
   .brand-logo-state--empty,
   .brand-title-placeholder,
-  .branding-panel {
+  .brand-obj-text-placeholder,
+  .brand-header-resize,
+  .branding-panel,
+  .nw-template-ribbon {
     display: none !important;
   }
 
-  .brand-logo--editable,
-  .brand-logo--selected {
+  .brand-header--editable,
+  .brand-obj--editable,
+  .brand-obj--selected {
     outline: none !important;
   }
 

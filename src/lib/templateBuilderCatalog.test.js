@@ -688,7 +688,12 @@ describe("the Builder configures no Section size and no image size", () => {
     expect(MEDIA_MAX_WIDTH_PCT).toBe(100);
     expect(clampMediaWidthPct(100)).toBe(100);
     expect(clampMediaWidthPct(140)).toBe(100);
-    expect(read(BUILDER_DOC)).not.toContain("widthPct");
+    // The Builder touches no MEDIA width. (Since Template Editor A1 it does
+    // hold the header LOGO's width — `branding.header.layout.logo.widthPct`,
+    // a branding value of the version, not a Section image's width — so the
+    // check is on the media-core rule, not on the bare word.)
+    expect(read(BUILDER_DOC)).not.toMatch(/clampMediaWidthPct|measuredWidthPctOf|data-width-pct/);
+    expect(read(BUILDER_DOC)).not.toMatch(/sectionDoc[\s\S]{0,80}widthPct/);
     expect(read(FIELDS)).not.toContain("widthPct");
   });
 
