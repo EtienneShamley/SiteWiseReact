@@ -480,9 +480,9 @@ describe("structured types are unchanged", () => {
     expect(table).toContain("type === FIELD_TYPE.SELECT && (");
     expect(table).toContain("Dropdown options");
     expect(table).toContain("Add option");
-    expect(table).toContain("handleOptionAdd(row)");
-    expect(table).toContain("handleOptionRename(row, o.id, e.target.value)");
-    expect(table).toContain("handleOptionDelete(row, o.id)");
+    expect(table).toContain("handleOptionAdd(row, cell)");
+    expect(table).toContain("handleOptionRename(row, cell, o.id, e.target.value)");
+    expect(table).toContain("handleOptionDelete(row, cell, o.id)");
   });
 });
 
@@ -721,7 +721,7 @@ describe("the Builder configures no Section size and no image size", () => {
     // user actually dragged it, so it is deliberately not removed.
     const table = read(TABLE);
     expect(table).toContain("twocol-resize-handle");
-    expect(table).toContain("startRowDrag(row, e)");
+    expect(table).toContain("startRowDrag(row, e, cells)");
     expect(table).toContain("Drag row borders to adjust height");
     expect(read(BUILDER_DOC)).toContain("onRowHeightChange={changeRowHeight}");
   });

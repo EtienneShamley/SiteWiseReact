@@ -56,6 +56,23 @@ import ThreeDotMenu from "../ThreeDotMenu";
 import { BrandedHeaderBlock, BrandedTitleBlock } from "./BrandedDocumentHeader";
 import { brandingStyles, normalizeBranding } from "../../lib/templateBranding";
 import { mmToPx } from "../../lib/pageGeometry";
+import {
+  COLUMN_SIDE,
+  canDeleteTableColumn,
+  canInsertTableColumn,
+  canMergeCell,
+  canSplitCell,
+  cellGridSpan,
+  columnTemplate,
+  resizeColumnsAt,
+  rowCells,
+  valueColumns as normalizeValueColumns,
+} from "../../lib/templateColumns";
+import {
+  LEGACY_EVIDENCE_MIN_PX,
+  rowDragMinPx,
+  rowMinHeightPx,
+} from "../../lib/templateRowHeight";
 import { actionButtonClass } from "../../lib/interactionStyles";
 
 /**
@@ -129,11 +146,26 @@ import { actionButtonClass } from "../../lib/interactionStyles";
  *   it never changes a block's measured height (pagination stays stable) and is
  *   hidden in print (see template.css).
  *
- * COLUMN DIVIDER (`enableColumnDivider`, builder only):
- * - Dragging the vertical divider sets the label-column width; the value is the
- *   template's persisted `leftPct` and is published with the version, so every
- *   page and every note pinned to that version shares one ratio. In note mode
- *   the ratio comes from the pinned version and is deliberately not adjustable.
+ * COLUMN DIVIDERS (`enableColumnDivider`, builder only):
+ * - The LABEL divider sets the label-column width; the value is the template's
+ *   persisted `leftPct` and is published with the version, so every page and
+ *   every note pinned to that version shares one ratio.
+ * - The TABLE-COLUMN dividers set the widths of the value-column GRID
+ *   (`valueColumns`, src/lib/templateColumns.js), which is likewise a property
+ *   of the version: dragging one from any row moves the shared grid, so every
+ *   row realigns together and no row owns a width of its own.
+ * - In note mode neither is adjustable: both come from the pinned version.
+ *
+ * THE TABLE GRID AND A ROW'S CELLS:
+ * - Every row is laid out against the SAME grid track list, so a value column
+ *   runs vertically through the whole table. A row's cells are mapped onto that
+ *   grid by SPAN (`rowCells`), so an undivided row is one cell spanning
+ *   everything and a divided row is several cells whose spans total the grid.
+ * - Structural changes are the Builder's alone and come in two clearly separate
+ *   kinds: TABLE-WIDE (`onInsertTableColumn` / `onDeleteTableColumn` /
+ *   `onColumnWidths*`), which change the grid and every row with it, and
+ *   ROW-LOCAL (`onSplitCell` / `onMergeCell`), which change how one row's cells
+ *   sit on that grid and nothing else.
  *
  * FLEXIBLE SECTIONS (note mode, since Phase G):
  * - A flexible Section body — a Text or custom row's whole answer, or the
@@ -319,6 +351,24 @@ export default function ResizableTwoColTable({
   rowActionsMode = "none",
   onInsertRow, // (anchorRowId, "above" | "below") => void
   onDeleteRow, // (rowId) => void — offered for note-specific custom rows only
+  // THE TABLE'S VALUE-COLUMN GRID (src/lib/templateColumns.js): the ordered
+  // `[{ id, widthPct }]` every row's cells are mapped onto. Absent — every
+  // template published before the grid existed — reads as the single full-width
+  // column the table has always had.
+  valueColumns = null,
+  // STRUCTURAL ACTIONS (Template Builder only — see the block comment above).
+  // They change the TEMPLATE's structure, so a completed note never receives
+  // them and can never reach a structural mutation from its own surface.
+  //
+  // The first three are TABLE-WIDE — they change the grid, and every row with
+  // it. The last two are ROW-LOCAL — they change how one row's cells sit on the
+  // grid, and nothing else in the table.
+  onInsertTableColumn, // (gridIndex) => void
+  onDeleteTableColumn, // (columnId) => void
+  onColumnWidthsChange, // (widths[]) => void — continuous while dragging
+  onColumnWidthsCommit, // (widths[]) => void — once, on drag release
+  onSplitCell, // (rowId, cellId) => void
+  onMergeCell, // (rowId, cellId, "left" | "right") => void
   onRowLabelChange, // (rowId, label) => void
   onRowHeightChange, // (rowId, px) => void — continuous while dragging
   onRowHeightCommit, // (rowId, px) => void — once, on drag release
@@ -333,7 +383,16 @@ export default function ResizableTwoColTable({
 }) {
   const [rowDrag, setRowDrag] = useState(null);
   const [colDrag, setColDrag] = useState(null);
-  const [menuRowId, setMenuRowId] = useState(null);
+  // The INNER column divider being dragged, if any:
+  // `{ rowId, cells, dividerIndex, el }`. Separate state from `colDrag`
+  // (the label-column divider) because they resize different things: the label
+  // column is one ratio shared by the whole template, an inner divider is this
+  // row's own share of its own value area.
+  const [cellDrag, setCellDrag] = useState(null);
+  // Which CELL's action menu is open: `"<rowId>::<cellId>"`. Keyed by cell
+  // rather than by row because the Builder gives each value column its own
+  // trigger, so a column action is never ambiguous about which column it means.
+  const [menuKey, setMenuKey] = useState(null);
   // Header object selection is OWNED BY THE BUILDER (it is read by the ribbon
   // above this document as well as by the header block), and is passed in.
 
@@ -350,11 +409,20 @@ export default function ResizableTwoColTable({
   const menuAnchors = useRef(new Map());
   // Last height emitted during a row drag, so release can commit it once.
   const lastRowHeight = useRef(null);
+  // Last width list emitted during an inner column drag, committed once on
+  // release — exactly the commit-once rule the row-height drag already uses.
+  const lastColumnWidths = useRef(null);
 
   const leftWidth = useMemo(() => {
     const clamped = Math.max(10, Math.min(40, Number(leftPct) || 18));
     return `${clamped}%`;
   }, [leftPct]);
+
+  // THE TABLE'S GRID, normalized once at the component boundary. Every row is
+  // laid out against this same list, which is exactly what makes a value column
+  // run vertically through the table.
+  const grid = useMemo(() => normalizeValueColumns(valueColumns), [valueColumns]);
+  const gridTracks = useMemo(() => columnTemplate(leftWidth, grid), [leftWidth, grid]);
 
   const showRowActions = rowActionsMode === "note" || rowActionsMode === "builder";
 
@@ -373,17 +441,27 @@ export default function ResizableTwoColTable({
   //
   // Row identity (not array index) drives both, because the note view
   // interleaves note-specific custom rows with the template's own rows.
-  const startRowDrag = useCallback((row, e) => {
-    e.preventDefault();
-    lastRowHeight.current = null;
-    setRowDrag({
-      mode: "row",
-      rowId: row.id,
-      startY: e.clientY,
-      startH: row.px ?? 120,
-      minPx: row.minPx ?? 100,
-    });
-  }, []);
+  const startRowDrag = useCallback(
+    (row, e, cells = null, { isAttachmentField = false } = {}) => {
+      e.preventDefault();
+      lastRowHeight.current = null;
+      // The drag STARTS from the height the row actually occupies right now —
+      // its content floor, raised by an explicit height if the user set one —
+      // rather than from a stored `px` the row may no longer be honouring, so
+      // grabbing the handle can never make the row jump before it moves. The
+      // floor is the CONTENT floor, so a row can always be dragged back down to
+      // compact (see src/lib/templateRowHeight.js).
+      const floor = rowDragMinPx({ row, cells, isAttachmentField });
+      setRowDrag({
+        mode: "row",
+        rowId: row.id,
+        startY: e.clientY,
+        startH: rowMinHeightPx({ row, cells, isAttachmentField }),
+        minPx: floor,
+      });
+    },
+    []
+  );
 
   const startSectionDrag = useCallback((row, e, startExtraPx) => {
     e.preventDefault();
@@ -477,6 +555,82 @@ export default function ResizableTwoColTable({
       window.removeEventListener("mouseup", mu);
     };
   }, [colDrag, onMouseMoveCol]);
+
+  // ---------- TABLE COLUMN DIVIDER DRAG (builder only) --------------------
+  // The same interaction as the label-column divider above, applied to the
+  // TABLE'S value-column grid. It is dragged from whichever row the pointer
+  // happens to be over, but it moves the shared grid — so every row realigns
+  // together and no row owns a width.
+  //
+  // The pointer position is read as a RATIO of that row's live rect, so it is
+  // scale-invariant and document zoom cannot skew it (there is no pixel
+  // constant here to be multiplied by the zoom factor). The widths themselves
+  // are normalized percentages of the value area, clamped to the shared minimum
+  // by `resizeColumnsAt` — a drag can never produce a negative, an unusable or
+  // an unnormalized width.
+  const startCellDrag = useCallback((dividerIndex, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const rowEl = e.currentTarget.parentElement;
+    if (!rowEl) return;
+    lastColumnWidths.current = null;
+    setCellDrag({ dividerIndex, el: rowEl });
+  }, []);
+
+  const onMouseMoveCell = useCallback(
+    (e) => {
+      if (!cellDrag?.el || !onColumnWidthsChange) return;
+      const rect = cellDrag.el.getBoundingClientRect();
+      if (!rect.width) return;
+      // The value area starts where the label column ends. Both are read from
+      // the SAME live rect, so a page scroll mid-drag cannot skew either.
+      const labelShare = Math.max(10, Math.min(40, Number(leftPct) || 18)) / 100;
+      const valueLeft = rect.left + rect.width * labelShare;
+      const valueWidth = rect.width * (1 - labelShare);
+      if (valueWidth <= 0) return;
+      const share = ((e.clientX - valueLeft) / valueWidth) * 100;
+      const widths = resizeColumnsAt(grid, cellDrag.dividerIndex, share);
+      lastColumnWidths.current = widths;
+      onColumnWidthsChange(widths);
+    },
+    [cellDrag, grid, leftPct, onColumnWidthsChange]
+  );
+
+  const stopCellDrag = useCallback(() => {
+    if (cellDrag && lastColumnWidths.current && onColumnWidthsCommit) {
+      onColumnWidthsCommit(lastColumnWidths.current);
+    }
+    lastColumnWidths.current = null;
+    setCellDrag(null);
+  }, [cellDrag, onColumnWidthsCommit]);
+
+  React.useEffect(() => {
+    if (!cellDrag) return;
+    const mm = (e) => onMouseMoveCell(e);
+    const mu = () => stopCellDrag();
+    window.addEventListener("mousemove", mm);
+    window.addEventListener("mouseup", mu);
+    return () => {
+      window.removeEventListener("mousemove", mm);
+      window.removeEventListener("mouseup", mu);
+    };
+  }, [cellDrag, onMouseMoveCell, stopCellDrag]);
+
+  // Keyboard alternative to dragging an inner divider (1 point per press),
+  // mirroring `nudgeLeftPct` below so both dividers are reachable without a
+  // pointer.
+  const nudgeCellWidth = useCallback(
+    (dividerIndex, delta) => {
+      if (!onColumnWidthsChange) return;
+      const before = grid
+        .slice(0, dividerIndex + 1)
+        .reduce((sum, c) => sum + c.widthPct, 0);
+      const widths = resizeColumnsAt(grid, dividerIndex, before + delta);
+      onColumnWidthsChange(widths);
+      if (onColumnWidthsCommit) onColumnWidthsCommit(widths);
+    },
+    [grid, onColumnWidthsChange, onColumnWidthsCommit]
+  );
 
   // Keyboard alternative to dragging the divider (1% per arrow press).
   const nudgeLeftPct = useCallback(
@@ -684,33 +838,68 @@ export default function ResizableTwoColTable({
     [rows, onRowsChange]
   );
 
+  /**
+   * Patch the field type / dropdown options of ONE value cell.
+   *
+   * A row that carries no stored `cells` — every row of every template
+   * published before columns existed — is patched on the ROW exactly as it
+   * always was, so its published bytes and the unchanged-definition no-op in
+   * `publishTemplateVersion` are untouched. Only a row that genuinely has
+   * columns writes into its cell list, and then only into the one cell named.
+   */
+  const patchCell = useCallback(
+    (row, cellId, patch) => {
+      if (!onRowsChange || !row) return;
+      if (!Array.isArray(row.cells)) {
+        patchRow(row.id, patch);
+        return;
+      }
+      onRowsChange(
+        rows.map((r) =>
+          r.id === row.id
+            ? {
+                ...r,
+                cells: (r.cells || []).map((c) =>
+                  c && c.id === cellId ? { ...c, ...patch } : c
+                ),
+              }
+            : r
+        )
+      );
+    },
+    [rows, onRowsChange, patchRow]
+  );
+
   const handleTypeChange = useCallback(
-    (rowId, nextType) => patchRow(rowId, { type: normalizeType(nextType) }),
-    [patchRow]
+    (row, cell, nextType) =>
+      patchCell(row, cell.id, { type: normalizeType(nextType) }),
+    [patchCell]
   );
 
   const handleOptionAdd = useCallback(
-    (row) =>
-      patchRow(row.id, { options: [...(row.options || []), makeOption("")] }),
-    [patchRow]
+    (row, cell) =>
+      patchCell(row, cell.id, {
+        options: [...(cell.options || []), makeOption("")],
+      }),
+    [patchCell]
   );
 
   const handleOptionRename = useCallback(
-    (row, optId, value) =>
-      patchRow(row.id, {
-        options: (row.options || []).map((o) =>
+    (row, cell, optId, value) =>
+      patchCell(row, cell.id, {
+        options: (cell.options || []).map((o) =>
           o.id === optId ? { ...o, value } : o
         ),
       }),
-    [patchRow]
+    [patchCell]
   );
 
   const handleOptionDelete = useCallback(
-    (row, optId) =>
-      patchRow(row.id, {
-        options: (row.options || []).filter((o) => o.id !== optId),
+    (row, cell, optId) =>
+      patchCell(row, cell.id, {
+        options: (cell.options || []).filter((o) => o.id !== optId),
       }),
-    [patchRow]
+    [patchCell]
   );
 
   // ---------- NOTE-MODE ANSWER CONTROL (per field type) ----------
@@ -723,6 +912,11 @@ export default function ResizableTwoColTable({
     const focus = () => onRightFocus && onRightFocus(row.id);
     const change = (v) => onRightChange && onRightChange(row.id, v);
     const safeStr = displayTextValue(raw, row.id, knownOptionIds);
+    /* `row` here is the CELL VIEW (see `cellView`): for a single-column row it
+       IS the row, and for a column of a multi-column row it is the same object
+       with that column's own id, type and options — so every branch below
+       addresses exactly one cell's stored value, through the same keys it has
+       always used. */
     const inputCls =
       "w-full bg-white text-sm outline-none border border-gray-300 " +
       "rounded px-2 py-1 text-black";
@@ -864,8 +1058,8 @@ export default function ResizableTwoColTable({
   // gets its own legacy entry back — `builderFieldTypeOptions` decides that
   // from the row's own current type — so an old template's row shows what it
   // truthfully is and is never implicitly converted just by being opened.
-  function renderFieldTypeEditor(row) {
-    const type = normalizeType(row.type);
+  function renderFieldTypeEditor(row, cell) {
+    const type = normalizeType(cell.type);
     return (
       <div className="flex flex-col gap-2">
         <label className="text-xs text-black opacity-80">
@@ -873,7 +1067,7 @@ export default function ResizableTwoColTable({
           <select
             className="twocol-field ml-2 px-2 py-1 text-sm rounded"
             value={type}
-            onChange={(e) => handleTypeChange(row.id, e.target.value)}
+            onChange={(e) => handleTypeChange(row, cell, e.target.value)}
           >
             {builderFieldTypeOptions(type).map((t) => (
               <option key={t.value} value={t.value}>
@@ -888,21 +1082,23 @@ export default function ResizableTwoColTable({
             <span className="text-xs opacity-70 text-black">
               Dropdown options
             </span>
-            {(row.options || []).map((o) => (
+            {(cell.options || []).map((o) => (
               <div key={o.id} className="flex items-center gap-2">
                 <input
                   type="text"
                   className="twocol-field flex-grow px-2 py-1 text-sm rounded"
                   placeholder="Option value"
                   value={o.value}
-                  onChange={(e) => handleOptionRename(row, o.id, e.target.value)}
+                  onChange={(e) =>
+                    handleOptionRename(row, cell, o.id, e.target.value)
+                  }
                 />
                 <button
                   type="button"
                   className="twocol-icon-btn twocol-icon-btn--danger w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs"
                   title="Delete option"
                   aria-label="Delete option"
-                  onClick={() => handleOptionDelete(row, o.id)}
+                  onClick={() => handleOptionDelete(row, cell, o.id)}
                 >
                   ×
                 </button>
@@ -911,7 +1107,7 @@ export default function ResizableTwoColTable({
             <button
               type="button"
               className="twocol-action self-start px-2 py-1 text-xs rounded"
-              onClick={() => handleOptionAdd(row)}
+              onClick={() => handleOptionAdd(row, cell)}
             >
               Add option
             </button>
@@ -919,6 +1115,25 @@ export default function ResizableTwoColTable({
         )}
       </div>
     );
+  }
+
+  // ---------- THE CELL VIEW ----------
+  /**
+   * One value CELL, seen as the row-shaped object every renderer below already
+   * takes.
+   *
+   * The Section machinery — activation, static rendering, Refine targets,
+   * Quick Add, the answer control — is written against `{ id, label, type,
+   * options, isCustom }` and treats the id as OPAQUE. A cell is exactly that
+   * shape, so giving each column its own view of the row lets every one of
+   * those renderers serve a column without knowing columns exist.
+   *
+   * For a single-column row the view carries the row's own id, type and
+   * options — the same values the renderers read before columns existed — so
+   * such a row renders through identical code with identical inputs.
+   */
+  function cellView(row, cell) {
+    return { ...row, id: cell.id, type: cell.type, options: cell.options };
   }
 
   // ---------- SHARED CELL RENDERERS ----------
@@ -1049,10 +1264,31 @@ export default function ResizableTwoColTable({
   //
   // `modernTarget` is the Section Refine target the row-level trigger acts on
   // (see rowModernRefineTarget), or null for a row that has no Refine.
-  function renderRowActions(row, modernTarget = null) {
-    const modern = modernTarget || null;
-    if (!showRowActions && !modern) return null;
-    const name = row.label || (row.isCustom ? "custom section" : "this field");
+  /**
+   * The actions offered by ONE cell's ⋯ menu.
+   *
+   * THREE GROUPS, in the order a user thinks about them, separated so it is
+   * always obvious what an action affects:
+   *
+   *   Rows    this row
+   *   Cell    THIS CELL of this row only — splitting and un-splitting it. The
+   *           rest of the table is untouched.
+   *   Table   THE WHOLE TABLE — a real vertical column through every row.
+   *
+   * The two are deliberately never both called "insert column": "Split cell"
+   * divides one row, "Insert table column left/right" divides the table. The
+   * Table entries name the table in their own labels, so the distinction
+   * survives being read out of context by a screen reader.
+   *
+   * Every entry that would not make sense is simply ABSENT rather than shown
+   * disabled: a table's only column offers no "Delete table column" (removing it
+   * would leave a table nothing can be filled into), a grid already at
+   * `MAX_VALUE_COLUMNS` offers no insert and no split of a single-column cell,
+   * an end cell offers no merge on the side it has no neighbour, and a completed
+   * note is offered no structural action at all, because structure belongs to
+   * the TEMPLATE and a note may never change it.
+   */
+  function rowMenuOptions(row, cell, cellIndex, cells) {
     const options = [
       {
         label: "Insert row above",
@@ -1063,6 +1299,7 @@ export default function ResizableTwoColTable({
         onClick: () => onInsertRow && onInsertRow(row.id, "below"),
       },
     ];
+
     if (rowActionsMode === "note" && row.isCustom && onDeleteRow) {
       options.push({ type: "separator" });
       options.push({
@@ -1070,44 +1307,117 @@ export default function ResizableTwoColTable({
         danger: true,
         onClick: () => onDeleteRow(row.id),
       });
+      return options;
     }
+
+    if (rowActionsMode !== "builder") return options;
+
+    /* ---- THIS CELL, this row only ---- */
+    const cellEntries = [];
+    if (onSplitCell && canSplitCell(grid, cell)) {
+      cellEntries.push({
+        label: "Split cell",
+        onClick: () => onSplitCell(row.id, cell.id),
+      });
+    }
+    if (onMergeCell && canMergeCell(cells, cell.id, COLUMN_SIDE.LEFT)) {
+      cellEntries.push({
+        label: "Merge with cell on left",
+        onClick: () => onMergeCell(row.id, cell.id, COLUMN_SIDE.LEFT),
+      });
+    }
+    if (onMergeCell && canMergeCell(cells, cell.id, COLUMN_SIDE.RIGHT)) {
+      cellEntries.push({
+        label: "Merge with cell on right",
+        onClick: () => onMergeCell(row.id, cell.id, COLUMN_SIDE.RIGHT),
+      });
+    }
+    if (cellEntries.length) {
+      options.push({ type: "separator" });
+      options.push(...cellEntries);
+    }
+
+    /* ---- THE WHOLE TABLE ---- */
+    const tableEntries = [];
+    if (onInsertTableColumn && canInsertTableColumn(grid)) {
+      tableEntries.push({
+        label: "Insert table column left",
+        onClick: () => onInsertTableColumn(cell.start),
+      });
+      tableEntries.push({
+        label: "Insert table column right",
+        onClick: () => onInsertTableColumn(cell.start + cell.span),
+      });
+    }
+    if (onDeleteTableColumn && canDeleteTableColumn(grid)) {
+      // A cell spanning several grid columns is not "in" one column, so the
+      // action names the column the cell BEGINS in — the one its left edge sits
+      // on, which is the one the user is pointing at.
+      const column = grid[Math.min(cell.start, grid.length - 1)];
+      tableEntries.push({
+        label: `Delete table column ${cell.start + 1}`,
+        danger: true,
+        onClick: () => onDeleteTableColumn(column.id),
+      });
+    }
+    if (tableEntries.length) {
+      options.push({ type: "separator" });
+      options.push(...tableEntries);
+    }
+
+    return options;
+  }
+
+  function renderRowActions(row, cell, cellIndex, cells, modernTarget = null) {
+    const modern = modernTarget || null;
+    if (!showRowActions && !modern) return null;
+    const cellRow = cellView(row, cell);
+    const base = row.label || (row.isCustom ? "custom section" : "this field");
+    const name = cells.length > 1 ? `${base}, column ${cellIndex + 1}` : base;
+    const key = `${row.id}::${cell.id}`;
+    const open = menuKey === key;
+    const options = rowMenuOptions(row, cell, cellIndex, cells);
     return (
-      <div className="twocol-row-actions">
-        {modern && renderSectionRefineAction(row, modern)}
+      <div
+        className={
+          cells.length > 1 ? "twocol-row-actions twocol-cell-actions" : "twocol-row-actions"
+        }
+      >
+        {modern && renderSectionRefineAction(cellRow, modern)}
         {showRowActions && (
           <>
             <button
               type="button"
               className={`twocol-row-actions-btn twocol-icon-btn ${
-                menuRowId === row.id ? "twocol-icon-btn--open" : ""
+                open ? "twocol-icon-btn--open" : ""
               }`}
               aria-haspopup="menu"
-              aria-expanded={menuRowId === row.id}
+              aria-expanded={open}
               aria-label={`Row actions for ${name}`}
               title={`Row actions for ${name}`}
               ref={(el) => {
-                if (el) menuAnchors.current.set(row.id, el);
-                else menuAnchors.current.delete(row.id);
+                if (el) menuAnchors.current.set(key, el);
+                else menuAnchors.current.delete(key);
               }}
-              onClick={() => setMenuRowId((prev) => (prev === row.id ? null : row.id))}
+              onClick={() => setMenuKey((prev) => (prev === key ? null : key))}
               // Keyboard: Enter/Space open natively (a real button); Down arrow
               // opens too, as a menu button conventionally does. The menu
               // itself takes focus on open and returns it on Escape.
               onKeyDown={(event) => {
-                if (event.key === "ArrowDown" && menuRowId !== row.id) {
+                if (event.key === "ArrowDown" && !open) {
                   event.preventDefault();
-                  setMenuRowId(row.id);
+                  setMenuKey(key);
                 }
               }}
             >
               <span aria-hidden="true">⋯</span>
             </button>
-            {menuRowId === row.id && (
+            {open && (
               <ThreeDotMenu
-                anchorRef={menuAnchors.current.get(row.id) || null}
+                anchorRef={menuAnchors.current.get(key) || null}
                 theme="light"
                 options={options}
-                onClose={() => setMenuRowId(null)}
+                onClose={() => setMenuKey(null)}
               />
             )}
           </>
@@ -1218,6 +1528,54 @@ export default function ResizableTwoColTable({
     );
   }
 
+  /**
+   * The dividers between the TABLE'S value columns (Builder only).
+   *
+   * One per grid boundary, positioned by the running total of the grid's shares
+   * of the value area — the same absolute-overlay technique the label-column
+   * divider uses, so neither adds any height and neither appears in print. They
+   * are drawn on every row at the same percentages, which is what makes them
+   * read as continuous vertical rules through the table, and dragging any one of
+   * them moves the shared grid rather than that row.
+   *
+   * Nothing is rendered for a one-column table, which is every template
+   * published before the grid existed.
+   */
+  function renderCellDividers() {
+    if (!enableColumnDivider || !onColumnWidthsChange || grid.length < 2) {
+      return null;
+    }
+    const labelShare = Math.max(10, Math.min(40, Number(leftPct) || 18));
+    const valueShare = 100 - labelShare;
+    let running = 0;
+    return grid.slice(0, -1).map((column, index) => {
+      running += column.widthPct;
+      const left = labelShare + (valueShare * running) / 100;
+      return (
+        <div
+          key={`divider-${column.id}`}
+          className="twocol-col-handle twocol-col-handle--cell"
+          style={{ left: `${left}%` }}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={`Resize table column ${index + 1} — drag, or use the arrow keys`}
+          title="Drag the divider to resize this table column"
+          tabIndex={0}
+          onMouseDown={(e) => startCellDrag(index, e)}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              nudgeCellWidth(index, -1);
+            } else if (e.key === "ArrowRight") {
+              e.preventDefault();
+              nudgeCellWidth(index, 1);
+            }
+          }}
+        />
+      );
+    });
+  }
+
   function renderFieldError(fieldId) {
     const message = fieldErrors[fieldId];
     if (!message) return null;
@@ -1320,8 +1678,174 @@ export default function ResizableTwoColTable({
     );
   }
 
+  /**
+   * The whole BODY of one value cell in a MULTI-COLUMN row, rendered inline.
+   *
+   * A single-column row flows its Section down the page one block per segment
+   * (`renderAnswerSlot` / `renderHeadMediaSlot` and the segment blocks the
+   * planner emits), and that path is untouched. Columns run across the page, so
+   * a column's segments stack INSIDE its own cell instead — the same renderers,
+   * the same static views, the same shared editor, in a different box.
+   */
+  function renderCellSectionBody(row, cell) {
+    // The Builder renders STRUCTURE, never note content — exactly the gate
+    // `renderAnswerSlot` applies to a single-column row, so a column cannot
+    // show an answer box its undivided equivalent would not.
+    if (!showRightEditor) return null;
+    const cellRow = cellView(row, cell);
+    if (isSectionEditorActive(cellRow)) return renderSectionEditor(cellRow);
+    const entry = documentBodySegments.get(cell.id);
+    if (!entry || !entry.segments.length) return renderAnswerControl(cellRow);
+    return entry.segments.map((segment) => (
+      <React.Fragment key={segment.key}>
+        {renderSectionDocSegmentBody(cellRow, segment)}
+      </React.Fragment>
+    ));
+  }
+
+  /**
+   * ONE value cell of a row.
+   *
+   * `index === 0` of a SINGLE-column row is the answer cell every template has
+   * always had, and it renders byte-for-byte what it rendered before columns
+   * existed: the legacy compatibility strip, the two-slot answer area that
+   * carries the one live editor across every transition, the Refine status, the
+   * Builder's field-type editor and the section tail. Nothing about that path
+   * is conditional on columns.
+   *
+   * Every other cell is the same cell without the whole-row concerns: it has no
+   * legacy base64 strip (that collection is keyed to the row id, which is the
+   * first cell's), no head media slot (a multi-column row plans no segment
+   * blocks) and no section tail (the trailing working space belongs to the
+   * row). It carries its OWN field error, answer, Refine status, type editor
+   * and ⋯ trigger.
+   */
+  function renderValueCell(
+    row,
+    cell,
+    index,
+    cells,
+    { headSegment, legacyItems, imgMaxH, isSectionTail, sectionExtraPx }
+  ) {
+    const multi = cells.length > 1;
+    const cellRow = cellView(row, cell);
+    const cellType = normalizeType(cell.type);
+    const modernTarget = multi
+      ? rowModernRefineTarget(cellRow, null)
+      : rowModernRefineTarget(row, headSegment);
+    const isFirst = index === 0;
+
+    return (
+      <div
+        key={cell.id}
+        className={`twocol-cell-right px-3 py-2 text-black flex flex-col ${
+          multi ? "twocol-cell-col" : ""
+        }`.trim()}
+        // The cell occupies the combined width of the GRID columns it spans —
+        // it holds no width of its own, so it is always exactly as wide as the
+        // table says those columns are.
+        style={{ gridColumn: cellGridSpan(cell) }}
+      >
+        {isFirst && legacyItems.length > 0 && (
+          <div className="flex flex-wrap gap-2 items-start justify-start mb-2">
+            {legacyItems.map((item) => (
+              <div
+                key={`${row.id}_legacy_${item.index}`}
+                className="relative inline-block"
+              >
+                {typeof item.norm === "string" ? (
+                  <img
+                    src={item.norm}
+                    alt={`Attachment ${item.index + 1}`}
+                    className="twocol-img"
+                    style={{ maxHeight: `${imgMaxH}px` }}
+                  />
+                ) : item.norm.kind === ATTACHMENT_KIND.FILE ? (
+                  <FileAttachmentRow
+                    attachment={item.norm}
+                    onRemove={() =>
+                      onRemoveAttachment && onRemoveAttachment(row.id, item.index)
+                    }
+                    onError={(msg) => onFieldError && onFieldError(row.id, msg)}
+                  />
+                ) : (
+                  <LegacyAssetImage attachment={item.norm} maxH={imgMaxH} />
+                )}
+                {onRemoveAttachment && item.norm.kind !== ATTACHMENT_KIND.FILE && (
+                  <button
+                    type="button"
+                    className="
+                      absolute -top-2 -right-2 w-5 h-5 rounded-full
+                      bg-black/70 text-white text-xs flex items-center justify-center
+                    "
+                    onClick={() => onRemoveAttachment(row.id, item.index)}
+                    title="Remove image"
+                    aria-label={`Remove attached image ${item.index + 1}`}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {showRightEditor && renderFieldError(cell.id)}
+
+        {/* THE ANSWER SLOT — TWO fixed positions, always in this order.
+            Everything that can hold the one live editor renders at the FIRST
+            of them, deliberately: React reconciles by position, so the editor
+            survives every transition that happens underneath it while the
+            user is typing (including its first genuine edit, which changes
+            which stored representation the body comes from).
+
+              slot 1   the row's own control, OR the head prose segment of
+                       its Section document, OR — for a Section whose first
+                       content is a picture or a file — the zero-height
+                       lead-in above it (press it to type above the image)
+              slot 2   the head MEDIA segment, when the Section starts with
+                       one, so text typed above it pushes it down through
+                       ordinary document flow.
+
+            A COLUMN of a multi-column row has no segment blocks to be the head
+            of, so it renders its whole body in one place instead. */}
+        {multi ? (
+          renderCellSectionBody(row, cell)
+        ) : (
+          <>
+            {renderAnswerSlot(cellRow, headSegment)}
+            {renderHeadMediaSlot(cellRow, headSegment)}
+          </>
+        )}
+
+        {showRightEditor &&
+          modernTarget &&
+          renderSectionRefineStatus(cellRow, modernTarget)}
+
+        {enableFieldTypeEditor &&
+          (cellType === FIELD_TYPE.PHOTO || cellType === FIELD_TYPE.FILE) && (
+            <div className="attach-builder-placeholder">
+              {cellType === FIELD_TYPE.PHOTO
+                ? "Photos can be added when completing this note."
+                : "Files can be added when completing this note."}
+            </div>
+          )}
+
+        {enableFieldTypeEditor && renderFieldTypeEditor(row, cell)}
+
+        {/* A SINGLE-ITEM flexible section ends here, so its extra working
+            space and its one resize handle belong to this block. */}
+        {isFirst && isSectionTail && renderSectionTail(row, sectionExtraPx)}
+
+        {/* A column carries its own ⋯ trigger, so a column action is never
+            ambiguous about which column it means. A single-column row keeps
+            its trigger on the ROW, exactly where it has always been. */}
+        {multi && renderRowActions(row, cell, index, cells, modernTarget)}
+      </div>
+    );
+  }
+
   function renderRowBlock(row, ctx = null, section = null, headSegment = null) {
-    const type = normalizeType(row.type);
     // The row-level Refine target. Null for every row Section Refine does not
     // serve; otherwise the run this block's trigger acts on — see
     // rowModernRefineTarget for the three shapes it covers.
@@ -1341,9 +1865,12 @@ export default function ResizableTwoColTable({
 
     // HOW TALL IS THIS BLOCK'S BOX?
     //
-    // A row whose body is its own answer control keeps `row.px` — the height the
-    // user actually dragged for it. That is the legacy Text row, a structured
-    // row and a Photo/File field, and none of them changes.
+    // A row whose body is its own answer control is CONTENT-DRIVEN with a floor
+    // that fits what its cells actually render — one line of prose, or a
+    // structured control with room for its picker button — plus the height the
+    // user dragged, when they genuinely dragged one. The rule is stated once, in
+    // src/lib/templateRowHeight.js, and the pagination planner applies the same
+    // function to the same row, so the DOM box and the page estimate agree.
     //
     // A row whose body is a SECTION DOCUMENT is content-driven instead: its
     // head segment is one segment among several, so reserving the whole legacy
@@ -1353,10 +1880,19 @@ export default function ResizableTwoColTable({
     // the same number rather than two guesses that can drift apart. It is a
     // real `min-height` on a real box: the content genuinely grows it, and
     // nothing is faked with negative margins or absolute positioning.
-    const baseMin = headSegment ? sectionSegmentMinHeight(headSegment) : row.px || 120;
+    const cells = rowCells(row, grid.length);
+    const baseMin = headSegment
+      ? sectionSegmentMinHeight(headSegment)
+      : rowMinHeightPx({
+          row,
+          cells,
+          hasLegacyEvidence: legacyItems.length > 0,
+        });
     // The legacy base64 compatibility strip needs room for its images whatever
     // the rest of the row is doing.
-    const effectiveMin = legacyItems.length ? Math.max(baseMin, 170) : baseMin;
+    const effectiveMin = legacyItems.length
+      ? Math.max(baseMin, LEGACY_EVIDENCE_MIN_PX)
+      : baseMin;
     const imgMaxH = Math.max(80, effectiveMin * 0.6);
 
     // Does the LOGICAL section end at this block? True only for a single-item
@@ -1384,99 +1920,32 @@ export default function ResizableTwoColTable({
         // does not depend on the turquoise border alone.
         aria-current={isTarget ? "true" : undefined}
         style={{
-          gridTemplateColumns: `${leftWidth} 1fr`,
+          gridTemplateColumns: gridTracks,
           minHeight: `${effectiveMin}px`,
         }}
       >
         {renderLabelCell(row)}
 
-        {/* RIGHT COLUMN — legacy evidence strip (compat), then the control */}
-        <div className="twocol-cell-right px-3 py-2 text-black flex flex-col">
-          {legacyItems.length > 0 && (
-            <div className="flex flex-wrap gap-2 items-start justify-start mb-2">
-              {legacyItems.map((item) => (
-                <div
-                  key={`${row.id}_legacy_${item.index}`}
-                  className="relative inline-block"
-                >
-                  {typeof item.norm === "string" ? (
-                    <img
-                      src={item.norm}
-                      alt={`Attachment ${item.index + 1}`}
-                      className="twocol-img"
-                      style={{ maxHeight: `${imgMaxH}px` }}
-                    />
-                  ) : item.norm.kind === ATTACHMENT_KIND.FILE ? (
-                    <FileAttachmentRow
-                      attachment={item.norm}
-                      onRemove={() =>
-                        onRemoveAttachment && onRemoveAttachment(row.id, item.index)
-                      }
-                      onError={(msg) => onFieldError && onFieldError(row.id, msg)}
-                    />
-                  ) : (
-                    <LegacyAssetImage attachment={item.norm} maxH={imgMaxH} />
-                  )}
-                  {onRemoveAttachment && item.norm.kind !== ATTACHMENT_KIND.FILE && (
-                    <button
-                      type="button"
-                      className="
-                        absolute -top-2 -right-2 w-5 h-5 rounded-full
-                        bg-black/70 text-white text-xs flex items-center justify-center
-                      "
-                      onClick={() => onRemoveAttachment(row.id, item.index)}
-                      title="Remove image"
-                      aria-label={`Remove attached image ${item.index + 1}`}
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
+        {/* THIS ROW'S CELLS on the table's grid — the one full-width cell every
+            template has always had, or the several a Builder user divided this
+            row into. Each spans the grid columns it covers. */}
+        {cells.map((cell, index) =>
+          renderValueCell(row, cell, index, cells, {
+            headSegment,
+            legacyItems,
+            imgMaxH,
+            isSectionTail,
+            sectionExtraPx,
+          })
+        )}
 
-          {showRightEditor && renderFieldError(row.id)}
-
-          {/* THE ANSWER SLOT — TWO fixed positions, always in this order.
-              Everything that can hold the one live editor renders at the FIRST
-              of them, deliberately: React reconciles by position, so the editor
-              survives every transition that happens underneath it while the
-              user is typing (including its first genuine edit, which changes
-              which stored representation the body comes from).
-
-                slot 1   the row's own control, OR the head prose segment of
-                         its Section document, OR — for a Section whose first
-                         content is a picture or a file — the zero-height
-                         lead-in above it (press it to type above the image)
-                slot 2   the head MEDIA segment, when the Section starts with
-                         one, so text typed above it pushes it down through
-                         ordinary document flow. */}
-          {renderAnswerSlot(row, headSegment)}
-          {renderHeadMediaSlot(row, headSegment)}
-
-          {showRightEditor &&
-            headModernTarget &&
-            renderSectionRefineStatus(row, headModernTarget)}
-
-          {enableFieldTypeEditor &&
-            (type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE) && (
-              <div className="attach-builder-placeholder">
-                {type === FIELD_TYPE.PHOTO
-                  ? "Photos can be added when completing this note."
-                  : "Files can be added when completing this note."}
-              </div>
-            )}
-
-          {enableFieldTypeEditor && renderFieldTypeEditor(row)}
-
-          {/* A SINGLE-ITEM flexible section ends here, so its extra working
-              space and its one resize handle belong to this block. */}
-          {isSectionTail && renderSectionTail(row, sectionExtraPx)}
-        </div>
-
-        {renderRowActions(row, headModernTarget)}
+        {/* An UNDIVIDED row keeps its ⋯ trigger on the ROW itself, in the exact
+            position it has always occupied. A divided row's triggers live in its
+            cells (see renderValueCell). */}
+        {cells.length === 1 &&
+          renderRowActions(row, cells[0], 0, cells, headModernTarget)}
         {renderColumnDivider()}
+        {renderCellDividers()}
 
         {/* LEGACY ROW HEIGHT HANDLE — a row whose body is its own answer
             control only. A flexible section is sized by its content plus the
@@ -1488,7 +1957,7 @@ export default function ResizableTwoColTable({
         {(!headSegment || (editorHead && !hasDocumentBody)) && (
           <div
             className="twocol-resize-handle"
-            onMouseDown={(e) => startRowDrag(row, e)}
+            onMouseDown={(e) => startRowDrag(row, e, cells)}
           />
         )}
       </div>
@@ -1499,12 +1968,16 @@ export default function ResizableTwoColTable({
   // control + inline status/errors. keepWithNext keeps it with the first
   // attachment so a heading is never orphaned at a page bottom.
   function renderAttachmentHead(row, type, count, ctx = null) {
+    // A compound Photo/File field is a whole-row structure and is never divided
+    // into columns (see planRowBlocks), so it has exactly the one value cell it
+    // has always had.
+    const cells = rowCells(row, grid.length);
     const isPhoto = type === FIELD_TYPE.PHOTO;
     const busy = !!fieldBusy[row.id];
     // The dragged row.px stays the head's preferred height, so row-height
     // dragging keeps working on attachment fields (floor of 56 fits the
     // upload control).
-    const headMin = Math.max(56, row.px || 56);
+    const headMin = rowMinHeightPx({ row, isAttachmentField: true });
     const isTarget = !!targetRowId && row.id === targetRowId;
     return (
       <div
@@ -1513,13 +1986,16 @@ export default function ResizableTwoColTable({
         )}`.trim()}
         aria-current={isTarget ? "true" : undefined}
         style={{
-          gridTemplateColumns: `${leftWidth} 1fr`,
+          gridTemplateColumns: gridTracks,
           minHeight: `${headMin}px`,
         }}
       >
         {renderLabelCell(row)}
 
-        <div className="twocol-cell-right px-3 py-2 text-black flex flex-col items-start gap-1">
+        <div
+          className="twocol-cell-right px-3 py-2 text-black flex flex-col items-start gap-1"
+          style={{ gridColumn: cellGridSpan(cells[0]) }}
+        >
           <label className={`attach-upload-btn ${busy ? "attach-upload-btn--busy" : ""}`}>
             {busy ? "Uploading…" : isPhoto ? "Upload Photo" : "Add File"}
             <input
@@ -1557,13 +2033,14 @@ export default function ResizableTwoColTable({
           {renderFieldError(row.id)}
         </div>
 
-        {renderRowActions(row)}
+        {renderRowActions(row, cells[0], 0, cells)}
         {renderColumnDivider()}
+        {renderCellDividers()}
 
         {/* ROW DRAG HANDLE */}
         <div
           className="twocol-resize-handle"
-          onMouseDown={(e) => startRowDrag(row, e)}
+          onMouseDown={(e) => startRowDrag(row, e, null, { isAttachmentField: true })}
         />
       </div>
     );
@@ -1670,7 +2147,7 @@ export default function ResizableTwoColTable({
         } ${isTarget ? "twocol-row--target" : ""} ${composingClass(
           ctx
         )} ${extraClass}`.trim()}
-        style={{ gridTemplateColumns: `${leftWidth} 1fr` }}
+        style={{ gridTemplateColumns: gridTracks }}
       >
         <div className="twocol-cell-left twocol-seg-left px-3 py-2">
           {continued && (
@@ -1682,7 +2159,14 @@ export default function ResizableTwoColTable({
             </span>
           )}
         </div>
-        <div className="twocol-cell-right px-3 py-2 text-black">
+        {/* A continuation segment is the row's own content carrying on, so it
+            spans the WHOLE value area rather than one grid column — only a row
+            with a single cell ever produces one (a divided row is one atomic
+            block, see planRowBlocks). */}
+        <div
+          className="twocol-cell-right px-3 py-2 text-black"
+          style={{ gridColumn: `span ${grid.length}` }}
+        >
           {note}
           {body}
         </div>
@@ -2097,6 +2581,7 @@ export default function ResizableTwoColTable({
 
     const planned = planRowBlocks({
       row,
+      valueColumnCount: grid.length,
       isAttachmentField,
       attachments,
       // Evidence renders in note mode only, exactly like attachments — the
@@ -2181,9 +2666,13 @@ export default function ResizableTwoColTable({
             divider itself is the control in the Builder, and a completed note
             takes its ratio from the pinned template version. */}
         <div className="flex flex-col text-xs text-black dark:text-white opacity-70 text-right">
-          {enableColumnDivider && <span>Drag the divider to resize columns</span>}
+          {enableColumnDivider && <span>Drag a divider to resize columns</span>}
           <span>Drag row borders to adjust height</span>
-          {showRowActions && <span>Use a row's ⋯ menu to insert a row above or below</span>}
+          {showRowActions && (
+            <span>
+              Use a cell's ⋯ menu for rows, splitting a cell, and table columns
+            </span>
+          )}
         </div>
       </div>
 

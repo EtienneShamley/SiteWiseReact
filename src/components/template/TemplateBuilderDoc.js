@@ -11,12 +11,30 @@ import {
   makeNewRow,
 } from "../../templates/defaultTwoColDoc";
 import {
+  cellsWithNoteContent,
   getCurrentVersion,
   publishTemplateVersion,
   isLogoAssetReferenced,
 } from "../../lib/templateModel";
-import { FIELD_TYPE, normalizeRows, normalizeType } from "../../lib/templateFields";
+import {
+  DEFAULT_BUILDER_FIELD_TYPE,
+  FIELD_TYPE,
+  normalizeRows,
+  normalizeType,
+} from "../../lib/templateFields";
 import { appendRow, insertRowAt } from "../../lib/templateRowOps";
+import {
+  COLUMN_SIDE,
+  deleteTableColumn,
+  insertTableColumn,
+  mergeCell,
+  rowCells,
+  splitCell,
+  storedValueColumns,
+  valueColumns as normalizeValueColumns,
+  withColumnWidths,
+} from "../../lib/templateColumns";
+import { explicitRowHeightPatch } from "../../lib/templateRowHeight";
 import { createLogoAsset, deleteAsset } from "../../lib/assetStorage";
 import { normalizeBranding } from "../../lib/templateBranding";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
@@ -33,6 +51,9 @@ function loadCurrentDefinition(templateId) {
   }
   return {
     leftPct: version.leftPct || DEFAULT_LEFT_COL_PCT,
+    // The table's value-column grid. A version published before it existed reads
+    // as the single full-width column the table has always had.
+    valueColumns: normalizeValueColumns(version.valueColumns),
     logoAssetId: version.logoAssetId ?? null,
     logoSrc: version.logoSrc || null,
     // Read-time normalization supplies rendering defaults (legacy rows and the
@@ -49,6 +70,11 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
   );
   const [leftPct, setLeftPct] = useState(
     () => loadCurrentDefinition(templateId)?.leftPct ?? DEFAULT_LEFT_COL_PCT
+  );
+  // THE TABLE'S VALUE-COLUMN GRID — a draft, exactly like `rows` and `leftPct`.
+  // It is the single authority for column widths: a row never carries one.
+  const [valueColumns, setValueColumns] = useState(() =>
+    normalizeValueColumns(loadCurrentDefinition(templateId)?.valueColumns)
   );
   // Logo is an IndexedDB asset reference. `legacyLogoSrc` covers an un-migrated
   // version (or IndexedDB being unavailable) so an existing logo is never lost.
@@ -162,8 +188,104 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
   const changeRowLabel = (rowId, label) =>
     setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, label } : r)));
 
+  // A dragged height is a DELIBERATE one, so it is stamped as such — that
+  // marker is what tells it apart from the scaffold defaults every row has
+  // always carried, and it is the only thing that makes a stored `px` reserve
+  // height again (src/lib/templateRowHeight.js).
   const changeRowHeight = (rowId, px) =>
-    setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, px } : r)));
+    setRows((prev) =>
+      prev.map((r) => (r.id === rowId ? { ...r, ...explicitRowHeightPatch(px) } : r))
+    );
+
+  /* ------------------------- STRUCTURAL ACTIONS --------------------------- */
+  // All of these change the reusable company template, so they are the TEMPLATE
+  // BUILDER'S ALONE: a completed note is never given these callbacks (see
+  // NoteTemplateDoc), and nothing is published until "Submit template".
+  //
+  // They come in two clearly separate kinds, and the model keeps them one
+  // system rather than two: TABLE-WIDE actions change the grid and bring every
+  // row onto it; ROW-LOCAL actions change how one row's cells sit on that grid.
+  // Neither ever touches an existing cell's id, field type or dropdown options.
+
+  /**
+   * Confirm a structural change that would leave note content with nowhere to
+   * render, and ONLY then.
+   *
+   * Nothing is destroyed by any of these actions: a note keeps every answer,
+   * Section document, attachment and piece of evidence keyed to an orphaned cell
+   * id on its own instance. But the person editing the template cannot see those
+   * notes, so they are told before it happens instead of afterwards. When no
+   * note has put anything in the cells in question — the overwhelmingly common
+   * case, including undoing a split a moment after making it — there is nothing
+   * to warn about and no dialog appears.
+   */
+  function confirmOrphanedCells(orphanedCellIds) {
+    const filled = cellsWithNoteContent(orphanedCellIds);
+    if (filled.length === 0) return true;
+    const what =
+      filled.length === 1
+        ? "A note using this template has already filled in this cell."
+        : `Notes using this template have already filled in ${filled.length} of these cells.`;
+    return window.confirm(
+      `${what}\n\nThat content is not deleted, but it will no longer be shown. Continue?`
+    );
+  }
+
+  // TABLE-WIDE: a real vertical column through every row.
+  const insertTableColumnAt = useCallback(
+    (gridIndex) => {
+      const next = insertTableColumn(
+        valueColumns,
+        rows,
+        gridIndex,
+        DEFAULT_BUILDER_FIELD_TYPE
+      );
+      setValueColumns(next.columns);
+      setRows(next.rows);
+    },
+    [valueColumns, rows]
+  );
+
+  const deleteTableColumnById = useCallback(
+    (columnId) => {
+      const next = deleteTableColumn(valueColumns, rows, columnId);
+      if (next.columns.length === valueColumns.length) return;
+      if (!confirmOrphanedCells(next.orphanedCellIds)) return;
+      setValueColumns(next.columns);
+      setRows(next.rows);
+    },
+    [valueColumns, rows]
+  );
+
+  const changeColumnWidths = useCallback((widths) => {
+    setValueColumns((prev) => withColumnWidths(prev, widths));
+  }, []);
+
+  // ROW-LOCAL: how one row's cells sit on the grid.
+  const splitCellInRow = useCallback(
+    (rowId, cellId) => {
+      const next = splitCell(
+        valueColumns,
+        rows,
+        rowId,
+        cellId,
+        DEFAULT_BUILDER_FIELD_TYPE
+      );
+      setValueColumns(next.columns);
+      setRows(next.rows);
+    },
+    [valueColumns, rows]
+  );
+
+  const mergeCellInRow = useCallback(
+    (rowId, cellId, side) => {
+      const next = mergeCell(valueColumns, rows, rowId, cellId, side ?? COLUMN_SIDE.LEFT);
+      if (!next.orphanedCellIds.length) return;
+      if (!confirmOrphanedCells(next.orphanedCellIds)) return;
+      setRows(next.rows);
+    },
+    [valueColumns, rows]
+  );
 
   // Branding edits are DRAFT-ONLY: nothing is stored until "Submit template"
   // publishes a new immutable version, so a colour picker being dragged cannot
@@ -255,9 +377,22 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     };
   }, []);
 
+  // Dropdown options as they are PUBLISHED: order and stable ids preserved,
+  // completely empty values dropped. Shared by the row and by each of its value
+  // columns so the two can never disagree about what a published option is.
+  function publishedOptions(options) {
+    return (options || [])
+      .filter((o) => String(o.value ?? "").trim() !== "")
+      .map((o) => ({ id: o.id, value: o.value }));
+  }
+
   function handleSubmitTemplate() {
     const definition = {
       leftPct,
+      // The table's grid. `storedValueColumns` returns null for the default
+      // single column, so a template nobody has divided publishes exactly the
+      // bytes it always did.
+      valueColumns: storedValueColumns(valueColumns),
       logoAssetId: logoAssetId ?? null,
       // Carry a legacy data URL forward ONLY when there is no asset (an
       // un-migrated version saved unchanged), so an existing logo is never lost.
@@ -279,9 +414,27 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
         // values while preserving order and stable ids. Dormant options on a
         // non-dropdown row are not written to the published version.
         if (type === FIELD_TYPE.SELECT) {
-          base.options = (r.options || [])
-            .filter((o) => String(o.value ?? "").trim() !== "")
-            .map((o) => ({ id: o.id, value: o.value }));
+          base.options = publishedOptions(r.options);
+        }
+        // A DELIBERATE height, and the VALUE COLUMNS — both written only when
+        // the row genuinely has them. A row nobody has dragged or divided
+        // publishes exactly the keys it always did, which is what keeps the
+        // unchanged-definition no-op in publishTemplateVersion working for
+        // every existing template.
+        if (r.pxExplicit === true) base.pxExplicit = true;
+        // THIS ROW'S CELLS on the table's grid, written only when the row
+        // genuinely differs from "one cell spanning everything, keyed by the row
+        // id" — which is what an absent `cells` key already means. A cell
+        // carries a SPAN and never a width: widths belong to the grid.
+        if (Array.isArray(r.cells)) {
+          base.cells = rowCells(r, valueColumns.length).map((cell) => {
+            const cellType = normalizeType(cell.type);
+            const out = { id: cell.id, span: cell.span, type: cellType };
+            if (cellType === FIELD_TYPE.SELECT) {
+              out.options = publishedOptions(cell.options);
+            }
+            return out;
+          });
         }
         return base;
       }),
@@ -318,7 +471,10 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
       />
 
       {/* The document scroller. */}
-      <div className="flex-1 min-h-0 overflow-auto p-4" data-nw-template-scroller="true">
+      {/* The document scroller's inset matches the note workspace's, so the
+          same A4 document is surrounded by the same amount of desk on both
+          surfaces. */}
+      <div className="flex-1 min-h-0 overflow-auto p-2" data-nw-template-scroller="true">
         {/* Editing the reusable company template itself — not one note's copy.
             Submitting publishes a new immutable version; existing notes stay
             pinned to the version they were completed against. */}
@@ -330,6 +486,7 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
 
         <ResizableTwoColTable
           leftPct={leftPct}
+          valueColumns={valueColumns}
           rows={rows}
           onRowsChange={setRows}
           onAddRow={addRow}
@@ -346,6 +503,12 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
           enableFieldTypeEditor={true}
           rowActionsMode="builder"
           onInsertRow={insertRow}
+          onInsertTableColumn={insertTableColumnAt}
+          onDeleteTableColumn={deleteTableColumnById}
+          onColumnWidthsChange={changeColumnWidths}
+          onColumnWidthsCommit={changeColumnWidths}
+          onSplitCell={splitCellInRow}
+          onMergeCell={mergeCellInRow}
           onRowLabelChange={changeRowLabel}
           onRowHeightChange={changeRowHeight}
           enableColumnDivider={true}

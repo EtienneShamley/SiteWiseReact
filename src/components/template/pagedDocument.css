@@ -19,7 +19,11 @@
   box-sizing: border-box;
   width: 100%;
   overflow-x: auto;
-  padding: 24px;
+  /* A restrained desk margin around the paper, not a second page margin. The
+     page's own 20mm print margins are what separate the table from the paper
+     edge; this only separates the paper from the app surface, so it is kept
+     small — every pixel here is width the document does not get. */
+  padding: 12px;
   background: #eceef1; /* light "desk" behind the paper */
   border-radius: 12px;
 }

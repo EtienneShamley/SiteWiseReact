@@ -70,6 +70,8 @@ import {
 } from "./templateSectionContent";
 import { sectionExtraHeightFor } from "./templateSectionHeight";
 import { sectionReplacesRowAnswer } from "./templateRowContent";
+import { rowCells, valueColumns } from "./templateColumns";
+import { rowMinHeightPx } from "./templateRowHeight";
 import { sectionDocAssetIds } from "./templateSectionDoc";
 import { SECTION_BODY_SOURCE, resolveSectionBody } from "./templateSectionBody";
 import {
@@ -739,10 +741,20 @@ export function buildTemplateExportModel({
   let totalPhotos = 0;
   let totalFiles = 0;
 
-  const rows = orderedRows.map((row) => {
-    const isCustom = !!row.isCustom;
-    const type = isCustom ? FIELD_TYPE.TEXT : normalizeType(row.type);
+  /**
+   * The export UNITS of ONE value cell.
+   *
+   * A row's cells are the compatibility projection from src/lib/templateColumns.js:
+   * a row that was never divided has exactly one, spanning the whole grid, whose
+   * id IS the row id — so this function reads exactly the entries it always
+   * read, through exactly the same authority rule, and an existing note exports
+   * byte-for-byte as before. A divided row simply asks the same question once
+   * per cell.
+   */
+  function unitsForCell(row, cell, isCustom) {
+    const type = isCustom ? FIELD_TYPE.TEXT : normalizeType(cell.type);
     const isAttachmentRow = type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE;
+    const cellId = cell.id;
     const units = [];
 
     // AUTHORITY — the same rule the live document applies (§3.4), stated once in
@@ -764,13 +776,13 @@ export function buildTemplateExportModel({
     // reader repairs, migrates and writes nothing.
     const body = resolveSectionBody({
       instance,
-      rowId: row.id,
+      rowId: cellId,
       rowType: type,
       isCustomRow: isCustom,
       isAttachmentField: isAttachmentRow,
     });
     const hasDoc = body.source === SECTION_BODY_SOURCE.SECTION_DOC;
-    const sectionItems = hasDoc ? [] : sectionItemsForRow(sectionContent, row.id);
+    const sectionItems = hasDoc ? [] : sectionItemsForRow(sectionContent, cellId);
     const hasSection = hasDoc || sectionItems.length > 0;
     const sectionOwnsBody =
       hasSection && sectionReplacesRowAnswer(type, isAttachmentRow);
@@ -784,13 +796,13 @@ export function buildTemplateExportModel({
       // A legacy Photo/File field keeps its PRIMARY attachments first and fixed;
       // ordered items are supplementary content after them. `attachments[rowId]`
       // is never migrated into `sectionContent`, so nothing is duplicated.
-      units.push(...attachmentUnitsFor(row, attachments[row.id], assets));
+      units.push(...attachmentUnitsFor(row, attachments[cellId], assets));
       units.push(...sectionUnits);
     } else {
       // Legacy evidence attached to an ordinary row still renders there. It is
       // never copied into `sectionContent` by materialisation, so it cannot be
       // duplicated by a section and is left exactly where it has always been.
-      const legacy = attachmentUnitsFor(row, attachments[row.id], assets);
+      const legacy = attachmentUnitsFor(row, attachments[cellId], assets);
       units.push(...legacy);
 
       if (sectionOwnsBody) {
@@ -800,7 +812,7 @@ export function buildTemplateExportModel({
         // — this is a read-time choice, exactly as it is on screen.
         units.push(...sectionUnits);
       } else {
-        const raw = isCustom ? customAnswers.get(row.id) : answers[row.id];
+        const raw = isCustom ? customAnswers.get(cellId) : answers[cellId];
         if (type === FIELD_TYPE.TEXT) {
           const textUnits = textUnitsFor(raw);
           // A row that already carries legacy evidence must not also emit the
@@ -811,7 +823,11 @@ export function buildTemplateExportModel({
         } else {
           // A structured row's typed value stays FIRST and fixed, and is never
           // turned into a text item. Ordered items follow it.
-          const text = structuredDisplayValue(row, raw, knownOptionIds);
+          const text = structuredDisplayValue(
+            { ...row, id: cellId, type, options: cell.options },
+            raw,
+            knownOptionIds
+          );
           if (text) units.push({ type: EXPORT_UNIT.VALUE, text });
           units.push(...sectionUnits);
         }
@@ -827,21 +843,52 @@ export function buildTemplateExportModel({
     // Only a flexible section has one; a structured row and a legacy Photo/File
     // field keep their own `row.px`, exactly as the planner decides.
     const extraPx = sectionOwnsBody
-      ? sectionExtraHeightFor(sectionExtraHeight, row.id)
+      ? sectionExtraHeightFor(sectionExtraHeight, cellId)
       : 0;
     if (extraPx > 0) {
       units.push({ type: EXPORT_UNIT.SPACE, heightPx: extraPx });
     }
 
-    for (const unit of units) {
-      // A WRAP unit carries one photo; it is counted exactly like a block one.
-      const photo = unit.type === EXPORT_UNIT.WRAP ? unit.photo : unit;
-      if (photo && photo.type === EXPORT_UNIT.PHOTO) {
-        totalPhotos += 1;
-        if (photo.unavailable) unavailablePhotos += 1;
-      } else if (unit.type === EXPORT_UNIT.FILE) {
-        totalFiles += 1;
-        if (unit.unavailable) unavailableFiles += 1;
+    return {
+      id: cellId,
+      type,
+      // How many of the TABLE'S value columns this cell covers. Widths belong to
+      // the grid (`layout.valueColumns`), never to a cell — which is exactly
+      // what lets every renderer express this as an ordinary `colspan`.
+      span: cell.span,
+      units,
+      contentDriven: sectionOwnsBody,
+      empty: units.every((u) => u.type === EXPORT_UNIT.EMPTY),
+    };
+  }
+
+  // The table's VALUE-COLUMN GRID — the single authority for column widths, read
+  // once and shared by every row, exactly as the live document reads it.
+  const grid = valueColumns(version.valueColumns);
+
+  const rows = orderedRows.map((row) => {
+    const isCustom = !!row.isCustom;
+    const cellDefs = rowCells(row, grid.length);
+    const cells = cellDefs.map((cell) => unitsForCell(row, cell, isCustom));
+    // The FIRST cell is the row's own value — the one every consumer of this
+    // model has always read. Row-level `units`, `type` and `contentDriven`
+    // therefore keep meaning exactly what they meant, so a single-column row
+    // (every row of every template published before columns existed) produces
+    // an identical model, and every renderer that has not learned about columns
+    // still renders the row correctly.
+    const first = cells[0];
+
+    for (const cell of cells) {
+      for (const unit of cell.units) {
+        // A WRAP unit carries one photo; it is counted exactly like a block one.
+        const photo = unit.type === EXPORT_UNIT.WRAP ? unit.photo : unit;
+        if (photo && photo.type === EXPORT_UNIT.PHOTO) {
+          totalPhotos += 1;
+          if (photo.unavailable) unavailablePhotos += 1;
+        } else if (unit.type === EXPORT_UNIT.FILE) {
+          totalFiles += 1;
+          if (unit.unavailable) unavailableFiles += 1;
+        }
       }
     }
 
@@ -849,16 +896,23 @@ export function buildTemplateExportModel({
       kind: isCustom ? "custom" : "master",
       id: row.id,
       label: typeof row.label === "string" ? row.label : "",
-      type,
-      preferredHeightPx: Number(row.px) > 0 ? Number(row.px) : 120,
+      type: first.type,
+      // CONTENT-DRIVEN with a floor that fits what the row's cells render, and
+      // the height the user dragged only when they genuinely dragged one — the
+      // same function the live document and the pagination planner apply to the
+      // same row, so the exported minimum and the on-screen one are one number.
+      preferredHeightPx: rowMinHeightPx({ row, cells: cellDefs }),
       // A flexible section is CONTENT-DRIVEN: its height is what is actually in
-      // it, never the legacy whole-row height. Reserving `row.px` above a
+      // it, never a reserved whole-row height. Reserving a box above a
       // section's first photo is the same defect the live document already fixed
-      // (§4.6), so the layout flavours skip the minimum box for such a row and
-      // for it alone. Every legacy row keeps `row.px` unchanged.
-      contentDriven: sectionOwnsBody,
-      units,
-      empty: units.every((u) => u.type === EXPORT_UNIT.EMPTY),
+      // (§4.6), so the layout flavours skip the minimum box for such a row.
+      contentDriven: first.contentDriven,
+      units: first.units,
+      // THE VALUE COLUMNS, in order. Always present and always at least one, so
+      // a renderer may iterate `cells` unconditionally; `units` above is
+      // `cells[0].units`, never a separate copy.
+      cells,
+      empty: cells.every((c) => c.empty),
     };
   });
 
@@ -878,6 +932,11 @@ export function buildTemplateExportModel({
     branding,
     layout: {
       leftPct: Math.max(10, Math.min(40, Number(version.leftPct) || 18)),
+      // The value-column grid every row's cells span. Always at least one
+      // column, so a renderer may read it unconditionally; a template published
+      // before the grid existed reads as the single full-width column it has
+      // always had.
+      valueColumns: grid.map((c) => ({ id: c.id, widthPct: c.widthPct })),
     },
     logo: assets.logoDataUrl ? { dataUrl: assets.logoDataUrl } : null,
     rows,

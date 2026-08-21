@@ -9,6 +9,7 @@ import {
 } from "../templates/defaultTwoColDoc";
 import { newId } from "./id";
 import { normalizeBranding } from "./templateBranding";
+import { storedValueColumns } from "./templateColumns";
 import { brandingIdentity } from "./templateHeaderLayout";
 import { sectionContentReferencesAsset } from "./templateSectionContent";
 import { sectionDocReferencesAsset } from "./templateSectionDoc";
@@ -42,7 +43,15 @@ function saveMap(key, map) {
 export const getTemplates = () => loadMap(TEMPLATES_KEY);
 export const saveTemplates = (map) => saveMap(TEMPLATES_KEY, map);
 
-// TemplateVersions: { [versionId]: { id, templateId, createdAt, leftPct, logoAssetId, branding, rows } }
+// TemplateVersions: { [versionId]: { id, templateId, createdAt, leftPct, valueColumns, logoAssetId, branding, rows } }
+// `valueColumns` is the table's VALUE-COLUMN GRID (src/lib/templateColumns.js):
+// an ordered `[{ id, widthPct }]` whose normalized percentages sum to 100, or
+// `null` for the single full-width column every template has always had. It is
+// ADDITIVE and OPTIONAL exactly like `branding`: a version published before the
+// grid existed has no such key and reads as the one-column default, so no
+// migration is required and no stored version is ever rewritten. Widths live
+// here and NOWHERE else — a row's cells carry spans onto this grid, never
+// widths of their own.
 // `branding` is the normalized company branding for this version (branded
 // header/banner + logo placement, report title, table colours — see
 // src/lib/templateBranding.js). It is ADDITIVE and OPTIONAL: a version
@@ -147,6 +156,10 @@ export function createTemplate(name, definition) {
     templateId,
     createdAt: now,
     leftPct: definition?.leftPct ?? DEFAULT_LEFT_COL_PCT,
+    // The table's VALUE-COLUMN GRID (src/lib/templateColumns.js). `null` for the
+    // single full-width column every template has always had, so a template
+    // nobody has divided carries no grid key at all.
+    valueColumns: storedValueColumns(definition?.valueColumns),
     // Prefer an IndexedDB asset reference; a legacy base64 logoSrc is only kept
     // when there is no asset (e.g. the seed migration passing a legacy logo).
     logoAssetId: definition?.logoAssetId ?? null,
@@ -189,6 +202,7 @@ export function duplicateTemplate(templateId) {
   // reference-safe, and cleanup never deletes an asset a version still uses.
   return createTemplate(`${source.name} (copy)`, {
     leftPct: version?.leftPct,
+    valueColumns: version?.valueColumns ?? null,
     logoAssetId: version?.logoAssetId ?? null,
     logoSrc: version?.logoSrc ?? null,
     // The copy inherits the source's branding (an absent/legacy branding
@@ -225,6 +239,10 @@ export function publishTemplateVersion(templateId, definition) {
 
   const next = {
     leftPct: definition?.leftPct ?? DEFAULT_LEFT_COL_PCT,
+    // Normalized at WRITE time like every other structural value, and `null` for
+    // the default single column — so a version published before the grid existed
+    // and an untouched template published today compare equal.
+    valueColumns: storedValueColumns(definition?.valueColumns),
     logoAssetId: definition?.logoAssetId ?? null,
     logoSrc: definition?.logoSrc ?? null,
     branding: normalizeBranding(definition?.branding),
@@ -249,6 +267,10 @@ export function publishTemplateVersion(templateId, definition) {
     current &&
     JSON.stringify({
       leftPct: current.leftPct,
+      // Projected through the SAME normalizer as the draft, so a legacy version
+      // with no grid key at all compares equal to a freshly-normalized default
+      // and an untouched legacy template still publishes nothing.
+      valueColumns: storedValueColumns(current.valueColumns),
       logoAssetId: current.logoAssetId ?? null,
       logoSrc: current.logoSrc ?? null,
       branding: brandingIdentity(current.branding),
@@ -370,6 +392,54 @@ export function isAttachmentAssetReferenced(assetId) {
     if (sectionDocReferencesAsset(instance?.sectionDoc, assetId)) return true;
   }
   return false;
+}
+
+// Which of these CELL ids some note has already put content into.
+//
+// A structural template edit — removing a table column, merging two cells — can
+// leave a cell id with nowhere to render. Nothing is deleted when that happens:
+// the note's own instance keeps every answer, document, attachment and piece of
+// evidence keyed to that id, exactly where it is. But the user editing the
+// template cannot see those notes, so this is what lets the Builder TELL them
+// before they do it, instead of hiding somebody's work silently.
+//
+// Read-only, and deliberately generous about what counts as content: every
+// collection a cell id can key into is checked, and any non-empty entry counts.
+// The cost of a false positive is one extra confirmation; the cost of a false
+// negative is somebody's report text disappearing without a word.
+export function cellsWithNoteContent(cellIds) {
+  const wanted = new Set((Array.isArray(cellIds) ? cellIds : []).filter(Boolean));
+  if (wanted.size === 0) return [];
+
+  const found = new Set();
+  const instances = getNoteTemplateInstances();
+  const hasEntry = (map, id) => {
+    if (!map || typeof map !== "object") return false;
+    const value = map[id];
+    if (value === undefined || value === null || value === "") return false;
+    if (Array.isArray(value)) return value.length > 0;
+    return true;
+  };
+
+  for (const noteId of Object.keys(instances)) {
+    const instance = instances[noteId];
+    if (!instance) continue;
+    for (const id of wanted) {
+      if (found.has(id)) continue;
+      if (
+        hasEntry(instance.answers, id) ||
+        hasEntry(instance.attachments, id) ||
+        hasEntry(instance.evidence, id) ||
+        hasEntry(instance.sectionContent, id) ||
+        hasEntry(instance.sectionDoc, id) ||
+        hasEntry(instance.sectionExtraHeight, id)
+      ) {
+        found.add(id);
+      }
+    }
+    if (found.size === wanted.size) break;
+  }
+  return Array.from(found);
 }
 
 export function getNoteTemplateInstance(noteId) {

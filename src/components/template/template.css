@@ -501,6 +501,44 @@
   outline: none;
 }
 
+/* A divider between two VALUE columns of one row (Builder only). Identical
+   interaction and appearance to the label-column divider above — it is the same
+   element with the same class — and it is scoped to the row it belongs to
+   rather than to the whole table, because value-column widths are the row's own
+   share of its own value area (src/lib/templateColumns.js). Absolutely
+   positioned, so it adds no height and cannot affect pagination. */
+.twocol-col-handle--cell {
+  z-index: 2;
+}
+
+/* A value column of a MULTI-COLUMN row. It becomes the positioning context for
+   its own ⋯ trigger, so each column's actions overlay that column rather than
+   the row — which is what makes "insert column left" unambiguous. A
+   single-column row is untouched: its trigger stays a child of the row, exactly
+   where it has always been. */
+.twocol-cell-col {
+  position: relative;
+}
+
+/* A value column's own ⋯ trigger. It is the same overlay as the row-level one
+   and inherits everything from it — the hover/focus reveal, the accent, the
+   print hiding — but it is positioned against its COLUMN (which is why
+   `.twocol-cell-col` above is a positioning context) and sits above the inner
+   column dividers, so grabbing the trigger of a narrow column never lands on
+   the divider beside it. */
+.twocol-cell-actions {
+  z-index: 4;
+}
+
+/* The border between two value columns of one row. It is the same hairline the
+   label column draws, from the same branded custom properties, so a divided row
+   reads as one table rather than as nested boxes. The FIRST value column draws
+   no left border: the label cell's own right border is already there. */
+.twocol-cell-col + .twocol-cell-col {
+  border-left: var(--nw-tpl-border-width, 1px) solid
+    var(--nw-tpl-border-color, #d1d5db);
+}
+
 /* Per-row action trigger (insert above/below, delete a custom row).
    Overlaid on the row's top-right corner and revealed on hover or keyboard
    focus only, so the paper is never permanently cluttered and the row's

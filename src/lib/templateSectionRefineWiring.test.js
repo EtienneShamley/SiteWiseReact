@@ -373,14 +373,14 @@ describe("33-36. each row has exactly ONE applicable Refine path", () => {
     ]) {
       expect(TABLE).not.toContain(legacy);
     }
-    expect(TABLE).toContain("function renderRowActions(row, modernTarget = null)");
-    const actions = between(TABLE, "function renderRowActions(row, modernTarget = null)", "function renderSectionRefineStatus(row, target)");
+    expect(TABLE).toContain("function renderRowActions(row, cell, cellIndex, cells, modernTarget = null)");
+    const actions = between(TABLE, "function renderRowActions(row, cell, cellIndex, cells, modernTarget = null)", "function renderSectionRefineStatus(row, target)");
     expect(actions).toContain("const modern = modernTarget || null;");
-    expect(actions).toContain("{modern && renderSectionRefineAction(row, modern)}");
+    expect(actions).toContain("{modern && renderSectionRefineAction(cellRow, modern)}");
     // The row head passes the modern target; a row it does not serve passes
     // nothing and therefore renders no Refine trigger at all.
     expect(TABLE).toContain("const headModernTarget = rowModernRefineTarget(row, headSegment);");
-    expect(TABLE).toContain("{renderRowActions(row, headModernTarget)}");
+    expect(TABLE).toContain("renderRowActions(row, cells[0], 0, cells, headModernTarget)");
   });
 
   test("34. a modern Section can never invoke the legacy TextItem writer", () => {
@@ -575,7 +575,7 @@ describe("F6a-b. a Section with a live editor but no sectionDoc yet", () => {
     expect(state).toContain("if (!sectionEditorEligibility(body).ok) {");
     // Refused rows are not editable; every eligible one — including a legacy
     // prose-only or legacy-with-media body — is.
-    expect(state).toContain("editable[row.id] = {");
+    expect(state).toContain("editable[cell.id] = {");
     expect(state).toContain("html: sectionBodyHtml(body),");
   });
 });
@@ -688,7 +688,7 @@ describe("41-45. what F6a deliberately does not touch", () => {
 
   test("44. Quick Add routing is untouched", () => {
     expect(NOTE_DOC).toContain("const sectionDocQuickAddTarget = useCallback(");
-    expect(NOTE_DOC).toContain("quickAdd[row.id] = resolveSectionQuickAddRoute(body);");
+    expect(NOTE_DOC).toContain("quickAdd[cell.id] = resolveSectionQuickAddRoute(body);");
     expect(NOTE_DOC).toContain("sectionQuickAddRouteRef.current[rowId]");
     // Quick Add and Refine share the registry, and nothing else.
     expect(REFINE_HANDLER()).not.toContain("sectionDocQuickAddTarget");

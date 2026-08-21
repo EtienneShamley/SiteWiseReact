@@ -35,6 +35,7 @@ import {
 } from "./templateRowContent";
 import { resolveBlockHeight } from "./paginateBlocks";
 import { FIELD_TYPE } from "./templateFields";
+import { COMPACT_ROW_MIN_PX } from "./templateRowHeight";
 import { sectionItemsForRow } from "./templateSectionContent";
 import {
   isLegacyMediaBody,
@@ -200,7 +201,9 @@ describe("no evidence means nothing changes", () => {
       id: "row-1",
       group: null,
       keepWithNext: false,
-      minHeight: 120,
+      // Content-driven: a stored `px` the user never dragged does not reserve
+      // height (src/lib/templateRowHeight.js).
+      minHeight: COMPACT_ROW_MIN_PX,
       splittable: false,
     });
   });
@@ -472,7 +475,7 @@ describe("no usable section body changes nothing", () => {
       id: "row-1",
       group: null,
       keepWithNext: false,
-      minHeight: 120,
+      minHeight: COMPACT_ROW_MIN_PX,
       splittable: false,
     });
   });
@@ -826,7 +829,7 @@ describe("section pagination grouping", () => {
     expect(single.id).toBe("row-1");
     // HEIGHT is the one thing that deliberately differs: a flexible section is
     // content-driven, so it does not inherit the legacy row height.
-    expect(legacy.minHeight).toBe(120);
+    expect(legacy.minHeight).toBe(COMPACT_ROW_MIN_PX);
     expect(single.minHeight).toBe(SECTION_TEXT_BLOCK_MIN_PX);
   });
 
@@ -1034,13 +1037,18 @@ describe("one row is ONE logical section group", () => {
 describe("section height comes from the segments, never from the legacy row height", () => {
   const heights = (blocks) => blocks.map((b) => b.minHeight);
 
-  test("a legacy Text row with NO section content keeps its row height", () => {
-    expect(plan({ row: row() })[0].minHeight).toBe(120);
-    expect(plan({ row: row({ px: 300 }) })[0].minHeight).toBe(300);
+  test("a legacy Text row with NO section content is compact unless it was dragged", () => {
+    // A stored `px` nobody dragged is a scaffold default and reserves nothing.
+    expect(plan({ row: row() })[0].minHeight).toBe(COMPACT_ROW_MIN_PX);
+    expect(plan({ row: row({ px: 300 }) })[0].minHeight).toBe(COMPACT_ROW_MIN_PX);
+    // A height the user DELIBERATELY dragged is kept, exactly as before.
+    expect(plan({ row: row({ px: 300, pxExplicit: true }) })[0].minHeight).toBe(300);
     // And an empty/absent section map changes nothing.
     expect(
-      plan({ row: row({ px: 300 }), sectionContent: { "row-1": [] } })[0]
-        .minHeight
+      plan({
+        row: row({ px: 300, pxExplicit: true }),
+        sectionContent: { "row-1": [] },
+      })[0].minHeight
     ).toBe(300);
   });
 
@@ -1132,7 +1140,7 @@ describe("section height comes from the segments, never from the legacy row heig
 
   test("a STRUCTURED row keeps its real primary control height", () => {
     const blocks = plan({
-      row: row({ type: FIELD_TYPE.DATE, px: 160 }),
+      row: row({ type: FIELD_TYPE.DATE, px: 160, pxExplicit: true }),
       sectionContent: { "row-1": [secPhoto("B", "a-b")] },
     });
     // The typed control's own row is untouched…
@@ -1145,7 +1153,7 @@ describe("section height comes from the segments, never from the legacy row heig
 
   test("a legacy PHOTO field keeps its primary area and adds nothing artificial", () => {
     const blocks = plan({
-      row: row({ type: FIELD_TYPE.PHOTO, px: 200 }),
+      row: row({ type: FIELD_TYPE.PHOTO, px: 200, pxExplicit: true }),
       isAttachmentField: true,
       attachments: { "row-1": [photo("P", "a-p")] },
       sectionContent: { "row-1": [secText("C", "note"), secPhoto("D", "a-d")] },
@@ -1160,7 +1168,7 @@ describe("section height comes from the segments, never from the legacy row heig
 
   test("a legacy FILE field behaves the same way", () => {
     const blocks = plan({
-      row: row({ type: FIELD_TYPE.FILE, px: 90 }),
+      row: row({ type: FIELD_TYPE.FILE, px: 90, pxExplicit: true }),
       isAttachmentField: true,
       attachments: { "row-1": [file("F", "a-f")] },
       sectionContent: { "row-1": [secText("C", "note")] },
@@ -1372,7 +1380,7 @@ describe("a flexible section's optional extra working space", () => {
 
   test("a STRUCTURED row gets no section extra and keeps its own row height", () => {
     const blocks = plan({
-      row: row({ type: FIELD_TYPE.DATE, px: 160 }),
+      row: row({ type: FIELD_TYPE.DATE, px: 160, pxExplicit: true }),
       sectionContent: { "row-1": [secPhoto("B", "a-b")] },
       sectionExtraHeight: { "row-1": 200 },
     });
@@ -1383,7 +1391,7 @@ describe("a flexible section's optional extra working space", () => {
 
   test("a legacy Photo/File field gets no section extra either", () => {
     const blocks = plan({
-      row: row({ type: FIELD_TYPE.PHOTO, px: 200 }),
+      row: row({ type: FIELD_TYPE.PHOTO, px: 200, pxExplicit: true }),
       isAttachmentField: true,
       attachments: { "row-1": [photo("P", "a-p")] },
       sectionContent: { "row-1": [secText("C", "note")] },
@@ -1407,7 +1415,7 @@ describe("a flexible section's optional extra working space", () => {
 
   test("a LEGACY row with no section content is completely unaffected", () => {
     const blocks = plan({
-      row: row({ px: 300 }),
+      row: row({ px: 300, pxExplicit: true }),
       sectionExtraHeight: { "row-1": 500 },
     });
     expect(blocks).toHaveLength(1);
@@ -1439,7 +1447,7 @@ describe("a flexible section's optional extra working space", () => {
       sectionExtraHeight: null,
     });
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].minHeight).toBe(120);
+    expect(blocks[0].minHeight).toBe(COMPACT_ROW_MIN_PX);
   });
 });
 

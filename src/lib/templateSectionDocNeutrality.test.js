@@ -505,7 +505,10 @@ describe("templateModel's only new wiring is the fourth asset scan", () => {
     // Exactly four mentions, and each one is accounted for: the import
     // specifier, the imported symbol, the fourth scan, and seeding a NEW
     // instance with an empty map. Nothing reads a document, nothing writes one.
-    expect(model.match(/sectionDoc/g) || []).toHaveLength(4);
+    // Five since the cell-content guard (`cellsWithNoteContent`, A2) added one
+    // more READ of the same collection — it asks whether a cell has content, and
+    // still never reads a document's contents, repairs one or writes one.
+    expect(model.match(/sectionDoc/g) || []).toHaveLength(5);
     expect(model).toContain("sectionDoc: {}");
     expect(model).toContain("import { sectionDocReferencesAsset }");
   });

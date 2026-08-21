@@ -1932,9 +1932,13 @@ export default function MainArea() {
           grid minimum is 0 and the `1fr` track is exactly the remaining
           height — the document scrolls inside it and never grows the page. */}
       <div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">
+        {/* The document viewport's own inset is deliberately small: the
+            document surfaces inside it (the Template's A4 pages, the Free-form
+            paper) carry the real page margins, so anything added here is width
+            the document does not get. */}
         <div
           id="chatWindow"
-          className="overflow-auto px-4 py-4 sm:px-6 sm:py-6 space-y-3 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-200 dark:focus-within:ring-blue-900/40 focus-within:border-blue-300 dark:focus-within:border-blue-700"
+          className="overflow-auto px-2 py-3 sm:px-3 sm:py-4 space-y-3 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-200 dark:focus-within:ring-blue-900/40 focus-within:border-blue-300 dark:focus-within:border-blue-700"
         >
           {/* NOTE VIEW */}
           <div style={{ display: activeTab === "note" ? "block" : "none" }}>

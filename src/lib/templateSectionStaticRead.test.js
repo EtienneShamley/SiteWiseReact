@@ -41,6 +41,7 @@ import {
   resolveSectionBody,
 } from "./templateSectionBody";
 import { SECTION_DOC_FORMAT } from "./templateSectionDoc";
+import { CONTROL_ROW_MIN_PX } from "./templateRowHeight";
 
 const SRC = path.join(__dirname, "..");
 const read = (relative) => fs.readFileSync(path.join(SRC, relative), "utf8");
@@ -347,7 +348,10 @@ describe("27-29. a structured row keeps its typed value first and separate", () 
     const { document } = bothPlans(instance, { row: { type: "number" }, body: { rowType: "number" } });
     expect(document[0].kind).toBe(ROW_BLOCK_KIND.ROW);
     expect(document[0].id).toBe(ROW);
-    expect(document[0].minHeight).toBe(120);
+    // The typed control's own floor — enough for a structured control and its
+    // focus ring (src/lib/templateRowHeight.js). The stored `px` this row never
+    // had dragged does not reserve height.
+    expect(document[0].minHeight).toBe(CONTROL_ROW_MIN_PX);
     expect(document.slice(1).map((b) => b.kind)).toEqual([
       ROW_BLOCK_KIND.SECTION_SEGMENT,
       ROW_BLOCK_KIND.SECTION_SEGMENT,
@@ -566,11 +570,11 @@ describe("5/34-37. a row still on its legacy answer/evidence: what the reader sa
     );
     expect(memo).toContain("const isDocument = isSectionDocumentBody(body);");
     expect(memo).toContain("const legacyMedia = isLegacyMediaBody(body);");
-    expect(memo).toContain("if (isDocument || legacyMedia) bodies[row.id] = body;");
+    expect(memo).toContain("if (isDocument || legacyMedia) bodies[cell.id] = body;");
     // A REFUSED document body still renders statically (its document plus its
     // compat segments); a refused legacy body keeps its legacy blocks.
-    expect(memo).toContain("if (isDocument) bodies[row.id] = body;");
-    expect(memo).toContain("editable[row.id] = {");
+    expect(memo).toContain("if (isDocument) bodies[cell.id] = body;");
+    expect(memo).toContain("editable[cell.id] = {");
   });
 });
 
@@ -1008,7 +1012,7 @@ describe("51-55. MODERN INTERACTION: the shared editor is the only one, and ever
     expect(NOTE_DOC_CODE).toContain("appendComposedAttachment");
     expect(NOTE_DOC_CODE).toContain("appendComposedText");
     expect(NOTE_DOC_CODE).toContain("const sectionDocQuickAddTarget = useCallback(");
-    expect(NOTE_DOC_CODE).toContain("quickAdd[row.id] = resolveSectionQuickAddRoute(body);");
+    expect(NOTE_DOC_CODE).toContain("quickAdd[cell.id] = resolveSectionQuickAddRoute(body);");
     expect(NOTE_DOC_CODE).toContain("SECTION_QUICK_ADD_ROUTE.REFUSE");
     expect(NOTE_DOC_CODE).not.toContain("SECTION_QUICK_ADD_ROUTE.LEGACY");
     expect(NOTE_DOC_CODE).not.toContain("appendSectionText");

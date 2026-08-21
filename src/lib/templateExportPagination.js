@@ -415,6 +415,17 @@ export function fragmentRowUnits(units, fits) {
  * measurement and markup agree without either having to special-case the value.
  */
 export function fragmentRow(row, fits) {
+  // A row DIVIDED INTO SEVERAL CELLS is ATOMIC, exactly as it is on screen (see
+  // planRowBlocks). Its cells sit side by side across the page and their content
+  // has no single vertical order, so there is no boundary at which such a row
+  // could be cut without either interleaving two cells' text or dropping every
+  // cell but the first. A divided row that genuinely cannot fit a page therefore
+  // FAILS the export through the existing unsplittable path — the same rule this
+  // module already applies to any content it cannot divide safely: nothing is
+  // ever clipped and nothing is ever silently lost.
+  if (Array.isArray(row?.cells) && row.cells.length > 1) {
+    return { ok: false, reason: FRAGMENT_FAILURE.UNSPLITTABLE };
+  }
   const result = fragmentRowUnits(row?.units, fits);
   if (!result.ok) return result;
   return {

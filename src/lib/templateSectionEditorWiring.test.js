@@ -329,7 +329,7 @@ describe("24-37/55. images and files are the shared core's, not a Template copy"
     expect(readOnly).not.toContain("onFocus");
     expect(readOnly).not.toContain("activateSectionEditor");
     // The answer control routes a non-owned Text row there.
-    const control = between(TABLE, "function renderAnswerControl(row)", "function renderFieldTypeEditor(row)");
+    const control = between(TABLE, "function renderAnswerControl(row)", "function renderFieldTypeEditor(row, cell)");
     expect(control).toContain("if (sectionEditorOwnsRow(row)) {");
     expect(control).toContain("return renderSectionReadOnlyAnswer(row, value);");
     // A non-owned document row's prose is a plain box, and its media is the
@@ -508,7 +508,7 @@ describe("41-45. the static Section and the live one show the same document", ()
   test("a row still on its legacy prose answer keeps its dragged height while active", () => {
     // A legacy body carrying MEDIA renders (and edits) as document segments,
     // so it is content-driven like a document; a prose-only one keeps `row.px`.
-    expect(NOTE_DOC).toContain("minHeightPx: isDocument || legacyMedia ? 0 : row.px || 0");
+    expect(NOTE_DOC).toContain("minHeightPx: isDocument || legacyMedia ? 0 : multi ? 0 : row.px || 0");
     expect(NOTE_DOC).toContain("const legacyMedia = isLegacyMediaBody(body);");
     const planner = read("lib/templateRowContent.js");
     expect(planner).toContain("case SECTION_SEGMENT_KIND.EDITOR:");
@@ -543,7 +543,7 @@ describe("38-40. structured rows keep their typed value; custom rows are ordinar
     // `sectionOwnsRowHead` is false for a structured row, so its ROW block is
     // emitted first and the editor segment follows it in the same group.
     expect(planner).toContain("const sectionOwnsRowHead =");
-    expect(planner).toContain("sectionReplacesRowAnswer(row.type, isAttachmentField)");
+    expect(planner).toContain("sectionReplacesRowAnswer(row.type, attachmentField)");
   });
 
   test("40. a custom row uses the same registry, keyed by its own stable id", () => {
@@ -579,7 +579,7 @@ describe("50. Quick Add cannot create hidden content", () => {
     // in the body memo and read here — never re-derived from the registry or
     // from whether a sectionDoc exists.
     const memo = between(NOTE_DOC, "const sectionState = useMemo(", "const sectionBodies = sectionState.bodies");
-    expect(memo).toContain("quickAdd[row.id] = resolveSectionQuickAddRoute(body);");
+    expect(memo).toContain("quickAdd[cell.id] = resolveSectionQuickAddRoute(body);");
     expect(NOTE_DOC).toContain("sectionQuickAddRouteRef.current = sectionState.quickAdd;");
     expect(target).toContain("const route = sectionQuickAddRouteRef.current[rowId];");
     expect(target).toContain("const entry = sectionEditableRef.current[rowId];");

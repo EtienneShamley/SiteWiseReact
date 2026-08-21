@@ -398,9 +398,18 @@ export function rowHtml(fragment, ctx) {
     color: t.contentTextColor,
     border: `${t.borderWidthPx}px solid ${t.borderColor}`,
   });
-  const units = (fragment.units || [])
-    .map((unit) => unitHtml(unit, ctx))
-    .join("");
+  // THIS ROW'S CELLS on the table's grid. `fragment.cells` is the canonical list
+  // from the export model and always holds at least one entry, whose units ARE
+  // `fragment.units` — so an undivided row (every row of every template
+  // published before the grid existed) emits exactly the one `<td>` it always
+  // did, from exactly the same units. A PAGINATED fragment carries only the
+  // units the planner put on this page, so it takes the row-level `units` for a
+  // single cell spanning the whole value area rather than the whole row's cells.
+  const columnCount = Math.max(1, ctx.columnWidths.length);
+  const cells =
+    Array.isArray(fragment.cells) && fragment.cells.length && !fragment.continued
+      ? fragment.cells
+      : [{ units: fragment.units || [], span: columnCount }];
   const labelClass = fragment.continued
     ? "nw-tpl-label nw-tpl-label--continued"
     : "nw-tpl-label";
@@ -416,10 +425,29 @@ export function rowHtml(fragment, ctx) {
     ? `<div class="nw-tpl-rowmin" style="min-height: ${minBox}px">${label}</div>`
     : label;
 
+  const unitsFor = (cell) =>
+    (cell.units || []).map((unit) => unitHtml(unit, ctx)).join("");
+
+  // ONE `<td>` per cell, spanning the grid columns it covers — an ordinary HTML
+  // `colspan`, which is exactly what this model is. A cell covering every column
+  // emits no `colspan` attribute at all when the table has one column, so every
+  // existing template's markup is byte-for-byte what it always was.
+  //
+  // Word understands `colspan` natively, so the DOCX conversion needs no second
+  // representation, and `table-layout: fixed` over the `<colgroup>` above gives
+  // the PDF the same calculated widths the live document uses.
+  const valueCells = cells
+    .map((cell) => {
+      const span = Math.max(1, Math.floor(Number(cell.span) || 1));
+      const colspan = span > 1 ? ` colspan="${span}"` : "";
+      return `<td class="nw-tpl-cell" style="${cellStyle}"${colspan}>${unitsFor(cell)}</td>`;
+    })
+    .join("");
+
   return (
     `<tr class="nw-tpl-row">` +
     `<td class="${labelClass}" style="${labelStyle}">${labelInner}</td>` +
-    `<td class="nw-tpl-cell" style="${cellStyle}">${units}</td>` +
+    valueCells +
     `</tr>`
   );
 }
@@ -557,6 +585,18 @@ function fallbackNoticeHtml(model) {
 export function makeRenderContext(model, flavor, options = {}) {
   const branding = normalizeBranding(model.branding);
   const leftPct = model.layout?.leftPct ?? 18;
+  // The table's VALUE-COLUMN GRID, as percentages of the WHOLE table — one
+  // `<col>` each, so the exported table has real vertical columns and a cell
+  // simply spans the ones it covers. A model without a grid (or one column) is
+  // the single full-width value column every template has always had.
+  const gridColumns = Array.isArray(model.layout?.valueColumns)
+    ? model.layout.valueColumns
+    : [];
+  const valueShare = 100 - leftPct;
+  const columnWidths =
+    gridColumns.length > 1
+      ? gridColumns.map((c) => ((Number(c.widthPct) || 0) * valueShare) / 100)
+      : [valueShare];
   const isPdf = flavor === EXPORT_FLAVOR.PDF;
   const rowMaxHeightPx =
     Number(options.rowMaxHeightPx) > 0
@@ -568,11 +608,14 @@ export function makeRenderContext(model, flavor, options = {}) {
     branding,
     table: branding.table,
     leftPct,
+    columnWidths,
     rowMaxHeightPx,
-    // The answer column's real width, used to size photos.
+    // The answer area's real width, used to size photos. A divided table sizes
+    // them against its WIDEST value column, which is the widest a photo can
+    // actually be laid out in.
     contentWidthPx: Math.max(
       1,
-      Math.round((USABLE_WIDTH_PX * (100 - leftPct)) / 100) - 24
+      Math.round((USABLE_WIDTH_PX * Math.max(...columnWidths)) / 100) - 24
     ),
     // For the PDF this is derived from the SAME capacity the planner uses, less
     // the row and photo chrome the image sits inside, so a full-page photo is
@@ -626,11 +669,26 @@ export function buildMeasurableHtml(inner) {
 
 function tableHtml(fragments, ctx) {
   const rows = fragments.map((f) => rowHtml(f, ctx)).join("");
+  // ONE `<col>` per real table column: the label column, then the value grid.
+  // A one-column table emits exactly the `<colgroup>` this exporter has always
+  // emitted, so every existing template's markup is unchanged.
+  const cols =
+    ctx.columnWidths.length > 1
+      ? ctx.columnWidths
+          .map((w) => `<col style="width: ${roundWidth(w)}%" />`)
+          .join("")
+      : "<col />";
   return (
     `<table class="nw-tpl-table" cellspacing="0" cellpadding="0">` +
-    `<colgroup><col style="width: ${ctx.leftPct}%" /><col /></colgroup>` +
+    `<colgroup><col style="width: ${ctx.leftPct}%" />${cols}</colgroup>` +
     `<tbody>${rows}</tbody></table>`
   );
+}
+
+// Column widths are emitted at two decimal places so a normalized percentage
+// never reaches the markup as a 17-digit float.
+function roundWidth(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
 }
 
 /**
@@ -726,7 +784,19 @@ export function templateExportComponentCss(flavor) {
       -webkit-print-color-adjust: exact; print-color-adjust: exact;
     }
     .nw-tpl-doc *, .nw-tpl-doc *::before, .nw-tpl-doc *::after { box-sizing: border-box; }
-    ${pdf ? `.nw-tpl-page { width: ${USABLE_WIDTH_MM}mm; }` : ".nw-tpl-page { max-width: 820px; margin: 0 auto; }"}
+    ${
+      pdf
+        ? `.nw-tpl-page { width: ${USABLE_WIDTH_MM}mm; }`
+        : // ONE content width for every surface. This used to be an arbitrary
+          // 820px (~217mm) — wider than the A4 content column the app document,
+          // the PDF and the print stylesheet all use — so the standalone HTML
+          // document and the Document Preview rendered the same table wider than
+          // the note it was previewing. It is now the SAME shared usable width
+          // the page geometry defines, so Builder, note, Preview and every
+          // export agree. `max-width` rather than `width`, so a narrow window
+          // still narrows the document instead of scrolling it sideways.
+          `.nw-tpl-page { max-width: ${USABLE_WIDTH_MM}mm; margin: 0 auto; }`
+    }
     .nw-tpl-pagebreak { page-break-before: always; break-before: page; height: 0; }
     .nw-tpl-header { position: relative; width: 100%; overflow: hidden; margin-bottom: 6mm; }
     .nw-tpl-banner { position: absolute; }

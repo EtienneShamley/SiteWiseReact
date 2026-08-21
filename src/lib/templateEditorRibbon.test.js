@@ -99,7 +99,7 @@ describe("[10] the Template editing ribbon stays outside the document scroller",
     expect(scroller).not.toContain("<TemplateEditorRibbon");
     // The scroller is the only overflow-auto region of the Builder.
     expect(BUILDER.match(/overflow-auto/g)).toHaveLength(1);
-    expect(BUILDER).toContain('className="flex-1 min-h-0 overflow-auto p-4" data-nw-template-scroller="true"');
+    expect(BUILDER).toContain('className="flex-1 min-h-0 overflow-auto p-2" data-nw-template-scroller="true"');
   });
 
   test("the modal body stops scrolling itself while a template is being edited", () => {

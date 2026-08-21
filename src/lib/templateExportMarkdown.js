@@ -262,13 +262,40 @@ export function buildTemplateExportMarkdown(model) {
   for (const row of model.rows || []) {
     lines.push(`### ${escapeMd(row.label || "Untitled field")}`);
     lines.push("");
-    const body = [];
-    for (const unit of row.units || []) body.push(...unitMd(unit));
-    // Trailing blank lines from empty paragraphs carry no meaning at the end of
-    // a field, so they are trimmed; interior blank lines are preserved.
-    while (body.length && body[body.length - 1] === "") body.pop();
-    lines.push(...body);
-    lines.push("");
+
+    // A row's CELLS degrade DETERMINISTICALLY.
+    //
+    // Markdown has no way to express a row divided into cells that may each hold
+    // prose, images and file links — a GFM table cell holds a single line of
+    // inline content and nothing else, so rendering the cells as a table would
+    // silently drop images, file links and every paragraph after the first, and
+    // a colspan cannot be expressed at all. Instead each cell becomes its own
+    // sub-heading beneath the field, in document order, and its content is
+    // emitted through the SAME unit renderer every other field uses. Nothing is
+    // lost, the order is the document's, and the same model always produces the
+    // same text.
+    //
+    // A row with ONE cell — every row of every template published before the
+    // grid existed, and every row of a wider table nobody has divided — emits no
+    // sub-heading at all, so its Markdown is unchanged.
+    const cells =
+      Array.isArray(row.cells) && row.cells.length
+        ? row.cells
+        : [{ units: row.units || [] }];
+
+    cells.forEach((cell, index) => {
+      if (cells.length > 1) {
+        lines.push(`#### Cell ${index + 1}`);
+        lines.push("");
+      }
+      const body = [];
+      for (const unit of cell.units || []) body.push(...unitMd(unit));
+      // Trailing blank lines from empty paragraphs carry no meaning at the end
+      // of a field, so they are trimmed; interior blank lines are preserved.
+      while (body.length && body[body.length - 1] === "") body.pop();
+      lines.push(...body);
+      lines.push("");
+    });
   }
 
   return `${lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;

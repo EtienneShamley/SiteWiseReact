@@ -21,6 +21,10 @@ import {
   normalizeType,
 } from "../../lib/templateFields";
 import {
+  rowCells,
+  valueColumns as normalizeValueColumns,
+} from "../../lib/templateColumns";
+import {
   CUSTOM_ROW_MIN_HEIGHT_PX,
   customRowsForTemplate,
   deleteCustomRow,
@@ -292,6 +296,9 @@ export default function NoteTemplateDoc({
 
   const [rows, setRows] = useState(() => normalizeRows(defaultRows));
   const [leftPct, setLeftPct] = useState(DEFAULT_LEFT_COL_PCT);
+  // The pinned version's VALUE-COLUMN GRID. Read-only here: the grid is the
+  // TEMPLATE's structure, and a note fills it rather than changing it.
+  const [valueColumns, setValueColumns] = useState(() => normalizeValueColumns(null));
   // The logo is referenced by asset id (resolved to an object URL below).
   // `legacyLogoSrc` is the fallback for an un-migrated pinned version.
   const [logoAssetId, setLogoAssetId] = useState(null);
@@ -549,6 +556,7 @@ export default function NoteTemplateDoc({
       getCurrentVersion(instance?.templateId);
     if (!version) return; // keep scaffold defaults
     setLeftPct(version.leftPct || DEFAULT_LEFT_COL_PCT);
+    setValueColumns(normalizeValueColumns(version.valueColumns));
     if (Array.isArray(version.rows) && version.rows.length > 0) {
       // Read-time normalization for rendering only — supplies field-type and
       // deterministic id defaults without rewriting the pinned immutable
@@ -721,43 +729,66 @@ export default function NoteTemplateDoc({
     const bodies = {};
     const editable = {};
     const quickAdd = {};
+    // ONE PASS PER VALUE CELL, not per row.
+    //
+    // A cell is the unit a Section belongs to, and its id is the key every
+    // stored collection already uses. For every row of every template published
+    // before columns existed — and for every note-specific custom row — the row
+    // has exactly one cell whose id IS the row id (see
+    // src/lib/templateColumns.js), so this loop reads and writes exactly the
+    // entries it always did, through exactly the same reader. A row divided
+    // into columns simply resolves one body per column, each keyed by its own
+    // cell id, so every column is a full Section rather than a lesser kind of
+    // cell.
     for (const row of displayRows) {
       if (!row || !row.id) continue;
-      const type = normalizeType(row.type);
-      const body = resolveSectionBody({
-        instance,
-        rowId: row.id,
-        rowType: row.type,
-        isCustomRow: customRowIds.has(row.id),
-        isAttachmentField: type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE,
+      const cells = rowCells(row, valueColumns.length);
+      const multi = cells.length > 1;
+      cells.forEach((cell, index) => {
+        if (!cell || !cell.id) return;
+        const type = normalizeType(cell.type);
+        const body = resolveSectionBody({
+          instance,
+          rowId: cell.id,
+          rowType: cell.type,
+          isCustomRow: customRowIds.has(cell.id),
+          isAttachmentField: type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE,
+        });
+        const isDocument = isSectionDocumentBody(body);
+        quickAdd[cell.id] = resolveSectionQuickAddRoute(body);
+
+        if (!sectionEditorEligibility(body).ok) {
+          // A refused ordered-document body still renders statically as the
+          // document it can show plus its compatibility segments; a refused
+          // legacy body keeps its legacy blocks. Neither is editable.
+          if (isDocument) bodies[cell.id] = body;
+          return;
+        }
+
+        const legacyMedia = isLegacyMediaBody(body);
+        if (isDocument || legacyMedia) bodies[cell.id] = body;
+        const name = (row.label || "").trim() || "Section";
+        editable[cell.id] = {
+          // A column names itself, so a screen reader can tell which cell of a
+          // multi-column row it is in. A single-cell row keeps the exact label
+          // it has always had.
+          html: sectionBodyHtml(body),
+          ariaLabel: multi
+            ? `${name} — column ${index + 1} answer`
+            : `${name} — answer`,
+          // The block floor an ACTIVE Section keeps. A row still rendering as
+          // its legacy answer box keeps the height the user dragged for it
+          // (`row.px`), so clicking into it cannot make it jump; a row whose
+          // body renders as a document is content-driven, exactly as its static
+          // rendering is. A column of a multi-column row has no whole-row
+          // height of its own to keep.
+          minHeightPx: isDocument || legacyMedia ? 0 : multi ? 0 : row.px || 0,
+          isDocument: isDocument || legacyMedia,
+        };
       });
-      const isDocument = isSectionDocumentBody(body);
-      quickAdd[row.id] = resolveSectionQuickAddRoute(body);
-
-      if (!sectionEditorEligibility(body).ok) {
-        // A refused ordered-document body still renders statically as the
-        // document it can show plus its compatibility segments; a refused
-        // legacy body keeps its legacy blocks. Neither is editable.
-        if (isDocument) bodies[row.id] = body;
-        continue;
-      }
-
-      const legacyMedia = isLegacyMediaBody(body);
-      if (isDocument || legacyMedia) bodies[row.id] = body;
-      editable[row.id] = {
-        html: sectionBodyHtml(body),
-        ariaLabel: `${(row.label || "").trim() || "Section"} — answer`,
-        // The block floor an ACTIVE Section keeps. A row still rendering as its
-        // legacy answer box keeps the height the user dragged for it
-        // (`row.px`), so clicking into it cannot make it jump; a row whose body
-        // renders as a document is content-driven, exactly as its static
-        // rendering is.
-        minHeightPx: isDocument || legacyMedia ? 0 : row.px || 0,
-        isDocument: isDocument || legacyMedia,
-      };
     }
     return { bodies, editable, quickAdd };
-  }, [displayRows, instance, customRowIds]);
+  }, [displayRows, instance, customRowIds, valueColumns]);
 
   const sectionBodies = sectionState.bodies;
   sectionEditableRef.current = sectionState.editable;
@@ -1790,7 +1821,12 @@ export default function NoteTemplateDoc({
       if (!customRowIds.has(rowId)) return;
       handleCustomRowPatch(
         rowId,
-        { preferredHeight: Math.max(CUSTOM_ROW_MIN_HEIGHT_PX, Math.round(px)) },
+        {
+          preferredHeight: Math.max(CUSTOM_ROW_MIN_HEIGHT_PX, Math.round(px)),
+          // A dragged height is a deliberate one — the marker is what makes it
+          // reserve space (src/lib/templateRowHeight.js).
+          heightExplicit: true,
+        },
         "This section's height could not be saved"
       );
       setPendingHeights((prev) => {
@@ -2794,6 +2830,7 @@ export default function NoteTemplateDoc({
 
       <ResizableTwoColTable
         leftPct={leftPct}
+        valueColumns={valueColumns}
         rows={displayRows}
         onAddRow={handleAddRowAtEnd}
         addRowLabel="Add section at end"

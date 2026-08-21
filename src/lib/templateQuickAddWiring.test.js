@@ -367,7 +367,7 @@ describe("a Section capture goes through the document route only", () => {
   });
 
   test("the route is the reader's verdict, published once per row", () => {
-    expect(templateDoc).toMatch(/quickAdd\[row\.id\] = resolveSectionQuickAddRoute\(body\)/);
+    expect(templateDoc).toMatch(/quickAdd\[cell\.id\] = resolveSectionQuickAddRoute\(body\)/);
     expect(templateDoc).toMatch(/sectionQuickAddRouteRef\.current = sectionState\.quickAdd/);
     expect(routeFn).toMatch(/const route = sectionQuickAddRouteRef\.current\[rowId\]/);
   });

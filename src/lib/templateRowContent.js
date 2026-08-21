@@ -87,6 +87,8 @@ import { normalizeAttachment, ATTACHMENT_KIND } from "./noteAttachments";
 import { SECTION_ITEM_KIND } from "./templateSectionContent";
 import { sectionExtraHeightFor } from "./templateSectionHeight";
 import { FIELD_TYPE, normalizeType } from "./templateFields";
+import { rowCells } from "./templateColumns";
+import { ATTACHMENT_HEAD_MIN_PX, rowMinHeightPx } from "./templateRowHeight";
 import {
   SECTION_SEGMENT_KIND,
   compatSegmentItemKind,
@@ -306,6 +308,9 @@ export function sectionSegmentMinHeight(segment) {
  *     them, in the same group. Its `evidence` is not rendered as well.
  *
  * @param row               the render row ({ id, label, px, type, isCustom })
+ * @param valueColumnCount  how many columns the TABLE'S value grid has, so the
+ *                          row's cells can be mapped onto it. Defaults to the
+ *                          one-column grid every template started with.
  * @param isAttachmentField whether the row's CURRENT pinned type is Photo/File
  *                          AND attachment rendering is enabled (note mode)
  * @param attachments       the instance's raw attachments map
@@ -322,6 +327,7 @@ export function sectionSegmentMinHeight(segment) {
  */
 export function planRowBlocks({
   row,
+  valueColumnCount = 1,
   isAttachmentField = false,
   attachments = null,
   evidence = null,
@@ -331,18 +337,47 @@ export function planRowBlocks({
   if (!row || !row.id) return [];
 
   const rowId = row.id;
+  // The row's cells on the TABLE'S grid (src/lib/templateColumns.js). A table
+  // nobody has divided has a one-column grid, so this is the single full-width
+  // cell every row has always had.
+  const cells = rowCells(row, valueColumnCount);
+  // A row DIVIDED INTO SEVERAL CELLS is ONE ATOMIC BLOCK, and this is the one
+  // place that is decided.
+  //
+  // The segment plan below flows a Section's body DOWN the page, one block per
+  // segment, so a long section can break across pages. Columns run ACROSS the
+  // page: two cells side by side each hold their own document, and there is no
+  // single vertical order for their segments to be planned into. So a row with
+  // more than one value column plans as a single non-splittable block whose
+  // cells render their own bodies inside it, exactly as a table cell does in
+  // every word processor. If such a row grows taller than a page it starts a
+  // fresh page and that page grows to contain it (PagedDocument's existing
+  // oversized-block behaviour) — nothing is clipped, and nothing is silently
+  // dropped.
+  //
+  // A row with ONE cell — every row of every template published before the grid
+  // existed, and every row of a wider table that nobody has divided — is
+  // untouched by this and keeps the full segment plan, whatever the grid is.
+  const multiColumn = cells.length > 1;
   // `sectionSegments` are the segments of a body already resolved by the
   // canonical reader (src/lib/templateSectionBody.js) and projected for layout
   // (src/lib/templateSectionDocSegments.js). Nothing about which representation
   // is authoritative is decided here: that question belongs to the reader, and
   // this parameter is the caller's answer to it.
-  const sectionUnits = Array.isArray(sectionSegments) ? sectionSegments : [];
+  const sectionUnits =
+    multiColumn || !Array.isArray(sectionSegments) ? [] : sectionSegments;
   const hasSection = sectionUnits.length > 0;
   // AUTHORITY: ordered section content replaces the row's legacy evidence, so
   // material a later phase materialises into the ordered list can never appear
   // twice. Nothing is deleted — `evidence[rowId]` stays in storage untouched.
   const evidenceItems = hasSection ? [] : rowEvidenceItems(evidence, rowId);
-  const attachmentItems = isAttachmentField
+  // The compound Photo/File field is a whole-row structure with its own head
+  // and one block per attachment, so it is never divided into columns. Photo
+  // and File are not offered by the builder's creation catalog either
+  // (templateFields.js), which is why only a legacy single-column row can be
+  // one at all — this simply makes the exclusion explicit rather than implied.
+  const attachmentField = isAttachmentField && !multiColumn;
+  const attachmentItems = attachmentField
     ? rowAttachmentItems(attachments, rowId)
     : [];
 
@@ -350,19 +385,19 @@ export function planRowBlocks({
   // Only a Text row hands its whole body over; every other type keeps its typed
   // value or its primary attachments first.
   const sectionOwnsRowHead =
-    hasSection && sectionReplacesRowAnswer(row.type, isAttachmentField);
+    hasSection && sectionReplacesRowAnswer(row.type, attachmentField);
 
   // A row is compound when it emits more than one block.
   const blockCount =
-    (isAttachmentField ? 1 + attachmentItems.length : sectionOwnsRowHead ? 0 : 1) +
+    (attachmentField ? 1 + attachmentItems.length : sectionOwnsRowHead ? 0 : 1) +
     sectionUnits.length +
     evidenceItems.length;
-  const isCompound = isAttachmentField || blockCount > 1;
+  const isCompound = attachmentField || blockCount > 1;
   const group = isCompound ? rowId : null;
 
   const blocks = [];
 
-  if (isAttachmentField) {
+  if (attachmentField) {
     blocks.push({
       kind: ROW_BLOCK_KIND.ATTACHMENT_HEAD,
       id: rowId,
@@ -373,7 +408,10 @@ export function planRowBlocks({
       // alone.
       keepWithNext:
         attachmentItems.length + sectionUnits.length + evidenceItems.length > 0,
-      minHeight: Math.max(56, row.px || 56),
+      minHeight: Math.max(
+        ATTACHMENT_HEAD_MIN_PX,
+        rowMinHeightPx({ row, cells, isAttachmentField: true })
+      ),
       splittable: false,
       attachmentCount: attachmentItems.length,
     });
@@ -399,7 +437,14 @@ export function planRowBlocks({
       rowId,
       group,
       keepWithNext: evidenceItems.length + sectionUnits.length > 0,
-      minHeight: row.px || 120,
+      // CONTENT-DRIVEN with a floor that fits what the row's cells render, and
+      // the height the user dragged only when they genuinely dragged one — the
+      // one statement of that rule lives in templateRowHeight.js.
+      minHeight: rowMinHeightPx({
+        row,
+        cells,
+        hasLegacyEvidence: evidenceItems.length > 0,
+      }),
       // The editable Text answer is deliberately not sliced across pages in
       // this phase — unchanged behaviour.
       splittable: false,

@@ -90,6 +90,13 @@ export function normalizeCustomRow(raw) {
       Number.isFinite(preferred) && preferred > 0
         ? Math.max(CUSTOM_ROW_MIN_HEIGHT_PX, preferred)
         : CUSTOM_ROW_DEFAULT_HEIGHT_PX,
+    // True only when the user DRAGGED this row's height. `preferredHeight` has
+    // always carried a default as well as a dragged value, and only a dragged
+    // one reserves height (src/lib/templateRowHeight.js) — so the two are told
+    // apart here rather than by guessing from the number. Additive and
+    // optional: a row saved before it existed reads as "never dragged", which
+    // is the correct default and needs no migration.
+    heightExplicit: raw.heightExplicit === true,
     placement: {
       anchorFieldId:
         typeof placement.anchorFieldId === "string" && placement.anchorFieldId
@@ -157,7 +164,7 @@ export function deleteCustomRow(list, id, now = Date.now()) {
 // table already renders (`{ id, label, px, minPx, type, options }`) plus the
 // `isCustom` marker that selects note-specific actions and persistence.
 export function toRenderRow(customRow) {
-  return {
+  const row = {
     id: customRow.id,
     label: customRow.label,
     px: customRow.preferredHeight,
@@ -166,6 +173,10 @@ export function toRenderRow(customRow) {
     options: [],
     isCustom: true,
   };
+  // A dragged height is honoured; the default this row was created with is not,
+  // exactly as for a template row (src/lib/templateRowHeight.js).
+  if (customRow.heightExplicit === true) row.pxExplicit = true;
+  return row;
 }
 
 /**

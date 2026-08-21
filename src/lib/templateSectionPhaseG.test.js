@@ -525,7 +525,7 @@ describe("MODERN OPENING — every supported flexible Section opens in the share
     // whatever its source — there is no plain-prose gate any more.
     expect(NTD).not.toContain("isPlainLegacyTextBody");
     expect(NTD).toContain("if (!sectionEditorEligibility(body).ok)");
-    expect(NTD).toContain("editable[row.id] = {");
+    expect(NTD).toContain("editable[cell.id] = {");
   });
 
   test("4/44. opening alone writes nothing — content at construction, no update handler reached", () => {
@@ -539,8 +539,8 @@ describe("MODERN OPENING — every supported flexible Section opens in the share
     expect(NTD).toContain("sectionDocUpdateRef.current?.(identity, context?.rowId, editor)");
     // The static rendering of a legacy prose row keeps its designed height: it
     // is deliberately NOT published as a document body while untouched.
-    expect(NTD).toContain("if (isDocument || legacyMedia) bodies[row.id] = body;");
-    expect(NTD).toContain("minHeightPx: isDocument || legacyMedia ? 0 : row.px || 0,");
+    expect(NTD).toContain("if (isDocument || legacyMedia) bodies[cell.id] = body;");
+    expect(NTD).toContain("minHeightPx: isDocument || legacyMedia ? 0 : multi ? 0 : row.px || 0,");
   });
 
   test("5. the first genuine edit creates sectionDoc and freezes everything older", () => {
@@ -626,7 +626,7 @@ describe("QUICK ADD — two-way routing, one writer", () => {
   });
 
   test("the route is decided from the resolved body, per displayed row, and read by the composer", () => {
-    expect(NTD).toContain("quickAdd[row.id] = resolveSectionQuickAddRoute(body);");
+    expect(NTD).toContain("quickAdd[cell.id] = resolveSectionQuickAddRoute(body);");
     expect(NTD).toContain("sectionQuickAddRouteRef.current = sectionState.quickAdd;");
     expect(NTD).toContain("const route = sectionQuickAddRouteRef.current[rowId];");
   });

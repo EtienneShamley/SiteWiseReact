@@ -159,7 +159,7 @@ export function makeOption(value = "") {
 export function normalizeRow(row, idx) {
   const r = row || {};
   const type = normalizeType(r.type);
-  return {
+  const normalized = {
     id: r.id || `row-${idx}`,
     label: r.label ?? "",
     px: r.px ?? 120,
@@ -170,6 +170,19 @@ export function normalizeRow(row, idx) {
     // for the smallest safe behavior — see docs/ARCHITECTURE.md.
     options: normalizeOptions(r.options),
   };
+  // `pxExplicit` marks a height a user deliberately dragged, so a stored `px`
+  // is told apart from a scaffold default (src/lib/templateRowHeight.js). It is
+  // carried through ONLY when present: a row that never had one must not gain
+  // the key on a read, or every legacy row would claim a deliberate height.
+  if (r.pxExplicit === true) normalized.pxExplicit = true;
+  // The row's VALUE COLUMNS, when it has more than the one every row has always
+  // had. Carried through raw and projected for rendering by `rowCells`
+  // (src/lib/templateColumns.js) — the single owner of the column model, which
+  // reads this module and so cannot be read from it. A row without the key is
+  // left without it, which is what keeps an existing template's published bytes
+  // identical.
+  if (Array.isArray(r.cells)) normalized.cells = r.cells;
+  return normalized;
 }
 
 export function normalizeRows(rows) {

@@ -40,7 +40,7 @@ describe("34. the row-action button is rendered as a real button", () => {
   test("a real <button> with an accessible name, a tooltip and a menu-button contract", () => {
     expect(TABLE).toContain("className={`twocol-row-actions-btn twocol-icon-btn ${");
     expect(TABLE).toContain('aria-haspopup="menu"');
-    expect(TABLE).toContain("aria-expanded={menuRowId === row.id}");
+    expect(TABLE).toContain("aria-expanded={open}");
     expect(TABLE).toContain("aria-label={`Row actions for ${name}`}");
     expect(TABLE).toContain("title={`Row actions for ${name}`}");
     expect(TABLE).toContain('<span aria-hidden="true">⋯</span>');
@@ -80,7 +80,10 @@ describe("35-36. visible at rest, accent-tinted, stronger on hover/focus, restra
 
 describe("37-40. Insert row above / below, delete, and nothing invented", () => {
   test("the menu offers exactly the product's actions", () => {
-    const actions = TABLE.slice(TABLE.indexOf("function renderRowActions("), TABLE.indexOf("function renderSectionRefineStatus("));
+    const actions = TABLE.slice(
+      TABLE.indexOf("function rowMenuOptions("),
+      TABLE.indexOf("function renderSectionRefineStatus(")
+    );
     expect(actions).toContain('label: "Insert row above"');
     expect(actions).toContain('label: "Insert row below"');
     expect(actions).toContain('label: "Delete row"');
@@ -171,8 +174,10 @@ describe("43. the popover is placed correctly under document zoom", () => {
   });
 
   test("ownership is untouched: the trigger anchors by row and the row-level state drives open/close", () => {
-    expect(TABLE).toContain("anchorRef={menuAnchors.current.get(row.id) || null}");
-    expect(TABLE).toContain("onClose={() => setMenuRowId(null)}");
+    // The trigger anchors by CELL key (`<rowId>::<cellId>`), which for every
+    // single-column row is one trigger in the position it has always had.
+    expect(TABLE).toContain("anchorRef={menuAnchors.current.get(key) || null}");
+    expect(TABLE).toContain("onClose={() => setMenuKey(null)}");
   });
 });
 
@@ -180,7 +185,7 @@ describe("43. the popover is placed correctly under document zoom", () => {
 
 describe("44. keyboard accessibility", () => {
   test("the trigger opens on Down arrow (Enter/Space natively); the menu takes focus, arrows move, Escape returns focus", () => {
-    expect(TABLE).toContain('if (event.key === "ArrowDown" && menuRowId !== row.id) {');
+    expect(TABLE).toContain('if (event.key === "ArrowDown" && !open) {');
     expect(MENU).toContain('const first = menu.querySelector(\'[role="menuitem"]:not(:disabled)\');');
     expect(MENU).toContain('role="menuitem"');
     expect(MENU).toContain('if (e.key === "ArrowDown") next = items[(index + 1 + items.length) % items.length];');

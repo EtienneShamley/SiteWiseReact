@@ -196,7 +196,7 @@ describe("Template Builder chrome form controls use the shared field treatment",
     // this pass actually converted is checked here.
     expect(branding).not.toMatch(/outline-none|ring-0|focus:ring-0/);
     const editorBlock = table.match(
-      /function renderFieldTypeEditor\(row\) \{[\s\S]*?\n  \}/
+      /function renderFieldTypeEditor\(row, cell\) \{[\s\S]*?\n  \}/
     )[0];
     expect(editorBlock).not.toMatch(/outline-none|ring-0|focus:ring-0/);
   });
@@ -293,10 +293,11 @@ describe("row, field-type and section handlers are unchanged", () => {
   });
 
   test("field-type change, option add, rename and delete are unchanged", () => {
-    expect(table).toContain("patchRow(rowId, { type: normalizeType(nextType) })");
-    expect(table).toContain('patchRow(row.id, { options: [...(row.options || []), makeOption("")] })');
+    expect(table).toContain("patchCell(row, cell.id, { type: normalizeType(nextType) })");
+    expect(table).toContain('patchCell(row, cell.id, {');
+    expect(table).toContain('options: [...(cell.options || []), makeOption("")],');
     expect(table).toContain("o.id === optId ? { ...o, value } : o");
-    expect(table).toContain("options: (row.options || []).filter((o) => o.id !== optId)");
+    expect(table).toContain("options: (cell.options || []).filter((o) => o.id !== optId)");
   });
 
   test("insert row above/below still routes through onInsertRow in builder mode", () => {
@@ -311,7 +312,7 @@ describe("row, field-type and section handlers are unchanged", () => {
 
   test("immutable versioning and current-version read functions are unchanged imports", () => {
     expect(doc).toContain(
-      'import {\n  getCurrentVersion,\n  publishTemplateVersion,\n  isLogoAssetReferenced,\n} from "../../lib/templateModel";'
+      'import {\n  cellsWithNoteContent,\n  getCurrentVersion,\n  publishTemplateVersion,\n  isLogoAssetReferenced,\n} from "../../lib/templateModel";'
     );
   });
 });
@@ -395,7 +396,7 @@ describe("export, pagination and note-mode rendering are untouched by this pass"
   test("row dimensions, drag handles and the column divider are unchanged", () => {
     expect(table).toContain("className=\"twocol-resize-handle\"");
     expect(table).toContain("className=\"twocol-col-handle\"");
-    expect(table).toContain("onMouseDown={(e) => startRowDrag(row, e)}");
+    expect(table).toContain("onMouseDown={(e) => startRowDrag(row, e, cells)}");
     expect(table).toContain("onMouseDown={startColDrag}");
   });
 
@@ -420,16 +421,16 @@ describe("on-paper action/icon controls reuse the light-locked treatment", () =>
   });
 
   test("the row-actions trigger combines the reveal mechanics class with the icon-button treatment", () => {
-    expect(table).toMatch(/className=\{`twocol-row-actions-btn twocol-icon-btn \$\{[\s\S]{0,80}?menuRowId === row\.id[\s\S]{0,80}?twocol-icon-btn--open/);
+    expect(table).toMatch(/className=\{`twocol-row-actions-btn twocol-icon-btn \$\{[\s\S]{0,80}?open \?[\s\S]{0,80}?twocol-icon-btn--open/);
   });
 
   test("the row-actions trigger's open state follows the real menu-open state, not a click memory", () => {
     // aria-expanded (unchanged) and the CSS class are driven by the same
     // `menuRowId === row.id` expression, so the trigger cannot show open
     // after the menu has actually closed.
-    const openClass = table.match(/menuRowId === row\.id[\s\S]{0,40}?"twocol-icon-btn--open" : ""/);
+    const openClass = table.match(/open \?[\s\S]{0,40}?"twocol-icon-btn--open" : ""/);
     expect(openClass).not.toBeNull();
-    expect(table).toContain("aria-expanded={menuRowId === row.id}");
+    expect(table).toContain("aria-expanded={open}");
   });
 
   test("delete-option is destructive and never carries an open, pressed or primary class", () => {
