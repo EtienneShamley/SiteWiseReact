@@ -66,14 +66,35 @@ import {
   columnTemplate,
   resizeColumnsAt,
   rowCells,
+  rowLabelFill,
   valueColumns as normalizeValueColumns,
 } from "../../lib/templateColumns";
+import { CELL_FILL_KIND, fillCss } from "../../lib/templateFill";
 import {
   LEGACY_EVIDENCE_MIN_PX,
   rowDragMinPx,
   rowMinHeightPx,
 } from "../../lib/templateRowHeight";
 import { actionButtonClass } from "../../lib/interactionStyles";
+
+/**
+ * The inline background of ONE document surface, or `undefined`.
+ *
+ * `undefined` — not a colour — is what makes the fill model inherit: the cell
+ * then carries no inline background at all and the branded custom property from
+ * `brandingStyles().table` paints it (template.css). A cell with an explicit
+ * override paints its own resolved fill instead, which beats the class rule
+ * without a specificity contest and is exactly the one declaration the exported
+ * `<td>` carries.
+ *
+ * Only `backgroundColor` is ever set: opacity lives in the colour's alpha
+ * channel, never as a CSS `opacity` on the box, so the text, images, borders and
+ * native picker buttons inside the cell are never faded with it.
+ */
+function fillStyle(fill) {
+  const css = fillCss(fill);
+  return css ? { backgroundColor: css } : undefined;
+}
 
 /**
  * Two-column template table, rendered as a page-aware A4 document.
@@ -369,6 +390,14 @@ export default function ResizableTwoColTable({
   onColumnWidthsCommit, // (widths[]) => void — once, on drag release
   onSplitCell, // (rowId, cellId) => void
   onMergeCell, // (rowId, cellId, "left" | "right") => void
+  // CELL FILL SELECTION (Template Builder only — Template Editor A3). Which
+  // surface the ribbon's Cell group acts on: `{ rowId, cellId, kind }` where
+  // `kind` is "label" (the row's label cell) or "value" (one grid cell). Owned
+  // by the Builder above this document, because the ribbon reads it too —
+  // exactly like `headerSelection`. Absent in a completed note, which is what
+  // keeps a note's surface entirely free of template styling.
+  cellSelection = null,
+  onCellSelect, // ({ rowId, cellId, kind }) => void
   onRowLabelChange, // (rowId, label) => void
   onRowHeightChange, // (rowId, px) => void — continuous while dragging
   onRowHeightCommit, // (rowId, px) => void — once, on drag release
@@ -404,6 +433,30 @@ export default function ResizableTwoColTable({
     () => brandingStyles(safeBranding).table,
     [safeBranding]
   );
+
+  // ---------- CELL FILL SELECTION (Builder only) ----------
+  // Present only when the Builder passes a handler down, so a completed note
+  // never gains a selectable surface and every branch below is inert there.
+  const cellSelectable = typeof onCellSelect === "function";
+
+  const isCellSelected = (rowId, cellId, kind) =>
+    !!cellSelection &&
+    cellSelection.rowId === rowId &&
+    cellSelection.cellId === cellId &&
+    cellSelection.kind === kind;
+
+  // Selection is taken on POINTER DOWN rather than on click, so pressing a cell
+  // and then reaching for a ribbon control targets the surface that was pressed
+  // — the same rule the header objects already follow. It never calls
+  // `preventDefault`: the label textarea, the field-type select and every other
+  // control inside a cell must still receive the very same press.
+  const selectCellProps = (rowId, cellId, kind) => {
+    if (!cellSelectable) return null;
+    return {
+      "data-cell-selectable": "true",
+      onMouseDown: () => onCellSelect({ rowId, cellId, kind }),
+    };
+  };
 
   // Anchor elements for the per-row action menu (never affects layout).
   const menuAnchors = useRef(new Map());
@@ -1143,8 +1196,17 @@ export default function ResizableTwoColTable({
   // the note's instance.
   function renderLabelCell(row) {
     const editable = !lockTemplateLabels || !!row.isCustom;
+    // THIS ROW'S LABEL FILL. Absent — every row of every template that has not
+    // been recoloured — leaves the branded default custom property in charge.
+    const selected = isCellSelected(row.id, row.id, CELL_FILL_KIND.LABEL);
     return (
-      <div className="twocol-cell-left px-3 py-2 flex items-stretch">
+      <div
+        className={`twocol-cell-left px-3 py-2 flex items-stretch ${
+          selected ? "twocol-cell--selected" : ""
+        }`.trim()}
+        style={fillStyle(rowLabelFill(row))}
+        {...(selectCellProps(row.id, row.id, CELL_FILL_KIND.LABEL) || {})}
+      >
         {/* `twocol-label-text` is the styling hook that lets the template's
             branded label colour override the document's default dark text
             (see the specificity note in template.css). */}
@@ -1735,16 +1797,25 @@ export default function ResizableTwoColTable({
       : rowModernRefineTarget(row, headSegment);
     const isFirst = index === 0;
 
+    const selected = isCellSelected(row.id, cell.id, CELL_FILL_KIND.VALUE);
+
     return (
       <div
         key={cell.id}
         className={`twocol-cell-right px-3 py-2 text-black flex flex-col ${
           multi ? "twocol-cell-col" : ""
-        }`.trim()}
+        } ${selected ? "twocol-cell--selected" : ""}`.trim()}
         // The cell occupies the combined width of the GRID columns it spans —
         // it holds no width of its own, so it is always exactly as wide as the
         // table says those columns are.
-        style={{ gridColumn: cellGridSpan(cell) }}
+        //
+        // THIS CELL'S FILL, and only this cell's: an override is stored on the
+        // cell it paints, so recolouring one cell can never reach the cell above
+        // it, the cell below it, or the same grid column in another row. A cell
+        // with no override carries no inline background at all and inherits the
+        // table default (see `fillStyle`).
+        style={{ gridColumn: cellGridSpan(cell), ...fillStyle(cell.fill) }}
+        {...(selectCellProps(row.id, cell.id, CELL_FILL_KIND.VALUE) || {})}
       >
         {isFirst && legacyItems.length > 0 && (
           <div className="flex flex-wrap gap-2 items-start justify-start mb-2">
@@ -1994,7 +2065,7 @@ export default function ResizableTwoColTable({
 
         <div
           className="twocol-cell-right px-3 py-2 text-black flex flex-col items-start gap-1"
-          style={{ gridColumn: cellGridSpan(cells[0]) }}
+          style={{ gridColumn: cellGridSpan(cells[0]), ...fillStyle(cells[0].fill) }}
         >
           <label className={`attach-upload-btn ${busy ? "attach-upload-btn--busy" : ""}`}>
             {busy ? "Uploading…" : isPhoto ? "Upload Photo" : "Add File"}
@@ -2149,7 +2220,10 @@ export default function ResizableTwoColTable({
         )} ${extraClass}`.trim()}
         style={{ gridTemplateColumns: gridTracks }}
       >
-        <div className="twocol-cell-left twocol-seg-left px-3 py-2">
+        <div
+          className="twocol-cell-left twocol-seg-left px-3 py-2"
+          style={fillStyle(rowLabelFill(row))}
+        >
           {continued && (
             <span
               className="twocol-seg-continued"
@@ -2165,7 +2239,12 @@ export default function ResizableTwoColTable({
             block, see planRowBlocks). */}
         <div
           className="twocol-cell-right px-3 py-2 text-black"
-          style={{ gridColumn: `span ${grid.length}` }}
+          // A continuation carries the SAME fill as the row head it continues,
+          // so a recoloured section stays one surface across a page break.
+          style={{
+            gridColumn: `span ${grid.length}`,
+            ...fillStyle(rowCells(row, grid.length)[0].fill),
+          }}
         >
           {note}
           {body}

@@ -47,6 +47,10 @@ describe("absent branding defaults safely", () => {
     const b = normalizeBranding(undefined);
     // White document, neutral 1px borders, dark text on white cells.
     expect(b.table).toEqual({
+      // The A3 fill opacities default to 100 — exactly what every colour in this
+      // product already meant, so the pre-branding appearance is unchanged.
+      labelBackgroundOpacity: 100,
+      contentBackgroundOpacity: 100,
       labelBackgroundColor: "#ffffff",
       labelTextColor: "#111111",
       contentBackgroundColor: "#ffffff",
@@ -255,7 +259,13 @@ describe("unknown properties are dropped, not interpreted", () => {
       watermark: { image: "data:image/png;base64,AAAA" },
     });
 
-    expect(Object.keys(b).sort()).toEqual(["header", "table", "title"]);
+    // `page` is the A3 document surface — whitelisted like everything else, and
+    // defaulted to the white paper so a version without the key is unchanged.
+    expect(Object.keys(b).sort()).toEqual(["header", "page", "table", "title"]);
+    expect(Object.keys(b.page).sort()).toEqual([
+      "backgroundColor",
+      "backgroundOpacity",
+    ]);
     expect(Object.keys(b.header).sort()).toEqual([
       "backgroundColor",
       "bannerShape",
@@ -281,8 +291,10 @@ describe("unknown properties are dropped, not interpreted", () => {
       "borderColor",
       "borderWidthPx",
       "contentBackgroundColor",
+      "contentBackgroundOpacity",
       "contentTextColor",
       "labelBackgroundColor",
+      "labelBackgroundOpacity",
       "labelTextColor",
     ]);
 
@@ -331,6 +343,9 @@ describe("branding maps to safe style objects", () => {
       },
     });
     expect(styles.table).toEqual({
+      // The page surface, flattened to an opaque colour once (see
+      // `pageSurfaceColor`) — the white paper for a template that has not set one.
+      "--nw-tpl-page-bg": "#ffffff",
       "--nw-tpl-label-bg": "#1aa3c2",
       "--nw-tpl-label-text": "#ffffff",
       "--nw-tpl-content-bg": "#ffffff",

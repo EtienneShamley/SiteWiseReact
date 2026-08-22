@@ -29,14 +29,29 @@ import {
   insertTableColumn,
   mergeCell,
   rowCells,
+  rowLabelFill,
+  setCellFill,
+  setRowLabelFill,
   splitCell,
   storedValueColumns,
   valueColumns as normalizeValueColumns,
   withColumnWidths,
 } from "../../lib/templateColumns";
+import {
+  CELL_FILL_KIND,
+  makeFill,
+  storedFill,
+} from "../../lib/templateFill";
 import { explicitRowHeightPatch } from "../../lib/templateRowHeight";
 import { createLogoAsset, deleteAsset } from "../../lib/assetStorage";
-import { normalizeBranding } from "../../lib/templateBranding";
+import {
+  DEFAULT_BRANDING,
+  isDefaultPageFill,
+  normalizeBranding,
+  pageFill as brandingPageFill,
+  tableContentFill,
+  tableLabelFill,
+} from "../../lib/templateBranding";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import { actionButtonClass } from "../../lib/interactionStyles";
 
@@ -105,6 +120,15 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
   // region and the ribbon, selecting the other object) — never by a blur, so
   // pressing a ribbon control can never lose the object it targets.
   const [headerSelection, setHeaderSelection] = useState(null);
+  // WHICH TABLE SURFACE the ribbon's Cell group acts on (Template Editor A3):
+  // `{ rowId, cellId, kind }`, or null for "nothing selected", in which case the
+  // ribbon shows the PAGE group instead. Owned here for the same reason
+  // `headerSelection` is — the ribbon above the document reads it too.
+  //
+  // The two selections are MUTUALLY EXCLUSIVE: selecting a header object clears
+  // the cell and vice versa, so the ribbon never offers two contextual groups
+  // for two different things at once.
+  const [cellSelection, setCellSelection] = useState(null);
   const brandingRef = useRef(branding);
   brandingRef.current = branding;
 
@@ -129,23 +153,40 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
         })
       );
     }, []),
-    onFocus: useCallback(() => setHeaderSelection(HEADER_OBJECT.TEXT), []),
+    onFocus: useCallback(() => {
+      setHeaderSelection(HEADER_OBJECT.TEXT);
+      setCellSelection(null);
+    }, []),
   });
+
+  const selectHeaderObject = useCallback((object) => {
+    setHeaderSelection(object);
+    if (object) setCellSelection(null);
+  }, []);
+
+  const selectCell = useCallback((selection) => {
+    setCellSelection(selection);
+    if (selection) setHeaderSelection(null);
+  }, []);
 
   // Deselect: Escape anywhere, or a pointer press outside BOTH the header
   // region and the ribbon. A press on the ribbon must keep the selection —
-  // that is the object the pressed control acts on.
+  // that is the object the pressed control acts on. A cell selection follows
+  // the identical rule against its own selectable surfaces, so pressing a
+  // ribbon fill control never loses the cell it is about to paint.
   useEffect(() => {
     const onDown = (e) => {
       const target = e.target;
       if (!target || typeof target.closest !== "function") return;
-      if (target.closest("[data-header-region]")) return;
       if (target.closest("[data-nw-template-ribbon]")) return;
+      if (!target.closest("[data-cell-selectable]")) setCellSelection(null);
+      if (target.closest("[data-header-region]")) return;
       setHeaderSelection(null);
     };
     const onKey = (e) => {
       if (e.key !== "Escape") return;
       setHeaderSelection(null);
+      setCellSelection(null);
       if (headerTextEditor && !headerTextEditor.isDestroyed && headerTextEditor.isFocused) {
         headerTextEditor.commands.blur();
       }
@@ -287,6 +328,67 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     [valueColumns, rows]
   );
 
+  /* ----------------------------- FILL ACTIONS ---------------------------- */
+  // Template Editor A3. Every one of these edits exactly ONE surface, and none
+  // of them ever writes a colour into a surface the user did not address —
+  // which is what makes "change the table default" and "change this cell"
+  // genuinely different actions instead of two spellings of the same one.
+
+  // What the SELECTED surface currently inherits: the table's label default for
+  // a label cell, its value default for a grid cell. Read from the draft
+  // branding, never copied into the row.
+  const inheritedFill =
+    cellSelection && cellSelection.kind === CELL_FILL_KIND.LABEL
+      ? tableLabelFill(branding)
+      : tableContentFill(branding);
+
+  // The selected surface's OWN override, or null when it has none. `null` is
+  // what the ribbon shows as "inheriting", and what "Use default" restores.
+  const selectedRow = cellSelection
+    ? rows.find((r) => r && r.id === cellSelection.rowId)
+    : null;
+  const selectedFill = !selectedRow
+    ? null
+    : cellSelection.kind === CELL_FILL_KIND.LABEL
+    ? rowLabelFill(selectedRow)
+    : rowCells(selectedRow, valueColumns.length).find(
+        (c) => c.id === cellSelection.cellId
+      )?.fill ?? null;
+
+  const changeCellFill = useCallback(
+    (fill) => {
+      if (!cellSelection) return;
+      const next = storedFill(fill);
+      setRows((prev) =>
+        cellSelection.kind === CELL_FILL_KIND.LABEL
+          ? setRowLabelFill(prev, cellSelection.rowId, next)
+          : setCellFill(
+              valueColumns,
+              prev,
+              cellSelection.rowId,
+              cellSelection.cellId,
+              next
+            )
+      );
+    },
+    [cellSelection, valueColumns]
+  );
+
+  // The document surface. `null` restores the white paper every NoteWise
+  // document has always been printed on, which is also what makes an untouched
+  // template publish nothing (the default compares equal to an absent key).
+  const changePageFill = useCallback((fill) => {
+    const next = fill ? makeFill(fill.color, fill.opacity) : null;
+    setBranding((prev) =>
+      normalizeBranding({
+        ...prev,
+        page: next
+          ? { backgroundColor: next.color, backgroundOpacity: next.opacity }
+          : { ...DEFAULT_BRANDING.page },
+      })
+    );
+  }, []);
+
   // Branding edits are DRAFT-ONLY: nothing is stored until "Submit template"
   // publishes a new immutable version, so a colour picker being dragged cannot
   // cause version churn. Every write goes back through normalizeBranding, so an
@@ -422,6 +524,12 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
         // unchanged-definition no-op in publishTemplateVersion working for
         // every existing template.
         if (r.pxExplicit === true) base.pxExplicit = true;
+        // THIS ROW'S LABEL FILL, written only when the row genuinely has one.
+        // A row nobody has recoloured publishes exactly the keys it always did,
+        // and clearing an override removes the key again — which is what keeps
+        // the unchanged-definition no-op in publishTemplateVersion working.
+        const labelFill = storedFill(r.labelFill);
+        if (labelFill) base.labelFill = labelFill;
         // THIS ROW'S CELLS on the table's grid, written only when the row
         // genuinely differs from "one cell spanning everything, keyed by the row
         // id" — which is what an absent `cells` key already means. A cell
@@ -433,6 +541,10 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
             if (cellType === FIELD_TYPE.SELECT) {
               out.options = publishedOptions(cell.options);
             }
+            // This cell's FILL, on the same terms: written only when it has an
+            // explicit override, never a copy of the table's default.
+            const fill = storedFill(cell.fill);
+            if (fill) out.fill = fill;
             return out;
           });
         }
@@ -468,6 +580,13 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
         logoError={logoError}
         onLogoFile={handleLogoFile}
         onLogoRemove={handleLogoRemove}
+        cellSelection={cellSelection}
+        cellFill={selectedFill}
+        inheritedFill={inheritedFill}
+        pageFill={brandingPageFill(branding)}
+        isDefaultPage={isDefaultPageFill(branding)}
+        onCellFillChange={changeCellFill}
+        onPageFillChange={changePageFill}
       />
 
       {/* The document scroller. */}
@@ -495,7 +614,9 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
           logoStatus={logoStatus}
           branding={branding}
           headerSelection={headerSelection}
-          onHeaderSelect={setHeaderSelection}
+          onHeaderSelect={selectHeaderObject}
+          cellSelection={cellSelection}
+          onCellSelect={selectCell}
           onHeaderLogoWidthChange={updateHeaderLogoWidth}
           onHeaderHeightChange={updateHeaderHeight}
           headerTextEditor={headerTextEditor}

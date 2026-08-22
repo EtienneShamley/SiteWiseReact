@@ -28,9 +28,14 @@
 
 import {
   brandingStyles,
+  isDefaultPageFill,
   normalizeBranding,
   layoutShowsLogo,
+  pageSurfaceColor,
+  tableContentFill,
+  tableLabelFill,
 } from "./templateBranding";
+import { compositeFill, fillCss, resolveFill } from "./templateFill";
 import { RICH_BLOCK, modelToHtml } from "./templateRichText";
 import { headerTextModel, headerTextModelIsEmpty } from "./templateHeaderLayout";
 import { EXPORT_UNIT } from "./templateExportModel";
@@ -386,18 +391,44 @@ export function rowMinBoxHeightPx(fragment, ctx) {
   );
 }
 
+/**
+ * The ONE background declaration a cell carries, for THIS export flavour.
+ *
+ * HTML, the standalone document, print and the PDF all express a fill exactly as
+ * the live document does: the plain hex colour when it is fully opaque, an
+ * `rgba()` over the page beneath it when it is not.
+ *
+ * WORD cannot. A DOCX table cell's shading (`w:shd w:fill`) is a single opaque
+ * colour with no alpha channel, so the fill is FLATTENED instead of having its
+ * opacity dropped: composited over the page fill, over the white paper, into the
+ * one opaque colour that looks the same. That degradation is deterministic — the
+ * same stored fill and the same page always produce the same hex — and nothing
+ * is written back to storage.
+ */
+function exportFillCss(fill, ctx) {
+  if (ctx && ctx.flattenFills) return compositeFill(fill, ctx.pageColor);
+  return fillCss(fill);
+}
+
 export function rowHtml(fragment, ctx) {
   const t = ctx.table;
   const labelStyle = styleAttr({
-    backgroundColor: t.labelBackgroundColor,
+    // The row's own LABEL fill when it has one, the table's label default when
+    // it has not — resolved here, exactly as the live document resolves it, so
+    // the exported cell carries the identical single background declaration.
+    backgroundColor: exportFillCss(
+      resolveFill(fragment.labelFill, ctx.labelFill),
+      ctx
+    ),
     color: t.labelTextColor,
     border: `${t.borderWidthPx}px solid ${t.borderColor}`,
   });
-  const cellStyle = styleAttr({
-    backgroundColor: t.contentBackgroundColor,
-    color: t.contentTextColor,
-    border: `${t.borderWidthPx}px solid ${t.borderColor}`,
-  });
+  const cellStyleFor = (fill) =>
+    styleAttr({
+      backgroundColor: exportFillCss(resolveFill(fill, ctx.contentFill), ctx),
+      color: t.contentTextColor,
+      border: `${t.borderWidthPx}px solid ${t.borderColor}`,
+    });
   // THIS ROW'S CELLS on the table's grid. `fragment.cells` is the canonical list
   // from the export model and always holds at least one entry, whose units ARE
   // `fragment.units` — so an undivided row (every row of every template
@@ -409,7 +440,16 @@ export function rowHtml(fragment, ctx) {
   const cells =
     Array.isArray(fragment.cells) && fragment.cells.length && !fragment.continued
       ? fragment.cells
-      : [{ units: fragment.units || [], span: columnCount }];
+      : [
+          {
+            units: fragment.units || [],
+            span: columnCount,
+            // A CONTINUATION carries the same fill as the head it continues, so
+            // a recoloured row stays one surface across a page break.
+            fill:
+              (Array.isArray(fragment.cells) && fragment.cells[0]?.fill) || null,
+          },
+        ];
   const labelClass = fragment.continued
     ? "nw-tpl-label nw-tpl-label--continued"
     : "nw-tpl-label";
@@ -440,7 +480,9 @@ export function rowHtml(fragment, ctx) {
     .map((cell) => {
       const span = Math.max(1, Math.floor(Number(cell.span) || 1));
       const colspan = span > 1 ? ` colspan="${span}"` : "";
-      return `<td class="nw-tpl-cell" style="${cellStyle}"${colspan}>${unitsFor(cell)}</td>`;
+      return `<td class="nw-tpl-cell" style="${cellStyleFor(
+        cell.fill
+      )}"${colspan}>${unitsFor(cell)}</td>`;
     })
     .join("");
 
@@ -607,6 +649,18 @@ export function makeRenderContext(model, flavor, options = {}) {
     flavor,
     branding,
     table: branding.table,
+    // THE TEMPLATE'S DEFAULT FILLS, read once (src/lib/templateFill.js). A row's
+    // `labelFill` and a cell's `fill` are resolved against these — the identical
+    // inheritance the live document applies, stated once for every flavour.
+    labelFill: tableLabelFill(branding),
+    contentFill: tableContentFill(branding),
+    // The opaque surface every fill is composited against — the page over the
+    // white paper, flattened once (see `pageSurfaceColor`). It is the same
+    // colour on screen, in this document and in the Word flattening above.
+    pageColor: pageSurfaceColor(branding),
+    // Word carries no alpha, so its fills are flattened onto the page. Every
+    // other flavour renders the layered document exactly as the screen does.
+    flattenFills: flavor === EXPORT_FLAVOR.DOCX,
     leftPct,
     columnWidths,
     rowMaxHeightPx,
@@ -701,6 +755,28 @@ function roundWidth(value) {
  * The branded header, the title and the provenance line are simply FIRST in
  * document order, so they appear on page 1 and are never repeated.
  */
+/**
+ * The page's own background attribute, or `""`.
+ *
+ * NOTHING is emitted for the default white paper, which is what keeps every
+ * template published before the page background existed producing byte-identical
+ * markup. The colour is already opaque (`pageSurfaceColor`), so the same
+ * declaration serves the standalone document, the PDF capture and print.
+ *
+ * DOCX carries no page background: Word's page colour is a document-level
+ * setting html-to-docx does not take from a section's inline style, and a
+ * silently-ignored declaration is worse than an honest omission. The page still
+ * reaches Word where it is actually load-bearing — every cell's fill is
+ * flattened ONTO it (see `exportFillCss`), so a tinted page with translucent
+ * cells produces the right cell colours there. This is the documented
+ * degradation, not an oversight.
+ */
+function pageStyleAttr(ctx) {
+  if (!ctx || ctx.flavor === EXPORT_FLAVOR.DOCX) return "";
+  if (isDefaultPageFill(ctx.branding)) return "";
+  return ` style="background-color: ${ctx.pageColor}"`;
+}
+
 export function buildTemplateExportBody(
   model,
   { flavor, pages, rowMaxHeightPx } = {}
@@ -727,7 +803,10 @@ export function buildTemplateExportBody(
       ctx.flavor === EXPORT_FLAVOR.PDF
         ? buildPageFooterHtml(index + 1, pageList.length)
         : "";
-    return `<section class="nw-tpl-page">${head}${tableHtml(fragments, ctx)}${footer}</section>`;
+    return `<section class="nw-tpl-page"${pageStyleAttr(ctx)}>${head}${tableHtml(
+      fragments,
+      ctx
+    )}${footer}</section>`;
   });
 
   const separator =

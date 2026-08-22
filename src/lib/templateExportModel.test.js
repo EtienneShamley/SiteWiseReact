@@ -578,7 +578,13 @@ describe("model integrity", () => {
       "undo",
       "autosave",
     ]) {
-      expect(serialized.toLowerCase()).not.toContain(forbidden.toLowerCase());
+      // Matched at a WORD BOUNDARY rather than as a bare substring. A plain
+      // `toContain("undo")` reported a false positive the moment the fill model
+      // added `backgroundOpacity` — "backgro-UNDO-pacity" — which is a key name,
+      // not an undo stack. The rule being asserted is that no runtime/editor
+      // concept has its own key, and a boundary match states exactly that.
+      const pattern = new RegExp(`\\b${forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
+      expect(serialized).not.toMatch(pattern);
     }
   });
 

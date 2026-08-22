@@ -92,6 +92,7 @@
 
 import { newId } from "./id";
 import { normalizeOptions, normalizeType } from "./templateFields";
+import { normalizeFill, storedFill } from "./templateFill";
 
 /**
  * The most value columns one table's grid may hold, label column excluded.
@@ -264,13 +265,21 @@ function makeColumn(widthPct) {
   return { id: newId(), widthPct: Number(widthPct) || 0 };
 }
 
-/** A brand-new value cell. The other place an id is minted here. */
+/**
+ * A brand-new value cell. The other place an id is minted here.
+ *
+ * It carries NO fill, deliberately: a cell created by a split, by a table-column
+ * insertion or by any other structural action inherits the table's default
+ * rather than cloning whatever explicit override happened to be next to it. An
+ * override is something a user chose for one cell, not a property of the shape.
+ */
 export function makeCell(type, span = 1) {
   return {
     id: newId(),
     type: normalizeType(type),
     options: [],
     span: Math.max(1, Math.floor(Number(span) || 1)),
+    fill: null,
   };
 }
 
@@ -302,17 +311,22 @@ export function rowCells(row, columnCount = 1) {
   const total = Math.max(1, Math.min(MAX_VALUE_COLUMNS, Math.floor(Number(columnCount) || 1)));
   const stored = Array.isArray(r.cells) && r.cells.length ? r.cells : null;
 
-  if (!stored) {
-    return [
-      {
-        id: rowId,
-        span: total,
-        start: 0,
-        type: normalizeType(r.type),
-        options: normalizeOptions(r.options),
-      },
-    ];
-  }
+  // A row with no `cells` key has never been divided AND has never been given a
+  // fill of its own — a fill is stored on the cell, so a row carrying one is by
+  // definition no longer the trivial shape (see `withCells`). Its single cell
+  // therefore inherits the table's default, which is what `null` means.
+  const wholeRow = () => [
+    {
+      id: rowId,
+      span: total,
+      start: 0,
+      type: normalizeType(r.type),
+      options: normalizeOptions(r.options),
+      fill: null,
+    },
+  ];
+
+  if (!stored) return wholeRow();
 
   const out = [];
   let start = 0;
@@ -326,21 +340,15 @@ export function rowCells(row, columnCount = 1) {
       start,
       type: normalizeType(cell.type),
       options: normalizeOptions(cell.options),
+      // This cell's FILL OVERRIDE, or `null` for "inherit the table default".
+      // Never repaired into an arbitrary colour: an unreadable override simply
+      // is not one (src/lib/templateFill.js).
+      fill: normalizeFill(cell.fill),
     });
     start += span;
   }
 
-  if (out.length === 0) {
-    return [
-      {
-        id: rowId,
-        span: total,
-        start: 0,
-        type: normalizeType(r.type),
-        options: normalizeOptions(r.options),
-      },
-    ];
-  }
+  if (out.length === 0) return wholeRow();
   // Short of the edge: the last cell reaches it. Nothing is fabricated.
   if (start < total) out[out.length - 1].span += total - start;
   return out;
@@ -370,8 +378,16 @@ export function cellAtColumn(cells, index) {
  * actually carries. A width is never written onto a cell.
  */
 function withCells(row, cells, columnCount) {
+  // A cell carrying a FILL is not the trivial shape, whatever its span: the
+  // override has to be stored somewhere, and "no `cells` key" already means
+  // "one cell spanning everything, with no override". Clearing the fill again
+  // returns the row to the trivial shape and drops the key — which is what
+  // makes "Use default" the exact inverse of setting a fill.
   const trivial =
-    cells.length === 1 && cells[0].id === row.id && cells[0].span >= columnCount;
+    cells.length === 1 &&
+    cells[0].id === row.id &&
+    cells[0].span >= columnCount &&
+    !normalizeFill(cells[0].fill);
   if (trivial) {
     const next = { ...row, type: cells[0].type, options: cells[0].options };
     delete next.cells;
@@ -379,12 +395,19 @@ function withCells(row, cells, columnCount) {
   }
   return {
     ...row,
-    cells: cells.map((cell) => ({
-      id: cell.id,
-      span: cell.span,
-      type: cell.type,
-      options: cell.options,
-    })),
+    cells: cells.map((cell) => {
+      const out = {
+        id: cell.id,
+        span: cell.span,
+        type: cell.type,
+        options: cell.options,
+      };
+      // Written ONLY when the cell genuinely has one, so a divided row that has
+      // never been recoloured publishes exactly the keys it always did.
+      const fill = storedFill(cell.fill);
+      if (fill) out.fill = fill;
+      return out;
+    }),
   };
 }
 
@@ -738,6 +761,74 @@ export function mergeCell(columns, rows, rowId, cellId, side) {
     r && r.id === rowId ? withCells(r, recount(out), grid.length) : r
   );
   return { rows: nextRows, orphanedCellIds: [absorbed.id] };
+}
+
+/* ------------------------------------------------------------------------ */
+/* FILLS — the individual cell / label override on the shared grid            */
+/* ------------------------------------------------------------------------ */
+//
+// A fill override is stored on the SURFACE it paints and nowhere else:
+//
+//     row.labelFill      this row's LABEL cell
+//     cell.fill          this VALUE cell
+//
+// Both are optional, both are `null` when absent, and `null` means "inherit the
+// table's default" (src/lib/templateFill.js). Setting one changes exactly one
+// surface; clearing one removes the key entirely, so the row returns to the
+// bytes it had before it was ever recoloured.
+//
+// The FILL FOLLOWS THE CELL ID, which is what makes the A2 structural actions
+// behave sensibly without a single line of fill-specific code in them: a split
+// cell keeps its id and therefore its override, its new sibling is a `makeCell`
+// with none, a merge keeps the surviving left cell's, and inserting or deleting
+// a table column only ever changes a cell's SPAN.
+
+/** This row's LABEL cell override, or `null` for "inherit the table default". */
+export function rowLabelFill(row) {
+  return normalizeFill(row && row.labelFill);
+}
+
+/**
+ * Set (or clear, with `null`) ONE value cell's fill override.
+ *
+ * Returns the rows unchanged when the row or the cell does not exist, so a
+ * stale selection can never corrupt the table. Only the addressed cell is
+ * touched: every other cell of that row and every cell of every other row is
+ * returned byte-identical, which is the whole point of the model.
+ */
+export function setCellFill(columns, rows, rowId, cellId, fill) {
+  const grid = valueColumns(columns);
+  const list = Array.isArray(rows) ? rows : [];
+  const row = list.find((r) => r && r.id === rowId);
+  if (!row) return list;
+  const cells = rowCells(row, grid.length);
+  if (!cells.some((c) => c.id === cellId)) return list;
+  const next = cells.map((c) =>
+    c.id === cellId ? { ...c, fill: normalizeFill(fill) } : c
+  );
+  return list.map((r) => (r && r.id === rowId ? withCells(r, next, grid.length) : r));
+}
+
+/**
+ * Set (or clear, with `null`) ONE row's LABEL cell fill override.
+ *
+ * The label column is a single template-wide track, so a label override is a
+ * property of the ROW rather than of a grid cell — but it obeys the identical
+ * rule: absent means inherit, and clearing removes the key.
+ */
+export function setRowLabelFill(rows, rowId, fill) {
+  const list = Array.isArray(rows) ? rows : [];
+  const stored = storedFill(fill);
+  return list.map((r) => {
+    if (!r || r.id !== rowId) return r;
+    if (!stored) {
+      if (r.labelFill === undefined) return r;
+      const next = { ...r };
+      delete next.labelFill;
+      return next;
+    }
+    return { ...r, labelFill: stored };
+  });
 }
 
 /* ------------------------------------------------------------------------ */

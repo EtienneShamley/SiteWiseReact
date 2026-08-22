@@ -26,6 +26,19 @@
 //   HEADER    show header; direction (logo beside text / stacked); order
 //             (logo first / text first); height in mm (the precision path
 //             beside the on-page drag); banner colour, placement and edge.
+//   CELL /    ONE contextual group at the end, never both (Template Editor A3).
+//   PAGE      With a table cell selected on the page it is CELL — that cell's
+//             own fill colour, its fill opacity and "Use default", which stores
+//             `null` again rather than a copy of the current default. With
+//             nothing selected it is PAGE — the document surface's colour and
+//             opacity, and its reset. That is the whole ribbon rule: the most
+//             specific selected surface owns the group, and the document owns it
+//             when nothing is selected.
+//
+// FILL IS NOT TEXT COLOUR. The Cell group paints a SURFACE and nothing else;
+// typography (including the label and content text colours) stays where it has
+// always been — the Text group for the header, the Document branding panel for
+// the table's defaults. One control never means both.
 //
 // Every edit is DRAFT-ONLY: nothing is stored until "Submit template". Every
 // numeric field goes through BoundedNumberInput, so a malformed value can never
@@ -49,6 +62,11 @@ import {
   HEADER_ORDER,
   headerObjectAlignLabels,
 } from "../../lib/templateBranding";
+import {
+  CELL_FILL_KIND,
+  DEFAULT_FILL_COLOR,
+  FILL_OPACITY,
+} from "../../lib/templateFill";
 import { ALLOWED_LOGO_MIME_TYPES } from "../../lib/assetStorage";
 import { actionButtonClass, iconButtonClass } from "../../lib/interactionStyles";
 
@@ -83,6 +101,70 @@ function Divider() {
   return <span aria-hidden="true" className="w-px self-stretch bg-gray-300 dark:bg-gray-700 mx-1" />;
 }
 
+/**
+ * The FILL editor of one surface: a colour, an opacity and a reset.
+ *
+ * Deliberately one component for both the cell and the page, because they are
+ * one concept — a `{ color, opacity }` fill (src/lib/templateFill.js). The
+ * opacity field is the shared bounded numeric field, so it can be cleared and
+ * retyped and can never commit a malformed alpha; a value outside 0–100 is
+ * clamped on commit rather than accepted.
+ *
+ * `fill` may be `null`, which means THIS SURFACE HAS NO OVERRIDE. The controls
+ * then show what it currently INHERITS, and touching either of them is what
+ * creates the override — so a user never has to know the difference until they
+ * make one.
+ */
+function FillControls({
+  idPrefix,
+  fill,
+  inherited,
+  onChange,
+  onReset,
+  resetLabel,
+  // Whether there is anything TO reset. A cell can be reset once it has an
+  // override of its own; the page — which always has a fill, because it is the
+  // paper — can be reset once it is no longer the default white.
+  canReset = !!fill,
+}) {
+  const effective = fill || inherited;
+  return (
+    <>
+      <ColorField
+        id={`${idPrefix}-color`}
+        label="Fill"
+        compact
+        value={effective.color}
+        defaultValue={DEFAULT_FILL_COLOR}
+        onChange={(color) => onChange({ color, opacity: effective.opacity })}
+      />
+      <label className={labelCls} htmlFor={`${idPrefix}-opacity`}>
+        Opacity
+      </label>
+      <BoundedNumberInput
+        id={`${idPrefix}-opacity`}
+        className={fieldCls}
+        value={effective.opacity}
+        limits={FILL_OPACITY}
+        decimals={0}
+        step={5}
+        ariaLabel={`Fill opacity, percent (${FILL_OPACITY.min}–${FILL_OPACITY.max})`}
+        onChange={(opacity) => onChange({ color: effective.color, opacity })}
+      />
+      <span className={labelCls}>%</span>
+      <button
+        type="button"
+        className={btnCls}
+        disabled={!canReset}
+        title={resetLabel}
+        onClick={onReset}
+      >
+        {resetLabel}
+      </button>
+    </>
+  );
+}
+
 export default function TemplateEditorRibbon({
   branding, // normalized draft branding WITH header.layout
   onHeaderChange, // (patch) => void — header-level fields
@@ -93,6 +175,19 @@ export default function TemplateEditorRibbon({
   logoError,
   onLogoFile,
   onLogoRemove,
+  // THE CONTEXTUAL FILL GROUP (Template Editor A3).
+  //   cellSelection   `{ rowId, cellId, kind }` or null — which table surface is
+  //                   selected on the page. Null means the PAGE group shows.
+  //   cellFill        that surface's OWN override, or null for "inherited".
+  //   inheritedFill   what it inherits — the table's label or value default.
+  //   pageFill        the document surface's fill (never null: the paper).
+  cellSelection = null,
+  cellFill = null,
+  inheritedFill = null,
+  pageFill = null,
+  onCellFillChange, // (fill|null) => void
+  onPageFillChange, // (fill|null) => void — null restores the white paper
+  isDefaultPage = true, // the page is still the default white paper
 }) {
   const header = branding.header;
   const layout = header.layout;
@@ -319,6 +414,41 @@ export default function TemplateEditorRibbon({
           ))}
         </select>
       </Group>
+
+      <Divider />
+
+      {/* -------------------------- CELL *or* PAGE ------------------------- */}
+      {/* ONE contextual group, never both. The selected surface owns it; with
+          nothing selected the document does. This is what keeps the ribbon from
+          growing a permanent fifth column of controls that are wrong most of
+          the time. */}
+      {cellSelection ? (
+        <Group title={cellSelection.kind === CELL_FILL_KIND.LABEL ? "Label cell" : "Cell"}>
+          <FillControls
+            idPrefix="ribbon-cell-fill"
+            fill={cellFill}
+            inherited={inheritedFill}
+            onChange={onCellFillChange}
+            onReset={() => onCellFillChange(null)}
+            resetLabel="Use default"
+          />
+        </Group>
+      ) : (
+        <Group title="Page">
+          <FillControls
+            idPrefix="ribbon-page-fill"
+            fill={pageFill}
+            inherited={pageFill}
+            onChange={onPageFillChange}
+            onReset={() => onPageFillChange(null)}
+            resetLabel="Reset"
+            canReset={!isDefaultPage}
+          />
+          <span className="text-[11px] leading-none text-black dark:text-white opacity-60">
+            Select a table cell to fill it
+          </span>
+        </Group>
+      )}
     </div>
   );
 }

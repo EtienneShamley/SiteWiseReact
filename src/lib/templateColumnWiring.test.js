@@ -598,8 +598,12 @@ describe("23. the table-column resize is zoom-safe by construction", () => {
     );
     expect(TABLE.match(/gridTemplateColumns: gridTracks/g)).toHaveLength(3);
     expect(TABLE).not.toContain("gridTemplateColumns: `${leftWidth} 1fr`");
-    // A cell occupies the columns it spans and holds no width.
-    expect(TABLE).toContain("style={{ gridColumn: cellGridSpan(cell) }}");
+    // A cell occupies the columns it spans and holds no width. Its style object
+    // now also carries its own FILL when it has one (Template Editor A3) — a
+    // background, never a width.
+    expect(TABLE).toContain(
+      "style={{ gridColumn: cellGridSpan(cell), ...fillStyle(cell.fill) }}"
+    );
   });
 });
 

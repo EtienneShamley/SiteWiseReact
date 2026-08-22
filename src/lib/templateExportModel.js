@@ -70,7 +70,7 @@ import {
 } from "./templateSectionContent";
 import { sectionExtraHeightFor } from "./templateSectionHeight";
 import { sectionReplacesRowAnswer } from "./templateRowContent";
-import { rowCells, valueColumns } from "./templateColumns";
+import { rowCells, rowLabelFill, valueColumns } from "./templateColumns";
 import { rowMinHeightPx } from "./templateRowHeight";
 import { sectionDocAssetIds } from "./templateSectionDoc";
 import { SECTION_BODY_SOURCE, resolveSectionBody } from "./templateSectionBody";
@@ -856,6 +856,12 @@ export function buildTemplateExportModel({
       // the grid (`layout.valueColumns`), never to a cell — which is exactly
       // what lets every renderer express this as an ordinary `colspan`.
       span: cell.span,
+      // THIS CELL'S FILL OVERRIDE, or `null` for "inherit the table default"
+      // (src/lib/templateFill.js). Carried as the canonical `{ color, opacity }`
+      // rather than as a CSS string, so each export flavour decides for itself
+      // how to express it — `rgba()` where alpha exists, a flattened opaque hex
+      // where it cannot. No renderer ever parses a stored style string.
+      fill: cell.fill || null,
       units,
       contentDriven: sectionOwnsBody,
       empty: units.every((u) => u.type === EXPORT_UNIT.EMPTY),
@@ -896,6 +902,10 @@ export function buildTemplateExportModel({
       kind: isCustom ? "custom" : "master",
       id: row.id,
       label: typeof row.label === "string" ? row.label : "",
+      // This row's LABEL cell fill override, or `null` for "inherit the table
+      // default". The label column is one template-wide track, so its override
+      // belongs to the row rather than to a grid cell.
+      labelFill: rowLabelFill(row),
       type: first.type,
       // CONTENT-DRIVEN with a floor that fits what the row's cells render, and
       // the height the user dragged only when they genuinely dragged one — the

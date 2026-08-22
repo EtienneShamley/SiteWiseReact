@@ -12,6 +12,17 @@
 // header's TEXT object, typed on the page. What remains here is the one group
 // that is not header composition: the two-column table's colours.
 //
+// Since Template Editor A3 (2026-08-21) this panel is explicitly the table's
+// DEFAULTS — the fill (colour + opacity), text colour and border a row or cell
+// inherits when it carries no override of its own. ONE cell's own fill is set
+// from the ribbon's Cell group, is stored on that cell, and is not touched by
+// anything here: changing a default moves every un-overridden surface and
+// leaves every deliberate one exactly where the user put it. Nothing here ever
+// copies a colour into a row or a cell (src/lib/templateFill.js).
+//
+// Fill and TEXT colour stay separate controls, deliberately: one paints the
+// surface, the other the typography, and one control cannot mean both.
+//
 // Everything here edits the Builder's local DRAFT only. Nothing is stored until
 // "Submit template" publishes a new immutable TemplateVersion, so dragging a
 // colour picker cannot cause version churn.
@@ -29,6 +40,7 @@ import {
   isValidHexColor,
   normalizeHexColor,
 } from "../../lib/templateBranding";
+import { FILL_OPACITY } from "../../lib/templateFill";
 import { actionButtonClass } from "../../lib/interactionStyles";
 import BoundedNumberInput from "./BoundedNumberInput";
 
@@ -192,7 +204,7 @@ export default function BrandingPanel({
           aria-controls="branding-panel-body"
           onClick={() => setOpen((v) => !v)}
         >
-          <span>Document branding — table colours</span>
+          <span>Document branding — table defaults</span>
           <span className="text-xs opacity-70">
             {open ? "Hide ▲" : "Show ▼"}
           </span>
@@ -205,13 +217,27 @@ export default function BrandingPanel({
           className="flex flex-col gap-3 px-3 pb-3 border-t border-gray-300 dark:border-gray-700 pt-3"
         >
           {/* --------------------------- TABLE COLOURS -------------------------- */}
-          <Section title="Table colours">
+          {/* THE TABLE'S DEFAULTS, not a per-cell editor. Everything here is
+              what a row or cell inherits when it carries no override of its
+              own; one cell's own fill is set from the ribbon's Cell group
+              (Template Editor A3). Changing a default here moves every
+              un-overridden surface and leaves every deliberate one alone —
+              nothing is ever copied into a row or a cell. */}
+          <Section title="Table defaults — fills">
             <ColorField
               id="brand-label-bg"
               label="Label column background"
               value={table.labelBackgroundColor}
               defaultValue={DEFAULT_BRANDING.table.labelBackgroundColor}
               onChange={(v) => setTable({ labelBackgroundColor: v })}
+            />
+            <NumberField
+              id="brand-label-bg-opacity"
+              label="Label column opacity"
+              value={table.labelBackgroundOpacity}
+              limits={FILL_OPACITY}
+              suffix={`% (${FILL_OPACITY.min}–${FILL_OPACITY.max})`}
+              onChange={(v) => setTable({ labelBackgroundOpacity: v })}
             />
             <ColorField
               id="brand-label-text"
@@ -226,6 +252,14 @@ export default function BrandingPanel({
               value={table.contentBackgroundColor}
               defaultValue={DEFAULT_BRANDING.table.contentBackgroundColor}
               onChange={(v) => setTable({ contentBackgroundColor: v })}
+            />
+            <NumberField
+              id="brand-content-bg-opacity"
+              label="Content cell opacity"
+              value={table.contentBackgroundOpacity}
+              limits={FILL_OPACITY}
+              suffix={`% (${FILL_OPACITY.min}–${FILL_OPACITY.max})`}
+              onChange={(v) => setTable({ contentBackgroundOpacity: v })}
             />
             <ColorField
               id="brand-content-text"

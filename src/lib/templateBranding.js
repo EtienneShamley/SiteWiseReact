@@ -59,6 +59,15 @@
 //     rich value and the canonical identity live in src/lib/templateHeaderLayout.js
 //     because they need the rich-text serializer, which imports this module.
 
+import {
+  FILL_OPACITY,
+  clampFillOpacity,
+  compositeFill,
+  fillCss,
+  makeFill,
+  normalizeHexColor,
+} from "./templateFill";
+
 /* ------------------------------- enums ---------------------------------- */
 
 // Restrained set of header compositions. Deliberately small (see the sprint
@@ -195,6 +204,7 @@ export const MIN_CONTRAST_RATIO = 4.5;
 
 export const DEFAULT_COLORS = Object.freeze({
   banner: "#ffffff",
+  page: "#ffffff",
   title: "#111111",
   labelBackground: "#ffffff",
   labelText: "#111111",
@@ -233,11 +243,24 @@ export const DEFAULT_BRANDING = Object.freeze({
   }),
   table: Object.freeze({
     labelBackgroundColor: DEFAULT_COLORS.labelBackground,
+    // The label / value DEFAULT fills gained an opacity in Template Editor A3.
+    // 100 is the value every colour in this product already meant, so a version
+    // published before it existed normalizes to exactly the appearance it had.
+    labelBackgroundOpacity: FILL_OPACITY.default,
     labelTextColor: DEFAULT_COLORS.labelText,
     contentBackgroundColor: DEFAULT_COLORS.contentBackground,
+    contentBackgroundOpacity: FILL_OPACITY.default,
     contentTextColor: DEFAULT_COLORS.contentText,
     borderColor: DEFAULT_COLORS.border,
     borderWidthPx: BORDER_WIDTH_PX.default,
+  }),
+  // THE DOCUMENT SURFACE (Template Editor A3). White at full opacity is the
+  // paper every NoteWise document has always been printed on, so the default is
+  // literally the previous appearance and an untouched template still publishes
+  // and compares as it always did. Nothing is emitted for it anywhere.
+  page: Object.freeze({
+    backgroundColor: DEFAULT_COLORS.page,
+    backgroundOpacity: FILL_OPACITY.default,
   }),
 });
 
@@ -258,30 +281,12 @@ export const DEFAULT_HEADER_LAYOUT = Object.freeze({
 
 /* --------------------------- value normalizers --------------------------- */
 
-const HEX_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
-
-// True only for a literal #rgb / #rrggbb colour. Everything else — including
-// named colours, rgb()/hsl(), var(), url(), and any string carrying a ';' or
-// '(' — is false, so no CSS expression can enter a style object.
-export function isValidHexColor(value) {
-  return typeof value === "string" && HEX_RE.test(value.trim());
-}
-
-// Normalizes to lowercase 6-digit #rrggbb, or returns `fallback` when the input
-// is not a valid hex colour. Never throws, never passes the raw input through.
-export function normalizeHexColor(value, fallback) {
-  const safeFallback = isValidHexColor(fallback) ? expandHex(fallback) : DEFAULT_COLORS.title;
-  if (!isValidHexColor(value)) return safeFallback;
-  return expandHex(value);
-}
-
-function expandHex(value) {
-  const hex = value.trim().toLowerCase();
-  if (hex.length === 4) {
-    return `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`;
-  }
-  return hex;
-}
+// The hex primitives now live in src/lib/templateFill.js — the bottom of the
+// colour stack, so the fill model can validate a colour without importing this
+// module and creating a cycle. They are re-exported here under their
+// long-standing names, so every existing caller (and every existing test) reads
+// exactly the same functions from exactly the same place.
+export { isValidHexColor, normalizeHexColor } from "./templateFill";
 
 // Clamps a finite number into [min, max]; anything that is not a real number
 // falls back to `def` — including NaN, ±Infinity, null, "", "12px", booleans,
@@ -400,6 +405,7 @@ export function normalizeBranding(raw) {
   const header = src.header && typeof src.header === "object" ? src.header : {};
   const title = src.title && typeof src.title === "object" ? src.title : {};
   const table = src.table && typeof src.table === "object" ? src.table : {};
+  const page = src.page && typeof src.page === "object" ? src.page : {};
   const logo = header.logo && typeof header.logo === "object" ? header.logo : {};
 
   return {
@@ -450,6 +456,7 @@ export function normalizeBranding(raw) {
         table.labelBackgroundColor,
         DEFAULT_BRANDING.table.labelBackgroundColor
       ),
+      labelBackgroundOpacity: clampFillOpacity(table.labelBackgroundOpacity),
       labelTextColor: normalizeHexColor(
         table.labelTextColor,
         DEFAULT_BRANDING.table.labelTextColor
@@ -458,6 +465,7 @@ export function normalizeBranding(raw) {
         table.contentBackgroundColor,
         DEFAULT_BRANDING.table.contentBackgroundColor
       ),
+      contentBackgroundOpacity: clampFillOpacity(table.contentBackgroundOpacity),
       contentTextColor: normalizeHexColor(
         table.contentTextColor,
         DEFAULT_BRANDING.table.contentTextColor
@@ -467,6 +475,17 @@ export function normalizeBranding(raw) {
         DEFAULT_BRANDING.table.borderColor
       ),
       borderWidthPx: Math.round(clampNumber(table.borderWidthPx, BORDER_WIDTH_PX)),
+    },
+    // The document surface. Whitelisted exactly like everything else, and
+    // defaulted to the white paper — so a version with no `page` key at all
+    // (every version published before A3) normalizes to the appearance it has
+    // always had, and `isDefaultBranding` still recognises it as untouched.
+    page: {
+      backgroundColor: normalizeHexColor(
+        page.backgroundColor,
+        DEFAULT_BRANDING.page.backgroundColor
+      ),
+      backgroundOpacity: clampFillOpacity(page.backgroundOpacity),
     },
   };
 }
@@ -543,6 +562,71 @@ export function layoutShowsLogo(layoutStyle) {
   );
 }
 
+/* ---------------------------- branding -> fills --------------------------- */
+//
+// The three fills a template DEFAULTS to, as the one canonical `{ color,
+// opacity }` type every surface uses (src/lib/templateFill.js). Stated here so
+// that "the label column's default", "a value cell's default" and "the page"
+// are read from ONE place by the live document, every export flavour and the
+// Template Editor's ribbon alike.
+//
+// These are DEFAULTS, never overrides: a row's `labelFill` and a cell's `fill`
+// are resolved against them at read time (`resolveFill`), and nothing ever
+// copies one of them into a row or a cell.
+
+/** The document surface. Never null — an unconfigured page is white paper. */
+export function pageFill(rawBranding) {
+  const b = normalizeBranding(rawBranding);
+  return makeFill(b.page.backgroundColor, b.page.backgroundOpacity);
+}
+
+/**
+ * The page as an OPAQUE colour — the surface everything else is painted on.
+ *
+ * The page is the bottom layer of the document: there is nothing beneath it but
+ * paper, so its opacity is composited against white ONCE, here, and the result
+ * is what every surface uses. That is deliberate rather than incidental:
+ *
+ *   - on screen the paper backdrop sits on the app's grey desk, and a
+ *     translucent page would tint itself with the desk (and with a different
+ *     desk in dark mode);
+ *   - in the exported document it sits on a white body;
+ *   - in Word it is not drawn at all.
+ *
+ * Flattening it at the boundary makes all three the same colour, and makes a
+ * translucent CELL fill composite over exactly the same backdrop everywhere —
+ * which is what lets the DOCX flattening reproduce the screen.
+ */
+export function pageSurfaceColor(rawBranding) {
+  return compositeFill(pageFill(rawBranding));
+}
+
+/** The default fill of the LABEL column. Never null. */
+export function tableLabelFill(rawBranding) {
+  const b = normalizeBranding(rawBranding);
+  return makeFill(b.table.labelBackgroundColor, b.table.labelBackgroundOpacity);
+}
+
+/** The default fill of a VALUE cell. Never null. */
+export function tableContentFill(rawBranding) {
+  const b = normalizeBranding(rawBranding);
+  return makeFill(b.table.contentBackgroundColor, b.table.contentBackgroundOpacity);
+}
+
+/**
+ * True when the page is still the plain white paper.
+ *
+ * The exporters emit NOTHING for a default page, which is what keeps every
+ * template published before A3 producing byte-identical markup.
+ */
+export function isDefaultPageFill(rawBranding) {
+  const fill = pageFill(rawBranding);
+  return (
+    fill.color === DEFAULT_BRANDING.page.backgroundColor &&
+    fill.opacity === DEFAULT_BRANDING.page.backgroundOpacity
+  );
+}
+
 /**
  * Maps a branding object to the SAFE style objects the renderer applies.
  *
@@ -612,14 +696,23 @@ export function brandingStyles(rawBranding) {
           },
         }
       : null,
-    // CSS custom properties consumed by template.css. They cascade from the
-    // wrapper above <PagedDocument> to every row on every page, so master rows,
-    // note-specific custom rows and Photo/File continuation rows all inherit
-    // one company style with no per-row or per-cell overrides.
+    // CSS custom properties consumed by template.css and pagedDocument.css. They
+    // cascade from the wrapper above <PagedDocument> to every page and every row,
+    // so master rows, note-specific custom rows and Photo/File continuation rows
+    // all inherit one company style.
+    //
+    // These are the DEFAULT layer of the fill model (Template Editor A3): a row
+    // or cell WITHOUT an override is painted by these properties and stores
+    // nothing, and one WITH an override paints its own resolved fill inline
+    // instead — so changing a default moves every un-overridden surface and
+    // leaves every deliberate one alone. `fillCss` emits the plain hex colour
+    // for a fully opaque fill, so a template that has never touched opacity
+    // produces byte-identical values to the ones this has always emitted.
     table: {
-      "--nw-tpl-label-bg": b.table.labelBackgroundColor,
+      "--nw-tpl-page-bg": pageSurfaceColor(b),
+      "--nw-tpl-label-bg": fillCss(tableLabelFill(b)),
       "--nw-tpl-label-text": b.table.labelTextColor,
-      "--nw-tpl-content-bg": b.table.contentBackgroundColor,
+      "--nw-tpl-content-bg": fillCss(tableContentFill(b)),
       "--nw-tpl-content-text": b.table.contentTextColor,
       "--nw-tpl-border-color": b.table.borderColor,
       "--nw-tpl-border-width": `${b.table.borderWidthPx}px`,

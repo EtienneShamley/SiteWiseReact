@@ -182,6 +182,12 @@ export function normalizeRow(row, idx) {
   // left without it, which is what keeps an existing template's published bytes
   // identical.
   if (Array.isArray(r.cells)) normalized.cells = r.cells;
+  // The row's LABEL cell fill override, when it has one. Carried through raw
+  // and validated by the fill model (src/lib/templateFill.js) at the point of
+  // use, exactly like `cells` above — this module owns the field schema, not
+  // the colour model. A row without the key is left without it, which is what
+  // keeps an existing template's published bytes identical.
+  if (r.labelFill && typeof r.labelFill === "object") normalized.labelFill = r.labelFill;
   return normalized;
 }
 

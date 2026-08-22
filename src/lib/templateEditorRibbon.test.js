@@ -224,7 +224,9 @@ describe("[10] the Template editing ribbon stays outside the document scroller",
       expect(RIBBON).toContain(s);
     }
     const panel = read("components/template/BrandingPanel.js");
-    expect(panel).toContain('<Section title="Table colours">');
+    // Since A3 the panel is explicitly the table's DEFAULTS — one cell's own
+    // fill is set from the ribbon's contextual Cell group, not here.
+    expect(panel).toContain('<Section title="Table defaults — fills">');
     expect(panel).not.toContain('<Section title="Header">');
     expect(panel).not.toContain('<Section title="Title">');
     expect(panel).not.toContain("onLogoFile");
@@ -239,7 +241,11 @@ describe("[10] the Template editing ribbon stays outside the document scroller",
     expect(BUILDER).toContain("const [headerSelection, setHeaderSelection] = useState(null);");
     expect(BUILDER).toContain('if (target.closest("[data-header-region]")) return;');
     expect(BUILDER).toContain('if (target.closest("[data-nw-template-ribbon]")) return;');
-    expect(BUILDER).toContain("onFocus: useCallback(() => setHeaderSelection(HEADER_OBJECT.TEXT), []),");
+    // Focusing the header text selects the TEXT object and, since A3, clears any
+    // table-cell selection — the two contextual groups are mutually exclusive.
+    expect(BUILDER).toContain("setHeaderSelection(HEADER_OBJECT.TEXT);");
+    expect(BUILDER).toContain("const selectHeaderObject = useCallback((object) => {");
+    expect(BUILDER).toContain("const selectCell = useCallback((selection) => {");
     expect(BUILDER).not.toContain("onBlur");
     expect(TABLE).not.toContain("logoSelected");
     expect(TABLE).not.toContain("useOutsideClose");

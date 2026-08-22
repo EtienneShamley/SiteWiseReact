@@ -5,19 +5,33 @@
  *
  * TABLE BRANDING: the row/cell colours below read CSS custom properties set by
  * ResizableTwoColTable from the TemplateVersion's branding (one wrapper above
- * <PagedDocument>, so they cascade to every row on every page). Every fallback
+ * <PagedDocument>, so they cascade to every page and every row). Every fallback
  * is the value this file used before branding existed, so a template with no
- * branding configuration renders exactly as it did. There are deliberately no
- * per-row or per-cell overrides — a company table style is one consistent set.
+ * branding configuration renders exactly as it did.
+ *
+ * FILLS (Template Editor A3): these properties are the DEFAULT layer of the
+ * fill model. A row or cell with no override of its own is painted by them and
+ * stores nothing; a cell the user deliberately recoloured paints its OWN
+ * resolved fill as an inline background instead (ResizableTwoColTable), which
+ * beats these rules without any specificity contest. Inheritance is resolved in
+ * the model, never by stacking two painted layers — see src/lib/templateFill.js.
+ *
+ * ONE PAINTED LAYER PER SURFACE: `.twocol-row` deliberately paints NO
+ * background. Its label and value cells are grid items that cover it exactly,
+ * so an opaque table looks identical either way — but a TRANSLUCENT cell fill
+ * would otherwise composite over a second, invisible row fill that no export
+ * flavour can reproduce (an exported `<td>` has one background and a Word cell
+ * has one shading colour). The page is the only thing beneath a cell, here and
+ * in every export.
  *
  * The properties are produced only by brandingStyles() in
- * src/lib/templateBranding.js, which emits validated hex colours and clamped
- * numbers; no stored string ever reaches a CSS declaration verbatim. */
+ * src/lib/templateBranding.js, which emits validated hex colours, clamped
+ * numbers and `rgba()` built from them; no stored string ever reaches a CSS
+ * declaration verbatim. */
 
 /* Row block */
 .twocol-row {
   position: relative;
-  background: var(--nw-tpl-content-bg, #ffffff);
   border: var(--nw-tpl-border-width, 1px) solid var(--nw-tpl-border-color, #d1d5db);
   /* Collapse the border shared with the row above, whatever its width. */
   margin-top: calc(-1 * var(--nw-tpl-border-width, 1px));
@@ -30,6 +44,16 @@
 
 .twocol-cell-right {
   background: var(--nw-tpl-content-bg, #ffffff);
+}
+
+/* A cell SELECTED in the Template Builder, so the ribbon's Cell group names the
+   surface it is about to fill. An editing affordance only: an outline drawn
+   inside the cell (so it never moves the table by a pixel), never a background —
+   the background is the thing being edited and must show exactly as it will
+   print. Hidden in print with the rest of the editing chrome. */
+.twocol-cell--selected {
+  outline: 2px solid #39dde9; /* NoteWise cyan, interaction/selection only */
+  outline-offset: -2px;
 }
 
 /* Branded TEXT colours.
@@ -814,6 +838,12 @@
   /* An empty field's prompt is editing guidance, not report content. */
   .twocol-rich-placeholder {
     display: none !important;
+  }
+
+  /* A Builder cell selection is an editing affordance: the printed page must
+     look identical whether or not a cell happened to be selected. */
+  .twocol-cell--selected {
+    outline: none !important;
   }
 
   .twocol-row,
