@@ -1,16 +1,19 @@
-// Phase 9 — the Template Builder's SIMPLIFIED type catalog.
+// Phase 9, and Template Editor A4 — what the Template Builder CREATES.
 //
-// The Builder defines the STRUCTURE of the document, and the normal row is a
-// SECTION: a flexible document area that may later hold text, images and files
-// in any order. Photo and File are no longer offered as new field types,
-// because photos and files are CONTENT added while completing a note.
+// The Builder defines the STRUCTURE of the document, and every cell it creates
+// is a SECTION: a flexible document area holding text, images and file
+// attachments in any order. Phase 9 removed Photo and File from the creation
+// catalog because photos and files are CONTENT added while completing a note;
+// A4 (2026-08-22) removed the catalog itself, because choosing a type in
+// advance is a question with no useful answer — a Section takes all of it.
 //
 // The two questions this file keeps apart, because the whole change rests on
 // them being different:
 //
 //   - which types a STORED row may validly carry (unchanged — `FIELD_TYPES`,
 //     `normalizeType`), so every pinned TemplateVersion keeps working;
-//   - which types the Builder OFFERS when creating one (`BUILDER_FIELD_TYPES`).
+//   - which type the Builder PRODUCES (`DEFAULT_BUILDER_FIELD_TYPE`) — now
+//     exactly one, with no selector anywhere in the normal workflow.
 //
 // Mixed pure / storage / source-text assertions. Source text is used for the
 // component facts for the reason documented in docs/TESTING.md and used by
@@ -25,9 +28,9 @@ import path from "path";
 import {
   FIELD_TYPE,
   FIELD_TYPES,
-  BUILDER_FIELD_TYPES,
   DEFAULT_BUILDER_FIELD_TYPE,
-  builderFieldTypeOptions,
+  fieldTypeLabel,
+  isFlexibleCellType,
   normalizeType,
   normalizeRow,
   normalizeRows,
@@ -87,8 +90,6 @@ const BUILDER_DOC = "components/template/TemplateBuilderDoc.js";
 const FIELDS = "lib/templateFields.js";
 const SCAFFOLD = "templates/defaultTwoColDoc.js";
 
-const catalogValues = () => BUILDER_FIELD_TYPES.map((t) => t.value);
-const catalogLabels = () => BUILDER_FIELD_TYPES.map((t) => t.label);
 
 // A HISTORICAL `sectionContent` list, read the way the runtime reads it: the
 // canonical reader resolves the body, the projection segments it, and the
@@ -136,17 +137,15 @@ beforeEach(() => {
 /* 1. The creation catalog                                             */
 /* ------------------------------------------------------------------ */
 
-describe("the Builder creation catalog", () => {
+describe("the Builder creates exactly one kind of cell", () => {
   test("a new Template's default rows are Sections", () => {
     const rows = normalizeRows(defaultRows);
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) {
       expect(row.type).toBe(FIELD_TYPE.TEXT);
       expect(row.type).toBe(DEFAULT_BUILDER_FIELD_TYPE);
+      expect(isFlexibleCellType(row.type)).toBe(true);
     }
-    // And "Section" is what that type is CALLED in the Builder.
-    const entry = BUILDER_FIELD_TYPES.find((t) => t.value === FIELD_TYPE.TEXT);
-    expect(entry.label).toBe("Section");
   });
 
   test("a newly added row defaults to Section", () => {
@@ -154,75 +153,60 @@ describe("the Builder creation catalog", () => {
     expect(row.type).toBe(DEFAULT_BUILDER_FIELD_TYPE);
     expect(normalizeType(row.type)).toBe(FIELD_TYPE.TEXT);
     expect(isAttachmentFieldType(row.type)).toBe(false);
+    expect(isFlexibleCellType(row.type)).toBe(true);
   });
 
-  test("the default is the catalog's own first choice, so the two cannot drift", () => {
-    expect(BUILDER_FIELD_TYPES[0].value).toBe(DEFAULT_BUILDER_FIELD_TYPE);
-    expect(BUILDER_FIELD_TYPES[0].label).toBe("Section");
+  test("1/33. there is no creation catalog left to choose from", () => {
+    const fields = read(FIELDS);
+    for (const gone of [
+      "BUILDER_FIELD_TYPES",
+      "LEGACY_BUILDER_FIELD_TYPES",
+      "builderFieldTypeOptions",
+    ]) {
+      expect(fields).not.toContain(gone);
+    }
+    // ...and nothing anywhere still imports one.
+    expect(read(TABLE)).not.toContain("builderFieldTypeOptions");
+    expect(read(BUILDER_DOC)).not.toContain("builderFieldTypeOptions");
   });
 
-  test("Section is offered in the normal type catalog", () => {
-    expect(catalogLabels()).toContain("Section");
-    expect(catalogValues()).toContain(FIELD_TYPE.TEXT);
+  test("1/33. the Builder renders no field-type selector at all", () => {
+    const table = stripComments(read(TABLE));
+    expect(table).not.toContain("Field type");
+    expect(table).not.toContain("handleTypeChange");
+    expect(table).not.toContain("renderFieldTypeEditor");
+    // Not merely hidden: no select element is bound to a cell's type anywhere.
+    expect(table).not.toMatch(/<select[\s\S]{0,200}value=\{type\}/);
   });
 
-  test("there is no duplicate Text + Section choice", () => {
-    expect(catalogLabels()).not.toContain("Text");
-    // Exactly ONE entry resolves to the flexible stored type.
-    const flexible = BUILDER_FIELD_TYPES.filter(
-      (t) => normalizeType(t.value) === FIELD_TYPE.TEXT
-    );
-    expect(flexible).toHaveLength(1);
-    // No two entries share a stored type at all.
-    expect(new Set(catalogValues()).size).toBe(BUILDER_FIELD_TYPES.length);
+  test("1. an empty flexible cell says what it accepts, in one quiet line", () => {
+    const table = read(TABLE);
+    expect(table).toContain('export const FLEXIBLE_CELL_HINT = "Text, image or file…";');
+    expect(table).toContain("if (isFlexibleCellType(type)) {");
+    expect(table).toContain("{FLEXIBLE_CELL_HINT}");
   });
 
-  test("Photo is NOT offered as a new field type", () => {
-    expect(catalogValues()).not.toContain(FIELD_TYPE.PHOTO);
-    expect(catalogLabels()).not.toContain("Photo");
-    expect(builderFieldTypeOptions(FIELD_TYPE.TEXT).map((t) => t.value)).not.toContain(
-      FIELD_TYPE.PHOTO
-    );
-  });
-
-  test("File is NOT offered as a new field type", () => {
-    expect(catalogValues()).not.toContain(FIELD_TYPE.FILE);
-    expect(catalogLabels()).not.toContain("File");
-    expect(builderFieldTypeOptions(FIELD_TYPE.TEXT).map((t) => t.value)).not.toContain(
-      FIELD_TYPE.FILE
-    );
-  });
-
-  test("no ordinary row's selector can create a Photo or File row", () => {
-    for (const type of [
-      FIELD_TYPE.TEXT,
+  test("the flexible cell is the EXISTING text type — no new stored value", () => {
+    expect(DEFAULT_BUILDER_FIELD_TYPE).toBe(FIELD_TYPE.TEXT);
+    expect(isFlexibleCellType("text")).toBe(true);
+    expect(isFlexibleCellType("multiline")).toBe(true); // the legacy alias
+    expect(isFlexibleCellType(undefined)).toBe(true); // an untyped scaffold row
+    for (const structured of [
       FIELD_TYPE.NUMBER,
       FIELD_TYPE.DATE,
       FIELD_TYPE.TIME,
       FIELD_TYPE.CHECKBOX,
       FIELD_TYPE.YESNO,
       FIELD_TYPE.SELECT,
-      undefined,
-      null,
-      "multiline",
-      "bogus",
+      FIELD_TYPE.PHOTO,
+      FIELD_TYPE.FILE,
     ]) {
-      const values = builderFieldTypeOptions(normalizeType(type)).map((t) => t.value);
-      expect(values).not.toContain(FIELD_TYPE.PHOTO);
-      expect(values).not.toContain(FIELD_TYPE.FILE);
+      expect(isFlexibleCellType(structured)).toBe(false);
     }
   });
 
-  test("Number is offered", () => expect(catalogValues()).toContain(FIELD_TYPE.NUMBER));
-  test("Date is offered", () => expect(catalogValues()).toContain(FIELD_TYPE.DATE));
-  test("Time is offered", () => expect(catalogValues()).toContain(FIELD_TYPE.TIME));
-  test("Checkbox is offered", () =>
-    expect(catalogValues()).toContain(FIELD_TYPE.CHECKBOX));
-  test("Yes / No is offered", () => expect(catalogValues()).toContain(FIELD_TYPE.YESNO));
-  test("Select is offered", () => expect(catalogValues()).toContain(FIELD_TYPE.SELECT));
-
-  test("the catalog is exactly Section + the six structured types", () => {
-    expect(catalogValues()).toEqual([
+  test("the VALIDITY set is untouched, so no stored template loses meaning", () => {
+    expect(FIELD_TYPES.map((t) => t.value)).toEqual([
       FIELD_TYPE.TEXT,
       FIELD_TYPE.NUMBER,
       FIELD_TYPE.DATE,
@@ -230,14 +214,30 @@ describe("the Builder creation catalog", () => {
       FIELD_TYPE.CHECKBOX,
       FIELD_TYPE.YESNO,
       FIELD_TYPE.SELECT,
+      FIELD_TYPE.PHOTO,
+      FIELD_TYPE.FILE,
     ]);
   });
 
-  test("the Builder's selector reads the catalog, not the validity set", () => {
-    const table = read(TABLE);
-    expect(table).toContain("builderFieldTypeOptions(type).map(");
-    expect(stripComments(table)).not.toMatch(/FIELD_TYPES\.map\(/);
-    expect(table).toContain("builderFieldTypeOptions,");
+  test("a legacy structured cell can NAME itself, from the validity set alone", () => {
+    expect(fieldTypeLabel(FIELD_TYPE.NUMBER)).toBe("Number");
+    expect(fieldTypeLabel(FIELD_TYPE.DATE)).toBe("Date");
+    expect(fieldTypeLabel(FIELD_TYPE.TIME)).toBe("Time");
+    expect(fieldTypeLabel(FIELD_TYPE.CHECKBOX)).toBe("Checkbox");
+    expect(fieldTypeLabel(FIELD_TYPE.YESNO)).toBe("Yes / No");
+    expect(fieldTypeLabel(FIELD_TYPE.SELECT)).toBe("Dropdown");
+    expect(fieldTypeLabel(FIELD_TYPE.PHOTO)).toBe("Photo");
+    expect(fieldTypeLabel(FIELD_TYPE.FILE)).toBe("File");
+    // An unknown type degrades to the flexible cell, so nothing renders blank.
+    expect(fieldTypeLabel("sasquatch")).toBe("Text");
+  });
+
+  test("new structural cells are flexible too — split and column insertion", () => {
+    // The Builder passes DEFAULT_BUILDER_FIELD_TYPE into every A2 action that
+    // mints a cell, so a split sibling and an inserted column are Sections.
+    const builder = read(BUILDER_DOC);
+    expect(builder).toContain("DEFAULT_BUILDER_FIELD_TYPE");
+    expect(builder).not.toContain("builderFieldTypeOptions");
   });
 });
 
@@ -247,13 +247,12 @@ describe("the Builder creation catalog", () => {
 
 describe("a Section's persisted representation", () => {
   test("a Section persists as the EXISTING flexible text type — no new row type", () => {
-    const section = BUILDER_FIELD_TYPES.find((t) => t.label === "Section");
-    expect(section.value).toBe(FIELD_TYPE.TEXT);
-    expect(section.value).toBe("text");
-    // Every offered value is already a valid stored type: the catalog narrows
-    // the validity set, it never extends it.
+    expect(DEFAULT_BUILDER_FIELD_TYPE).toBe(FIELD_TYPE.TEXT);
+    expect(DEFAULT_BUILDER_FIELD_TYPE).toBe("text");
+    // The one value the Builder produces is already a valid STORED type: what
+    // the Builder creates narrows the validity set, it never extends it.
     const valid = new Set(FIELD_TYPES.map((t) => t.value));
-    for (const value of catalogValues()) expect(valid.has(value)).toBe(true);
+    expect(valid.has(DEFAULT_BUILDER_FIELD_TYPE)).toBe(true);
   });
 
   test("no new stored type value was introduced anywhere", () => {
@@ -475,7 +474,10 @@ describe("structured types are unchanged", () => {
     expect(quickAddCapture(target)).toEqual({ image: true, file: true, reason: null });
   });
 
-  test("the Builder still renders the dropdown option editor", () => {
+  test("the Builder still renders the dropdown option editor for a LEGACY Dropdown", () => {
+    // A legacy Dropdown's options are template STRUCTURE, and are the one thing
+    // about a legacy field a template author still legitimately maintains — so
+    // A4 removed the type selector above them and kept these.
     const table = read(TABLE);
     expect(table).toContain("type === FIELD_TYPE.SELECT && (");
     expect(table).toContain("Dropdown options");
@@ -513,38 +515,26 @@ describe("legacy Photo / File rows", () => {
   test("a legacy Photo row is NOT auto-converted to a Section", () => {
     const loaded = normalizeRows(legacyRows());
     expect(loaded[0].type).toBe(FIELD_TYPE.PHOTO);
-    // Its own selector still shows it, so nothing changes just by being opened.
-    const values = builderFieldTypeOptions(loaded[0].type).map((t) => t.value);
-    expect(values).toContain(FIELD_TYPE.PHOTO);
-    expect(values).not.toContain(FIELD_TYPE.FILE);
-    const entry = builderFieldTypeOptions(FIELD_TYPE.PHOTO).find(
-      (t) => t.value === FIELD_TYPE.PHOTO
-    );
-    expect(entry.label).toBe("Photo (legacy)");
+    // It is not flexible, so it renders its own read-only badge rather than the
+    // flexible-cell hint — nothing changes just by being opened.
+    expect(isFlexibleCellType(loaded[0].type)).toBe(false);
+    expect(fieldTypeLabel(loaded[0].type)).toBe("Photo");
   });
 
   test("a legacy File row is NOT auto-converted to a Section", () => {
     const loaded = normalizeRows(legacyRows());
     expect(loaded[1].type).toBe(FIELD_TYPE.FILE);
-    const values = builderFieldTypeOptions(loaded[1].type).map((t) => t.value);
-    expect(values).toContain(FIELD_TYPE.FILE);
-    expect(values).not.toContain(FIELD_TYPE.PHOTO);
-    const entry = builderFieldTypeOptions(FIELD_TYPE.FILE).find(
-      (t) => t.value === FIELD_TYPE.FILE
-    );
-    expect(entry.label).toBe("File (legacy)");
+    expect(isFlexibleCellType(loaded[1].type)).toBe(false);
+    expect(fieldTypeLabel(loaded[1].type)).toBe("File");
   });
 
-  test("the legacy entry is added ONLY for the row that already has that type", () => {
-    expect(builderFieldTypeOptions(FIELD_TYPE.TEXT)).toBe(BUILDER_FIELD_TYPES);
-    expect(builderFieldTypeOptions(FIELD_TYPE.PHOTO)).toHaveLength(
-      BUILDER_FIELD_TYPES.length + 1
-    );
-    expect(builderFieldTypeOptions(FIELD_TYPE.FILE)).toHaveLength(
-      BUILDER_FIELD_TYPES.length + 1
-    );
-    // The shared catalog array itself is never mutated.
-    expect(BUILDER_FIELD_TYPES).toHaveLength(7);
+  test("there is no path by which a Photo or File cell can be CREATED", () => {
+    // The only type the Builder produces is the flexible one, and nothing can
+    // convert a cell to another type any more.
+    expect(isAttachmentFieldType(DEFAULT_BUILDER_FIELD_TYPE)).toBe(false);
+    expect(read(FIELDS)).not.toContain("Photo (legacy)");
+    expect(read(FIELDS)).not.toContain("File (legacy)");
+    expect(stripComments(read(TABLE))).not.toContain("handleTypeChange");
   });
 
   test("a legacy row's px is preserved on load and on re-publish", () => {
@@ -603,8 +593,8 @@ describe("legacy Photo / File rows", () => {
     expect(sectionReplacesRowAnswer(FIELD_TYPE.PHOTO, true)).toBe(false);
     // The Builder's own Photo/File explanatory placeholder is still there for
     // a legacy row, so an old template reads the same as it did.
-    expect(read(TABLE)).toContain("Photos can be added when completing this note.");
-    expect(read(TABLE)).toContain("Files can be added when completing this note.");
+    expect(read(TABLE)).toContain("photos are added when completing this note");
+    expect(read(TABLE)).toContain("files are added when completing this note");
   });
 
   test("a malformed or unknown legacy type does not break the Builder", () => {
@@ -619,10 +609,10 @@ describe("legacy Photo / File rows", () => {
     expect(rows[3].id).toBe("row-3");
     expect(rows[4].id).toBe("row-4");
     for (const row of rows) {
-      // Every one of them resolves to a real, offerable catalog entry, so the
-      // selector always has a matching option and never renders blank.
-      const values = builderFieldTypeOptions(row.type).map((t) => t.value);
-      expect(values).toContain(row.type);
+      // Every one of them resolves to the flexible cell, so an odd stored type
+      // renders as an ordinary Section rather than as a broken structured field.
+      expect(isFlexibleCellType(row.type)).toBe(true);
+      expect(fieldTypeLabel(row.type)).toBe("Text");
     }
   });
 

@@ -45,6 +45,7 @@ const SAVE_STATUS_HINT_ID = "note-save-status-hint";
  *                      owning editor's own schema and commands
  *                      (src/lib/editorCapabilities.js).
  * @param imagePolicy   the local-image picker's policy for the CURRENT surface
+ * @param filePolicy    the Attach file picker's policy for the CURRENT surface
  *                      (null = the Free-form note's own). Forwarded unchanged.
  * @param disabledHint  why the controls are disabled, when there is something
  *                      useful to say.
@@ -75,6 +76,7 @@ export default function EditorToolbar({
   editor,
   disabled = false,
   imagePolicy = null,
+  filePolicy = null,
   disabledHint = null,
   saveStatus = null,
   documentZoom = null,
@@ -100,6 +102,7 @@ export default function EditorToolbar({
         editor={editor}
         disabled={disabled}
         imagePolicy={imagePolicy}
+        filePolicy={filePolicy}
         disabledHint={disabledHint}
       />
       <div className="flex items-center gap-2 ml-auto">

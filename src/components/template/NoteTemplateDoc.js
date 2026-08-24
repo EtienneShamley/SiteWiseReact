@@ -125,6 +125,7 @@ import {
 } from "../../lib/templateRichText";
 import { insertLocalImageAsset } from "../../lib/editorImageInsert";
 import { insertFreeformFileAttachment } from "../../lib/editorFileInsert";
+import { validateSectionFile as validateSectionFileShared } from "../../lib/templateSectionToolbarFile";
 import { applyRowEditorRegistration } from "../../lib/editorToolbarState";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import { useRefine } from "../../hooks/useRefine";
@@ -673,6 +674,46 @@ export default function NoteTemplateDoc({
   );
 
   /**
+   * EVERY VALUE CELL ON THE FORM, keyed by its own cell id.
+   *
+   * The unit a Section belongs to is a CELL, not a row (Template Editor A2), and
+   * since A4 every cell the Builder creates is a flexible Section — so every
+   * question this component asks about "the thing the user is typing into, or
+   * capturing into, or refining" has to be answerable for a cell id.
+   *
+   * Before this index those questions were answered against the ROW list alone
+   * (`rows.some(r => r.id === id)`), which is true for the first cell of every
+   * row — its id IS the row id — and false for every cell created by a split or
+   * a table-column insertion. The consequence was that the second cell of a
+   * divided row rendered its Section statically but could not be opened, could
+   * not be a Quick Add destination and could not be refined. One lookup fixes
+   * all three, because all three go through `rowIsPresent` / `rowMetaFor` below.
+   *
+   * Derived, never stored, and read through a ref by the stable callbacks so
+   * none of them has to be rebuilt when a height drag changes `displayRows`.
+   */
+  const cellIndex = useMemo(() => {
+    const map = new Map();
+    for (const row of displayRows) {
+      if (!row || !row.id) continue;
+      const cells = rowCells(row, valueColumns.length);
+      cells.forEach((cell, index) => {
+        if (!cell || !cell.id) return;
+        map.set(cell.id, {
+          row,
+          cell,
+          index,
+          count: cells.length,
+        });
+      });
+    }
+    return map;
+  }, [displayRows, valueColumns]);
+
+  const cellIndexRef = useRef(cellIndex);
+  cellIndexRef.current = cellIndex;
+
+  /**
    * THE UNIFIED SECTION BODIES, one per row that has one — and, from the SAME
    * resolution, which Sections the shared editor may open.
    *
@@ -881,27 +922,36 @@ export default function NoteTemplateDoc({
           isCustom: true,
         };
       }
-      const row = (rowsRef.current || []).find((r) => r && r.id === rowId);
-      if (!row) return null;
+      // A CELL id, which for an undivided row IS the row id. The label the
+      // Quick Add chip shows names the column when there is more than one, so
+      // "Quick add to Date information" cannot mean two different cells.
+      const entry = cellIndexRef.current.get(rowId);
+      if (!entry) return null;
+      const label = entry.row.label ?? "";
       return {
-        label: row.label ?? "",
-        fieldType: normalizeType(row.type),
+        label:
+          entry.count > 1 ? `${label || "Untitled field"} (column ${entry.index + 1})` : label,
+        fieldType: normalizeType(entry.cell.type),
         isCustom: false,
       };
     },
     [customRowIds, templateCustomRows]
   );
 
-  // Is this row part of what the note is pinned to right now, whatever its type?
-  // A Section document may sit on a row of ANY type — a structured row keeps
-  // its typed control and holds a supplementary document beneath it, a legacy
-  // Photo/File field keeps its primary attachments — so the Text-only test
-  // above is the wrong question for one.
+  // Is this CELL part of what the note is pinned to right now, whatever its
+  // type? A Section document may sit on a cell of ANY type — a structured cell
+  // keeps its typed control and holds a supplementary document beneath it, a
+  // legacy Photo/File field keeps its primary attachments — so the Text-only
+  // test above is the wrong question for one.
+  //
+  // Asked of the CELL INDEX rather than of the row list: every value cell of a
+  // divided row is a full Section, and the gate in front of activation, Quick
+  // Add and Refine has to say yes to all of them (see `cellIndex`).
   const rowIsPresent = useCallback(
     (rowId) => {
       if (!rowId) return false;
       if (customRowIds.has(rowId)) return true;
-      return (rowsRef.current || []).some((r) => r && r.id === rowId);
+      return cellIndexRef.current.has(rowId);
     },
     [customRowIds]
   );
@@ -1220,11 +1270,10 @@ export default function NoteTemplateDoc({
    * through the shared allowlist before writing it, and the retrieved Blob's own
    * type remains the sole authority for whether a card may open anything.
    */
-  const validateSectionFile = useCallback((file) => {
-    const check = validateNoteFile(file);
-    if (!check.ok) return check;
-    return { ...check, mimeType: (file && file.type) || null };
-  }, []);
+  // ONE validator, shared with the toolbar's Attach file control
+  // (src/lib/templateSectionToolbarFile.js) — Quick Add and the toolbar must
+  // accept exactly the same files into exactly the same asset store.
+  const validateSectionFile = useCallback((file) => validateSectionFileShared(file), []);
 
   /** Put the caret at the very end of a Section document, before an insertion. */
   const placeSectionCaretAtEnd = useCallback((editor) => {
@@ -2749,11 +2798,12 @@ export default function NoteTemplateDoc({
    */
   useEffect(() => {
     if (!quickAddTargetRowId) return;
+    // The same CELL question the writers ask, so selecting the second cell of a
+    // divided row is not immediately undone by this guard.
     const stillExists =
-      customRowIds.has(quickAddTargetRowId) ||
-      (rows || []).some((r) => r && r.id === quickAddTargetRowId);
+      customRowIds.has(quickAddTargetRowId) || cellIndex.has(quickAddTargetRowId);
     if (!stillExists) onSelectRowRef.current?.(null, null);
-  }, [quickAddTargetRowId, customRowIds, rows]);
+  }, [quickAddTargetRowId, customRowIds, cellIndex]);
 
   // The mounted Section editor, resolved from the registry on every render so a
   // row that has stopped being editable — re-pinned away, deleted, or holding

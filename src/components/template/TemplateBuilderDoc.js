@@ -19,6 +19,7 @@ import {
 import {
   DEFAULT_BUILDER_FIELD_TYPE,
   FIELD_TYPE,
+  fieldTypeLabel,
   normalizeRows,
   normalizeType,
 } from "../../lib/templateFields";
@@ -30,6 +31,7 @@ import {
   mergeCell,
   rowCells,
   rowLabelFill,
+  setCellFieldControl,
   setCellFill,
   setRowLabelFill,
   splitCell,
@@ -328,6 +330,73 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
     [valueColumns, rows]
   );
 
+  /* -------------------------- FIELD CONTROLS ----------------------------- */
+  // Template Editor A4. A cell is a flexible Section unless the author
+  // deliberately gives it a typed control, from that cell's own ⋯ menu.
+  //
+  // WHAT A CONVERSION DOES TO CONTENT, and why it is safe by construction:
+  //
+  //   - Nothing on any note is written, moved or deleted. This edits the
+  //     template DEFINITION; a note keeps its `answers`, `sectionDoc`,
+  //     `attachments` and `evidence` under the same unchanged cell id.
+  //   - A cell that gains a control does NOT lose its Section content: a
+  //     structured cell's Section is SUPPLEMENTARY (`sectionReplacesRowAnswer`
+  //     is false for a structured type), so its document keeps rendering and
+  //     exporting beneath the new typed value — which is exactly the
+  //     "structured value + text + images + files" capability that already
+  //     existed and must not be removed.
+  //   - What CAN stop being shown is a cell's plain `answers[cellId]` string,
+  //     in one direction or the other: as prose it fills a flexible cell, as a
+  //     typed value it must fit the control (a sentence in a Date input shows
+  //     as empty), and a legacy prose answer sitting underneath a modern
+  //     `sectionDoc` is frozen once the Section owns the body.
+  //
+  // So the rule is the same one A2 already uses for removing structure: warn
+  // ONLY when a note has genuinely filled this cell in, and say plainly that
+  // nothing is deleted. When nobody has — the overwhelmingly common case,
+  // including undoing a control a moment after adding it — nothing is asked.
+  function confirmFieldControlChange(cellId, what) {
+    if (cellsWithNoteContent([cellId]).length === 0) return true;
+    return window.confirm(
+      `A note using this template has already filled in this cell.\n\n` +
+        `${what} Nothing is deleted, and notes stay on the template version ` +
+        `they were completed against — but a note completed against the new ` +
+        `version may show this cell differently. Continue?`
+    );
+  }
+
+  const addFieldControl = useCallback(
+    (rowId, cellId, type) => {
+      if (
+        !confirmFieldControlChange(
+          cellId,
+          `It will gain a ${fieldTypeLabel(type)} control, with its text, images and files kept beneath it.`
+        )
+      ) {
+        return;
+      }
+      setRows((prev) => setCellFieldControl(valueColumns, prev, rowId, cellId, type));
+    },
+    [valueColumns]
+  );
+
+  const removeFieldControl = useCallback(
+    (rowId, cellId) => {
+      if (
+        !confirmFieldControlChange(
+          cellId,
+          "Its field control will be removed and the cell becomes an ordinary content cell."
+        )
+      ) {
+        return;
+      }
+      setRows((prev) =>
+        setCellFieldControl(valueColumns, prev, rowId, cellId, DEFAULT_BUILDER_FIELD_TYPE)
+      );
+    },
+    [valueColumns]
+  );
+
   /* ----------------------------- FILL ACTIONS ---------------------------- */
   // Template Editor A3. Every one of these edits exactly ONE surface, and none
   // of them ever writes a colour into a surface the user did not address —
@@ -621,7 +690,7 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
           onHeaderHeightChange={updateHeaderHeight}
           headerTextEditor={headerTextEditor}
           logoLocked={false}
-          enableFieldTypeEditor={true}
+          builderStructure={true}
           rowActionsMode="builder"
           onInsertRow={insertRow}
           onInsertTableColumn={insertTableColumnAt}
@@ -630,6 +699,8 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
           onColumnWidthsCommit={changeColumnWidths}
           onSplitCell={splitCellInRow}
           onMergeCell={mergeCellInRow}
+          onAddFieldControl={addFieldControl}
+          onRemoveFieldControl={removeFieldControl}
           onRowLabelChange={changeRowLabel}
           onRowHeightChange={changeRowHeight}
           enableColumnDivider={true}

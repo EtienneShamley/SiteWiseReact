@@ -56,6 +56,7 @@ import {
 } from "../lib/templateRowRefine";
 import { setSectionRefineBackup } from "../lib/templateSectionRefine";
 import { SECTION_TOOLBAR_IMAGE_POLICY } from "../lib/templateSectionToolbarImage";
+import { SECTION_TOOLBAR_FILE_POLICY } from "../lib/templateSectionToolbarFile";
 import { insertLocalImageAsset } from "../lib/editorImageInsert";
 import { insertFreeformFileAttachment } from "../lib/editorFileInsert";
 import {
@@ -1308,6 +1309,15 @@ export default function MainArea() {
       ? SECTION_TOOLBAR_IMAGE_POLICY
       : null;
 
+  // The same rule for ATTACHING A FILE (Template Editor A4): the Template
+  // Section's own validator and asset kind while it owns the toolbar, the
+  // Free-form note's defaults otherwise. Null is not "no files" — it is the
+  // Free-form policy, exactly as it is for images.
+  const toolbarFilePolicy =
+    toolbarOwner === TOOLBAR_OWNER.TEMPLATE_SECTION
+      ? SECTION_TOOLBAR_FILE_POLICY
+      : null;
+
   const toolbarHint =
     templateFormVisible && toolbarOwner === TOOLBAR_OWNER.NONE
       ? TEMPLATE_TOOLBAR_HINT
@@ -1916,6 +1926,7 @@ export default function MainArea() {
           editor={toolbarEditor}
           disabled={toolbarOwner === TOOLBAR_OWNER.NONE}
           imagePolicy={toolbarImagePolicy}
+          filePolicy={toolbarFilePolicy}
           disabledHint={toolbarHint}
           saveStatus={{ label: activeSaveLabel, failed: activeSaveFailed }}
           documentZoom={documentZoom}

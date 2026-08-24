@@ -9,8 +9,12 @@ import React, {
 import "./template.css";
 import PagedDocument from "./PagedDocument";
 import {
+  FIELD_CONTROL_TYPES,
   FIELD_TYPE,
-  builderFieldTypeOptions,
+  canAddFieldControl,
+  canRemoveFieldControl,
+  fieldTypeLabel,
+  isFlexibleCellType,
   makeOption,
   normalizeType,
   displayTextValue,
@@ -76,6 +80,16 @@ import {
   rowMinHeightPx,
 } from "../../lib/templateRowHeight";
 import { actionButtonClass } from "../../lib/interactionStyles";
+
+/**
+ * What an empty flexible cell says in the Template Builder.
+ *
+ * ONE quiet line, not a row of buttons: the Builder defines structure, and the
+ * only thing a template author needs to know about a cell is that it will take
+ * whatever the person filling the note has — words, a photograph, a document.
+ * Exported so the copy is named once and asserted rather than duplicated.
+ */
+export const FLEXIBLE_CELL_HINT = "Text, image or file…";
 
 /**
  * The inline background of ONE document surface, or `undefined`.
@@ -286,7 +300,12 @@ export default function ResizableTwoColTable({
   // rich-text toolbar ownership so formatting can never reach the answer of the
   // row whose label the caret is in.
   logoLocked = false,
-  enableFieldTypeEditor = false,
+  // TEMPLATE BUILDER MODE (Template Editor A4 — formerly `enableFieldTypeEditor`,
+  // renamed because there is no field-type editor any more). True only for the
+  // Template Builder's own call: it turns on the light-locked row-label field
+  // box and the in-cell structure affordance, and it is what keeps a completed
+  // note's surface free of template-authoring chrome.
+  builderStructure = false,
   knownOptionIds = null,
   // Attachment evidence (note mode): raw instance attachments map keyed by
   // field id; arrays may mix legacy base64 strings and structured references.
@@ -390,6 +409,12 @@ export default function ResizableTwoColTable({
   onColumnWidthsCommit, // (widths[]) => void — once, on drag release
   onSplitCell, // (rowId, cellId) => void
   onMergeCell, // (rowId, cellId, "left" | "right") => void
+  // FIELD CONTROLS (Template Editor A4). A cell is a flexible Section by
+  // default; these are how a template author DELIBERATELY gives one cell a
+  // typed control, and takes it back. Contextual, on the cell's own ⋯ menu —
+  // never a selector on every row. Builder-only, like every structural action.
+  onAddFieldControl, // (rowId, cellId, type) => void
+  onRemoveFieldControl, // (rowId, cellId) => void
   // CELL FILL SELECTION (Template Builder only — Template Editor A3). Which
   // surface the ribbon's Cell group acts on: `{ rowId, cellId, kind }` where
   // `kind` is "label" (the row's label cell) or "value" (one grid cell). Owned
@@ -923,12 +948,6 @@ export default function ResizableTwoColTable({
     [rows, onRowsChange, patchRow]
   );
 
-  const handleTypeChange = useCallback(
-    (row, cell, nextType) =>
-      patchCell(row, cell.id, { type: normalizeType(nextType) }),
-    [patchCell]
-  );
-
   const handleOptionAdd = useCallback(
     (row, cell) =>
       patchCell(row, cell.id, {
@@ -1102,33 +1121,56 @@ export default function ResizableTwoColTable({
     );
   }
 
-  // ---------- BUILDER-MODE FIELD-TYPE EDITOR (per field type) ----------
+  // ---------- BUILDER-MODE CELL STRUCTURE (Template Editor A4) ----------
   //
-  // The options come from the CREATION catalog (src/lib/templateFields.js), not
-  // from the validity set: the normal choice is a flexible Section, and Photo /
-  // File are not offered because photos and files are content added while
-  // completing a note, into any section. A row ALREADY stored as Photo/File
-  // gets its own legacy entry back — `builderFieldTypeOptions` decides that
-  // from the row's own current type — so an old template's row shows what it
-  // truthfully is and is never implicitly converted just by being opened.
-  function renderFieldTypeEditor(row, cell) {
+  // What the Template Builder shows INSIDE a value cell. The Builder defines the
+  // document's STRUCTURE and never its content, so this is an affordance, not an
+  // editor: nothing typed here would have anywhere to be stored, because content
+  // belongs to each note's own instance.
+  //
+  // There is no field-type selector any more. Every cell the Builder creates is
+  // a flexible Section — prose, rich typography, images and file attachments
+  // interleaved in one document — so the cell simply SAYS so, once, quietly.
+  // Choosing a type up front was a question with no useful answer: the person
+  // designing a report does not yet know whether a field will hold a sentence, a
+  // photograph or an engineer's PDF, and a Section takes all three.
+  //
+  // A cell that carries a FIELD CONTROL (Number, Date, Time, Checkbox, Yes/No,
+  // Dropdown — added deliberately from the cell's ⋯ menu, or inherited from an
+  // older template) says which control it is, and says that text, images and
+  // files can still be added beneath it, because a typed control is a first
+  // value and not a closed container. The type itself is not a control here:
+  // it is changed from the ⋯ menu, which is also where it is removed. A
+  // Dropdown additionally keeps its option list EDITABLE — those options are
+  // template structure.
+  //
+  // A legacy Photo/File cell keeps its own wording and offers no removal: its
+  // primary attachments render only while it carries that type.
+  function renderBuilderCellStructure(row, cell) {
     const type = normalizeType(cell.type);
+
+    if (isFlexibleCellType(type)) {
+      // Not `aria-hidden`: for a flexible cell this line is the only thing in
+      // the cell, and it is exactly what a screen-reader user needs to hear to
+      // know the cell exists and what it will accept.
+      return <div className="twocol-cell-hint">{FLEXIBLE_CELL_HINT}</div>;
+    }
+
+    const isAttachment =
+      type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE;
+
     return (
       <div className="flex flex-col gap-2">
-        <label className="text-xs text-black opacity-80">
-          Field type
-          <select
-            className="twocol-field ml-2 px-2 py-1 text-sm rounded"
-            value={type}
-            onChange={(e) => handleTypeChange(row, cell, e.target.value)}
-          >
-            {builderFieldTypeOptions(type).map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="twocol-cell-legacy">
+          {fieldTypeLabel(type)} field
+          <span className="twocol-cell-legacy-note">
+            {isAttachment
+              ? type === FIELD_TYPE.PHOTO
+                ? " — photos are added when completing this note"
+                : " — files are added when completing this note"
+              : " — text, images and files can still be added beneath it"}
+          </span>
+        </div>
 
         {type === FIELD_TYPE.SELECT && (
           <div className="flex flex-col gap-1">
@@ -1214,11 +1256,11 @@ export default function ResizableTwoColTable({
           <textarea
             className={`twocol-label-text w-full h-full text-sm font-medium resize-none overflow-hidden leading-tight text-black ${
               // Builder-only: gives the row label the same light-locked field
-              // box as the field-type editor. Gated by enableFieldTypeEditor
-              // (Builder mode only) rather than by mode-agnostic markup, so a
+              // box the Builder's other in-cell controls use. Gated by
+              // `builderStructure` rather than by mode-agnostic markup, so a
               // note's own custom-row label editing (rowActionsMode="note")
               // keeps its existing borderless, inline-text appearance.
-              enableFieldTypeEditor
+              builderStructure
                 ? "twocol-field px-2 py-1 rounded"
                 : "bg-transparent outline-none"
             }`}
@@ -1397,6 +1439,33 @@ export default function ResizableTwoColTable({
     if (cellEntries.length) {
       options.push({ type: "separator" });
       options.push(...cellEntries);
+    }
+
+    /* ---- THIS CELL'S FIELD CONTROL ---- */
+    // A cell is a flexible Section unless the author says otherwise, so this
+    // group offers the five typed controls on a flexible cell and the single
+    // way back on a cell that has one. Each entry is directly invokable — one
+    // press, no submenu to hover through — and an entry that would not make
+    // sense is absent rather than disabled: a Photo/File cell offers no removal,
+    // because its primary attachments render only while it carries that type.
+    const controlEntries = [];
+    if (onAddFieldControl && canAddFieldControl(cell.type)) {
+      for (const control of FIELD_CONTROL_TYPES) {
+        controlEntries.push({
+          label: `${control.label} field`,
+          onClick: () => onAddFieldControl(row.id, cell.id, control.value),
+        });
+      }
+    }
+    if (onRemoveFieldControl && canRemoveFieldControl(cell.type)) {
+      controlEntries.push({
+        label: "Remove field control",
+        onClick: () => onRemoveFieldControl(row.id, cell.id),
+      });
+    }
+    if (controlEntries.length) {
+      options.push({ type: "separator" });
+      options.push(...controlEntries);
     }
 
     /* ---- THE WHOLE TABLE ---- */
@@ -1791,7 +1860,6 @@ export default function ResizableTwoColTable({
   ) {
     const multi = cells.length > 1;
     const cellRow = cellView(row, cell);
-    const cellType = normalizeType(cell.type);
     const modernTarget = multi
       ? rowModernRefineTarget(cellRow, null)
       : rowModernRefineTarget(row, headSegment);
@@ -1893,16 +1961,10 @@ export default function ResizableTwoColTable({
           modernTarget &&
           renderSectionRefineStatus(cellRow, modernTarget)}
 
-        {enableFieldTypeEditor &&
-          (cellType === FIELD_TYPE.PHOTO || cellType === FIELD_TYPE.FILE) && (
-            <div className="attach-builder-placeholder">
-              {cellType === FIELD_TYPE.PHOTO
-                ? "Photos can be added when completing this note."
-                : "Files can be added when completing this note."}
-            </div>
-          )}
-
-        {enableFieldTypeEditor && renderFieldTypeEditor(row, cell)}
+        {/* The Builder's view of this cell: the flexible-content affordance, or
+            a legacy structured field's read-only badge (and, for a Dropdown,
+            its still-editable options). Never rendered in a completed note. */}
+        {builderStructure && renderBuilderCellStructure(row, cell)}
 
         {/* A SINGLE-ITEM flexible section ends here, so its extra working
             space and its one resize handle belong to this block. */}

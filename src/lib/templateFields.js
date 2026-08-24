@@ -6,8 +6,10 @@
 // This module is pure and framework-agnostic so it can be unit-tested in
 // isolation. It provides:
 //   - the VALIDITY set of stored field types (`FIELD_TYPES`, `normalizeType`)
-//     and, separately, the smaller CREATION catalog the builder's type selector
-//     offers (`BUILDER_FIELD_TYPES`, `builderFieldTypeOptions`),
+//     the DEFAULT type of a new cell (`DEFAULT_BUILDER_FIELD_TYPE`,
+//     `isFlexibleCellType`) and the typed controls a user may deliberately add
+//     to one cell (`FIELD_CONTROL_TYPES`, `canAddFieldControl`,
+//     `canRemoveFieldControl`),
 //   - read-time row/option normalization that supplies safe rendering
 //     defaults WITHOUT mutating stored immutable template versions and
 //     WITHOUT ever generating a fresh id on an ordinary read,
@@ -44,7 +46,7 @@ export const FIELD_TYPE = {
 // `file` remain fully valid stored types, so an existing pinned TemplateVersion
 // containing one keeps rendering and exporting exactly as it does today.
 //
-// This is NOT the builder's creation catalog — see BUILDER_FIELD_TYPES below.
+// This is NOT what the Builder creates — see DEFAULT_BUILDER_FIELD_TYPE below.
 export const FIELD_TYPES = [
   { value: FIELD_TYPE.TEXT, label: "Text" },
   { value: FIELD_TYPE.NUMBER, label: "Number" },
@@ -57,66 +59,115 @@ export const FIELD_TYPES = [
   { value: FIELD_TYPE.FILE, label: "File" },
 ];
 
-// ---------- BUILDER CREATION CATALOG ----------
+// ---------- THE DEFAULT CELL (Template Editor A4) ----------
 //
-// What the Template Builder OFFERS when a user chooses a row's type. It is a
-// strict subset of the validity set above, and the split is the whole point:
-// which types are STORABLE and which types are CREATABLE are different
-// questions, so narrowing the second one can never invalidate data written
-// under the first.
+// The Template Builder no longer asks what KIND a cell is. Every cell it
+// creates is a flexible SECTION — one document area that accepts prose, rich
+// typography, images and file attachments interleaved in any order — and there
+// is no field-type selector on any row.
 //
-// The normal row is a SECTION — a flexible document area that may later hold
-// text, images and files in any order. Its stored type is the existing unified
-// `"text"`, unchanged: a Section is not a new persisted row type, it is the
-// user-facing name for the flexible area that type has already described since
-// the section model landed (see src/lib/templateSectionContent.js and the
-// authority rule in src/lib/templateRowContent.js). No migration, no schema
-// bump, and every existing `type: "text"` row IS a Section already.
+// The three questions this module keeps apart, because the whole design rests
+// on them being different:
 //
-// "Text" is therefore NOT offered alongside "Section": they would be the same
-// stored thing under two names, and a user choosing between them would be
-// choosing nothing.
+//   VALIDITY    which types a STORED row may carry (`FIELD_TYPES`,
+//               `normalizeType`) — unchanged and complete, so every pinned
+//               TemplateVersion containing a Number, Date, Time, Checkbox,
+//               Yes/No, Dropdown, Photo or File field keeps rendering and
+//               exporting exactly as it does today;
+//   DEFAULT     what a new cell IS (`DEFAULT_BUILDER_FIELD_TYPE`) — the
+//               flexible Section, always, with no question asked;
+//   CONTROLS    which typed controls a user may DELIBERATELY add to one cell
+//               afterwards (`FIELD_CONTROL_TYPES`) — a contextual action, never
+//               a permanent selector on every row.
 //
-// Photo and File are NOT offered. Photos and files are CONTENT a user adds
-// while completing a note (typing, Quick Add, camera, upload) into any section
-// — never something they should have to predict and design into the template.
-// The structured types below are not closed containers either: each defines one
-// primary typed control, and supplementary section content may still be added
-// beneath it at runtime.
-export const BUILDER_FIELD_TYPES = [
-  { value: FIELD_TYPE.TEXT, label: "Section" },
+// A Section is not a new persisted row type: its stored type is the existing
+// unified `"text"`, so every existing `type: "text"` row IS already one and
+// nothing is migrated (see src/lib/templateSectionDoc.js and the authority rule
+// in src/lib/templateRowContent.js).
+//
+// Why the selector went rather than shrinking (Template Editor A4, 2026-08-22):
+// choosing a type in advance is a decision the product should not ask for. A
+// user filling in a report does not know while DESIGNING it whether a field
+// will end up holding a sentence, a photograph of a crack, an engineer's PDF or
+// all three — and a flexible Section accepts all of them, so the question had
+// no useful answer on every row. The narrowing that removed Photo and File from
+// the catalog in Phase 9 was the same argument one step earlier: content is
+// what a user adds while completing a note, never something to predict in the
+// template.
+export const DEFAULT_BUILDER_FIELD_TYPE = FIELD_TYPE.TEXT;
+
+// True for the flexible document cell — what every new cell is, and what the
+// Builder falls back to when a field control is removed.
+export function isFlexibleCellType(type) {
+  return normalizeType(type) === DEFAULT_BUILDER_FIELD_TYPE;
+}
+
+// ---------- FIELD CONTROLS (Template Editor A4, corrected 2026-08-22) ----------
+//
+// Removing the per-row type dropdown was never meant to remove structured
+// fields from the product: it removed the PERMANENT, always-visible question.
+// A template author may still deliberately give ONE cell a typed control,
+// through the cell's own ⋯ menu ("Number field", "Date field", …) — a
+// contextual action on the cell they are pointing at, not a control on every
+// row and not an inspector.
+//
+// WHAT IS OFFERED, and why it is not the old catalog:
+//
+//   - Text/Section is absent: it is the DEFAULT, not a choice. Adding a field
+//     control is the only thing there is to choose.
+//   - Photo and File are absent, permanently. They are not field types any
+//     more — photos and files are universal Section content (Phase 9), and a
+//     Photo/File field's `attachments[cellId]` renders ONLY while the cell
+//     carries that type, so creating one would be creating a container users
+//     no longer need.
+//   - Checkbox is absent from CREATION but stays fully valid as a stored type.
+//     It and Yes/No are the same question under two names, and offering both is
+//     exactly the duplicate choice Phase 9 removed for Text/Section.
+export const FIELD_CONTROL_TYPES = [
   { value: FIELD_TYPE.NUMBER, label: "Number" },
   { value: FIELD_TYPE.DATE, label: "Date" },
   { value: FIELD_TYPE.TIME, label: "Time" },
-  { value: FIELD_TYPE.CHECKBOX, label: "Checkbox" },
   { value: FIELD_TYPE.YESNO, label: "Yes / No" },
   { value: FIELD_TYPE.SELECT, label: "Dropdown" },
 ];
 
-// The type a brand-new row gets. Kept here next to the catalog so the default
-// and the catalog can never drift apart.
-export const DEFAULT_BUILDER_FIELD_TYPE = FIELD_TYPE.TEXT;
+const FIELD_CONTROL_VALUES = new Set(FIELD_CONTROL_TYPES.map((t) => t.value));
 
-// Legacy-only selector entries. These exist so that a row ALREADY stored as
-// Photo or File shows its own real type in the builder's selector instead of
-// silently displaying as something it is not. They are keyed by type and are
-// added ONLY for the row that already carries that type — never as a general
-// choice, so a Photo/File row cannot be created from a row that isn't one.
-const LEGACY_BUILDER_FIELD_TYPES = {
-  [FIELD_TYPE.PHOTO]: { value: FIELD_TYPE.PHOTO, label: "Photo (legacy)" },
-  [FIELD_TYPE.FILE]: { value: FIELD_TYPE.FILE, label: "File (legacy)" },
-};
+/** True for a type the Builder may CREATE as a field control. */
+export function isFieldControlType(type) {
+  return FIELD_CONTROL_VALUES.has(normalizeType(type));
+}
 
-// The selector options for ONE builder row, given its CURRENT stored type.
-//
-// Ordinary rows get the creation catalog exactly. A row already stored as
-// Photo/File additionally gets its own legacy entry, so the selector reflects
-// the stored type truthfully and switching away from it stays a deliberate user
-// action rather than an implicit conversion on open. Nothing here writes: the
-// stored type is read, never rewritten.
-export function builderFieldTypeOptions(currentType) {
-  const legacy = LEGACY_BUILDER_FIELD_TYPES[currentType];
-  return legacy ? [...BUILDER_FIELD_TYPES, legacy] : BUILDER_FIELD_TYPES;
+/** May this cell be given a field control? Only a flexible one may. */
+export function canAddFieldControl(type) {
+  return isFlexibleCellType(type);
+}
+
+/**
+ * May this cell's field control be REMOVED, returning it to a flexible Section?
+ *
+ * Every VALUE control may — including Checkbox, which this build cannot create
+ * but historical templates carry: its stored answer is a string like any other
+ * and becomes ordinary cell text.
+ *
+ * An ATTACHMENT field (Photo/File) may NOT. Its primary `attachments[cellId]`
+ * are rendered because the cell carries that type, so removing the type would
+ * hide real evidence that has nowhere else to render — a data-visibility loss
+ * this action must not be able to cause. Those cells stay exactly as they are.
+ */
+export function canRemoveFieldControl(type) {
+  const normalized = normalizeType(type);
+  if (isFlexibleCellType(normalized)) return false;
+  return !isAttachmentFieldType(normalized);
+}
+
+// The human name of a stored type, for the Builder's read-only badge on a cell
+// that carries a field control. Read from the VALIDITY set, so a type can never
+// be displayed under a name this module does not actually recognise.
+export function fieldTypeLabel(type) {
+  const normalized = normalizeType(type);
+  const entry = FIELD_TYPES.find((t) => t.value === normalized);
+  return entry ? entry.label : "";
 }
 
 // True for the attachment-bearing field types (evidence lives on the note's

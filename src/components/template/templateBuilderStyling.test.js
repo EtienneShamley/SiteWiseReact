@@ -27,7 +27,7 @@
 //
 // The row label textarea and the field-type editor are also rendered in
 // completed-note mode (rowActionsMode="note", shared component). The row
-// label's new `.twocol-field` box is gated behind `enableFieldTypeEditor`,
+// label's new `.twocol-field` box is gated behind `builderStructure`,
 // which is true only for the Builder's own call (TemplateBuilderDoc.js) — a
 // note's own custom-row label editing keeps its prior, unboxed appearance.
 // The row-actions "..." trigger and its ThreeDotMenu were ALREADY
@@ -179,24 +179,27 @@ describe("Template Builder chrome form controls use the shared field treatment",
     expect(ribbon).toMatch(/const selectCls = "nw-field /);
   });
 
-  test("the field-type select and dropdown-option input use the light-locked equivalent", () => {
-    expect(table).toContain('className="twocol-field ml-2 px-2 py-1 text-sm rounded"');
+  test("the dropdown-option input uses the light-locked equivalent", () => {
+    // The field-type select is GONE (Template Editor A4): the Builder creates
+    // one kind of cell, so there is nothing to choose. A legacy Dropdown cell's
+    // option inputs are the one on-paper field that remains.
     expect(table).toContain('className="twocol-field flex-grow px-2 py-1 text-sm rounded"');
+    expect(table).not.toContain('className="twocol-field ml-2 px-2 py-1 text-sm rounded"');
   });
 
   test("the row label textarea uses the light-locked equivalent, gated to Builder mode", () => {
-    expect(table).toMatch(/enableFieldTypeEditor\s*\n\s*\? "twocol-field px-2 py-1 rounded"\s*\n\s*: "bg-transparent outline-none"/);
+    expect(table).toMatch(/builderStructure\s*\n\s*\? "twocol-field px-2 py-1 rounded"\s*\n\s*: "bg-transparent outline-none"/);
   });
 
   test("no field suppresses its own focus treatment", () => {
     // BrandingPanel is pure chrome — checked in full. `table` also renders the
     // note-mode answer control and the row label textarea, which keep their
     // own deliberate `outline-none` (inline document text, not a boxed
-    // field — see the scope note above), so only the field-type editor block
+    // field — see the scope note above), so only the Builder's in-cell block
     // this pass actually converted is checked here.
     expect(branding).not.toMatch(/outline-none|ring-0|focus:ring-0/);
     const editorBlock = table.match(
-      /function renderFieldTypeEditor\(row, cell\) \{[\s\S]*?\n  \}/
+      /function renderBuilderCellStructure\(row, cell\) \{[\s\S]*?\n  \}/
     )[0];
     expect(editorBlock).not.toMatch(/outline-none|ring-0|focus:ring-0/);
   });
@@ -292,8 +295,12 @@ describe("row, field-type and section handlers are unchanged", () => {
     expect(doc).toContain("const changeRowHeight = (rowId, px) =>");
   });
 
-  test("field-type change, option add, rename and delete are unchanged", () => {
-    expect(table).toContain("patchCell(row, cell.id, { type: normalizeType(nextType) })");
+  test("the field-type change handler is GONE; option add, rename and delete are unchanged", () => {
+    // Template Editor A4: there is no type to change, so the handler that
+    // changed it is removed rather than left unreachable. A legacy Dropdown
+    // cell's OPTIONS are still template structure and are still maintained here.
+    expect(table).not.toContain("normalizeType(nextType)");
+    expect(table).not.toContain("handleTypeChange");
     expect(table).toContain('patchCell(row, cell.id, {');
     expect(table).toContain('options: [...(cell.options || []), makeOption("")],');
     expect(table).toContain("o.id === optId ? { ...o, value } : o");
@@ -366,9 +373,9 @@ describe("the on-paper light-locked field (.twocol-field) mirrors the real accen
 
   test("it is used only on Builder-only on-paper controls, never on printed answer content", () => {
     const occurrences = table.match(/twocol-field/g) || [];
-    // The field-type <select>, the dropdown-option <input>, and the row
-    // label textarea's Builder-mode branch.
-    expect(occurrences.length).toBe(3);
+    // Since A4: a legacy Dropdown cell's option <input>, and the row label
+    // textarea's Builder-mode branch. The field-type <select> is gone.
+    expect(occurrences.length).toBe(2);
     expect(table).not.toMatch(/twocol-field[\s\S]{0,400}renderAnswerControl/);
   });
 
@@ -537,14 +544,14 @@ describe("the row-actions popup (ThreeDotMenu) is genuinely light-locked, not ju
 /* ------------------------------------------------------- Builder-only gate */
 
 describe("completed-note mode is unaffected by the row-label light-lock", () => {
-  test("NoteTemplateDoc does not pass enableFieldTypeEditor, so the row label keeps its prior appearance there", () => {
+  test("NoteTemplateDoc does not pass builderStructure, so the row label keeps its prior appearance there", () => {
     expect(noteTemplateDoc).toContain('rowActionsMode="note"');
-    expect(noteTemplateDoc).not.toMatch(/<ResizableTwoColTable[\s\S]*?enableFieldTypeEditor/);
+    expect(noteTemplateDoc).not.toMatch(/<ResizableTwoColTable[\s\S]*?builderStructure/);
   });
 
   test("TemplateBuilderDoc is the only caller that turns the gate on", () => {
     const callers = allSourceFiles()
-      .filter((file) => /enableFieldTypeEditor=\{true\}/.test(fs.readFileSync(file, "utf8")))
+      .filter((file) => /builderStructure=\{true\}/.test(fs.readFileSync(file, "utf8")))
       .map((file) => path.basename(file));
     expect(callers).toEqual(["TemplateBuilderDoc.js"]);
   });

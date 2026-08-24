@@ -153,7 +153,7 @@ describe("41-42. no retired Section machinery; Builder vs note instance", () => 
     // A note user can delete only a note-specific (custom) row, never a template row.
     expect(TABLE).toContain('if (rowActionsMode === "note" && row.isCustom && onDeleteRow) {');
     // No field-type editor, no logo control and no publishing on the note instance.
-    expect(NOTE_DOC).not.toContain("enableFieldTypeEditor={true}");
+    expect(NOTE_DOC).not.toContain("builderStructure={true}");
     expect(NOTE_DOC).toContain("lockTemplateLabels={true}");
   });
 });

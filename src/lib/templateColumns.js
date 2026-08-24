@@ -91,7 +91,15 @@
 // where it already is means no stored template changes shape.
 
 import { newId } from "./id";
-import { normalizeOptions, normalizeType } from "./templateFields";
+import {
+  DEFAULT_BUILDER_FIELD_TYPE,
+  canAddFieldControl,
+  canRemoveFieldControl,
+  isFieldControlType,
+  makeOption,
+  normalizeOptions,
+  normalizeType,
+} from "./templateFields";
 import { normalizeFill, storedFill } from "./templateFill";
 
 /**
@@ -830,6 +838,68 @@ export function setRowLabelFill(rows, rowId, fill) {
     return { ...r, labelFill: stored };
   });
 }
+
+/* ------------------------------------------------------------------------ */
+/* FIELD CONTROLS — giving ONE cell a typed control, and taking it back      */
+/* ------------------------------------------------------------------------ */
+//
+// A cell's `type` is where it has always lived — on the row for an undivided
+// row, on `row.cells[i]` for a divided one — so this writes through exactly the
+// same `withCells` storage rule as every other cell change. An undivided cell
+// therefore publishes `row.type` and no `cells` key at all, which is the shape
+// every template published before columns existed already has.
+//
+// NOTHING A NOTE HAS STORED IS TOUCHED. This returns a template DEFINITION; a
+// note's `answers`, `sectionDoc`, `attachments` and `evidence` stay on its own
+// instance, keyed by the same unchanged cell id. What changes is how a note
+// pinned to the NEW version renders that cell — which is why the Builder
+// confirms first whenever a note has genuinely filled it in.
+
+/**
+ * Give ONE cell a typed field control, or take it back to a flexible Section.
+ *
+ * `type` is one of `FIELD_CONTROL_TYPES` to add a control, or the flexible
+ * default to remove one. The rows are returned unchanged when the row, the cell
+ * or the transition does not exist — so a stale menu can never corrupt a table.
+ *
+ * A Dropdown is created with ONE empty option so its editor opens ready to be
+ * typed into; an empty option is dropped at publish time, so a Dropdown left
+ * unconfigured publishes exactly no options rather than a blank one.
+ *
+ * Options are NEVER discarded when a control is removed: a cell that was a
+ * Dropdown keeps its dormant option list (the long-standing `normalizeRow`
+ * policy), so making it a Dropdown again restores exactly the options it had.
+ */
+export function setCellFieldControl(columns, rows, rowId, cellId, type) {
+  const grid = valueColumns(columns);
+  const list = Array.isArray(rows) ? rows : [];
+  const row = list.find((r) => r && r.id === rowId);
+  if (!row) return list;
+  const cells = rowCells(row, grid.length);
+  const target = cells.find((c) => c.id === cellId);
+  if (!target) return list;
+
+  const next = normalizeType(type);
+  const adding = isFieldControlType(next);
+  if (adding ? !canAddFieldControl(target.type) : next !== DEFAULT_BUILDER_FIELD_TYPE) {
+    return list;
+  }
+  if (!adding && !canRemoveFieldControl(target.type)) return list;
+
+  const updated = cells.map((c) => {
+    if (c.id !== cellId) return c;
+    if (!adding) return { ...c, type: DEFAULT_BUILDER_FIELD_TYPE };
+    const options =
+      next === FIELD_TYPE_SELECT && c.options.length === 0 ? [makeOption("")] : c.options;
+    return { ...c, type: next, options };
+  });
+  return list.map((r) => (r && r.id === rowId ? withCells(r, updated, grid.length) : r));
+}
+
+// Local literal rather than an import of FIELD_TYPE, so this module keeps its
+// one narrow dependency on the field model (the four helpers above) and does
+// not grow a second idea of what a type is. Locked equal by test.
+const FIELD_TYPE_SELECT = "select";
 
 /* ------------------------------------------------------------------------ */
 /* Layout                                                                    */

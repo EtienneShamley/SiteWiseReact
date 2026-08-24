@@ -329,7 +329,7 @@ describe("24-37/55. images and files are the shared core's, not a Template copy"
     expect(readOnly).not.toContain("onFocus");
     expect(readOnly).not.toContain("activateSectionEditor");
     // The answer control routes a non-owned Text row there.
-    const control = between(TABLE, "function renderAnswerControl(row)", "function renderFieldTypeEditor(row, cell)");
+    const control = between(TABLE, "function renderAnswerControl(row)", "function renderBuilderCellStructure(row, cell)");
     expect(control).toContain("if (sectionEditorOwnsRow(row)) {");
     expect(control).toContain("return renderSectionReadOnlyAnswer(row, value);");
     // A non-owned document row's prose is a plain box, and its media is the
@@ -649,9 +649,17 @@ describe("50. Quick Add cannot create hidden content", () => {
     expect(attach).toContain("insertFreeformFileAttachment(");
     expect(attach).toContain("validate: validateComposedPhoto");
     // The Template's own file policy, with the display type the shared
-    // serializer needs passed through (acceptance is unchanged).
+    // serializer needs passed through (acceptance is unchanged). Since A4 that
+    // validator lives in ONE place and is shared with the toolbar's Attach file
+    // control, so Quick Add and the toolbar cannot drift apart about what a
+    // Section accepts.
     expect(attach).toContain("validate: validateSectionFile");
-    expect(NOTE_DOC).toContain("const check = validateNoteFile(file);");
+    expect(NOTE_DOC).toContain(
+      'import { validateSectionFile as validateSectionFileShared } from "../../lib/templateSectionToolbarFile";'
+    );
+    expect(read("lib/templateSectionToolbarFile.js")).toContain(
+      "const check = validateNoteFile(file);"
+    );
     expect(attach).toContain("createPhotoAsset(");
     expect(attach).toContain("createNoteFileAsset(");
   });

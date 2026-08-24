@@ -78,16 +78,16 @@
    They are form controls, not printed cell text — deliberately not rebranded. */
 
 /* Light-locked field treatment for Builder-only controls that live inside a
-   document row (the row label textarea, the field-type select and its
-   dropdown-option inputs — see ResizableTwoColTable.js renderLabelCell and
-   renderFieldTypeEditor). Same visual language as `.nw-field` in nav.css —
+   document row (the row label textarea, and a legacy Dropdown cell's option
+   inputs — see ResizableTwoColTable.js renderLabelCell and
+   renderBuilderCellStructure). Same visual language as `.nw-field` in nav.css —
    idle border, hover, focus ring — but the colours are hardcoded to the
    light-theme tokens rather than read from the `--nw-field-*` custom
    properties, because those flip with the app's dark theme and this sits on
    paper that never does (see the file header above and pagedDocument.css).
    Never used on printed report content, and gated to Builder mode at the
    call site where the same control is shared with a completed note (see the
-   `enableFieldTypeEditor` check around the row label textarea). */
+   `builderStructure` check around the row label textarea). */
 .twocol-field {
   color: #0f172a;
   background-color: #ffffff;
@@ -836,7 +836,11 @@
      paper — it is listed for the same reason every other affordance is. */
   .twocol-section-lead,
   /* An empty field's prompt is editing guidance, not report content. */
-  .twocol-rich-placeholder {
+  .twocol-rich-placeholder,
+  /* The Template Builder's in-cell affordances exist only while a template is
+     being designed. Nothing about them belongs on paper. */
+  .twocol-cell-hint,
+  .twocol-cell-legacy {
     display: none !important;
   }
 
@@ -1115,12 +1119,39 @@
   opacity: 0.55;
 }
 
-.attach-builder-placeholder {
+/* ---------- Template Builder: what a value cell says about itself ----------
+ * (Template Editor A4). These are AFFORDANCES on the Builder's paper, never
+ * report content: they exist only while a template is being designed, carry no
+ * stored value, and are hidden in print with the rest of the editing chrome.
+ * Both follow the branded content text colour (dimmed by opacity) so they stay
+ * legible on any cell fill a company picks — the same rule every other in-cell
+ * hint already uses. */
+
+/* An empty flexible cell: one quiet line saying what it will accept. Sized to
+   sit inside the A2 compact row floor (36px less the cell's 8px of vertical
+   padding), so saying it costs the row no height at all. */
+.twocol-cell-hint {
   font-size: 13px;
   font-style: italic;
+  line-height: 20px;
+  color: var(--nw-tpl-content-text, #111111);
+  opacity: 0.45;
+  user-select: none;
+}
+
+/* A cell stored under a LEGACY structured type. A statement of fact, not a
+   control: the type cannot be changed here, and saying so is what stops it
+   reading as a broken flexible cell. */
+.twocol-cell-legacy {
+  font-size: 12px;
+  font-weight: 500;
   color: var(--nw-tpl-content-text, #111111);
   opacity: 0.6;
-  margin-bottom: 6px;
+}
+
+.twocol-cell-legacy-note {
+  font-weight: 400;
+  font-style: italic;
 }
 
 /* Inline per-field error (restrained, in-document, dismissible) */

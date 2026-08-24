@@ -6,6 +6,7 @@ import {
   FaTable, FaUndo, FaRedo, FaHeading, FaGlobe, FaRemoveFormat,
   FaIndent, FaOutdent, FaSubscript, FaSuperscript, FaMinus, FaUnlink,
   FaAlignLeft, FaAlignCenter, FaAlignRight, FaAlignJustify, FaCaretDown,
+  FaPaperclip,
 } from "react-icons/fa";
 import { HEADING_LEVELS } from "../../lib/templateRichText";
 import { FONT_FAMILIES, FONT_SIZES } from "../../constants/editorOptions";
@@ -18,6 +19,11 @@ import {
   removeLink as removeLinkCommand,
 } from "../../lib/editorCommands";
 import { validateEditorImageFile } from "../../lib/editorImages";
+import {
+  ALLOWED_FILE_EXTENSIONS,
+  validateEditorFileAttachment,
+} from "../../lib/editorFileAttachments";
+import { insertFreeformFileAttachment } from "../../lib/editorFileInsert";
 import { insertLocalImageAsset } from "../../lib/editorImageInsert";
 import { isToolbarControlAllowed } from "../../lib/editorToolbarState";
 import { toolbarControlsForEditor } from "../../lib/editorCapabilities";
@@ -55,6 +61,16 @@ import { MESSAGE_TONE } from "../../lib/transientMessage";
  *                  which is the ONLY difference between inserting an image here
  *                  and inserting one there: the write sequence itself is the
  *                  one shared pipeline.
+ * @param filePolicy  the same seam for ATTACHING A FILE: optional
+ *                  `{ validateFile, insertDeps, accept }` for the surface the
+ *                  attachment is inserted into. Absent means the Free-form
+ *                  note's own policy (`editor-file` assets, its 25 MB
+ *                  validator); the Template form supplies the Section's
+ *                  (`note-file` assets, the Template's validator and its
+ *                  extension list; src/lib/templateSectionToolbarFile.js). The
+ *                  write sequence is the one shared pipeline either way —
+ *                  Blob to IndexedDB first, reference node only after that
+ *                  write is confirmed, bytes deleted again if it is refused.
  * @param disabledHint  a short explanation shown when nothing owns the toolbar.
  */
 // The heading levels the toolbar OFFERS. The shared core (and the stored
@@ -62,16 +78,22 @@ import { MESSAGE_TONE } from "../../lib/transientMessage";
 // field report needs and what keeps the control readable.
 export const TOOLBAR_HEADING_LEVELS = Object.freeze([1, 2, 3]);
 
+// What the Attach file picker offers when the surface supplies no policy of its
+// own — the Free-form note's allowlist, from the one module that owns it.
+const FILE_ATTACH_ACCEPT = ALLOWED_FILE_EXTENSIONS.join(",");
+
 export default function FormattingControls({
   editor,
   disabled = false,
   imagePolicy = null,
+  filePolicy = null,
   disabledHint = null,
 }) {
   // What the OWNING editor can do, read from the editor itself. Recomputed
   // only when ownership moves to another instance.
   const controls = useMemo(() => toolbarControlsForEditor(editor), [editor]);
   const fileInputRef = useRef();
+  const attachInputRef = useRef();
   const tableMenuRef = useRef(null);
   const textColorRef = useRef(null);
   const highlightColorRef = useRef(null);
@@ -85,6 +107,9 @@ export default function FormattingControls({
   // True while an image is being normalized and written to IndexedDB. The
   // document is not touched until that write is confirmed.
   const [imageBusy, setImageBusy] = useState(false);
+  // True while a file is being written to IndexedDB. Same rule as `imageBusy`:
+  // the document is not touched until that write is confirmed.
+  const [fileBusy, setFileBusy] = useState(false);
 
   // TipTap v3 does not re-render React on selection changes, so every
   // active/disabled/attribute read the toolbar depends on must go through
@@ -300,6 +325,43 @@ export default function FormattingControls({
       report(result);
     } finally {
       setImageBusy(false);
+    }
+  };
+
+  // ATTACH A FILE — the exact sibling of the image picker above, and
+  // deliberately the same shape: cheap rejection through the SAME validator the
+  // pipeline will apply, then ONE shared write sequence (validate → normalize a
+  // generic MIME type by re-wrapping the same bytes → store the Blob → insert
+  // the reference → roll the Blob back if the insertion is refused). The bytes
+  // go to IndexedDB and only a reference enters the document, so a failure at
+  // any step leaves the document exactly as it was and no broken card is ever
+  // visible.
+  //
+  // The surface supplies only its own policy: which files it accepts and which
+  // asset kind the bytes become. Nothing about files is implemented here.
+  const handleFileAttach = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !editor) return;
+
+    clearControlMessage();
+
+    const validateFile = filePolicy?.validateFile || validateEditorFileAttachment;
+    const check = validateFile(file);
+    if (!check.ok) {
+      showControlError(check.error);
+      return;
+    }
+
+    setFileBusy(true);
+    try {
+      const result = await insertFreeformFileAttachment(
+        { file, editor },
+        filePolicy?.insertDeps || undefined
+      );
+      report(result);
+    } finally {
+      setFileBusy(false);
     }
   };
 
@@ -626,6 +688,31 @@ export default function FormattingControls({
         </>
         )}
 
+        {show("fileAttach") && (
+        <>
+        <input
+          type="file"
+          accept={filePolicy?.accept || FILE_ATTACH_ACCEPT}
+          style={{ display: "none" }}
+          ref={attachInputRef}
+          onChange={handleFileAttach}
+        />
+        {/* Attach a document — PDF, Word, Excel, CSV, text. It becomes an
+            attachment CARD in the document (filename, size, Open / Download),
+            never an inline preview of the file's contents. */}
+        <button
+          title={fileBusy ? "Attaching file…" : "Attach file"}
+          aria-label="Attach a file from this device"
+          onClick={() => attachInputRef.current?.click()}
+          disabled={offFor("fileAttach") || fileBusy}
+          aria-busy={fileBusy || undefined}
+          className={`${btnBase} ${btnDisabled}`}
+        >
+          <FaPaperclip />
+        </button>
+        </>
+        )}
+
         {/* Genuinely remote: inserts an image from a web address. */}
         {show("imageUrl") && (
         <button
@@ -773,7 +860,7 @@ export default function FormattingControls({
           so a failure notice can never describe something that is no longer
           true. One live region serves the busy state and the message, so the
           status line's presence does not shift the toolbar twice. */}
-      {(imageBusy || !!controlMessage.message) && (
+      {(imageBusy || fileBusy || !!controlMessage.message) && (
         <span
           role="status"
           aria-live="polite"
@@ -784,7 +871,11 @@ export default function FormattingControls({
               : "text-gray-500 dark:text-gray-400",
           ].join(" ")}
         >
-          {imageBusy ? "Adding image…" : controlMessage.message}
+          {imageBusy
+            ? "Adding image…"
+            : fileBusy
+            ? "Attaching file…"
+            : controlMessage.message}
         </span>
       )}
     </div>

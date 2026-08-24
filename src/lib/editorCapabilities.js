@@ -51,6 +51,7 @@ export const TOOLBAR_CONTROL_KEYS = Object.freeze([
   "unlink",
   "imageUpload",
   "imageUrl",
+  "fileAttach",
   "horizontalRule",
   "table",
   "tableOptions",
@@ -122,6 +123,11 @@ export function toolbarControlsForEditor(editor) {
 
   allow("imageUpload", hasNode(editor, "image"));
   allow("imageUrl", hasNode(editor, "image"));
+  // Attaching a FILE is the exact sibling of uploading an image: the control
+  // exists when the owning editor's schema has the shared FileAttachment node.
+  // Both document surfaces have it; the header's TYPOGRAPHY vocabulary does not,
+  // so its ribbon omits the control entirely rather than greying it out.
+  allow("fileAttach", hasNode(editor, "fileAttachment"));
   allow("horizontalRule", hasNode(editor, "horizontalRule"));
   allow("table", hasNode(editor, "table"));
   allow("tableOptions", hasNode(editor, "table"));
