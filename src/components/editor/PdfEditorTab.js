@@ -1,5 +1,13 @@
 // src/components/editor/PdfEditorTab.js
-import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  Suspense,
+} from "react";
 import {
   FaFolderOpen,
   FaMousePointer,
@@ -8,7 +16,6 @@ import {
   FaUnderline,
   FaStrikethrough,
   FaFont,
-  FaICursor,
   FaComment,
   FaStickyNote,
   FaArrowRight,
@@ -16,7 +23,7 @@ import {
   FaRegSquare,
   FaRegCircle,
   FaPencilAlt,
-  FaPaintBrush,
+  FaMarker,
   FaUndo,
   FaRedo,
   FaTrashAlt,
@@ -51,33 +58,33 @@ import {
   serializeAnnotations,
 } from "../../lib/pdfAnnotationModel";
 import { useAppState } from "../../context/AppStateContext";
+import {
+  MARKUP_TOOLS,
+  TOOL,
+  TOOL_LABELS,
+  createToolStyles,
+  isCreationTool,
+  patchToolStyle,
+  toolStyleFor,
+} from "../../pdf/pdfTools";
+import {
+  clampScale,
+  focalScroll,
+  isZoomWheel,
+  wheelZoomScale,
+  zoomOptionsFor,
+} from "../../lib/pdfZoom";
+import PdfOptionsBar from "./PdfOptionsBar";
 import "../../pdf/pdfLayers.css";
 
 const PdfAnnotator = React.lazy(() => import("../../pdf/PdfAnnotator"));
 
-const TOOL = {
-  SELECT: "select",
-  HIGHLIGHT: "highlight",
-  UNDERLINE: "underline",
-  STRIKE: "strike",
-  TYPEWRITER: "typewriter",
-  TEXTBOX: "textbox",
-  CALLOUT: "callout",
-  STICKY: "sticky",
-  ARROW: "arrow",
-  LINE: "line",
-  POLYLINE: "polyline",
-  RECT: "rect",
-  ELLIPSE: "ellipse",
-  PEN: "pen",
-  FREEHAND_HIGHLIGHT: "freehandHighlight",
-  PAN: "pan",
-};
-
-const MARKUP_TOOLS = [TOOL.HIGHLIGHT, TOOL.UNDERLINE, TOOL.STRIKE];
-const MIN_SCALE = 0.4;
-const MAX_SCALE = 4;
-const ZOOM_STEPS = [50, 75, 100, 125, 150, 175, 200, 300];
+/** The Text box tool's glyph: a capital T, as the product asks for. */
+const TextBoxGlyph = () => (
+  <span aria-hidden="true" className="font-serif font-bold text-base leading-none">
+    T
+  </span>
+);
 
 // Object URLs for downloads are revoked on a conservative delay: revoking one
 // synchronously after the anchor click cancels the download in some browsers.
@@ -210,6 +217,13 @@ export default function PdfEditorTab({
   const [scale, setScale] = useState(1.1);
   const [zoomLabel, setZoomLabel] = useState(1.1);
   const [activeTool, setActiveTool] = useState(TOOL.SELECT);
+  // Per-tool creation styles: session memory, owned here, passed to both the
+  // options bar (to edit) and the annotator (to create with). Never persisted.
+  const [toolStyles, setToolStyles] = useState(createToolStyles);
+  // The transient selection, reported by the annotator for the options bar.
+  const [selection, setSelection] = useState({ ids: [], items: [] });
+  // Re-clicking the active tool focuses its options rather than toggling.
+  const [optionsFocusTick, setOptionsFocusTick] = useState(0);
   const [exportState, setExportState] = useState(EXPORT_STATE.IDLE);
   const [exportMessage, setExportMessage] = useState("");
   const [panning, setPanning] = useState(false);
@@ -217,7 +231,7 @@ export default function PdfEditorTab({
   const [initialAnnotations, setInitialAnnotations] = useState(null); // null = not loaded yet
   const [pageEls, setPageEls] = useState({});
   const [histState, setHistState] = useState({ canUndo: false, canRedo: false });
-  const [hasSelection, setHasSelection] = useState(false);
+  const hasSelection = selection.ids.length > 0;
 
   // Find/search state
   const [findOpen, setFindOpen] = useState(false);
@@ -232,6 +246,9 @@ export default function PdfEditorTab({
   const latestItemsRef = useRef(null);
   const saveTimer = useRef(null);
   const zoomTimer = useRef(null);
+  const zoomLabelRef = useRef(1.1);
+  const appliedScaleRef = useRef(1.1);
+  const pendingFocalRef = useRef(null); // { focal: {x,y}, from } for a wheel zoom
   const consumedInitialFile = useRef(false);
   const exportingRef = useRef(false);
   const objectUrlsRef = useRef(new Map()); // url -> timeout id
@@ -423,11 +440,53 @@ export default function PdfEditorTab({
   // debounced: the label updates immediately, the render commits shortly
   // after the last click.
   const requestScale = useCallback((next) => {
-    const s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, next));
+    const s = clampScale(next);
+    zoomLabelRef.current = s;
     setZoomLabel(s);
     window.clearTimeout(zoomTimer.current);
     zoomTimer.current = window.setTimeout(() => setScale(s), 180);
   }, []);
+
+  // Ctrl/Cmd + wheel (which is also how a trackpad pinch arrives) zooms the
+  // document around the pointer; a plain wheel keeps scrolling it. The
+  // listener is non-passive so the browser's own page zoom is suppressed for
+  // that gesture only. The ribbon is outside this scroller, so it never moves.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    function onWheel(e) {
+      if (!isZoomWheel(e)) return;
+      if (!pdfDoc) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const focal = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      if (!pendingFocalRef.current) {
+        pendingFocalRef.current = { focal, from: appliedScaleRef.current };
+      } else {
+        pendingFocalRef.current.focal = focal;
+      }
+      requestScale(wheelZoomScale(zoomLabelRef.current, e.deltaY, e.deltaMode));
+    }
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [pdfDoc, requestScale]);
+
+  // Once the new scale has laid out, keep the point under the pointer still.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const pending = pendingFocalRef.current;
+    appliedScaleRef.current = scale;
+    if (!el || !pending) return;
+    pendingFocalRef.current = null;
+    const next = focalScroll(
+      { scrollLeft: el.scrollLeft, scrollTop: el.scrollTop },
+      pending.focal,
+      pending.from,
+      scale
+    );
+    el.scrollLeft = next.scrollLeft;
+    el.scrollTop = next.scrollTop;
+  }, [scale]);
 
   const fitWidth = useCallback(() => {
     const el = scrollRef.current;
@@ -445,6 +504,31 @@ export default function PdfEditorTab({
     const p = layout[0];
     requestScale(Math.min(availW / p.baseW, availH / p.baseH));
   }, [layout, requestScale]);
+
+  /* --------------------------- Tools and options --------------------------- */
+
+  // Clicking the ACTIVE creation tool again means "show me its options" —
+  // never a toggle that silently drops the user back to Select.
+  const chooseTool = useCallback(
+    (tool) => {
+      if (tool === activeTool) {
+        if (isCreationTool(tool)) setOptionsFocusTick((t) => t + 1);
+        return;
+      }
+      setActiveTool(tool);
+    },
+    [activeTool]
+  );
+
+  const toolStyle = useMemo(() => toolStyleFor(toolStyles, activeTool), [toolStyles, activeTool]);
+  const onToolStyle = useCallback(
+    (patch) => setToolStyles((prev) => patchToolStyle(prev, activeTool, patch)),
+    [activeTool]
+  );
+  const applyToSelection = useCallback((patch) => {
+    annotatorRef.current?.applyToSelection(patch);
+  }, []);
+  const onEscape = useCallback(() => setActiveTool(TOOL.SELECT), []);
 
   /* ------------------------------- Hand pan -------------------------------- */
 
@@ -650,20 +734,34 @@ export default function PdfEditorTab({
   const exporting = exportState === EXPORT_STATE.EXPORTING;
 
   const zoomPct = Math.round(zoomLabel * 100);
-  const zoomOptions = ZOOM_STEPS.includes(zoomPct)
-    ? ZOOM_STEPS
-    : [...ZOOM_STEPS, zoomPct].sort((a, b) => a - b);
+  const zoomOptions = zoomOptionsFor(zoomLabel);
 
   const textSelectableFor = (meta) =>
     activeTool === TOOL.SELECT || (MARKUP_TOOLS.includes(activeTool) && meta.hasText);
 
+  const tb = (tool, icon) => (
+    <ToolButton
+      icon={icon}
+      label={TOOL_LABELS[tool]}
+      active={activeTool === tool}
+      onClick={() => chooseTool(tool)}
+    />
+  );
+
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
+      {/* The RIBBON: two rows that never scroll — tools, then contextual
+          options. Only the viewer below (scrollRef) scrolls. */}
+      <div className="shrink-0" data-pdf-ribbon="true">
       <div className="text-[11px] uppercase tracking-wide opacity-70 px-2 pt-1">
         PDF Editor
       </div>
-      {/* Modern compact icon toolbar */}
-      <div className="flex items-center gap-1 p-2 border-b border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-[#222] flex-wrap">
+      {/* Row 1: tools */}
+      <div
+        role="toolbar"
+        aria-label="PDF tools"
+        className="flex items-center gap-1 p-2 border-b border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-[#222] flex-wrap"
+      >
         <input
           ref={fileInputRef}
           type="file"
@@ -675,35 +773,32 @@ export default function PdfEditorTab({
 
         <ToolbarDivider />
 
-        <ToolButton icon={<FaMousePointer />} label="Select" active={activeTool === TOOL.SELECT} onClick={() => setActiveTool(TOOL.SELECT)} />
-        <ToolButton icon={<FaHandPaper />} label="Hand (Pan)" active={activeTool === TOOL.PAN} onClick={() => setActiveTool(TOOL.PAN)} />
+        {tb(TOOL.SELECT, <FaMousePointer />)}
+        {tb(TOOL.PAN, <FaHandPaper />)}
 
         <ToolbarDivider />
 
-        <ToolButton icon={<FaHighlighter />} label="Highlight" active={activeTool === TOOL.HIGHLIGHT} onClick={() => setActiveTool(TOOL.HIGHLIGHT)} />
-        <ToolButton icon={<FaUnderline />} label="Underline" active={activeTool === TOOL.UNDERLINE} onClick={() => setActiveTool(TOOL.UNDERLINE)} />
-        <ToolButton icon={<FaStrikethrough />} label="Strikethrough" active={activeTool === TOOL.STRIKE} onClick={() => setActiveTool(TOOL.STRIKE)} />
+        {/* Highlight is a first-class annotation tool: the existing
+            text-selection/drag-band Highlight model, with the highlighter icon. */}
+        {tb(TOOL.HIGHLIGHT, <FaHighlighter />)}
+        {tb(TOOL.UNDERLINE, <FaUnderline />)}
+        {tb(TOOL.STRIKE, <FaStrikethrough />)}
 
         <ToolbarDivider />
 
-        <ToolButton icon={<FaFont />} label="Text" active={activeTool === TOOL.TYPEWRITER} onClick={() => setActiveTool(TOOL.TYPEWRITER)} />
-        <ToolButton icon={<FaICursor />} label="Text Box" active={activeTool === TOOL.TEXTBOX} onClick={() => setActiveTool(TOOL.TEXTBOX)} />
-        <ToolButton icon={<FaComment />} label="Callout" active={activeTool === TOOL.CALLOUT} onClick={() => setActiveTool(TOOL.CALLOUT)} />
-        <ToolButton icon={<FaStickyNote />} label="Sticky Note" active={activeTool === TOOL.STICKY} onClick={() => setActiveTool(TOOL.STICKY)} />
+        {tb(TOOL.TYPEWRITER, <FaFont />)}
+        {tb(TOOL.TEXTBOX, <TextBoxGlyph />)}
+        {tb(TOOL.CALLOUT, <FaComment />)}
+        {tb(TOOL.STICKY, <FaStickyNote />)}
 
         <ToolbarDivider />
 
-        <ToolButton icon={<FaArrowRight />} label="Arrow" active={activeTool === TOOL.ARROW} onClick={() => setActiveTool(TOOL.ARROW)} />
-        <ToolButton icon={<FaSlash />} label="Line" active={activeTool === TOOL.LINE} onClick={() => setActiveTool(TOOL.LINE)} />
-        <ToolButton icon={<FaRegSquare />} label="Rectangle" active={activeTool === TOOL.RECT} onClick={() => setActiveTool(TOOL.RECT)} />
-        <ToolButton icon={<FaRegCircle />} label="Ellipse" active={activeTool === TOOL.ELLIPSE} onClick={() => setActiveTool(TOOL.ELLIPSE)} />
-        <ToolButton icon={<FaPencilAlt />} label="Freehand Pen" active={activeTool === TOOL.PEN} onClick={() => setActiveTool(TOOL.PEN)} />
-        <ToolButton
-          icon={<FaPaintBrush />}
-          label="Freehand Highlight"
-          active={activeTool === TOOL.FREEHAND_HIGHLIGHT}
-          onClick={() => setActiveTool(TOOL.FREEHAND_HIGHLIGHT)}
-        />
+        {tb(TOOL.ARROW, <FaArrowRight />)}
+        {tb(TOOL.LINE, <FaSlash />)}
+        {tb(TOOL.RECT, <FaRegSquare />)}
+        {tb(TOOL.ELLIPSE, <FaRegCircle />)}
+        {tb(TOOL.PEN, <FaPencilAlt />)}
+        {tb(TOOL.FREEHAND_HIGHLIGHT, <FaMarker />)}
 
         <ToolbarDivider />
 
@@ -747,6 +842,18 @@ export default function PdfEditorTab({
           <FaFileExport />
           {exporting ? "Exporting…" : "Export"}
         </button>
+      </div>
+
+      {/* Row 2: contextual options — the active tool's, or the selection's */}
+      <PdfOptionsBar
+        tool={activeTool}
+        toolStyle={toolStyle}
+        onToolStyle={onToolStyle}
+        selection={selection}
+        onApply={applyToSelection}
+        focusTick={optionsFocusTick}
+        disabled={!pdfDoc}
+      />
       </div>
 
       {/* Export status — announced, and never presented as a silent failure */}
@@ -813,15 +920,16 @@ export default function PdfEditorTab({
 
       <div
         ref={scrollRef}
-        className="flex-1 overflow-auto p-2"
+        className="flex-1 min-h-0 overflow-auto p-2"
+        data-pdf-scroller="true"
         style={{ cursor: activeTool === TOOL.PAN ? (panning ? "grabbing" : "grab") : undefined }}
         onMouseDown={onScrollAreaMouseDown}
       >
         {!pdfDoc && (
           <div className="text-sm opacity-70 p-4">
             Load a PDF. Pick a tool, then click/drag on the page — or select text with the
-            Highlight/Underline/Strikethrough tools to mark it up. Text tools switch back to{" "}
-            <em>Select</em> after placing an item.
+            Highlight/Underline/Strikethrough tools to mark it up. Text and Sticky note tools
+            switch back to <em>Select</em> after placing an item. Ctrl/⌘ + scroll zooms.
           </div>
         )}
 
@@ -847,11 +955,13 @@ export default function PdfEditorTab({
               pageEls={pageEls}
               scale={scale}
               activeTool={activeTool}
+              toolStyle={toolStyle}
               initialItems={initialAnnotations}
               onItemsChange={handleItemsChange}
               onHistoryChange={setHistState}
-              onSelectionChange={setHasSelection}
-              onToolConsumed={() => setActiveTool(TOOL.SELECT)}
+              onSelectionChange={setSelection}
+              onToolConsumed={onEscape}
+              onEscape={onEscape}
             />
           </Suspense>
         )}

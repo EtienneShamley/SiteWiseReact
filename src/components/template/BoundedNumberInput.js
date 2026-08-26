@@ -15,6 +15,7 @@ import {
   boundedNumberText,
   commitBoundedNumber,
   liveBoundedNumber,
+  stepBoundedNumber,
 } from "../../lib/boundedNumberInput";
 
 export default function BoundedNumberInput({
@@ -82,11 +83,11 @@ export default function BoundedNumberInput({
           setText(boundedNumberText(lastApplied.current));
         } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
           e.preventDefault();
-          const base = Number(lastApplied.current) || limits.min;
-          const n = commitBoundedNumber(
-            String(base + (e.key === "ArrowUp" ? step : -step)),
+          const n = stepBoundedNumber(
+            Number(lastApplied.current) || limits.min,
+            e.key === "ArrowUp" ? 1 : -1,
             limits,
-            lastApplied.current,
+            step,
             decimals
           );
           setText(boundedNumberText(n));

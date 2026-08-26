@@ -2033,11 +2033,19 @@ export default function MainArea() {
           {/* A note references a canonical folder-level PDF via pdfDocId. The
               shared PDF editor is keyed by that document id, so opening the same
               PDF here or from the folder PDF list shows identical annotations. */}
-          <div style={{ display: activeTab === "pdf" ? "block" : "none" }}>
+          {/* The PDF editor fills the document region's height and scrolls
+              INSIDE its own viewer, so its ribbon stays put while the pages
+              scroll — a linked PDF must not become one tall block that
+              #chatWindow scrolls, ribbon and all. `marginTop: 0` cancels the
+              region's space-y gap so nothing overflows by that margin. */}
+          <div
+            className="flex flex-col min-h-0"
+            style={{ display: activeTab === "pdf" ? "flex" : "none", height: "100%", marginTop: 0 }}
+          >
             {noteTitle ? (
               linkedPdfId ? (
                 <>
-                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap shrink-0">
                     <div className="min-w-0">
                       <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">
                         {linkedPdfDoc?.name || "Linked PDF"}
@@ -2054,7 +2062,9 @@ export default function MainArea() {
                       Unlink PDF
                     </button>
                   </div>
-                  <PdfEditorTab key={linkedPdfId} docId={linkedPdfId} />
+                  <div className="flex-1 min-h-0 border border-gray-300 dark:border-gray-700 rounded-xl overflow-hidden">
+                    <PdfEditorTab key={linkedPdfId} docId={linkedPdfId} />
+                  </div>
                 </>
               ) : (
                 <div className="text-center px-4 py-10">

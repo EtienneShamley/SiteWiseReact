@@ -158,20 +158,78 @@ function copyOptional(out, src, keys, fn) {
 
 const HEAD_STYLES = ["none", "single", "double"];
 
+/** Text alignment values a text annotation may carry (and export). */
+export const TEXT_ALIGNMENTS = ["left", "center", "right"];
+
+/**
+ * The font families a text annotation may use. The stored value is the CSS
+ * family string the editor renders with; `kind` is what the flattened export
+ * maps onto a PDF standard font (Helvetica / Times / Courier). Historical
+ * records store the first entry's CSS string, so they resolve to "sans".
+ */
+export const PDF_FONT_FAMILIES = [
+  {
+    id: "sans",
+    label: "Sans",
+    css: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+  },
+  { id: "serif", label: "Serif", css: "Georgia, 'Times New Roman', Times, serif" },
+  { id: "mono", label: "Mono", css: "ui-monospace, Menlo, Consolas, 'Courier New', monospace" },
+];
+
+export const DEFAULT_FONT_FAMILY = PDF_FONT_FAMILIES[0].css;
+
+/** Classify a stored CSS font-family string as sans | serif | mono. */
+export function fontFamilyKind(css) {
+  const s = typeof css === "string" ? css.toLowerCase() : "";
+  if (/mono|courier|menlo|consolas/.test(s)) return "mono";
+  if (/georgia|times|garamond|cambria/.test(s)) return "serif";
+  // "sans-serif" contains "serif"; only a bare generic serif counts.
+  if (/(^|[\s,])serif\b/.test(s) && !/sans-serif/.test(s)) return "serif";
+  return "sans";
+}
+
+/** The canonical "no fill" value. Stored as-is; never an empty string. */
+export const NO_FILL = "transparent";
+
+/** True when a stored fill means "no fill". */
+export function isNoFill(fill) {
+  return fill == null || fill === NO_FILL || fill === "none";
+}
+
+/**
+ * True when a box-like annotation has NO border. Canonical representation is
+ * `strokeWidth: 0`; a record without a strokeWidth keeps its historical
+ * default (2) and therefore has one.
+ */
+export function hasNoBorder(item) {
+  return typeof item?.strokeWidth === "number" && item.strokeWidth === 0;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Normalization                                                              */
 /* -------------------------------------------------------------------------- */
 
+const nonNegative = (v) => {
+  const n = finite(v);
+  return n !== undefined && n >= 0 ? n : undefined;
+};
+
 function normalizeStyle(out, raw) {
   copyOptional(out, raw, ["fill", "stroke", "color", "textColor", "fontFamily"], colour);
-  copyOptional(out, raw, ["strokeWidth", "thickness", "fontSize", "corner"], positive);
+  // A strokeWidth of exactly 0 is the canonical "no border" — it must survive
+  // the boundary rather than being dropped and silently restored to 2.
+  copyOptional(out, raw, ["strokeWidth"], nonNegative);
+  copyOptional(out, raw, ["thickness", "fontSize", "corner"], positive);
   copyOptional(out, raw, ["rotate"], finite);
   if (raw.opacity !== undefined) {
     const o = opacity01(raw.opacity);
     if (o !== undefined) out.opacity = o;
   }
   const align = text(raw.align, 16);
-  if (align) out.align = align;
+  if (align && TEXT_ALIGNMENTS.includes(align)) out.align = align;
+  if (raw.bold === true) out.bold = true;
+  if (raw.italic === true) out.italic = true;
 }
 
 function normalizeMarkup(out, raw) {
@@ -579,6 +637,166 @@ export function simplifyPath(
 export function clampPathToPage(pts, bounds) {
   if (!Array.isArray(pts)) return [];
   return pts.map((p) => clampPointToPage(p, bounds));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Whole-annotation geometry (selection, marquee, multi-move, later clipboard)*/
+/* -------------------------------------------------------------------------- */
+
+/** Fixed on-page size of the sticky-note marker, in page units. */
+export const STICKY_SIZE = 18;
+/** Typewriter text has no stored size; this is its on-page hit box. */
+export const TYPEWRITER_BOX = { w: 260, h: 40 };
+
+function boundsOfPoints(pts, pad = 0) {
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  return {
+    x: minX - pad,
+    y: minY - pad,
+    w: Math.max(...xs) - minX + pad * 2,
+    h: Math.max(...ys) - minY + pad * 2,
+  };
+}
+
+/**
+ * The page-space axis-aligned bounding box of any annotation type, or null
+ * for a record with no usable geometry. Rotation is ignored (the box is the
+ * unrotated frame), which is what selection and marquee hit-testing use.
+ */
+export function annotationBounds(item) {
+  if (!item || typeof item !== "object") return null;
+  switch (item.type) {
+    case ANNOTATION_TYPES.RECT:
+    case ANNOTATION_TYPES.ELLIPSE:
+    case ANNOTATION_TYPES.TEXTBOX:
+    case ANNOTATION_TYPES.CALLOUT: {
+      const r = quad(item);
+      return r ? normalizeRect(r) : null;
+    }
+    case ANNOTATION_TYPES.TYPEWRITER: {
+      const p = point(item);
+      if (!p) return null;
+      const fs = positive(item.fontSize) ?? 14;
+      return { x: p.x - 4, y: p.y - fs - 4, w: TYPEWRITER_BOX.w, h: TYPEWRITER_BOX.h };
+    }
+    case ANNOTATION_TYPES.STICKY: {
+      const p = point(item);
+      return p ? { x: p.x, y: p.y, w: STICKY_SIZE, h: STICKY_SIZE } : null;
+    }
+    case ANNOTATION_TYPES.ARROW:
+    case ANNOTATION_TYPES.LINE: {
+      const a = point({ x: item.x1, y: item.y1 });
+      const b = point({ x: item.x2, y: item.y2 });
+      if (!a || !b) return null;
+      return boundsOfPoints([a, b], (positive(item.strokeWidth) ?? 2) / 2);
+    }
+    case ANNOTATION_TYPES.PEN:
+    case ANNOTATION_TYPES.FREEHAND_HIGHLIGHT:
+    case ANNOTATION_TYPES.POLYLINE: {
+      const pts = pointList(item.pts);
+      if (!pts) return null;
+      return boundsOfPoints(pts, (positive(item.strokeWidth) ?? 2) / 2);
+    }
+    case ANNOTATION_TYPES.HIGHLIGHT:
+    case ANNOTATION_TYPES.UNDERLINE:
+    case ANNOTATION_TYPES.STRIKE: {
+      const quads = Array.isArray(item.quads) ? item.quads.map(quad).filter(Boolean) : [];
+      if (quads.length) {
+        return boundsOfPoints(quads.flatMap((q) => [{ x: q.x, y: q.y }, { x: q.x + q.w, y: q.y + q.h }]));
+      }
+      const a = point({ x: item.x0, y: item.y0 });
+      const b = point({ x: item.x1, y: item.y1 });
+      if (!a || !b) return null;
+      const t = positive(item.thickness) ?? (item.type === ANNOTATION_TYPES.HIGHLIGHT ? 22 : 3);
+      return boundsOfPoints([a, b], t / 2);
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Whether an annotation can be translated as a whole. Quad markup is anchored
+ * to the PDF's own text and never moves.
+ */
+export function isMovable(item) {
+  if (!item) return false;
+  if (
+    [ANNOTATION_TYPES.HIGHLIGHT, ANNOTATION_TYPES.UNDERLINE, ANNOTATION_TYPES.STRIKE].includes(
+      item.type
+    )
+  ) {
+    return !(Array.isArray(item.quads) && item.quads.length);
+  }
+  return annotationBounds(item) != null;
+}
+
+/**
+ * Translate one annotation by (dx, dy) in page space, clamped so it stays on
+ * the page. Returns the item unchanged when it cannot move. Used for
+ * multi-selection moves and, later, for pasting with an offset.
+ */
+export function translateAnnotation(item, dx, dy, bounds) {
+  if (!isMovable(item)) return item;
+  const ax = finite(dx) ?? 0;
+  const ay = finite(dy) ?? 0;
+  switch (item.type) {
+    case ANNOTATION_TYPES.RECT:
+    case ANNOTATION_TYPES.ELLIPSE:
+    case ANNOTATION_TYPES.TEXTBOX:
+    case ANNOTATION_TYPES.CALLOUT: {
+      const moved = moveRect(item, ax, ay, bounds);
+      const out = { ...item, ...moved };
+      if (item.type === ANNOTATION_TYPES.CALLOUT && point(item.leader)) {
+        out.leader = clampPointToPage(
+          { x: item.leader.x + (moved.x - item.x), y: item.leader.y + (moved.y - item.y) },
+          bounds
+        );
+      }
+      return out;
+    }
+    case ANNOTATION_TYPES.TYPEWRITER:
+    case ANNOTATION_TYPES.STICKY: {
+      const p = clampPointToPage({ x: item.x + ax, y: item.y + ay }, bounds);
+      return { ...item, x: p.x, y: p.y };
+    }
+    case ANNOTATION_TYPES.ARROW:
+    case ANNOTATION_TYPES.LINE:
+      return { ...item, ...moveSegment(item, ax, ay, bounds) };
+    case ANNOTATION_TYPES.PEN:
+    case ANNOTATION_TYPES.FREEHAND_HIGHLIGHT:
+    case ANNOTATION_TYPES.POLYLINE: {
+      // Shift the whole path by the largest step that keeps every point on
+      // the page, so the stroke keeps its shape at the edge.
+      const b = safeBounds(bounds);
+      const pts = item.pts;
+      const xs = pts.map((p) => p.x);
+      const ys = pts.map((p) => p.y);
+      let sx = ax;
+      let sy = ay;
+      if (Math.max(...xs) + sx > b.width) sx = b.width - Math.max(...xs);
+      if (Math.min(...xs) + sx < 0) sx = -Math.min(...xs);
+      if (Math.max(...ys) + sy > b.height) sy = b.height - Math.max(...ys);
+      if (Math.min(...ys) + sy < 0) sy = -Math.min(...ys);
+      return { ...item, pts: pts.map((p) => ({ x: p.x + sx, y: p.y + sy })) };
+    }
+    case ANNOTATION_TYPES.HIGHLIGHT:
+    case ANNOTATION_TYPES.UNDERLINE:
+    case ANNOTATION_TYPES.STRIKE: {
+      const moved = moveSegment(
+        { x1: item.x0, y1: item.y0, x2: item.x1, y2: item.y1 },
+        ax,
+        ay,
+        bounds
+      );
+      return { ...item, x0: moved.x1, y0: moved.y1, x1: moved.x2, y1: moved.y2 };
+    }
+    default:
+      return item;
+  }
 }
 
 /* -------------------------------------------------------------------------- */

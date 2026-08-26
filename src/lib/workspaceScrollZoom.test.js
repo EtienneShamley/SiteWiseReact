@@ -294,7 +294,11 @@ describe("32–37. zoom coexists with the three space controls and the one scrol
     expect(NOTE_MAIN.lastIndexOf('<div className="flex-1 grid grid-rows-[1fr_auto] min-h-0">', CHAT_WINDOW_AT)).toBeGreaterThan(-1);
     // The zoom wrapper adds no scroll container of its own: the enlarged
     // document grows inside #chatWindow, which already scrolls both axes.
-    const wrapper = NOTE_MAIN.slice(ZOOM_WRAPPER_AT, NOTE_MAIN.indexOf("<PdfEditorTab"));
+    // (The slice ends where the wrapper does — the note-linked PDF frame
+    // that follows is OUTSIDE it and deliberately clips its own viewer.)
+    const wrapperEnd = NOTE_MAIN.indexOf("</div>\n            ) : (", ZOOM_WRAPPER_AT);
+    expect(wrapperEnd).toBeGreaterThan(ZOOM_WRAPPER_AT);
+    const wrapper = NOTE_MAIN.slice(ZOOM_WRAPPER_AT, wrapperEnd);
     expect(wrapper).not.toMatch(/overflow-/);
   });
 

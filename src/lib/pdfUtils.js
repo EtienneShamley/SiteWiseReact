@@ -1,10 +1,31 @@
 // src/lib/pdfUtils.js
 import * as pdfjsLib from "pdfjs-dist";
-import { PDFDocument, rgb, StandardFonts, degrees, LineCapStyle } from "pdf-lib";
+import {
+  PDFDocument,
+  rgb,
+  StandardFonts,
+  degrees,
+  LineCapStyle,
+  pushGraphicsState,
+  popGraphicsState,
+  moveTo,
+  lineTo,
+  appendBezierCurve,
+  closePath,
+  fill,
+  stroke,
+  fillAndStroke,
+  setFillingRgbColor,
+  setStrokingRgbColor,
+  setLineWidth,
+} from "pdf-lib";
 import { makePageToPdf } from "./pdfCoords";
 import {
   arrowHeadPoints,
   arrowHeadSize,
+  fontFamilyKind,
+  hasNoBorder,
+  isNoFill,
   normalizeAnnotation,
   sortByZOrder,
 } from "./pdfAnnotationModel";
@@ -152,10 +173,119 @@ function drawPageRect(page, rect, conv, { color, opacity, borderColor, borderWid
   });
 }
 
+/* ------------------------------ Fonts ------------------------------------ */
+
+// The editor's three families × bold/italic map onto the PDF standard fonts,
+// so what the ribbon offers is exactly what the flattened file can show.
+const FONT_TABLE = {
+  sans: [
+    StandardFonts.Helvetica,
+    StandardFonts.HelveticaBold,
+    StandardFonts.HelveticaOblique,
+    StandardFonts.HelveticaBoldOblique,
+  ],
+  serif: [
+    StandardFonts.TimesRoman,
+    StandardFonts.TimesRomanBold,
+    StandardFonts.TimesRomanItalic,
+    StandardFonts.TimesRomanBoldItalic,
+  ],
+  mono: [
+    StandardFonts.Courier,
+    StandardFonts.CourierBold,
+    StandardFonts.CourierOblique,
+    StandardFonts.CourierBoldOblique,
+  ],
+};
+
+/** The standard font name for an annotation's family/bold/italic. */
+export function standardFontFor(item) {
+  const row = FONT_TABLE[fontFamilyKind(item?.fontFamily)] || FONT_TABLE.sans;
+  const idx = (item?.bold ? 1 : 0) + (item?.italic ? 2 : 0);
+  return row[idx];
+}
+
+/** Embed each standard font at most once per document. */
+function makeFontCache(pdfDoc) {
+  const cache = new Map();
+  return async (item) => {
+    const name = standardFontFor(item);
+    if (!cache.has(name)) cache.set(name, await pdfDoc.embedFont(name));
+    return cache.get(name);
+  };
+}
+
+/* ------------------------------ Geometry --------------------------------- */
+
+/** Rotate a page-space point about a centre by `deg` (SVG sense: clockwise on screen). */
+function rotatePoint(p, centre, deg) {
+  if (!deg) return p;
+  const rad = (deg * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const sn = Math.sin(rad);
+  const dx = p.x - centre.x;
+  const dy = p.y - centre.y;
+  return { x: centre.x + dx * c - dy * sn, y: centre.y + dx * sn + dy * c };
+}
+
+const KAPPA = 0.5522847498;
+
+/**
+ * Draw a page-space rectangle — optionally with rounded corners and rotated
+ * about its centre — as a PDF path, so the exported box has the same corners
+ * the editor shows (the plain drawRectangle always produced sharp corners,
+ * and could not rotate about the centre). Points are built in page space,
+ * transformed through `conv`, and emitted as raw path operators.
+ */
+function drawRoundedBox(page, rect, conv, { corner = 0, rotate = 0, fillColor, strokeColor, strokeWidth }) {
+  const { x, y, w, h } = rect;
+  if (!(w > 0) || !(h > 0)) return;
+  const r = Math.max(0, Math.min(corner || 0, w / 2, h / 2));
+  const centre = { x: x + w / 2, y: y + h / 2 };
+  const P = (px, py) => {
+    const q = rotatePoint({ x: px, y: py }, centre, rotate);
+    return conv.toPdf(q.x, q.y);
+  };
+  const ops = [pushGraphicsState()];
+  const doFill = !!fillColor;
+  const doStroke = !!strokeColor && strokeWidth > 0;
+  if (!doFill && !doStroke) return;
+  if (doFill) ops.push(setFillingRgbColor(fillColor.r, fillColor.g, fillColor.b));
+  if (doStroke) {
+    ops.push(setStrokingRgbColor(strokeColor.r, strokeColor.g, strokeColor.b));
+    ops.push(setLineWidth(strokeWidth));
+  }
+  const k = r * KAPPA;
+  const seg = (p) => lineTo(p.x, p.y);
+  const curve = (c1, c2, p) => appendBezierCurve(c1.x, c1.y, c2.x, c2.y, p.x, p.y);
+  const start = P(x + r, y);
+  ops.push(moveTo(start.x, start.y));
+  ops.push(seg(P(x + w - r, y)));
+  if (r > 0) ops.push(curve(P(x + w - r + k, y), P(x + w, y + r - k), P(x + w, y + r)));
+  ops.push(seg(P(x + w, y + h - r)));
+  if (r > 0) ops.push(curve(P(x + w, y + h - r + k), P(x + w - r + k, y + h), P(x + w - r, y + h)));
+  ops.push(seg(P(x + r, y + h)));
+  if (r > 0) ops.push(curve(P(x + r - k, y + h), P(x, y + h - r + k), P(x, y + h - r)));
+  ops.push(seg(P(x, y + r)));
+  if (r > 0) ops.push(curve(P(x, y + r - k), P(x + r - k, y), P(x + r, y)));
+  ops.push(closePath());
+  ops.push(doFill && doStroke ? fillAndStroke() : doFill ? fill() : stroke());
+  ops.push(popGraphicsState());
+  page.pushOperators(...ops);
+}
+
 // Wrapped text: all layout math happens in page space (y-down), each line's
 // baseline anchor is converted individually, and the glyphs are rotated by
-// the page-space text angle so text reads upright on rotated pages.
-function drawWrappedText(page, text, font, conv, { x, yTop, maxWidth, fontSize, color }) {
+// the page-space text angle so text reads upright on rotated pages. `align`
+// positions each line inside `maxWidth`; `rotate`/`centre` rotate the whole
+// block with its box.
+function drawWrappedText(
+  page,
+  text,
+  font,
+  conv,
+  { x, yTop, maxWidth, fontSize, color, align = "left", rotate = 0, centre = null }
+) {
   const str = String(text || "").trim();
   if (!str) return;
   const paragraphs = str.split(/\n/);
@@ -174,12 +304,18 @@ function drawWrappedText(page, text, font, conv, { x, yTop, maxWidth, fontSize, 
     }
     lines.push(line);
   }
-  const rotate = degrees(conv.textAngleDeg);
+  // Page-space clockwise rotation is a negative PDF (counter-clockwise) angle.
+  const angle = degrees(conv.textAngleDeg - (rotate || 0));
   let lineY = yTop + fontSize;
   for (const l of lines) {
     if (l) {
-      const p = conv.toPdf(x, lineY);
-      page.drawText(l, { x: p.x, y: p.y, size: fontSize, font, color: rgb(color.r, color.g, color.b), rotate });
+      const width = font.widthOfTextAtSize(l, fontSize);
+      const dx =
+        align === "center" ? Math.max(0, (maxWidth - width) / 2) : align === "right" ? Math.max(0, maxWidth - width) : 0;
+      const anchor =
+        rotate && centre ? rotatePoint({ x: x + dx, y: lineY }, centre, rotate) : { x: x + dx, y: lineY };
+      const p = conv.toPdf(anchor.x, anchor.y);
+      page.drawText(l, { x: p.x, y: p.y, size: fontSize, font, color: rgb(color.r, color.g, color.b), rotate: angle });
     }
     lineY += fontSize * 1.25;
   }
@@ -254,34 +390,48 @@ function drawMark(page, a, conv) {
   });
 }
 
-// Textbox / callout: bordered (and optionally filled) box with wrapped text.
+// Textbox / callout: a (rounded, possibly rotated) box with an optional fill,
+// an optional border and wrapped text — the same corner radius, inset, line
+// height, alignment, font and border state the editor overlay renders.
 function drawBoxText(page, a, font, conv) {
-  const hasFill = a.fill && a.fill !== "transparent";
+  const hasFill = !isNoFill(a.fill);
+  const noBorder = hasNoBorder(a);
   const strokeColor = hexToRgb01(a.stroke, { r: 0.2, g: 0.2, b: 0.2 });
+  const strokeWidth = noBorder ? 0 : a.strokeWidth ?? 2;
+  const rect = { x: a.x, y: a.y, w: a.w || 0, h: a.h || 0 };
+  const centre = { x: a.x + rect.w / 2, y: a.y + rect.h / 2 };
+  const rotate = a.rotate || 0;
 
-  drawPageRect(page, { x: a.x, y: a.y, w: a.w || 0, h: a.h || 0 }, conv, {
-    color: hasFill ? hexToRgb01(a.fill) : undefined,
-    borderColor: strokeColor,
-    borderWidth: a.strokeWidth ?? 2,
+  drawRoundedBox(page, rect, conv, {
+    corner: a.corner ?? 8,
+    rotate,
+    fillColor: hasFill ? hexToRgb01(a.fill) : null,
+    strokeColor: noBorder ? null : strokeColor,
+    strokeWidth,
   });
 
   if (a.type === "callout" && a.leader) {
     const lp = conv.toPdf(a.leader.x, a.leader.y);
-    const bp = conv.toPdf(a.x, a.y);
+    const corner = rotatePoint({ x: a.x, y: a.y }, centre, rotate);
+    const bp = conv.toPdf(corner.x, corner.y);
     page.drawLine({
       start: { x: lp.x, y: lp.y },
       end: { x: bp.x, y: bp.y },
-      thickness: a.strokeWidth ?? 2,
+      // The leader is the callout's point; it stays visible without a border.
+      thickness: strokeWidth || 1.5,
       color: rgb(strokeColor.r, strokeColor.g, strokeColor.b),
     });
   }
 
   drawWrappedText(page, a.text, font, conv, {
-    x: a.x + 4,
-    yTop: a.y + 4,
-    maxWidth: Math.max(10, (a.w || 0) - 8),
+    x: a.x + 6,
+    yTop: a.y + 6,
+    maxWidth: Math.max(10, rect.w - 12),
     fontSize: Math.max(6, a.fontSize || 14),
     color: hexToRgb01(a.textColor, { r: 0.07, g: 0.07, b: 0.07 }),
+    align: a.align || "left",
+    rotate,
+    centre,
   });
 }
 
@@ -289,8 +439,8 @@ function drawBoxText(page, a, font, conv) {
 function drawPlainText(page, a, font, conv) {
   const fontSize = Math.max(6, a.fontSize || 14);
   drawWrappedText(page, a.text, font, conv, {
-    x: a.x,
-    yTop: a.y - fontSize,
+    x: a.x + 4,
+    yTop: a.y - fontSize + 2,
     maxWidth: 400,
     fontSize,
     color: hexToRgb01(a.textColor, { r: 0.07, g: 0.07, b: 0.07 }),
@@ -341,20 +491,22 @@ function drawEllipseAnn(page, a, conv) {
   const h = a.h || 0;
   if (w <= 0 || h <= 0) return;
   const centre = conv.toPdf(a.x + w / 2, a.y + h / 2);
-  const hasFill = a.fill && a.fill !== "transparent";
+  const hasFill = !isNoFill(a.fill);
+  const noBorder = hasNoBorder(a);
+  if (!hasFill && noBorder) return;
   const border = hexToRgb01(a.stroke, { r: 0.2, g: 0.2, b: 0.2 });
-  const fill = hasFill ? hexToRgb01(a.fill) : null;
+  const fillCol = hasFill ? hexToRgb01(a.fill) : null;
   page.drawEllipse({
     x: centre.x,
     y: centre.y,
     xScale: w / 2,
     yScale: h / 2,
     rotate: degrees(conv.textAngleDeg),
-    color: fill ? rgb(fill.r, fill.g, fill.b) : undefined,
-    opacity: fill ? a.opacity ?? 1 : undefined,
-    borderColor: rgb(border.r, border.g, border.b),
-    borderWidth: a.strokeWidth ?? 2,
-    borderOpacity: 1,
+    color: fillCol ? rgb(fillCol.r, fillCol.g, fillCol.b) : undefined,
+    opacity: fillCol ? a.opacity ?? 1 : undefined,
+    borderColor: noBorder ? undefined : rgb(border.r, border.g, border.b),
+    borderWidth: noBorder ? 0 : a.strokeWidth ?? 2,
+    borderOpacity: noBorder ? 0 : 1,
   });
 }
 
@@ -381,11 +533,13 @@ function drawSticky(page, a, font, conv) {
 }
 
 function drawRect(page, a, conv) {
-  const hasFill = a.fill && a.fill !== "transparent";
+  const hasFill = !isNoFill(a.fill);
+  const noBorder = hasNoBorder(a);
+  if (!hasFill && noBorder) return;
   drawPageRect(page, { x: a.x, y: a.y, w: a.w || 0, h: a.h || 0 }, conv, {
     color: hasFill ? hexToRgb01(a.fill) : undefined,
-    borderColor: hexToRgb01(a.stroke, { r: 0.2, g: 0.2, b: 0.2 }),
-    borderWidth: a.strokeWidth ?? 2,
+    borderColor: noBorder ? undefined : hexToRgb01(a.stroke, { r: 0.2, g: 0.2, b: 0.2 }),
+    borderWidth: noBorder ? 0 : a.strokeWidth ?? 2,
   });
 }
 
@@ -440,7 +594,8 @@ export async function flattenAnnotations(src, annotations, pageMetas = {}) {
 
   // Load with a safe copy to avoid detached buffers
   const pdfDoc = await PDFDocument.load(bytes);
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const fontFor = makeFontCache(pdfDoc);
+  const font = await fontFor({});
 
   const pages = pdfDoc.getPages();
   for (let i = 0; i < pages.length; i++) {
@@ -472,10 +627,10 @@ export async function flattenAnnotations(src, annotations, pageMetas = {}) {
             break;
           case "textbox":
           case "callout":
-            drawBoxText(page, ann, font, conv);
+            drawBoxText(page, ann, await fontFor(ann), conv);
             break;
           case "typewriter":
-            drawPlainText(page, ann, font, conv);
+            drawPlainText(page, ann, await fontFor(ann), conv);
             break;
           case "arrow":
           case "line":
