@@ -1,12 +1,28 @@
-import React, { useRef, useState, useMemo } from "react";
+import React, { useRef, useState, useMemo, useEffect, useCallback } from "react";
 import { useAppState } from "../context/AppStateContext";
 import {
   FaEllipsisV, FaPen, FaTrash, FaShare, FaFolder, FaFilePdf, FaBookOpen,
   FaClipboardList, FaFileAlt, FaThLarge, FaCog, FaUserCircle,
-  FaAngleDoubleLeft, FaAngleDoubleRight, FaMicrophone,
+  FaAngleDoubleLeft, FaAngleDoubleRight, FaMicrophone, FaFolderOpen, FaGripVertical,
 } from "react-icons/fa";
 import ThreeDotMenu from "./ThreeDotMenu";
 import ShareDialog from "./ShareDialog";
+import MoveNoteDialog from "./MoveNoteDialog";
+import {
+  WORKSPACE_ROOT_DESTINATION,
+  WORKSPACE_ROOT_LABEL,
+  canMoveNoteTo,
+  folderDestination,
+  sameLocation,
+} from "../lib/noteMove";
+import {
+  PROJECT_HOVER_REVEAL_MS,
+  isNoteDragTransfer,
+  noteDragSourceProps,
+  projectHoverLeft,
+  projectHoverSeen,
+  readDraggedNoteId,
+} from "../lib/noteDrag";
 import { useTheme } from "../context/ThemeContext";
 import { useLiveTranscriptSession } from "../context/LiveTranscriptContext";
 import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interactionStyles";
@@ -140,9 +156,19 @@ export default function Sidebar({
     activeProjectId,
     activeFolderId,
     expandedProjectId,
+    setExpandedProjectId,
     setActiveSelection,
     clearActiveSelection,
     setCurrentNoteId,
+
+    // moving a note to a folder (Phase B2): the tree's folders are the DROP
+    // TARGETS, a collapsed project reveals its folders on hover, and a root
+    // note row is a drag source like a Notes-pane row. One operation —
+    // `moveNote` — serves drag/drop and the "Move to…" picker alike.
+    noteDrag,
+    beginNoteDrag,
+    endNoteDrag,
+    moveNote,
 
     // projects
     createProject,
@@ -320,6 +346,142 @@ export default function Sidebar({
     setWorkspace(next);
     if (overlay && typeof onCloseOverlay === "function") onCloseOverlay();
   };
+
+  // ---------- Moving a note: drop targets + project hover-reveal ----------
+  // The rules live in src/lib/noteMove.js (what accepts) and
+  // src/lib/noteDrag.js (how a drag is recognised, when a hover reveals); this
+  // block only binds them to rows and owns the one reveal timer.
+  const [moveCfg, setMoveCfg] = useState(null);
+  const [dropTarget, setDropTarget] = useState(null); // a move destination (src/lib/noteMove.js)
+  const projectHoverRef = useRef(null);
+  const projectHoverTimer = useRef(null);
+  // The expansion the user had before the drag began, restored if the drag
+  // is abandoned; a completed drop keeps whatever the drag revealed.
+  const expandedBeforeDragRef = useRef(undefined);
+  const droppedRef = useRef(false);
+
+  const clearProjectHover = useCallback(() => {
+    projectHoverRef.current = projectHoverLeft();
+    if (projectHoverTimer.current) {
+      clearTimeout(projectHoverTimer.current);
+      projectHoverTimer.current = null;
+    }
+  }, []);
+
+  const noteDragActive = !!noteDrag;
+  useEffect(() => {
+    if (noteDragActive) {
+      expandedBeforeDragRef.current = expandedProjectId;
+      droppedRef.current = false;
+      return;
+    }
+    // The drag ended (drop, Escape, release outside). Whatever state the
+    // targets held is over; an abandoned drag also puts the tree back the way
+    // the user left it, so hovering while dragging never re-arranges anything
+    // permanently on its own.
+    setDropTarget(null);
+    clearProjectHover();
+    if (!droppedRef.current && expandedBeforeDragRef.current !== undefined) {
+      const before = expandedBeforeDragRef.current;
+      setExpandedProjectId((current) => (current === before ? current : before));
+    }
+    expandedBeforeDragRef.current = undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [noteDragActive]);
+  useEffect(() => clearProjectHover, [clearProjectHover]);
+
+  const dragTree = { ...state, rootNotes };
+
+  // Props for ONE drop target — a folder row or the workspace-root surface —
+  // given its domain destination. A target that will not take the note (the
+  // note's own location) does not preventDefault, so the browser shows its
+  // no-drop cursor and the drop never fires; it takes no visual state either.
+  const dropProps = (destination) => {
+    const accepts = !!noteDrag && canMoveNoteTo(dragTree, noteDrag.noteId, destination);
+    const over = accepts && sameLocation(dropTarget, destination);
+    return {
+      accepts,
+      className: over ? "nw-drop-target--over" : "",
+      onDragEnter: (e) => {
+        if (!isNoteDragTransfer(e.dataTransfer) || !accepts) return;
+        e.preventDefault();
+        setDropTarget(destination);
+      },
+      onDragOver: (e) => {
+        if (!isNoteDragTransfer(e.dataTransfer) || !accepts) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (!over) setDropTarget(destination);
+      },
+      onDragLeave: (e) => {
+        const to = e.relatedTarget;
+        if (to && e.currentTarget.contains(to)) return; // moved within the target
+        setDropTarget((prev) => (sameLocation(prev, destination) ? null : prev));
+      },
+      onDrop: (e) => {
+        const noteId = readDraggedNoteId(e.dataTransfer);
+        if (!noteId) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setDropTarget(null);
+        clearProjectHover();
+        droppedRef.current = true;
+        // Confirmed persistence happens inside moveNote; a failure is
+        // reported there and leaves the note where it was.
+        moveNote(noteId, destination);
+        endNoteDrag();
+      },
+    };
+  };
+  const folderDropProps = (projectId, folderId) => ({
+    ...dropProps(folderDestination(projectId, folderId)),
+    "data-nw-drop-folder": folderId,
+  });
+  // THE WORKSPACE ROOT is the loose-notes surface at the top of the tree. It
+  // is an ordinary region until a note that can go there is dragged; then a
+  // labelled "Move to Workspace root" row appears above the loose notes and
+  // the whole region accepts the drop. Nothing permanent, nothing to guess.
+  const rootDrop = dropProps(WORKSPACE_ROOT_DESTINATION);
+
+  // Props for a PROJECT header row: not a destination (a project holds
+  // folders, not notes — dropping here does nothing and never invents an
+  // ownership), but resting on a collapsed one reveals its folders so the
+  // user can drop on one without abandoning the drag.
+  const projectRevealProps = (projectId) => ({
+    className:
+      noteDragActive && expandedProjectId !== projectId ? "nw-drop-reveal" : "",
+    onDragOver: (e) => {
+      if (!isNoteDragTransfer(e.dataTransfer)) return;
+      const next = projectHoverSeen(projectHoverRef.current, {
+        projectId,
+        expandedProjectId,
+        now: Date.now(),
+      });
+      if (next === projectHoverRef.current) return;
+      clearProjectHover();
+      projectHoverRef.current = next;
+      if (!next) return;
+      projectHoverTimer.current = setTimeout(() => {
+        projectHoverTimer.current = null;
+        if (projectHoverRef.current?.projectId === projectId) {
+          setExpandedProjectId(projectId);
+        }
+      }, PROJECT_HOVER_REVEAL_MS);
+    },
+    onDragLeave: (e) => {
+      const to = e.relatedTarget;
+      if (to && e.currentTarget.contains(to)) return;
+      if (projectHoverRef.current?.projectId === projectId) clearProjectHover();
+    },
+  });
+
+  const noteSourceProps = (note) =>
+    noteDragSourceProps({
+      noteId: note.id,
+      title: note.title,
+      onBegin: beginNoteDrag,
+      onEnd: endNoteDrag,
+    });
 
   const asideWidth = collapsed ? SIDEBAR_RAIL_WIDTH_CLASS : SIDEBAR_EXPANDED_WIDTH_CLASS;
   const toggleLabel = collapsed ? SIDEBAR_EXPAND_LABEL : SIDEBAR_COLLAPSE_LABEL;
@@ -573,6 +735,19 @@ export default function Sidebar({
               + New Note
             </button>
 
+            <div
+              className={`rounded ${rootDrop.className}`}
+              data-nw-drop-workspace-root
+              onDragEnter={rootDrop.onDragEnter}
+              onDragOver={rootDrop.onDragOver}
+              onDragLeave={rootDrop.onDragLeave}
+              onDrop={rootDrop.onDrop}
+            >
+            {rootDrop.accepts && (
+              <div className="nw-root-drop mt-2 rounded px-3 py-2 text-xs font-medium" aria-hidden="true">
+                Move to {WORKSPACE_ROOT_LABEL}
+              </div>
+            )}
             <RootNotesList
               rootNotes={rootNotes}
               setCurrentNoteId={setCurrentNoteId}
@@ -585,22 +760,32 @@ export default function Sidebar({
               renameRootNote={renameRootNote}
               deleteRootNote={deleteRootNote}
               setShareCfg={setShareCfg}
+              setMoveCfg={setMoveCfg}
+              noteDrag={noteDrag}
+              noteSourceProps={noteSourceProps}
               theme={theme}
             />
+            </div>
 
             {/* Root Folders */}
             <ul className="space-y-1 text-sm mt-3">
               {(state.rootFolders || []).map((folder) => {
                 const isRootFolderActive =
                   !activeProjectId && activeFolderId === folder.id;
+                const drop = folderDropProps(null, folder.id);
                 return (
                   <li
                     key={folder.id}
                     className={navItemClass({
                       active: isRootFolderActive,
-                      className: "p-2 rounded flex justify-between items-center",
+                      className: `p-2 rounded flex justify-between items-center ${drop.className}`,
                     })}
                     aria-current={isRootFolderActive ? "true" : undefined}
+                    data-nw-drop-folder={drop["data-nw-drop-folder"]}
+                    onDragEnter={drop.onDragEnter}
+                    onDragOver={drop.onDragOver}
+                    onDragLeave={drop.onDragLeave}
+                    onDrop={drop.onDrop}
                   >
                     <span
                       className="flex-1 cursor-pointer font-semibold"
@@ -683,6 +868,8 @@ export default function Sidebar({
               setShareCfg={setShareCfg}
               buildItemsForProject={buildItemsForProject}
               buildItemsForProjectFolder={buildItemsForProjectFolder}
+              folderDropProps={folderDropProps}
+              projectRevealProps={projectRevealProps}
               theme={theme}
             />
           </div>
@@ -737,6 +924,16 @@ export default function Sidebar({
         </div>
       </aside>
 
+      {moveCfg && (
+        <MoveNoteDialog
+          noteId={moveCfg.noteId}
+          noteTitle={moveCfg.title}
+          theme={theme}
+          returnFocusTo={moveCfg.anchor}
+          onClose={() => setMoveCfg(null)}
+        />
+      )}
+
       {shareCfg && (
         <ShareDialog
           scopeTitle={shareCfg.scopeTitle}
@@ -766,6 +963,9 @@ function RootNotesList({
   renameRootNote,
   deleteRootNote,
   setShareCfg,
+  setMoveCfg,
+  noteDrag,
+  noteSourceProps,
   theme,
 }) {
   const { currentNoteId } = useAppState();
@@ -773,20 +973,26 @@ function RootNotesList({
     <ul className="space-y-1 text-sm mt-2">
       {rootNotes.map((note) => {
         const isActive = currentNoteId === note.id;
+        const isDragging = noteDrag?.noteId === note.id;
         return (
           <li
             key={note.id}
             className={navItemClass({
               active: isActive,
-              className: "p-2 rounded flex justify-between items-center",
+              className: `p-2 rounded flex items-center gap-2 ${isDragging ? "nw-note-drag-source" : ""}`,
             })}
             aria-current={isActive ? "true" : undefined}
             onClick={() => {
               setCurrentNoteId(note.id);
               clearActiveSelection();
             }}
+            // A root note is a note without a folder — a valid SOURCE for a
+            // move into a folder, dragged exactly like a Notes-pane row.
+            {...noteSourceProps(note)}
+            data-nw-note-row={note.id}
           >
-            <span className="flex-1 cursor-pointer">{note.title}</span>
+            <FaGripVertical className="nw-note-grip shrink-0 text-xs" aria-hidden="true" />
+            <span className="flex-1 cursor-pointer truncate">{note.title}</span>
             <button
               ref={(el) => (rootNoteRefs.current[note.id] = el)}
               className={dotBtnCls}
@@ -794,6 +1000,8 @@ function RootNotesList({
                 e.stopPropagation();
                 openMenu("root-note", note.id);
               }}
+              aria-label={`Note actions for ${note.title}`}
+              data-nw-no-drag
             >
               <FaEllipsisV />
             </button>
@@ -820,6 +1028,18 @@ function RootNotesList({
                           { id: note.id, type: "note", title: note.title },
                         ],
                         defaultSelection: [note.id],
+                      });
+                      closeMenu();
+                    },
+                  },
+                  {
+                    icon: <FaFolderOpen className="mr-2" />,
+                    label: "Move to…",
+                    onClick: () => {
+                      setMoveCfg({
+                        noteId: note.id,
+                        title: note.title,
+                        anchor: rootNoteRefs.current[note.id] || null,
                       });
                       closeMenu();
                     },
@@ -866,6 +1086,8 @@ function ProjectTree({
   setShareCfg,
   buildItemsForProject,
   buildItemsForProjectFolder,
+  folderDropProps,
+  projectRevealProps,
   theme,
 }) {
   return (
@@ -874,6 +1096,9 @@ function ProjectTree({
         const pid = proj.id;
         const isProjectActive = activeProjectId === pid && !activeFolderId;
         const isExpanded = expandedProjectId === pid;
+        // The header row is NOT a drop target (a project holds folders, not
+        // notes); during a note drag it only reveals its folders on hover.
+        const reveal = projectRevealProps(pid);
 
         return (
           <li
@@ -887,7 +1112,12 @@ function ProjectTree({
             // location. Expanded is not the same as current and never styles.
             aria-current={isProjectActive ? "true" : undefined}
           >
-            <div className="flex justify-between items-center rounded">
+            <div
+              className={`flex justify-between items-center rounded ${reveal.className}`}
+              onDragOver={reveal.onDragOver}
+              onDragLeave={reveal.onDragLeave}
+              data-nw-project-row={pid}
+            >
               <span
                 className="cursor-pointer font-semibold flex items-center w-full"
                 onClick={() => {
@@ -961,14 +1191,20 @@ function ProjectTree({
                 {(state.folderMap[pid] || []).map((folder) => {
                   const isFolderActive =
                     activeFolderId === folder.id && activeProjectId === pid;
+                  const drop = folderDropProps(pid, folder.id);
                   return (
                     <li
                       key={folder.id}
                       className={navItemClass({
                         active: isFolderActive,
-                        className: "p-2 rounded",
+                        className: `p-2 rounded ${drop.className}`,
                       })}
                       aria-current={isFolderActive ? "true" : undefined}
+                      data-nw-drop-folder={drop["data-nw-drop-folder"]}
+                      onDragEnter={drop.onDragEnter}
+                      onDragOver={drop.onDragOver}
+                      onDragLeave={drop.onDragLeave}
+                      onDrop={drop.onDrop}
                     >
                       <div className="flex justify-between items-center rounded">
                         <span

@@ -48,6 +48,7 @@
 import { REFINE_OUTCOME } from "./refineContract";
 import { REFINE_STATUS } from "./refineLifecycle";
 import { richAnswerText } from "./templateRichText";
+import { TRANSIENT_MESSAGE_MS } from "./transientMessage";
 
 // The row lifecycle uses the SAME status vocabulary as note-level Refine —
 // re-exported rather than redefined so the two can never drift apart.
@@ -202,6 +203,90 @@ export function setRowRefineMessage(map, targetKey, status, message) {
       requestId: entry ? entry.requestId : 0,
     },
   };
+}
+
+/* ------------------------------------------------------------------------ */
+/* Transient feedback: how long a settled message stays on screen             */
+/* ------------------------------------------------------------------------ */
+//
+// A Refine outcome is OPERATIONAL feedback about one request — "Field refined.",
+// "AI refinement could not complete. This field has not been changed." — and a
+// request is over the moment it settles. Left on screen indefinitely it stops
+// being feedback and becomes furniture: the user re-reads a stale sentence about
+// a request they finished with, on a form of otherwise identical rows.
+//
+// So a SETTLED message expires. Three rules keep that safe:
+//
+//   NOTHING IN FLIGHT EXPIRES.  A LOADING slot is not feedback about a finished
+//                               operation, so it is never scheduled. Its own
+//                               settle replaces it and starts the clock.
+//   NO DECISION IS DISMISSED.   This map holds messages only. The Revert control
+//                               is driven by the per-note BACKUP map
+//                               (`revertKeys` / `revertableKeys`), never by a
+//                               status entry, so expiring a message can never
+//                               take away the user's ability to undo a
+//                               refinement — the two are deliberately separate
+//                               and are rendered from separate sources.
+//   A NEWER MESSAGE WINS.       An expiry carries the STAMP of the exact message
+//                               it was scheduled for, and is refused if the slot
+//                               has moved on since. A new request on the same
+//                               target replaces the message (see
+//                               `beginRowRefine`) and the stale timer becomes a
+//                               no-op, so the two can never race.
+//
+// Nothing here touches the document, the instance record, autosave or editor
+// history: this is one entry of one React state map, and clearing it renders
+// exactly the same document it was already rendering.
+
+/**
+ * How long a settled Refine message stays on screen.
+ *
+ * NOT a second number: it is the app's ONE transient-message duration
+ * (src/lib/transientMessage.js, the model the editor's own inline status
+ * already uses), re-exported under this module's name so a Refine outcome and
+ * a rejected image cannot drift to different timings.
+ */
+export const ROW_REFINE_MESSAGE_TIMEOUT_MS = TRANSIENT_MESSAGE_MS;
+
+/**
+ * The identity of the exact message currently in one slot, or null when that
+ * slot holds nothing that expires (empty, or still loading).
+ *
+ * The status, the request and the text are all part of the identity: a slot
+ * that settles, is refined again and settles differently must not be cleared by
+ * the first outcome's timer.
+ */
+export function rowRefineMessageStamp(entry) {
+  if (!entry || !entry.message) return null;
+  if (entry.status === ROW_REFINE_STATUS.LOADING) return null;
+  return `${entry.status}|${entry.requestId}|${entry.message}`;
+}
+
+/**
+ * Every target currently showing a message that should expire, with the stamp
+ * to expire it by. Pure: the caller owns the timers.
+ */
+export function expiringRowRefineMessages(map) {
+  const base = map || {};
+  const out = [];
+  for (const targetKey of Object.keys(base)) {
+    const stamp = rowRefineMessageStamp(base[targetKey]);
+    if (stamp) out.push({ targetKey, stamp });
+  }
+  return out;
+}
+
+/**
+ * Drop one target's message because its time is up — but only if that slot
+ * still holds the SAME message the expiry was scheduled for. Returns the same
+ * reference otherwise, so a superseded timer cannot clear newer feedback and
+ * cannot drive a render loop.
+ */
+export function expireRowRefineMessage(map, targetKey, stamp) {
+  const base = map || {};
+  if (!targetKey || !stamp) return base;
+  if (rowRefineMessageStamp(base[targetKey]) !== stamp) return base;
+  return clearRowRefineStatus(base, targetKey);
 }
 
 // Drop a target's transient feedback. Returns the same reference when there is

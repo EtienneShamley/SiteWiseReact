@@ -72,6 +72,12 @@ import { sectionExtraHeightFor } from "./templateSectionHeight";
 import { sectionReplacesRowAnswer } from "./templateRowContent";
 import { rowCells, rowLabelFill, valueColumns } from "./templateColumns";
 import { rowMinHeightPx } from "./templateRowHeight";
+import { applyNoteRowHeights } from "./noteRowHeights";
+import {
+  normalizeNoteLayoutOverrides,
+  noteColumnWidths,
+  noteLeftPct,
+} from "./noteLayoutOverrides";
 import { sectionDocAssetIds } from "./templateSectionDoc";
 import { SECTION_BODY_SOURCE, resolveSectionBody } from "./templateSectionBody";
 import {
@@ -702,7 +708,16 @@ export function buildTemplateExportModel({
   if (!instance || !template || !version) return null;
 
   const branding = normalizeBranding(version.branding);
-  const masterRows = normalizeRows(version.rows);
+  // The pinned version's rows, with THIS NOTE'S own deliberately-dragged row
+  // heights overlaid (instance.rowHeights → px + pxExplicit) — the same shared
+  // overlay the live document applies, so the exported minimum box and the
+  // on-screen one are one number. A note that never resized a row overlays
+  // nothing and exports byte-for-byte as before; the TemplateVersion record
+  // itself is read-only here as everywhere.
+  const masterRows = applyNoteRowHeights(
+    normalizeRows(version.rows),
+    instance.rowHeights ?? null
+  );
   const customRows = customRowsForTemplate(
     instance.customRows,
     instance.templateId ?? null
@@ -870,7 +885,13 @@ export function buildTemplateExportModel({
 
   // The table's VALUE-COLUMN GRID — the single authority for column widths, read
   // once and shared by every row, exactly as the live document reads it.
-  const grid = valueColumns(version.valueColumns);
+  // THIS NOTE'S width overrides (label share + value-column widths), applied
+  // over the version's layout exactly as the live document applies them —
+  // presentation only, keyed by the grid's stable column ids, falling back to
+  // the template defaults whenever they do not match this grid. The version
+  // record itself is read-only here as everywhere.
+  const layoutOverrides = normalizeNoteLayoutOverrides(instance.layoutOverrides);
+  const grid = noteColumnWidths(valueColumns(version.valueColumns), layoutOverrides);
 
   const rows = orderedRows.map((row) => {
     const isCustom = !!row.isCustom;
@@ -941,7 +962,10 @@ export function buildTemplateExportModel({
     },
     branding,
     layout: {
-      leftPct: Math.max(10, Math.min(40, Number(version.leftPct) || 18)),
+      leftPct: Math.max(
+        10,
+        Math.min(40, Number(noteLeftPct(layoutOverrides, version.leftPct)) || 18)
+      ),
       // The value-column grid every row's cells span. Always at least one
       // column, so a renderer may read it unconditionally; a template published
       // before the grid existed reads as the single full-width column it has

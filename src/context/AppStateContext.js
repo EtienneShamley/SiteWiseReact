@@ -16,39 +16,27 @@ import { migrateLegacyNotePdfs } from "../lib/pdfMigration";
 import { runTemplateMigration } from "../lib/templateMigration";
 import { migrateTemplateLogos } from "../lib/templateLogoMigration";
 import { migrateNoteAttachments } from "../lib/noteAttachmentMigration";
+import {
+  MOVE_FAILURE,
+  NOTE_LOCATION_KIND,
+  moveNoteInTree,
+  noteMoveFailureMessage,
+} from "../lib/noteMove";
+import { nextDefaultName } from "../lib/defaultNames";
 
 export const AppStateContext = createContext();
 
-/** Naming counters persisted locally */
-const COUNTERS_KEY = "sitewise-counters-v1";
+// Default names ("Project n" / "Folder n" / "Note n") are allocated from the
+// CURRENT sibling names (src/lib/defaultNames.js) — the lowest free number,
+// so a deleted or renamed-away number is reused. The former lifetime counter
+// record ("sitewise-counters-v1") is no longer read or written; it is left in
+// storage untouched.
 
 /** NEW: per-note voice language memory (noteId -> "en" | "auto" | ...) */
 const VOICE_LANG_KEY = "sitewise-note-voice-lang-v1";
 
-/** In test mode, clear local storage on load (you already wired this for counters). */
+/** In test mode, clear local storage on load. */
 const TEST_RESET = String(process.env.REACT_APP_TEST_RESET || "") === "1";
-
-function loadCounters() {
-  try {
-    if (!TEST_RESET) {
-      const raw = localStorage.getItem(COUNTERS_KEY);
-      if (raw) return JSON.parse(raw);
-    }
-  } catch {}
-  return {
-    // global
-    project: 0,       // Project #
-    rootFolder: 0,    // Root-level Folder #
-    rootNote: 0,      // Root-level Note #
-    // per-scope maps
-    projectFolder: {},    // { [projectId]: count }  Folder # inside each project
-    folderNote: {},       // { [folderId]: count }   Note # inside each (project) folder
-    rootFolderNote: {},   // { [rootFolderId]: count } Note # inside each root folder
-  };
-}
-function saveCounters(c) {
-  try { localStorage.setItem(COUNTERS_KEY, JSON.stringify(c)); } catch {}
-}
 
 /** NEW: voice language map load/save */
 function loadVoiceLangMap() {
@@ -111,6 +99,14 @@ export function AppStateProvider({ children }) {
   // what the main workspace shows. Transient; defaults to projects.
   const [workspace, setWorkspaceRaw] = useState("projects");
 
+  // The note being DRAGGED to a folder right now (`{ noteId, title }`), or
+  // null. Transient, never persisted. It lives here because the drag starts
+  // in one pane (Notes pane / root-note list) and lands in another (the
+  // sidebar tree), and the targets must know WHICH note is in flight to tell
+  // its own folder from a real destination — the data transfer itself is
+  // unreadable during dragover. See src/lib/noteDrag.js.
+  const [noteDrag, setNoteDrag] = useState(null);
+
   // -------- PDF document registry + note references --------
   const [pdfDocs, setPdfDocs] = useState(() => (TEST_RESET ? {} : getPdfDocs()));
   const [notePdfRefs, setNotePdfRefs] = useState(() => (TEST_RESET ? {} : getNotePdfRefs()));
@@ -121,10 +117,6 @@ export function AppStateProvider({ children }) {
 
   // Visible surface for localStorage persistence failures (quota, etc.).
   const [persistenceError, setPersistenceError] = useState(null);
-
-  // -------- Naming counters --------
-  const [counters, setCounters] = useState(loadCounters);
-  useEffect(() => { saveCounters(counters); }, [counters]);
 
   // -------- NEW: Note-specific voice language memory --------
   const [noteVoiceLangMap, setNoteVoiceLangMap] = useState(loadVoiceLangMap);
@@ -397,33 +389,20 @@ export function AppStateProvider({ children }) {
     });
   }
 
-  // helpers to increment & get scoped numbers
-  const nextGlobal = (key) => {
-    setCounters((prev) => {
-      const n = (prev[key] || 0) + 1;
-      const out = { ...prev, [key]: n };
-      saveCounters(out);
-      return out;
-    });
-  };
-  const getGlobal = (key) => (counters[key] || 0) + 1;
-  const getAndBumpGlobal = (key) => {
-    const n = getGlobal(key);
-    nextGlobal(key);
-    return n;
-  };
-  const getAndBumpScoped = (mapKey, id) => {
-    const curr = counters[mapKey]?.[id] || 0;
-    const next = curr + 1;
-    setCounters((prev) => {
-      const m = { ...(prev[mapKey] || {}) };
-      m[id] = next;
-      const out = { ...prev, [mapKey]: m };
-      saveCounters(out);
-      return out;
-    });
-    return next;
-  };
+  // -------- Default names --------
+  // Each is the lowest free "<Prefix> n" among the entity's CURRENT siblings:
+  // projects among projects, a project's folders among that project's folders,
+  // root folders among root folders, a folder's notes among that folder's
+  // notes, root notes among root notes (src/lib/defaultNames.js).
+  const names = (list, key) => (list || []).map((x) => x?.[key]);
+  const suggestProjectName = () => nextDefaultName("Project", names(projectData, "name"));
+  const suggestFolderName = (pid) => nextDefaultName("Folder", names(folderMap[pid], "name"));
+  const suggestRootFolderName = () => nextDefaultName("Folder", names(rootFolders, "name"));
+  const suggestFolderNoteName = (pid, fid) =>
+    nextDefaultName("Note", names((folderMap[pid] || []).find((f) => f.id === fid)?.notes, "title"));
+  const suggestRootFolderNoteName = (fid) =>
+    nextDefaultName("Note", names(rootFolderNotesMap[fid], "title"));
+  const suggestRootNoteName = () => nextDefaultName("Note", names(rootNotes, "title"));
 
   // -------- Selection helpers --------
   function setActiveSelection(pid, fid) {
@@ -443,8 +422,7 @@ export function AppStateProvider({ children }) {
   //                        ROOT NOTES
   // =========================================================
   function createRootNote() {
-    const idx = getAndBumpGlobal("rootNote"); // Note 1..n at root
-    const suggested = `Note ${idx}`;
+    const suggested = suggestRootNoteName();
     const title = prompt("Note title:", suggested);
     if (title === null) return; // cancelled
     const name = title.trim() || suggested;
@@ -491,8 +469,7 @@ export function AppStateProvider({ children }) {
   //                         PROJECTS
   // =========================================================
   function createProject() {
-    const idx = getAndBumpGlobal("project"); // Project 1..n (global)
-    const suggested = `Project ${idx}`;
+    const suggested = suggestProjectName();
     const name = prompt("Project name:", suggested);
     if (name === null) return; // cancelled
     const finalName = name.trim() || suggested;
@@ -557,8 +534,7 @@ export function AppStateProvider({ children }) {
   function createFolder(pid = activeProjectId) {
     if (!pid) return alert("Highlight a project first.");
 
-    const idx = getAndBumpScoped("projectFolder", pid); // Folder 1..n per project
-    const suggested = `Folder ${idx}`;
+    const suggested = suggestFolderName(pid);
     const name = prompt("Folder name:", suggested);
     if (name === null) return; // cancelled
     const finalName = name.trim() || suggested;
@@ -622,8 +598,7 @@ export function AppStateProvider({ children }) {
 
   // Notes INSIDE a (project) folder — Note 1..n per folder
   function addNoteToFolder(pid, fid) {
-    const idx = getAndBumpScoped("folderNote", fid);
-    const suggested = `Note ${idx}`;
+    const suggested = suggestFolderNoteName(pid, fid);
     const title = prompt("Note title:", suggested);
     if (title === null) return;
     const finalTitle = title.trim() || suggested;
@@ -646,8 +621,7 @@ export function AppStateProvider({ children }) {
   //                    ROOT-LEVEL FOLDERS
   // =========================================================
   function createRootFolder() {
-    const idx = getAndBumpGlobal("rootFolder"); // Folder 1..n at root
-    const suggested = `Folder ${idx}`;
+    const suggested = suggestRootFolderName();
     const name = prompt("Folder name:", suggested);
     if (name === null) return null;
     const finalName = name.trim() || suggested;
@@ -705,8 +679,7 @@ export function AppStateProvider({ children }) {
 
   // Notes INSIDE a root folder — Note 1..n per root folder
   function addNoteToRootFolder(fid) {
-    const idx = getAndBumpScoped("rootFolderNote", fid);
-    const suggested = `Note ${idx}`;
+    const suggested = suggestRootFolderNoteName(fid);
     const title = prompt("Note title:", suggested);
     if (title === null) return;
     const finalTitle = title.trim() || suggested;
@@ -811,6 +784,81 @@ export function AppStateProvider({ children }) {
   }
 
   // =========================================================
+  //                 NOTE MOVE (folder → folder)
+  // =========================================================
+  // THE ONE move operation — pointer drag/drop and the keyboard "Move to…"
+  // picker both call this and nothing else. The ownership rules are the pure
+  // model in src/lib/noteMove.js: a note's entry leaves its current list and
+  // is appended to the destination folder's list, same id, same title; no
+  // content, instance, asset, preference or PDF reference is touched, because
+  // all of those are keyed by the note id and never by its folder.
+  //
+  // CONFIRMED, NOT OPTIMISTIC. The next tree is written to storage HERE,
+  // synchronously, before any React state changes. If that write throws the
+  // state is left exactly as it was — the note never appears in the
+  // destination, so there is nothing to roll back and no duplicate can exist —
+  // and the failure is reported on the persistence banner. (The tree persist
+  // effect then re-saves the same successful tree; that second identical write
+  // is harmless.)
+  //
+  // THE OPEN NOTE FOLLOWS ITSELF. If the moved note is the one open in the
+  // editor, the selection moves with it, so the note stays open and its
+  // context (sidebar highlight, Notes pane, document title) shows the new
+  // location: a folder destination selects that folder (and expands its
+  // project); the WORKSPACE ROOT clears the project/folder selection exactly
+  // as opening a root note from the sidebar does. Any other note leaves the
+  // selection alone: the Notes pane simply no longer lists it. The current
+  // note id itself is never cleared or changed by a move, so no editor, save
+  // status or Refine backup is disturbed.
+  //
+  // `destination` is the domain model of src/lib/noteMove.js —
+  // `folderDestination(projectId, folderId)` or `WORKSPACE_ROOT_DESTINATION`.
+  function moveNote(noteId, destination) {
+    const tree = { projectData, folderMap, rootFolders, rootFolderNotesMap, rootNotes };
+    const result = moveNoteInTree(tree, noteId, destination);
+    if (!result.ok) return { ok: false, failure: result.failure };
+    try {
+      saveTree(result.tree);
+    } catch (err) {
+      const title = findMovedTitle(result.tree, noteId);
+      setPersistenceError(noteMoveFailureMessage(MOVE_FAILURE.PERSIST_FAILED, title));
+      return { ok: false, failure: MOVE_FAILURE.PERSIST_FAILED };
+    }
+    if (result.tree.folderMap !== folderMap) setFolderMap(result.tree.folderMap);
+    if (result.tree.rootFolderNotesMap !== rootFolderNotesMap) {
+      setRootFolderNotesMap(result.tree.rootFolderNotesMap);
+    }
+    if (result.tree.rootNotes !== rootNotes) setRootNotes(result.tree.rootNotes);
+    if (currentNoteId === noteId) {
+      if (result.to.kind === NOTE_LOCATION_KIND.ROOT) {
+        clearActiveSelection();
+      } else {
+        setActiveProjectId(result.to.projectId ?? null);
+        setActiveFolderId(result.to.folderId);
+        if (result.to.projectId) setExpandedProjectId(result.to.projectId);
+      }
+    }
+    return { ok: true, from: result.from, to: result.to };
+  }
+  function findMovedTitle(tree, noteId) {
+    const lists = [
+      ...Object.values(tree.folderMap || {}).flatMap((fs) => (fs || []).flatMap((f) => f?.notes || [])),
+      ...Object.values(tree.rootFolderNotesMap || {}).flat(),
+      ...(tree.rootNotes || []),
+    ];
+    return lists.find((n) => n?.id === noteId)?.title || "";
+  }
+
+  // Drag session bookkeeping (see `noteDrag` above). Ending is idempotent.
+  function beginNoteDrag(noteId, title) {
+    if (!noteId) return;
+    setNoteDrag({ noteId, title: typeof title === "string" ? title : "" });
+  }
+  function endNoteDrag() {
+    setNoteDrag((prev) => (prev ? null : prev));
+  }
+
+  // =========================================================
   //                UNIVERSAL NOTE CREATION
   // =========================================================
   function createNoteUniversal(pid, fid) {
@@ -898,6 +946,12 @@ export function AppStateProvider({ children }) {
         deleteNote,
         shareNote,
         createNoteUniversal,
+
+        // moving a note to another folder (drag/drop and "Move to…" share it)
+        moveNote,
+        noteDrag,
+        beginNoteDrag,
+        endNoteDrag,
 
         // NEW: per-note voice language memory
         getNoteVoiceLanguage,

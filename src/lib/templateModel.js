@@ -507,6 +507,16 @@ export function getOrCreateInstanceForNote(noteId) {
     // height and reinterpreting it here would reserve blank space in every
     // existing section at once (see src/lib/templateSectionHeight.js).
     sectionExtraHeight: {},
+    // A row the user deliberately resized IN THIS NOTE, keyed by the same
+    // stable row id — the per-note minimum for a row whose body is its own
+    // answer control. Additive and optional exactly like `sectionExtraHeight`:
+    // an instance saved before it existed reads as "no row was ever resized",
+    // and the pinned TemplateVersion is never touched (src/lib/noteRowHeights.js).
+    rowHeights: {},
+    // This note's table WIDTH overrides — the label share and the value-column
+    // widths, keyed by the version grid's own stable column ids. Additive and
+    // optional on the same terms as `rowHeights` (src/lib/noteLayoutOverrides.js).
+    layoutOverrides: {},
     customRows: [],
     createdAt: Date.now(),
   };

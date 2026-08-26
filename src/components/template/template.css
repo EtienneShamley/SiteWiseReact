@@ -29,12 +29,91 @@
  * numbers and `rgba()` built from them; no stored string ever reaches a CSS
  * declaration verbatim. */
 
+/* ==========================================================================
+ * THE TEMPLATE NOTE LAYER MODEL (Phase B1, 2026-08-24)
+ * ==========================================================================
+ *
+ * Every positioned affordance on the Template page reads its stacking level
+ * from ONE of the tokens below. No component invents a number, and nothing is
+ * ever "fixed" by raising a z-index locally — a control that needs to win reads
+ * a higher-named token, or it is in the wrong layer.
+ *
+ *   content              document text, images, file cards, structured
+ *                        controls. `z-index: auto` — the default, never stated.
+ *   affordance   (1)     things drawn ON the content that must never take a
+ *                        press away from it: the row-height grab strip.
+ *   overlay      (2)     an affordance that owns its own band and must win the
+ *                        hit test inside it: the Section lead-in, a photo's
+ *                        own toolbar and resize handle.
+ *   divider      (3)     the Builder's column / cell drag dividers.
+ *   action       (4)     a row's / cell's / item's ACTION RAIL — the ⋯ trigger
+ *                        and the Refine trigger beside it.
+ *   row-raised   (6)     the WHOLE ROW the pointer or the keyboard is in.
+ *                        Strictly above every OTHER row's action layer, which
+ *                        is what makes "the row you are pointing at owns the
+ *                        top of the stack" true rather than accidental.
+ *   menu       (9999)    an OPEN menu or popover. Not a token: menus are
+ *                        PORTALLED onto <body> by ThreeDotMenu, so they escape
+ *                        every clipping and stacking context on this page and
+ *                        always win. Nothing here may compete with them.
+ *
+ * WHY THE ROW, AND NOT JUST ITS RAIL, IS RAISED
+ * ---------------------------------------------
+ * A rail cannot escape its own row: raising `.twocol-row-actions` only reorders
+ * rails that share one stacking context, and DOM order still decides between
+ * two rails at the same level — so the row BELOW won, purely because it is
+ * later in the document. Raising the hovered/focused ROW above the flat action
+ * level is what makes the ownership explicit: while row A is active, no control
+ * belonging to row B can paint over anything of row A's, whatever the order.
+ *
+ * WHY NO ROW STATE MAY QUIETLY CREATE A STACKING CONTEXT
+ * -----------------------------------------------------
+ * `.twocol-row--target` (the Quick Add destination) used to carry
+ * `position: relative; z-index: 1` purely to make its accent border outrank the
+ * neighbouring row's collapsed border. That z-index made the target row a
+ * stacking context, which TRAPPED its own rail at level 1 — so every later
+ * row's rail painted over the target row's Refine control. The target now draws
+ * its accent as an INSET ring inside its own box (see `.twocol-row--target`),
+ * which needs no z-index at all and cannot be covered by a neighbour's border.
+ *
+ * GEOMETRY. Both lengths below are ordinary CSS lengths, so they scale with the
+ * document's CSS `zoom` exactly like the content they sit beside — there is no
+ * pixel arithmetic anywhere in this model and nothing to re-derive at 75 %,
+ * 125 % or 150 %. */
+:root {
+  --nw-tpl-layer-affordance: 1;
+  --nw-tpl-layer-overlay: 2;
+  --nw-tpl-layer-divider: 3;
+  --nw-tpl-layer-action: 4;
+  --nw-tpl-layer-row-raised: 6;
+
+  /* The gap between a row's right edge and its rail, inside the page's own
+     20mm right margin (pagedDocument.css). */
+  --nw-tpl-rail-gap: 6px;
+  /* The action zone an INNER cell of a divided row reserves for its own rail —
+     the only place a rail cannot be put in the page margin, because a rail
+     there would be ambiguous about which column it acts on. Sized to the rail
+     (a 26px trigger stacked over the Refine trigger's text button), never
+     larger: a divided cell pays for its own rail and every undivided row pays
+     nothing at all. */
+  --nw-tpl-action-zone: 62px;
+}
+
 /* Row block */
 .twocol-row {
   position: relative;
   border: var(--nw-tpl-border-width, 1px) solid var(--nw-tpl-border-color, #d1d5db);
   /* Collapse the border shared with the row above, whatever its width. */
   margin-top: calc(-1 * var(--nw-tpl-border-width, 1px));
+}
+
+/* THE ACTIVE ROW OWNS THE TOP OF THE STACK. Applied to the row the pointer is
+   over or the keyboard is inside, so its rail — and its open trigger — cannot
+   be covered by any control belonging to another row. It is the ONLY row state
+   that raises anything, and it is transient by construction. */
+.twocol-row:hover,
+.twocol-row:focus-within {
+  z-index: var(--nw-tpl-layer-row-raised);
 }
 
 .twocol-cell-left {
@@ -499,7 +578,7 @@
   height: 12px;
   cursor: row-resize;
   user-select: none;
-  z-index: 1;
+  z-index: var(--nw-tpl-layer-affordance);
 }
 
 /* Column divider drag handle (Builder only). Absolutely positioned, so it adds
@@ -516,7 +595,7 @@
   background: transparent;
   border-left: 2px solid rgba(57, 221, 233, 0.25); /* restrained NoteWise cyan */
   touch-action: none;
-  z-index: 2;
+  z-index: var(--nw-tpl-layer-divider);
 }
 
 .twocol-col-handle:hover,
@@ -532,7 +611,7 @@
    share of its own value area (src/lib/templateColumns.js). Absolutely
    positioned, so it adds no height and cannot affect pagination. */
 .twocol-col-handle--cell {
-  z-index: 2;
+  z-index: var(--nw-tpl-layer-divider);
 }
 
 /* A value column of a MULTI-COLUMN row. It becomes the positioning context for
@@ -544,14 +623,38 @@
   position: relative;
 }
 
-/* A value column's own ⋯ trigger. It is the same overlay as the row-level one
-   and inherits everything from it — the hover/focus reveal, the accent, the
-   print hiding — but it is positioned against its COLUMN (which is why
-   `.twocol-cell-col` above is a positioning context) and sits above the inner
-   column dividers, so grabbing the trigger of a narrow column never lands on
-   the divider beside it. */
+/* AN INNER COLUMN OF A DIVIDED ROW reserves its own action zone.
+ *
+ * Every other rail on the page is placed in the page's own right margin, where
+ * it covers nothing (see `.twocol-actions-rail--margin`). An inner column has no
+ * margin to use — to its right is the NEXT column's content — and its rail may
+ * not be moved to the page margin either, because a rail out there could not say
+ * WHICH column it acts on. So the column reserves exactly the rail's width at
+ * its right edge, once, in screen and print alike: the content box simply ends
+ * before the rail begins, so prose, images, file cards and structured controls
+ * can never reach under it at any zoom.
+ *
+ * Only INNER columns pay this. The LAST column of a divided row ends at the
+ * row's right edge, so its rail goes in the page margin like every other one,
+ * and an undivided row reserves nothing at all.
+ *
+ * Doubled class: `.twocol-cell-right` also carries Tailwind's `px-3`, and a
+ * single class would be a specificity tie decided by bundle order. */
+.twocol-cell-col--inner.twocol-cell-col--inner {
+  padding-right: var(--nw-tpl-action-zone);
+}
+
+/* A value column's own rail. It is the same rail as the row-level one and
+   inherits everything from it — the hover/focus reveal, the accent, the print
+   hiding — but it belongs to its COLUMN (which is why `.twocol-cell-col` above
+   is a positioning context), so a column action is never ambiguous about which
+   column it means. It sits above the inner column dividers, so grabbing the
+   trigger of a narrow column never lands on the divider beside it. The LAST
+   column ends at the row's right edge and therefore uses the page-margin
+   anchor like any undivided row; only an INNER column uses the inset anchor
+   and the reserved zone above. */
 .twocol-cell-actions {
-  z-index: 4;
+  z-index: var(--nw-tpl-layer-action);
 }
 
 /* The border between two value columns of one row. It is the same hairline the
@@ -563,21 +666,74 @@
     var(--nw-tpl-border-color, #d1d5db);
 }
 
-/* Per-row action trigger (insert above/below, delete a custom row).
-   Overlaid on the row's top-right corner and revealed on hover or keyboard
-   focus only, so the paper is never permanently cluttered and the row's
-   printed layout is unchanged. */
-.twocol-row-actions {
+/* ---------- THE ACTION RAIL ----------
+ *
+ * ONE rail per row, per divided cell and per Section item, holding that box's
+ * ⋯ trigger and — when the box owns a refinable text run — the Refine trigger
+ * beneath it. Three classes name WHOSE rail it is (`.twocol-row-actions`,
+ * `.twocol-cell-actions`, `.twocol-item-actions`); `.twocol-actions-rail` is
+ * the shared geometry, and a modifier says where it is anchored.
+ *
+ * IT IS VERTICAL, AND IT LIVES OUTSIDE THE CONTENT. Until this phase the rail
+ * was a horizontal strip pinned to the cell's top-right corner, INSIDE the
+ * cell — so a revealed "Refine with AI" button lay across the first line of the
+ * user's prose, and the ⋯ trigger sat exactly on the picker button of a
+ * full-width native date or time input. Neither was a stacking problem and
+ * neither could be fixed by any z-index: the control was simply in the same
+ * place as the content.
+ *
+ * A stacked rail is narrow enough to fit in the page's OWN 20mm right margin
+ * (pagedDocument.css: the flow is 170mm inside a 210mm page), which is empty by
+ * definition, prints nothing and belongs to no row. So the rail is anchored
+ * just outside the row's right edge and covers nothing at all — no prose, no
+ * image, no file card, no picker button — while staying beside the row it acts
+ * on. Nothing is reserved inside the cell, so no printed measure changes and
+ * pagination is untouched.
+ *
+ * The rail may hang below a short row: what it hangs over is more empty page
+ * margin, never content. Only one row is ever hovered or focused at a time, and
+ * that row is raised above every other row's action layer (see the layer model
+ * at the top of this file), so two rails can never contend.
+ *
+ * It stays absolutely positioned, still adds no measured height, and is still
+ * hidden in print with every other affordance. */
+.twocol-actions-rail {
   position: absolute;
   top: 2px;
-  right: 2px;
-  z-index: 3;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 4px;
+  z-index: var(--nw-tpl-layer-action);
 }
 
-/* The same overlay, on ONE ordered section item's own block, for the item-level
+/* Anchored in the page's right margin — every rail whose box ends at the row's
+   right edge: an undivided row, a Section item block, and the LAST column of a
+   divided row. `left: 100%` is the box's own right edge, so this holds at every
+   zoom level without any measurement. */
+.twocol-actions-rail--margin {
+  left: 100%;
+  right: auto;
+  margin-left: var(--nw-tpl-rail-gap);
+}
+
+/* Anchored inside an INNER column's reserved action zone (see
+   `.twocol-cell-col--inner`), the one case with no page margin to use. */
+.twocol-actions-rail--inset {
+  left: auto;
+  right: 4px;
+  align-items: flex-end;
+}
+
+/* Per-row action trigger (insert above/below, delete a custom row).
+   Revealed on hover or keyboard focus only, so the paper is never permanently
+   cluttered and the row's printed layout is unchanged. */
+.twocol-row-actions {
+  position: absolute;
+  z-index: var(--nw-tpl-layer-action);
+}
+
+/* The same rail, on ONE ordered section item's own block, for the item-level
    "Refine with AI" trigger. A flexible section reads as continuous document
    text, so an item boundary must never be drawn: no border, no grip, no
    permanent button. This is position only — the trigger inside it is the same
@@ -586,12 +742,7 @@
    invisible-means-inert rule and the identical print hiding. */
 .twocol-item-actions {
   position: absolute;
-  top: 2px;
-  right: 2px;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  gap: 4px;
+  z-index: var(--nw-tpl-layer-action);
 }
 
 /* THE ROW-ACTIONS TRIGGER (⋯) — restored as a discoverable control
@@ -675,7 +826,12 @@
   display: flex;
   align-items: center;
   height: 26px;
-  padding: 0 8px;
+  /* Tight enough that the label, the rail gap and the trigger beside it all fit
+     inside the page's own 20mm right margin — see `.twocol-actions-rail`. The
+     label is still a WORD, not a bare sparkle icon, and it is the same word the
+     header Refine control uses; the row's own name stays in the accessible name
+     and the tooltip, where it belongs. */
+  padding: 0 6px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -801,10 +957,18 @@
  * exposes aria-current="true". */
 .twocol-row--target {
   border-color: var(--nw-accent-bright, #0b6e78);
-  /* Outranks the neighbouring row's collapsed border so the target reads as one
-     complete outline rather than three sides. */
+  /* The target reads as one complete outline rather than three sides.
+   *
+   * The bottom edge is SHARED with the row below (rows collapse their border
+   * with a negative top margin), and the later row paints it — so the accent
+   * needs a second, unshared statement. It used to be `z-index: 1`, which won
+   * the border but made the target row a STACKING CONTEXT and trapped its own
+   * action rail below every later row's (see the layer model at the top of this
+   * file). An inset ring is drawn INSIDE the row's own box instead: nothing
+   * else can paint over it, it needs no z-index at all, and the row therefore
+   * creates no stacking context in any state but the transient raised one. */
   position: relative;
-  z-index: 1;
+  box-shadow: inset 0 0 0 1px var(--nw-accent-bright, #0b6e78);
 }
 
 .twocol-row--target .twocol-cell-left {
@@ -862,6 +1026,7 @@
      at it. Falls back to the branded border, exactly like every other row. */
   .twocol-row--target {
     border-color: var(--nw-tpl-border-color, #d1d5db);
+    box-shadow: none;
   }
 
   .twocol-row--target .twocol-cell-left {
@@ -989,7 +1154,7 @@
   margin-top: -8px;
   cursor: text;
   position: relative;
-  z-index: 2;
+  z-index: var(--nw-tpl-layer-overlay);
 }
 
 .twocol-section-lead:hover::after,
@@ -1269,7 +1434,7 @@
   position: absolute;
   top: 4px;
   left: 4px;
-  z-index: 2;
+  z-index: var(--nw-tpl-layer-overlay);
   display: none;
   flex-wrap: wrap;
   align-items: center;
@@ -1342,7 +1507,7 @@
   cursor: nwse-resize;
   opacity: 0.55;
   touch-action: none;
-  z-index: 2;
+  z-index: var(--nw-tpl-layer-overlay);
 }
 
 /* Touch-friendly hit area: extends the grabbable region well past the visible

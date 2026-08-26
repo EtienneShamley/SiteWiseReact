@@ -824,3 +824,67 @@
    animated and is unaffected by reduced motion — there is no transition to
    disable. Colour is never the only signal either: the thumb's presence and
    position are the signal, and the accent only makes it discoverable. */
+
+/* -------------------------------------------------------------------------- */
+/* Moving a note to a folder (drag and drop, Phase B2)                        */
+/*                                                                            */
+/* Four states, all on existing rows, none of which change a row's size:       */
+/*   .nw-note-grip           the drag affordance on a note row — hidden until  */
+/*                           the row is hovered or holds focus, so the list    */
+/*                           stays quiet; shown while that note is dragged      */
+/*   .nw-note-drag-source    the note being dragged: dimmed, still in place,   */
+/*                           so the user sees exactly which note is moving     */
+/*   .nw-drop-target--over   a folder that WILL accept the drop, while the     */
+/*                           pointer is over it: the selection tint and an     */
+/*                           inset accent ring (inset, so nothing shifts)      */
+/*   .nw-drop-reveal         a collapsed project while a note drag is live: a  */
+/*                           dashed hint that resting on it reveals folders.   */
+/*                           It is not a destination and never takes the      */
+/*                           accept ring                                       */
+/* A folder that will not accept the note (the note's own folder) gets NO      */
+/* state at all — the browser's own no-drop cursor is the honest signal.        */
+/* -------------------------------------------------------------------------- */
+
+.nw-note-grip {
+  opacity: 0;
+  color: var(--nw-nav-muted-text);
+  cursor: grab;
+  transition: opacity 150ms ease;
+}
+
+.nw-nav-item:hover .nw-note-grip,
+.nw-nav-item:focus-within .nw-note-grip,
+.nw-note-drag-source .nw-note-grip {
+  opacity: 1;
+}
+
+.nw-note-drag-source {
+  opacity: 0.45;
+}
+
+.nw-drop-target--over,
+.nw-drop-target--over:hover {
+  color: var(--nw-nav-active-text);
+  background-color: var(--nw-nav-selected-bg);
+  box-shadow: inset 0 0 0 2px var(--nw-nav-active-border);
+}
+
+.nw-drop-reveal {
+  outline: 1px dashed var(--nw-nav-active-border);
+  outline-offset: -1px;
+}
+
+/* The workspace-root target's label row: exists ONLY while a note that can go
+   there is being dragged (see Sidebar.js), so there is no permanent drop box.
+   The surrounding region takes .nw-drop-target--over while hovered. */
+.nw-root-drop {
+  color: var(--nw-nav-active-text);
+  border: 1px dashed var(--nw-nav-active-border);
+  background-color: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nw-note-grip {
+    transition: none;
+  }
+}

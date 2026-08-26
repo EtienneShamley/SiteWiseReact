@@ -8,10 +8,13 @@ import { userFacingRefinePresets } from "../../lib/refineContract";
  * Text row's own answer, or ONE ordered section text item.
  *
  * It lives inside an absolutely positioned action area revealed on hover/focus
- * only — the row's EXISTING `.twocol-row-actions` next to the ⋯ menu, or the
+ * only — the row's EXISTING `.twocol-row-actions` beneath the ⋯ menu, or the
  * matching `.twocol-item-actions` on a section item's own block — so it consumes
  * no measured height, cannot disturb pagination, and is hidden in print,
- * exactly like the row-actions trigger it sits beside.
+ * exactly like the row-actions trigger it sits beside. Since Phase B1 that
+ * action area is the page's own right margin rather than the top-right corner
+ * of the cell, so the trigger cannot cover the user's prose, an image, a file
+ * card or a native date/time picker button at any zoom level.
  *
  * `itemId` is passed straight back through `onRefine`, so a section paragraph is
  * refined by its own stable id rather than by its row. It is deliberately opaque
@@ -73,7 +76,13 @@ export default function RowRefineAction({
         title={`${accessibleName} — choose a writing style`}
         onClick={() => setOpen((prev) => !prev)}
       >
-        {loading ? "Refining…" : "Refine with AI"}
+        {/* The VISIBLE label is the same word the header Refine control uses,
+            and the full intent — including the field's own name — stays in the
+            accessible name and the tooltip above. It is a word, never a bare
+            sparkle icon; it is short because the rail it sits in is the page's
+            own right margin, which is exactly 20mm wide (see
+            `.twocol-actions-rail` in template.css). */}
+        {loading ? "Refining…" : "Refine"}
       </button>
 
       {open && (

@@ -3,9 +3,12 @@ import React, { useState, useRef } from "react";
 import { useAppState } from "../context/AppStateContext";
 import {
   FaEllipsisV, FaPen, FaShare, FaTrash, FaRegStickyNote, FaAngleDoubleRight,
+  FaGripVertical, FaFolderOpen,
 } from "react-icons/fa";
 import ThreeDotMenu from "./ThreeDotMenu";
 import ShareDialog from "./ShareDialog";
+import MoveNoteDialog from "./MoveNoteDialog";
+import { noteDragSourceProps } from "../lib/noteDrag";
 import { useTheme } from "../context/ThemeContext";
 import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interactionStyles";
 import {
@@ -33,11 +36,18 @@ export default function MiddlePane({
     addNoteToFolder,
     addNoteToRootFolder, // may be undefined; we’ll fallback
     activeNoteView,
+    // Moving a note to another folder (Phase B2). A row is a DRAG SOURCE —
+    // the drop targets are the sidebar's folders — and its menu offers the
+    // keyboard path, "Move to…", which runs the SAME move operation.
+    noteDrag,
+    beginNoteDrag,
+    endNoteDrag,
   } = useAppState();
   const { theme } = useTheme();
 
   const [menu, setMenu] = useState({ noteId: null });
   const [shareCfg, setShareCfg] = useState(null);
+  const [moveCfg, setMoveCfg] = useState(null);
   const noteRefs = useRef({});
 
   // Resolve notes for: (A) project folder, or (B) root folder
@@ -190,20 +200,39 @@ export default function MiddlePane({
         <ul className="space-y-2 text-sm">
           {notes.map(note => {
             const isActive = currentNoteId === note.id;
+            const isDragging = noteDrag?.noteId === note.id;
             return (
               <li
                 key={note.id}
                 className={navItemClass({
                   active: isActive,
-                  className:
+                  className: [
                     "group flex items-center gap-2 rounded-xl px-3 py-3 cursor-pointer",
+                    isDragging ? "nw-note-drag-source" : "",
+                  ].join(" ").trim(),
                 })}
                 // The current note is whichever note the editor actually has
                 // open — switching notes moves this in the same render, so no
                 // stale row can keep the current-location treatment.
                 aria-current={isActive ? "true" : undefined}
                 onClick={() => setCurrentNoteId(note.id)}
+                // The WHOLE row drags (a press-and-move anywhere on it), so the
+                // affordance is generous; the grip that appears on hover/focus
+                // is the visible promise of it. Click, menu, rename and keyboard
+                // navigation are untouched — a click without movement never
+                // starts a drag, and the menu trigger opts out (data-nw-no-drag).
+                {...noteDragSourceProps({
+                  noteId: note.id,
+                  title: note.title,
+                  onBegin: beginNoteDrag,
+                  onEnd: endNoteDrag,
+                })}
+                data-nw-note-row={note.id}
               >
+                <FaGripVertical
+                  className="nw-note-grip shrink-0 text-xs"
+                  aria-hidden="true"
+                />
                 <span className="flex-1 truncate" title={note.title}>
                   {note.title}
                 </span>
@@ -214,6 +243,8 @@ export default function MiddlePane({
                     e.stopPropagation();
                     setMenu({ noteId: note.id });
                   }}
+                  aria-label={`Note actions for ${note.title}`}
+                  data-nw-no-drag
                 >
                   <FaEllipsisV />
                 </button>
@@ -240,6 +271,18 @@ export default function MiddlePane({
                         },
                       },
                       {
+                        icon: <FaFolderOpen className="mr-2" />,
+                        label: "Move to…",
+                        onClick: () => {
+                          setMoveCfg({
+                            noteId: note.id,
+                            title: note.title,
+                            anchor: noteRefs.current[note.id] || null,
+                          });
+                          setMenu({ noteId: null });
+                        },
+                      },
+                      {
                         icon: <FaTrash className="mr-2" />,
                         label: "Delete",
                         onClick: () => { deleteNote(activeFolderId, note.id); setMenu({ noteId: null }); },
@@ -253,6 +296,16 @@ export default function MiddlePane({
             );
           })}
         </ul>
+      )}
+
+      {moveCfg && (
+        <MoveNoteDialog
+          noteId={moveCfg.noteId}
+          noteTitle={moveCfg.title}
+          theme={theme}
+          returnFocusTo={moveCfg.anchor}
+          onClose={() => setMoveCfg(null)}
+        />
       )}
 
       {shareCfg && (

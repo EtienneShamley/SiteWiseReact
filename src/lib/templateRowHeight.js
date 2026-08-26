@@ -193,3 +193,26 @@ export function explicitRowHeightPatch(px) {
   const value = Math.round(Number(px) || 0);
   return { px: Math.max(COMPACT_ROW_MIN_PX, value), pxExplicit: true };
 }
+
+/**
+ * The patch a row-height DRAG writes, given the row's own content floor.
+ *
+ * Above the floor it is `explicitRowHeightPatch` — a deliberate height, marked
+ * as one. AT or below the floor the row has been dragged back to its natural
+ * size, and the deliberate-height marker is CLEARED instead of a floor-sized
+ * height being stored: the row returns to auto, so if its content floor later
+ * changes (a control added or removed, the compact floor itself revised) the
+ * row follows the new rule rather than staying pinned to a number that only
+ * ever meant "whatever the floor was that day". `px` keeps the floor value for
+ * the legacy readers that expect the key, but without the marker it reserves
+ * nothing (see `explicitRowHeight`).
+ */
+export function rowHeightDragPatch(px, floorPx = COMPACT_ROW_MIN_PX) {
+  const floor = Math.max(
+    COMPACT_ROW_MIN_PX,
+    Math.round(Number(floorPx) || 0) || COMPACT_ROW_MIN_PX
+  );
+  const value = Math.round(Number(px) || 0);
+  if (value <= floor) return { px: floor, pxExplicit: false };
+  return explicitRowHeightPatch(value);
+}

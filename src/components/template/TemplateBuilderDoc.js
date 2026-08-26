@@ -44,7 +44,7 @@ import {
   makeFill,
   storedFill,
 } from "../../lib/templateFill";
-import { explicitRowHeightPatch } from "../../lib/templateRowHeight";
+import { rowDragMinPx, rowHeightDragPatch } from "../../lib/templateRowHeight";
 import { createLogoAsset, deleteAsset } from "../../lib/assetStorage";
 import {
   DEFAULT_BRANDING,
@@ -231,13 +231,19 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
   const changeRowLabel = (rowId, label) =>
     setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, label } : r)));
 
-  // A dragged height is a DELIBERATE one, so it is stamped as such — that
-  // marker is what tells it apart from the scaffold defaults every row has
-  // always carried, and it is the only thing that makes a stored `px` reserve
-  // height again (src/lib/templateRowHeight.js).
+  // A dragged height ABOVE the row's content floor is a DELIBERATE template
+  // minimum, stamped as such — the marker is what tells it apart from the
+  // scaffold defaults every row has always carried, and the only thing that
+  // makes a stored `px` reserve height again. Dragged back TO the floor, the
+  // marker is cleared instead: the row returns to auto rather than storing a
+  // meaningless floor-sized "deliberate" height (src/lib/templateRowHeight.js).
   const changeRowHeight = (rowId, px) =>
     setRows((prev) =>
-      prev.map((r) => (r.id === rowId ? { ...r, ...explicitRowHeightPatch(px) } : r))
+      prev.map((r) => {
+        if (r.id !== rowId) return r;
+        const floor = rowDragMinPx({ row: r, cells: rowCells(r, valueColumns.length) });
+        return { ...r, ...rowHeightDragPatch(px, floor) };
+      })
     );
 
   /* ------------------------- STRUCTURAL ACTIONS --------------------------- */

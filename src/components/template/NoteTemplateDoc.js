@@ -23,7 +23,23 @@ import {
 import {
   rowCells,
   valueColumns as normalizeValueColumns,
+  withColumnWidths,
 } from "../../lib/templateColumns";
+import {
+  rowDragMinPx,
+  rowMinHeightPx,
+} from "../../lib/templateRowHeight";
+import {
+  applyNoteRowHeights,
+  setNoteRowHeight,
+} from "../../lib/noteRowHeights";
+import {
+  normalizeNoteLayoutOverrides,
+  noteColumnWidths,
+  noteLeftPct,
+  setNoteColumnWidths,
+  setNoteLeftPct,
+} from "../../lib/noteLayoutOverrides";
 import {
   CUSTOM_ROW_MIN_HEIGHT_PX,
   customRowsForTemplate,
@@ -133,6 +149,7 @@ import { REFINE_OUTCOME, isAllowedRefineStyle } from "../../lib/refineContract";
 import {
   ROW_REFINE_CHANGED_MESSAGE,
   ROW_REFINE_EMPTY_MESSAGE,
+  ROW_REFINE_MESSAGE_TIMEOUT_MS,
   ROW_REFINE_REVERTED_MESSAGE,
   ROW_REFINE_REVERT_FAILED_MESSAGE,
   ROW_REFINE_SAVE_FAILED_MESSAGE,
@@ -141,6 +158,8 @@ import {
   beginRowRefine,
   clearRowRefineStatus,
   createRowRefineState,
+  expireRowRefineMessage,
+  expiringRowRefineMessages,
   hasRefinableText,
   isRowRefineCurrent,
   rowRefineMessageFor,
@@ -353,6 +372,39 @@ export default function NoteTemplateDoc({
     return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   }, [instance?.sectionExtraHeight]);
 
+  // THIS NOTE'S OWN deliberately-dragged row heights, keyed by row id — the
+  // per-note minimum for a row whose body is its own answer control. Owned by
+  // the instance exactly like `sectionExtraHeight` above, and for the same
+  // reason: resizing a row in a completed note is a choice about THIS document
+  // and must never reach the pinned, immutable TemplateVersion. Applied by
+  // overlay (`applyNoteRowHeights`), so the height flows through the one
+  // content-floor rule in src/lib/templateRowHeight.js and can never clip
+  // content. See src/lib/noteRowHeights.js.
+  const storedRowHeights = useMemo(() => {
+    const raw = instance?.rowHeights;
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  }, [instance?.rowHeights]);
+
+  // THIS NOTE'S OWN table WIDTH overrides — the label share and the
+  // value-column widths, applied over the pinned version's layout. Owned by
+  // the instance for the same reason `rowHeights` above is: dragging a
+  // vertical wall in a completed note formats THIS document and must never
+  // reach the immutable TemplateVersion. Column widths are keyed by the
+  // grid's own stable column ids; an entry that does not match this note's
+  // grid exactly falls back to the template defaults on read
+  // (src/lib/noteLayoutOverrides.js).
+  const storedLayoutOverrides = useMemo(
+    () => normalizeNoteLayoutOverrides(instance?.layoutOverrides),
+    [instance?.layoutOverrides]
+  );
+
+  // Live values WHILE a vertical wall is being dragged, unpersisted — the same
+  // pending-wins-until-release rule the row-height drag uses. One instance
+  // write happens on release (see the width commit handlers below), never per
+  // pointer move.
+  const [pendingLeftPct, setPendingLeftPct] = useState(null);
+  const [pendingColumnWidths, setPendingColumnWidths] = useState(null);
+
   // Per-field inline error/busy state for attachment and custom-row operations.
   const [fieldErrors, setFieldErrors] = useState({});
   const [fieldBusy, setFieldBusy] = useState({});
@@ -489,6 +541,40 @@ export default function NoteTemplateDoc({
       mountedRef.current = false;
     };
   }, []);
+
+  // TRANSIENT REFINE FEEDBACK — a settled message clears itself.
+  //
+  // A Refine outcome describes ONE finished request. Left on the page it stops
+  // being feedback and becomes furniture, on a form of otherwise identical
+  // rows. Every settled message therefore carries a timer; the rule for which
+  // messages expire, and the stamp that stops a stale timer clearing a newer
+  // message, live in src/lib/templateRowRefine.js.
+  //
+  // WHAT THIS EFFECT CANNOT DO, by construction:
+  //   - it never dismisses anything in flight (a LOADING slot has no stamp),
+  //   - it never dismisses the REVERT control, which is rendered from the
+  //     per-note backup map and not from this state at all, so the user's
+  //     ability to undo a refinement outlives the message about it,
+  //   - it touches no document, no instance record, no autosave and no editor
+  //     history: clearing a message re-renders exactly the document that was
+  //     already on screen.
+  //
+  // Re-running on every change of the map is what makes a NEW request replace
+  // the previous message rather than race it: the cleanup clears the previous
+  // timers, and only the messages that are actually on screen now are
+  // rescheduled. Unmounting runs the same cleanup, so no timer outlives the
+  // component.
+  useEffect(() => {
+    const pending = expiringRowRefineMessages(rowRefineStatus);
+    if (!pending.length) return undefined;
+    const timers = pending.map(({ targetKey, stamp }) =>
+      setTimeout(() => {
+        if (!mountedRef.current) return;
+        setRowRefineStatus((prev) => expireRowRefineMessage(prev, targetKey, stamp));
+      }, ROW_REFINE_MESSAGE_TIMEOUT_MS)
+    );
+    return () => timers.forEach((timer) => clearTimeout(timer));
+  }, [rowRefineStatus]);
 
   // Monotonic request ids, and a synchronous per-TARGET in-flight set. The
   // disabled button covers the rendered case; this set covers two clicks inside
@@ -664,14 +750,35 @@ export default function NoteTemplateDoc({
     [rows, templateCustomRows]
   );
 
-  // Apply any in-progress drag height without persisting it.
-  const displayRows = useMemo(
-    () =>
-      orderedRows.map((r) =>
-        pendingHeights[r.id] != null ? { ...r, px: pendingHeights[r.id] } : r
-      ),
-    [orderedRows, pendingHeights]
-  );
+  // The rows as THIS NOTE displays them: the persisted note-level height
+  // overrides first (each an explicit `px` + `pxExplicit`, so it flows through
+  // the shared content-floor rule), then any in-progress drag height on top of
+  // them, live and unpersisted. The pending value carries the SAME marker —
+  // without it `rowMinHeightPx` would ignore the number and the row would not
+  // move under the pointer at all, which is exactly the dead drag A2's `px`
+  // demotion left behind.
+  const displayRows = useMemo(() => {
+    const overridden = applyNoteRowHeights(orderedRows, storedRowHeights);
+    return overridden.map((r) =>
+      pendingHeights[r.id] != null
+        ? { ...r, px: pendingHeights[r.id], pxExplicit: true }
+        : r
+    );
+  }, [orderedRows, storedRowHeights, pendingHeights]);
+
+  // The label share and grid THIS NOTE displays: the version's defaults with
+  // the note's own width overrides, and any in-flight drag on top. Widths only
+  // — structure (ids, order, count) always comes from the version, so
+  // `rowCells` projections, the cell index and every id-keyed collection are
+  // untouched by an override.
+  const displayLeftPct =
+    pendingLeftPct != null
+      ? pendingLeftPct
+      : noteLeftPct(storedLayoutOverrides, leftPct);
+  const displayValueColumns = useMemo(() => {
+    const base = noteColumnWidths(valueColumns, storedLayoutOverrides);
+    return pendingColumnWidths ? withColumnWidths(base, pendingColumnWidths) : base;
+  }, [valueColumns, storedLayoutOverrides, pendingColumnWidths]);
 
   /**
    * EVERY VALUE CELL ON THE FORM, keyed by its own cell id.
@@ -1790,19 +1897,15 @@ export default function NoteTemplateDoc({
     ]
   );
 
-  // Row height: a custom row's dragged height is shown live and persisted once
-  // on release. A template row's height in a completed note stays transient
-  // (the pinned version is immutable) — unchanged behaviour.
-  const handleRowHeightChange = useCallback(
-    (rowId, px) => {
-      if (customRowIds.has(rowId)) {
-        setPendingHeights((prev) => ({ ...prev, [rowId]: px }));
-        return;
-      }
-      setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, px } : r)));
-    },
-    [customRowIds]
-  );
+  // Row height, live while the handle is dragged — EVERY row the same way.
+  // The pending value simply wins over the stored one until release (see
+  // `displayRows`), and nothing is persisted here. A master template row no
+  // longer writes into the local copy of the pinned version's rows: its
+  // committed height belongs to the NOTE (instance.rowHeights, below), and the
+  // version copy stays exactly what the version says.
+  const handleRowHeightChange = useCallback((rowId, px) => {
+    setPendingHeights((prev) => ({ ...prev, [rowId]: px }));
+  }, []);
 
   /**
    * A flexible section's extra working space, live while the handle is dragged.
@@ -1865,27 +1968,180 @@ export default function NoteTemplateDoc({
     [saveInstanceConfirmed, clearFieldError, setFieldError]
   );
 
+  /**
+   * The ONE confirmed write for a dragged row height, on release.
+   *
+   * Two owners, one rule — a dragged height above the row's natural default is
+   * a deliberate NOTE choice; dragged back to it, the row returns to auto with
+   * no residue:
+   *
+   *   CUSTOM row    the note-owned row record itself (`preferredHeight` +
+   *                 `heightExplicit`), exactly as before — except that landing
+   *                 back at the content floor now CLEARS the marker instead of
+   *                 pinning a floor-sized "deliberate" height.
+   *   MASTER row    `instance.rowHeights[rowId]` — a NOTE-INSTANCE override.
+   *                 The pinned TemplateVersion is immutable and is never
+   *                 touched; a second note pinned to the same version keeps
+   *                 the template default. Landing back at the row's default
+   *                 height (its content floor, raised by the template's own
+   *                 explicit height if it has one) removes the entry.
+   *
+   * Either way the write goes through the confirmed instance save, carrying
+   * every other collection through from its ref so a concurrent edit is not
+   * clobbered, and the pending drag value is dropped whether the save landed
+   * or not — the row must show what is actually saved.
+   */
   const handleRowHeightCommit = useCallback(
     (rowId, px) => {
-      if (!customRowIds.has(rowId)) return;
-      handleCustomRowPatch(
-        rowId,
-        {
-          preferredHeight: Math.max(CUSTOM_ROW_MIN_HEIGHT_PX, Math.round(px)),
-          // A dragged height is a deliberate one — the marker is what makes it
-          // reserve space (src/lib/templateRowHeight.js).
-          heightExplicit: true,
-        },
-        "This section's height could not be saved"
-      );
-      setPendingHeights((prev) => {
-        if (!(rowId in prev)) return prev;
-        const next = { ...prev };
-        delete next[rowId];
-        return next;
+      const dropPending = () =>
+        setPendingHeights((prev) => {
+          if (!(rowId in prev)) return prev;
+          const next = { ...prev };
+          delete next[rowId];
+          return next;
+        });
+
+      if (customRowIds.has(rowId)) {
+        // A custom row is a single-cell Text section: its content floor is the
+        // compact prose floor.
+        const floor = rowDragMinPx({ row: { type: FIELD_TYPE.TEXT } });
+        handleCustomRowPatch(
+          rowId,
+          Math.round(px) <= floor
+            ? { heightExplicit: false }
+            : {
+                preferredHeight: Math.max(CUSTOM_ROW_MIN_HEIGHT_PX, Math.round(px)),
+                // A dragged height is a deliberate one — the marker is what
+                // makes it reserve space (src/lib/templateRowHeight.js).
+                heightExplicit: true,
+              },
+          "This section's height could not be saved"
+        );
+        dropPending();
+        return;
+      }
+
+      // MASTER row: the un-overridden row from the pinned version decides the
+      // default this drag is measured against.
+      const row = (rowsRef.current || []).find((r) => r && r.id === rowId);
+      if (!row) {
+        dropPending();
+        return;
+      }
+      const type = normalizeType(row.type);
+      const isAttachmentField = type === FIELD_TYPE.PHOTO || type === FIELD_TYPE.FILE;
+      const defaultPx = rowMinHeightPx({
+        row,
+        cells: isAttachmentField ? null : rowCells(row, valueColumns.length),
+        isAttachmentField,
       });
+      const nextMap = setNoteRowHeight(
+        instanceRef.current?.rowHeights,
+        rowId,
+        px,
+        defaultPx
+      );
+      const nextInstance = {
+        ...instanceRef.current,
+        answers: rowTextRef.current,
+        attachments: rowAttachmentsRef.current,
+        evidence: rowEvidenceRef.current,
+        rowHeights: nextMap,
+      };
+      try {
+        saveInstanceConfirmed(nextInstance);
+        instanceRef.current = nextInstance;
+        setInstance(nextInstance);
+        clearFieldError(rowId);
+      } catch (err) {
+        setFieldError(
+          rowId,
+          `This row's height could not be saved (${err?.message || err}). The last change was not kept.`
+        );
+      } finally {
+        dropPending();
+      }
     },
-    [customRowIds, handleCustomRowPatch]
+    [
+      customRowIds,
+      handleCustomRowPatch,
+      valueColumns,
+      saveInstanceConfirmed,
+      clearFieldError,
+      setFieldError,
+    ]
+  );
+
+  /**
+   * Persist ONE change to this note's width overrides, through the same
+   * confirmed instance save as everything else. There is no per-row anchor for
+   * a table-wide width, so a failed write is reported by the note's own save
+   * status (saveInstanceConfirmed settles the status chip as failed before
+   * rethrowing) and the display simply falls back to what is actually saved —
+   * the pending drag value is dropped either way.
+   */
+  const persistLayoutOverrides = useCallback(
+    (nextOverrides) => {
+      const nextInstance = {
+        ...instanceRef.current,
+        answers: rowTextRef.current,
+        attachments: rowAttachmentsRef.current,
+        evidence: rowEvidenceRef.current,
+        layoutOverrides: nextOverrides,
+      };
+      try {
+        saveInstanceConfirmed(nextInstance);
+        instanceRef.current = nextInstance;
+        setInstance(nextInstance);
+      } catch {
+        // Reported through the save status; the stored value remains the truth.
+      }
+    },
+    [saveInstanceConfirmed]
+  );
+
+  // ---- The LABEL divider, note-owned (live / commit-once) ----
+  // Dragging the label/value wall moves every row's boundary together (the
+  // share is table-wide by construction); the committed value is a NOTE
+  // override, removed again when it lands back on the template's own share.
+  const handleLeftPctChange = useCallback((pct) => {
+    setPendingLeftPct(pct);
+  }, []);
+
+  const handleLeftPctCommit = useCallback(
+    (pct) => {
+      const nextOverrides = setNoteLeftPct(
+        instanceRef.current?.layoutOverrides,
+        pct,
+        leftPct
+      );
+      persistLayoutOverrides(nextOverrides);
+      setPendingLeftPct(null);
+    },
+    [leftPct, persistLayoutOverrides]
+  );
+
+  // ---- The VALUE-COLUMN dividers, note-owned (live / commit-once) ----
+  // The drag itself is the Builder's proven interaction unchanged
+  // (`resizeColumnsAt` over the shared grid — normalized, 12% minimum,
+  // ratio-based and so zoom-safe); only the OWNER of the committed widths
+  // differs. They are stored keyed by the version grid's own stable column
+  // ids, and removed again when the drag lands back on the template defaults.
+  const handleColumnWidthsChange = useCallback((widths) => {
+    setPendingColumnWidths(widths);
+  }, []);
+
+  const handleColumnWidthsCommit = useCallback(
+    (widths) => {
+      const nextOverrides = setNoteColumnWidths(
+        instanceRef.current?.layoutOverrides,
+        valueColumns,
+        widths
+      );
+      persistLayoutOverrides(nextOverrides);
+      setPendingColumnWidths(null);
+    },
+    [valueColumns, persistLayoutOverrides]
   );
 
   // Only a custom row's own label is editable in a completed note; master
@@ -2879,9 +3135,21 @@ export default function NoteTemplateDoc({
       )}
 
       <ResizableTwoColTable
-        leftPct={leftPct}
-        valueColumns={valueColumns}
+        leftPct={displayLeftPct}
+        valueColumns={displayValueColumns}
         rows={displayRows}
+        // NOTE-OWNED WIDTH FORMATTING. The vertical dividers are enabled in a
+        // completed note, but every committed value lands on THIS NOTE'S
+        // instance (`layoutOverrides`) — the pinned TemplateVersion is never
+        // written, and a second note keeps the template defaults. Width
+        // dragging is presentation only: none of the STRUCTURAL callbacks
+        // (split/merge/insert/delete column) are passed here, so the note has
+        // no path to a structural change.
+        enableColumnDivider={true}
+        onLeftPctChange={handleLeftPctChange}
+        onLeftPctCommit={handleLeftPctCommit}
+        onColumnWidthsChange={handleColumnWidthsChange}
+        onColumnWidthsCommit={handleColumnWidthsCommit}
         onAddRow={handleAddRowAtEnd}
         addRowLabel="Add section at end"
         logoUrl={logoUrl}

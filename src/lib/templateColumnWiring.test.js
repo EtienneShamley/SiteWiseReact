@@ -126,21 +126,30 @@ describe("15-16. only the Template Builder may change the table's structure", ()
     }
   });
 
-  test("16. a normal note is given NONE of them and cannot mutate the grid", () => {
+  test("16. a normal note is given NO structural callback and cannot mutate the grid", () => {
+    // Re-targeted (2026-08-24): the note now DOES take the width callbacks —
+    // its vertical dividers commit note-instance presentation overrides
+    // (src/lib/noteLayoutOverrides.js) — but every STRUCTURAL callback stays
+    // Builder-only, so a completed note still has no path to splitting,
+    // merging or inserting/deleting a column.
     for (const prop of [
       "onInsertTableColumn",
       "onDeleteTableColumn",
-      "onColumnWidthsChange",
-      "onColumnWidthsCommit",
       "onSplitCell",
       "onMergeCell",
+      "onAddFieldControl",
+      "onRemoveFieldControl",
     ]) {
       expect(NOTE_DOC).not.toContain(prop);
     }
     const usage = NOTE_DOC.slice(NOTE_DOC.indexOf("<ResizableTwoColTable"));
     expect(usage).toContain('rowActionsMode="note"');
     expect(usage).not.toMatch(/onInsertTableColumn|onDeleteTableColumn|onSplitCell|onMergeCell/);
-    // The note READS the pinned version's grid and never writes one.
+    // The note's width commits land on ITS OWN instance…
+    expect(usage).toContain("onColumnWidthsCommit={handleColumnWidthsCommit}");
+    expect(NOTE_DOC).toContain("setNoteColumnWidths(");
+    // …while the pinned version's grid stays read-only: read on load, never
+    // written back (`storedValueColumns` is the publish-side serializer).
     expect(NOTE_DOC).toContain("setValueColumns(normalizeValueColumns(version.valueColumns));");
     expect(NOTE_DOC).not.toContain("storedValueColumns");
   });
@@ -576,19 +585,35 @@ describe("23. the table-column resize is zoom-safe by construction", () => {
     expect(TABLE).toContain("onColumnWidthsCommit(lastColumnWidths.current)");
   });
 
-  test("the dividers are the TABLE's, drawn on every row at the same shares", () => {
+  test("a divider is drawn where TWO CELLS OF THE ROW MEET, never at every raw grid boundary", () => {
+    // Re-targeted (Phase B1/A2 correction, 2026-08-24): this test previously
+    // asserted `grid.slice(0, -1)` — one handle per underlying grid boundary on
+    // EVERY row, which is exactly the ghost-divider defect a merge left behind
+    // (the merge changes only the row's cells; the grid deliberately keeps its
+    // column because other rows may still expose the boundary). The walls now
+    // derive from the row's own cell spans, the same rule the painted border
+    // follows, while the DRAG still moves the SHARED grid divider that edge
+    // sits on.
     const dividers = TABLE.slice(
       TABLE.indexOf("function renderCellDividers("),
       TABLE.indexOf("function renderFieldError(")
     );
-    expect(dividers).toContain("grid.slice(0, -1).map((column, index)");
-    expect(dividers).toContain("running += column.widthPct;");
+    expect(dividers).not.toContain("grid.slice(0, -1)");
+    expect(dividers).toContain("function renderCellDividers(cells)");
+    expect(dividers).toContain("if (list.length < 2) return null;");
+    expect(dividers).toContain("const boundary = cell.start + cell.span - 1;");
+    expect(dividers).toContain("onMouseDown={(e) => startCellDrag(boundary, e)}");
+    expect(dividers).toContain("key={`divider-${grid[boundary].id}`}");
     expect(dividers).toContain("tabIndex={0}");
     expect(dividers).toContain('role="separator"');
     expect(dividers).toContain('if (e.key === "ArrowLeft") {');
     expect(dividers).toContain(
       "if (!enableColumnDivider || !onColumnWidthsChange || grid.length < 2) {"
     );
+    // Both render sites hand the function the row's OWN cells — there is no
+    // zero-argument call left that could fall back to the raw grid.
+    expect(TABLE).toContain("{renderCellDividers(cells)}");
+    expect(TABLE).not.toContain("{renderCellDividers()}");
   });
 
   test("every row is laid out against the SAME track list", () => {

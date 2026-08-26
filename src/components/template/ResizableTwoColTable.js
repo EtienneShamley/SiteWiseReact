@@ -181,15 +181,21 @@ function fillStyle(fill) {
  *   it never changes a block's measured height (pagination stays stable) and is
  *   hidden in print (see template.css).
  *
- * COLUMN DIVIDERS (`enableColumnDivider`, builder only):
- * - The LABEL divider sets the label-column width; the value is the template's
- *   persisted `leftPct` and is published with the version, so every page and
- *   every note pinned to that version shares one ratio.
- * - The TABLE-COLUMN dividers set the widths of the value-column GRID
- *   (`valueColumns`, src/lib/templateColumns.js), which is likewise a property
- *   of the version: dragging one from any row moves the shared grid, so every
- *   row realigns together and no row owns a width of its own.
- * - In note mode neither is adjustable: both come from the pinned version.
+ * COLUMN DIVIDERS (`enableColumnDivider`):
+ * - The LABEL divider sets the label-column share; the TABLE-COLUMN dividers
+ *   set the widths of the value-column GRID (`valueColumns`,
+ *   src/lib/templateColumns.js). Dragging one from any row moves the SHARED
+ *   grid, so every row realigns together and no row owns a width of its own.
+ * - WHO OWNS THE NUMBER is the caller's affair, not this component's: the
+ *   Builder feeds the drags into the draft template definition (published as
+ *   the version's defaults), and a completed note feeds them into ITS OWN
+ *   instance's `layoutOverrides` (src/lib/noteLayoutOverrides.js) — a
+ *   presentation override over the pinned version, which is never written.
+ *   This component only reports geometry: live values through the *Change
+ *   callbacks, one committed value per drag through the *Commit ones.
+ * - Width dragging is NOT a structural action: the note passes none of the
+ *   structural callbacks below, so its surface can resize columns without any
+ *   path to splitting, merging or inserting/deleting one.
  *
  * THE TABLE GRID AND A ROW'S CELLS:
  * - Every row is laid out against the SAME grid track list, so a value column
@@ -427,7 +433,8 @@ export default function ResizableTwoColTable({
   onRowHeightChange, // (rowId, px) => void — continuous while dragging
   onRowHeightCommit, // (rowId, px) => void — once, on drag release
   lockTemplateLabels = false, // note mode: master labels are read-only
-  enableColumnDivider = false, // builder only (leftPct is a template value)
+  onLeftPctCommit, // (pct) => void — once, on label-divider drag release
+  enableColumnDivider = false, // layout-editing surfaces (Builder + completed note)
   addRowLabel = "Add Row",
   // The row the bottom capture bar (Quick Add) would insert into, if any. This
   // is PRESENTATION ONLY — the selection is owned by MainArea and mirrored down
@@ -604,10 +611,17 @@ export default function ResizableTwoColTable({
   // The divider replaces the former numeric percentage input. It reads the row
   // element's live rect on every move (so page scrolling during a drag cannot
   // skew it) and clamps to the same 10–40% range the renderer clamps to.
+  // Last label share emitted during a drag, committed once on release —
+  // exactly the commit-once rule the row-height and inner-column drags use, so
+  // a completed note can persist ONE instance write per drag instead of one
+  // per pointer move.
+  const lastLeftPctValue = useRef(null);
+
   const startColDrag = useCallback((e) => {
     e.preventDefault();
     const rowEl = e.currentTarget.parentElement;
     if (!rowEl) return;
+    lastLeftPctValue.current = null;
     setColDrag({ el: rowEl });
   }, []);
 
@@ -617,22 +631,32 @@ export default function ResizableTwoColTable({
       const rect = colDrag.el.getBoundingClientRect();
       if (!rect.width) return;
       const pct = ((e.clientX - rect.left) / rect.width) * 100;
-      onLeftPctChange(Math.round(Math.max(10, Math.min(40, pct))));
+      const next = Math.round(Math.max(10, Math.min(40, pct)));
+      lastLeftPctValue.current = next;
+      onLeftPctChange(next);
     },
     [colDrag, onLeftPctChange]
   );
 
+  const stopColDrag = useCallback(() => {
+    if (colDrag && lastLeftPctValue.current != null && onLeftPctCommit) {
+      onLeftPctCommit(lastLeftPctValue.current);
+    }
+    lastLeftPctValue.current = null;
+    setColDrag(null);
+  }, [colDrag, onLeftPctCommit]);
+
   React.useEffect(() => {
     if (!colDrag) return;
     const mm = (e) => onMouseMoveCol(e);
-    const mu = () => setColDrag(null);
+    const mu = () => stopColDrag();
     window.addEventListener("mousemove", mm);
     window.addEventListener("mouseup", mu);
     return () => {
       window.removeEventListener("mousemove", mm);
       window.removeEventListener("mouseup", mu);
     };
-  }, [colDrag, onMouseMoveCol]);
+  }, [colDrag, onMouseMoveCol, stopColDrag]);
 
   // ---------- TABLE COLUMN DIVIDER DRAG (builder only) --------------------
   // The same interaction as the label-column divider above, applied to the
@@ -710,14 +734,18 @@ export default function ResizableTwoColTable({
     [grid, onColumnWidthsChange, onColumnWidthsCommit]
   );
 
-  // Keyboard alternative to dragging the divider (1% per arrow press).
+  // Keyboard alternative to dragging the divider (1% per arrow press). Each
+  // press is a completed adjustment, so it commits as well as changes —
+  // mirroring `nudgeCellWidth` above.
   const nudgeLeftPct = useCallback(
     (delta) => {
       if (!onLeftPctChange) return;
       const current = Math.max(10, Math.min(40, Number(leftPct) || 18));
-      onLeftPctChange(Math.max(10, Math.min(40, current + delta)));
+      const next = Math.max(10, Math.min(40, current + delta));
+      onLeftPctChange(next);
+      if (onLeftPctCommit) onLeftPctCommit(next);
     },
-    [leftPct, onLeftPctChange]
+    [leftPct, onLeftPctChange, onLeftPctCommit]
   );
 
   const showRightEditor = !!enableRightEditor;
@@ -1508,13 +1536,27 @@ export default function ResizableTwoColTable({
     const key = `${row.id}::${cell.id}`;
     const open = menuKey === key;
     const options = rowMenuOptions(row, cell, cellIndex, cells);
+    // WHERE THIS RAIL IS ANCHORED. Every rail whose owning box ends at the row's
+    // right edge is placed just outside it, in the page's own 20mm right margin,
+    // where it covers no content at all (see `.twocol-actions-rail` in
+    // template.css). The one exception is an INNER column of a divided row: a
+    // rail out in the page margin could not say which column it acts on, so it
+    // stays inside the column, in the small action zone that column reserves.
+    const isEdgeBox = cellIndex === cells.length - 1;
     return (
       <div
-        className={
-          cells.length > 1 ? "twocol-row-actions twocol-cell-actions" : "twocol-row-actions"
-        }
+        className={[
+          "twocol-row-actions",
+          cells.length > 1 ? "twocol-cell-actions" : "",
+          "twocol-actions-rail",
+          isEdgeBox ? "twocol-actions-rail--margin" : "twocol-actions-rail--inset",
+        ]
+          .filter(Boolean)
+          .join(" ")}
       >
-        {modern && renderSectionRefineAction(cellRow, modern)}
+        {/* ⋯ FIRST, so the structural trigger keeps the row's top-right corner
+            it has always occupied and the Refine trigger stacks beneath it —
+            which is also the reading and tab order a user expects. */}
         {showRowActions && (
           <>
             <button
@@ -1553,6 +1595,7 @@ export default function ResizableTwoColTable({
             )}
           </>
         )}
+        {modern && renderSectionRefineAction(cellRow, modern)}
       </div>
     );
   }
@@ -1672,34 +1715,66 @@ export default function ResizableTwoColTable({
    * Nothing is rendered for a one-column table, which is every template
    * published before the grid existed.
    */
-  function renderCellDividers() {
+  /**
+   * THE VISIBLE WALLS OF ONE ROW — derived from that row's own cell spans,
+   * never from the raw table grid.
+   *
+   * This function used to draw one handle per UNDERLYING GRID BOUNDARY
+   * (`grid.slice(0, -1)`) on EVERY row. That was a second, drifting visual
+   * model of the table: a row whose cell SPANS a grid boundary (a merged cell,
+   * or any row simply left undivided while another row split) still showed a
+   * faint wall running through it — the "ghost divider" a merge left behind.
+   * The merge itself was always correct (`mergeCell` changes only the row's
+   * cells and deliberately leaves the grid alone, because other rows may still
+   * expose the boundary), and a completed note rendered correctly because it
+   * has no divider handles at all — only the Builder drew the stale wall.
+   *
+   * A wall exists where TWO CELLS OF THIS ROW MEET, and nowhere else — the
+   * same rule the painted border already follows
+   * (`.twocol-cell-col + .twocol-cell-col`), so the drag affordance and the
+   * visible boundary can never disagree again. Cells tile the grid, so each
+   * cell boundary sits exactly ON a grid boundary: dragging the handle still
+   * moves the SHARED grid divider at that index (`cell.start + cell.span - 1`)
+   * and every row that exposes it realigns together. A merged row loses its
+   * handle in the same render that merges its cells; a split rewires it back;
+   * inserting or deleting a table column re-derives every row's cells and the
+   * walls follow — there is no divider state anywhere to go stale.
+   */
+  function renderCellDividers(cells) {
     if (!enableColumnDivider || !onColumnWidthsChange || grid.length < 2) {
       return null;
     }
+    const list = Array.isArray(cells) ? cells : [];
+    if (list.length < 2) return null;
     const labelShare = Math.max(10, Math.min(40, Number(leftPct) || 18));
     const valueShare = 100 - labelShare;
-    let running = 0;
-    return grid.slice(0, -1).map((column, index) => {
-      running += column.widthPct;
+    return list.slice(0, -1).map((cell) => {
+      // The grid divider this cell's right edge sits on. Cells tile the grid,
+      // so this is always a real inner boundary; the guard only defends
+      // against a malformed stored row.
+      const boundary = cell.start + cell.span - 1;
+      if (boundary < 0 || boundary >= grid.length - 1) return null;
+      let running = 0;
+      for (let i = 0; i <= boundary; i += 1) running += grid[i].widthPct;
       const left = labelShare + (valueShare * running) / 100;
       return (
         <div
-          key={`divider-${column.id}`}
+          key={`divider-${grid[boundary].id}`}
           className="twocol-col-handle twocol-col-handle--cell"
           style={{ left: `${left}%` }}
           role="separator"
           aria-orientation="vertical"
-          aria-label={`Resize table column ${index + 1} — drag, or use the arrow keys`}
+          aria-label={`Resize table column ${boundary + 1} — drag, or use the arrow keys`}
           title="Drag the divider to resize this table column"
           tabIndex={0}
-          onMouseDown={(e) => startCellDrag(index, e)}
+          onMouseDown={(e) => startCellDrag(boundary, e)}
           onKeyDown={(e) => {
             if (e.key === "ArrowLeft") {
               e.preventDefault();
-              nudgeCellWidth(index, -1);
+              nudgeCellWidth(boundary, -1);
             } else if (e.key === "ArrowRight") {
               e.preventDefault();
-              nudgeCellWidth(index, 1);
+              nudgeCellWidth(boundary, 1);
             }
           }}
         />
@@ -1872,6 +1947,12 @@ export default function ResizableTwoColTable({
         key={cell.id}
         className={`twocol-cell-right px-3 py-2 text-black flex flex-col ${
           multi ? "twocol-cell-col" : ""
+        } ${
+          // An INNER column of a divided row is the one box on the page with no
+          // page margin beside it, so it reserves the small action zone its own
+          // rail sits in — see `.twocol-cell-col--inner` in template.css. The
+          // last column ends at the row's right edge and reserves nothing.
+          multi && index < cells.length - 1 ? "twocol-cell-col--inner" : ""
         } ${selected ? "twocol-cell--selected" : ""}`.trim()}
         // The cell occupies the combined width of the GRID columns it spans —
         // it holds no width of its own, so it is always exactly as wide as the
@@ -2078,7 +2159,7 @@ export default function ResizableTwoColTable({
         {cells.length === 1 &&
           renderRowActions(row, cells[0], 0, cells, headModernTarget)}
         {renderColumnDivider()}
-        {renderCellDividers()}
+        {renderCellDividers(cells)}
 
         {/* LEGACY ROW HEIGHT HANDLE — a row whose body is its own answer
             control only. A flexible section is sized by its content plus the
@@ -2168,7 +2249,7 @@ export default function ResizableTwoColTable({
 
         {renderRowActions(row, cells[0], 0, cells)}
         {renderColumnDivider()}
-        {renderCellDividers()}
+        {renderCellDividers(cells)}
 
         {/* ROW DRAG HANDLE */}
         <div
@@ -2316,7 +2397,11 @@ export default function ResizableTwoColTable({
             in print. Supplied only by a Section segment that opens a text run
             and is not the row head — the head's own trigger stays in the row
             action area. */}
-        {actions && <div className="twocol-item-actions">{actions}</div>}
+        {actions && (
+          <div className="twocol-item-actions twocol-actions-rail twocol-actions-rail--margin">
+            {actions}
+          </div>
+        )}
       </div>
     );
   }
