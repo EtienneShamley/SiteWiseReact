@@ -408,3 +408,80 @@ describe("nudgeSelectedMediaWidth (Alt/Option + Arrow)", () => {
     expect(editor.calls).toEqual([]);
   });
 });
+
+/* ---------------------- P4: replaceImageAssetReference --------------------- */
+
+describe("replaceImageAssetReference (Photo Annotator write)", () => {
+  const { replaceImageAssetReference } = require("./editorCommands");
+  const imageType = { name: "image" };
+  const paraType = { name: "paragraph" };
+
+  // A tiny document: [paragraph@0, image(a)@1, paragraph@2, image(a)@3, image(b)@4]
+  function makeDoc(nodes) {
+    return {
+      content: { size: nodes.length },
+      nodeAt: (pos) => nodes[pos] || null,
+      descendants(fn) {
+        for (let i = 0; i < nodes.length; i++) if (fn(nodes[i], i) === false) return;
+      },
+    };
+  }
+  function makePmEditor(nodes) {
+    const dispatched = [];
+    const markups = [];
+    const doc = makeDoc(nodes);
+    return {
+      dispatched,
+      markups,
+      schema: { nodes: { image: imageType } },
+      state: {
+        doc,
+        tr: {
+          setNodeMarkup(pos, type, attrs, marks) {
+            markups.push({ pos, attrs, marks });
+            return { pos, attrs };
+          },
+        },
+      },
+      view: { dispatch: (tr) => dispatched.push(tr) },
+    };
+  }
+  const image = (assetId, extra = {}) => ({ type: imageType, attrs: { assetId, src: null, width: 40, height: 30, widthPct: 55, layoutMode: "wrap", layoutSide: "left", annotationSourceId: null, ...extra }, marks: [] });
+  const para = () => ({ type: paraType, attrs: {}, marks: [] });
+
+  test("points the node at `pos` at the rendition, remembering the original, in ONE transaction", () => {
+    const ed = makePmEditor([para(), image("a"), para(), image("a"), image("b")]);
+    const out = replaceImageAssetReference(ed, { fromAssetId: "a", pos: 3, toAssetId: "rend", annotationSourceId: "a", width: 400, height: 300 });
+    expect(out.ok).toBe(true);
+    expect(out.pos).toBe(3);
+    expect(ed.markups).toHaveLength(1);
+    expect(ed.markups[0].attrs).toEqual({
+      assetId: "rend", src: null, width: 400, height: 300, widthPct: 55, layoutMode: "wrap", layoutSide: "left", annotationSourceId: "a",
+    });
+    expect(ed.dispatched).toHaveLength(1);
+  });
+
+  test("falls back to the FIRST node carrying the asset when the position moved", () => {
+    const ed = makePmEditor([para(), para(), image("a"), image("a")]);
+    const out = replaceImageAssetReference(ed, { fromAssetId: "a", pos: 0, toAssetId: "rend", annotationSourceId: "a" });
+    expect(out.ok).toBe(true);
+    expect(out.pos).toBe(2);
+    // Untouched dimensions are kept.
+    expect(ed.markups[0].attrs).toMatchObject({ width: 40, height: 30 });
+  });
+
+  test("reverting clears the source memory", () => {
+    const ed = makePmEditor([image("rend", { annotationSourceId: "orig" })]);
+    const out = replaceImageAssetReference(ed, { fromAssetId: "rend", pos: 0, toAssetId: "orig", annotationSourceId: null });
+    expect(out.ok).toBe(true);
+    expect(ed.markups[0].attrs).toMatchObject({ assetId: "orig", annotationSourceId: null });
+  });
+
+  test("an image that is no longer in the document changes nothing", () => {
+    const ed = makePmEditor([para(), image("b")]);
+    expect(replaceImageAssetReference(ed, { fromAssetId: "a", pos: 1, toAssetId: "rend" })).toEqual({ ok: false, error: null });
+    expect(ed.dispatched).toEqual([]);
+    expect(replaceImageAssetReference(null, { fromAssetId: "a", toAssetId: "b" })).toEqual({ ok: false, error: null });
+    expect(replaceImageAssetReference(ed, { fromAssetId: "", toAssetId: "b" })).toEqual({ ok: false, error: null });
+  });
+});

@@ -299,6 +299,86 @@ export function updateMediaAttrs(editor, patch = {}) {
 }
 
 /**
+ * Point ONE image node at a different stored asset — the Photo Annotator's
+ * write (P4): the node that was annotated now references the flattened
+ * rendition (`assetId`) and remembers the original (`annotationSourceId`);
+ * reverting an image to its original clears that memory.
+ *
+ * Which node: the image at `pos` when it still carries `fromAssetId` (the
+ * position captured when Annotate was pressed), otherwise the FIRST image
+ * carrying `fromAssetId` — the document may have changed under a modal
+ * workspace, but the image the user annotated is still the one with that
+ * reference. Nothing else in the document is touched, the change is ONE
+ * transaction (one undo step, one autosave), and a document with no such
+ * image returns `{ ok: false }` so the caller can say so and clean up.
+ *
+ * Presentation attributes (width %, layout) are untouched: the annotated
+ * picture keeps the size and placement the original had.
+ */
+export function replaceImageAssetReference(
+  editor,
+  { fromAssetId, pos, toAssetId, annotationSourceId, width, height } = {}
+) {
+  if (!editor) return noEditor();
+  const from = typeof fromAssetId === "string" ? fromAssetId.trim() : "";
+  const to = typeof toAssetId === "string" ? toAssetId.trim() : "";
+  if (!from || !to) return { ok: false, error: null };
+
+  const { state } = editor;
+  const imageType = nodeTypeNamed(editor, "image");
+  if (!imageType) return { ok: false, error: null };
+
+  const isTarget = (node) => node && node.type === imageType && node.attrs.assetId === from;
+
+  let at = null;
+  if (typeof pos === "number" && pos >= 0 && pos <= state.doc.content.size) {
+    let candidate = null;
+    try {
+      candidate = state.doc.nodeAt(pos);
+    } catch {
+      candidate = null;
+    }
+    if (isTarget(candidate)) at = pos;
+  }
+  if (at === null) {
+    state.doc.descendants((node, nodePos) => {
+      if (at !== null) return false;
+      if (isTarget(node)) {
+        at = nodePos;
+        return false;
+      }
+      return true;
+    });
+  }
+  if (at === null) return { ok: false, error: null };
+
+  const node = state.doc.nodeAt(at);
+  const sourceId =
+    typeof annotationSourceId === "string" && annotationSourceId.trim() && annotationSourceId.trim() !== to
+      ? annotationSourceId.trim()
+      : null;
+  const attrs = {
+    ...node.attrs,
+    assetId: to,
+    src: null,
+    annotationSourceId: sourceId,
+    width: Number(width) > 0 ? Math.round(Number(width)) : node.attrs.width,
+    height: Number(height) > 0 ? Math.round(Number(height)) : node.attrs.height,
+  };
+
+  let applied = false;
+  try {
+    const tr = state.tr.setNodeMarkup(at, undefined, attrs, node.marks);
+    editor.view.dispatch(tr);
+    applied = true;
+  } catch {
+    applied = false;
+  }
+  if (!applied) return { ok: false, error: null };
+  return { ok: true, pos: at, attrs };
+}
+
+/**
  * One keyboard resize step — Alt/Option + Arrow — for the SELECTED image node.
  *
  * Applies only when the current selection is a NodeSelection on an image;

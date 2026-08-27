@@ -53,7 +53,6 @@ import {
   NO_FILL,
   RECT_CORNERS,
   STICKY_SIZE,
-  TYPEWRITER_BOX,
   annotationBounds,
   arrowHeadPoints,
   arrowHeadSize,
@@ -73,6 +72,7 @@ import {
   sortByZOrder,
   stampUpdated,
   translateAnnotation,
+  typewriterBox,
 } from "../lib/pdfAnnotationModel";
 import {
   beginGesture as beginHistoryGesture,
@@ -99,7 +99,9 @@ import {
   resolveMarqueeSelection,
 } from "../lib/pdfSelection";
 import {
+  ANNOTATION_EDITOR_ROOT_SELECTOR,
   ANNOTATION_SHORTCUT,
+  CLIPBOARD_SCOPE,
   annotationShortcut,
   copyAnnotations,
   editorOwnsShortcut,
@@ -213,6 +215,7 @@ export default forwardRef(function PdfAnnotator(
     resolvePastePage, // () => pageNo the viewer is showing (paste target); optional
     onNotice, // (message) — a short, non-error status the ribbon can show
     resolveTextRuns, // async (pageNo) => text runs of that page (src/lib/pdfTextRuns.js); optional
+    clipboardScope = CLIPBOARD_SCOPE.PDF, // which session clipboard this surface uses (src/lib/pdfClipboard.js)
   },
   ref
 ) {
@@ -429,9 +432,9 @@ export default forwardRef(function PdfAnnotator(
   const copySelected = useCallback(() => {
     const payload = copyAnnotations(itemsRef.current, selectedRef.current);
     if (!payload) return false;
-    writeClipboard(payload);
+    writeClipboard(payload, clipboardScope);
     return true;
-  }, []);
+  }, [clipboardScope]);
 
   // Add a planned set of new records as ONE history entry and select them.
   const adoptNewItems = useCallback(
@@ -455,7 +458,7 @@ export default forwardRef(function PdfAnnotator(
   // re-homed. A no-op with an empty clipboard.
   const paste = useCallback(
     (targetPage) => {
-      const payload = readClipboard();
+      const payload = readClipboard(clipboardScope);
       if (!payload?.items?.length) return false;
       let target = Number.isInteger(targetPage) ? targetPage : null;
       if (target === null && typeof resolvePastePage === "function") target = resolvePastePage();
@@ -469,7 +472,7 @@ export default forwardRef(function PdfAnnotator(
         );
         return false;
       }
-      writeClipboard(plan.payload);
+      writeClipboard(plan.payload, clipboardScope);
       adoptNewItems(plan.items);
       if (plan.skipped > 0) {
         onNotice?.(
@@ -478,7 +481,7 @@ export default forwardRef(function PdfAnnotator(
       }
       return true;
     },
-    [resolvePastePage, pages, boundsFor, adoptNewItems, onNotice]
+    [resolvePastePage, pages, boundsFor, adoptNewItems, onNotice, clipboardScope]
   );
 
   // Duplicate the selection in place (offset, new ids). The clipboard is untouched.
@@ -559,11 +562,20 @@ export default forwardRef(function PdfAnnotator(
   // (src/lib/pdfClipboard.js → editorOwnsShortcut): never while a text
   // entry has focus, where the browser's own text clipboard and select-all
   // must win, and never when focus is elsewhere in the application.
+  //
+  // Every key is claimed only while THIS editor owns it (editorOwnsShortcut):
+  // more than one annotation editor can be mounted at once — a note's linked
+  // PDF stays mounted (hidden) while the Photo Annotator is open over it — and
+  // a Delete or Escape aimed at the workspace in front must not reach the
+  // one behind.
   useEffect(() => {
     function onKeyDown(e) {
       const focused = typeof document !== "undefined" ? document.activeElement : null;
+      const anyHost = Object.values(pageEls || {}).find(Boolean);
+      const editorRoot = anyHost?.closest?.(ANNOTATION_EDITOR_ROOT_SELECTOR) || null;
       if (e.key === "Escape") {
         if (shouldIgnoreDeleteKey(e.target, focused)) return;
+        if (!editorOwnsShortcut(e.target, focused, editorRoot)) return;
         if (cancelCalloutDraft()) return;
         if (abortActiveGesture()) return;
         if (selectedRef.current.length) {
@@ -577,8 +589,6 @@ export default forwardRef(function PdfAnnotator(
       const shortcut = annotationShortcut(e);
       if (shortcut) {
         if (e.defaultPrevented) return;
-        const anyHost = Object.values(pageEls || {}).find(Boolean);
-        const editorRoot = anyHost?.closest?.("[data-pdf-editor]") || null;
         if (!editorOwnsShortcut(e.target, focused, editorRoot)) return;
         let handled = false;
         switch (shortcut) {
@@ -608,6 +618,7 @@ export default forwardRef(function PdfAnnotator(
       }
       if (e.key !== "Delete" && e.key !== "Backspace") return;
       if (shouldIgnoreDeleteKey(e.target, focused)) return;
+      if (!editorOwnsShortcut(e.target, focused, editorRoot)) return;
       if (!selectedRef.current.length) return;
       if (deleteSelected()) e.preventDefault();
     }
@@ -2028,13 +2039,16 @@ function PageOverlay({
   }
 
   function renderTypewriter(a) {
+    // The box grows with the font so large text (a photo's scaled default) is
+    // not clipped; identical to the historical 260 × 40 at the default size.
+    const box = typewriterBox(a.fontSize);
     return (
       <g key={a.id} pointerEvents={itemPE(a)}>
         <foreignObject
           x={a.x}
           y={a.y - (a.fontSize || 14)}
-          width={TYPEWRITER_BOX.w}
-          height={TYPEWRITER_BOX.h}
+          width={box.w}
+          height={box.h}
         >
           <div
             dir="ltr"
@@ -2094,8 +2108,8 @@ function PageOverlay({
           <rect
             x={a.x - 4}
             y={a.y - (a.fontSize || 14) - 4}
-            width={TYPEWRITER_BOX.w}
-            height={TYPEWRITER_BOX.h}
+            width={box.w}
+            height={box.h}
             fill="transparent"
             style={{ ...grab, cursor: interactive ? "move" : undefined }}
             onPointerDown={startMovePoint(a)}

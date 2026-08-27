@@ -45,6 +45,16 @@ import {
 
 export const EDITOR_IMAGE_ASSET_ATTR = "data-asset-id";
 
+// PHOTO ANNOTATION (P4). An annotated image's `data-asset-id` points at the
+// flattened RENDITION (an ordinary editor-image asset every display and
+// export path already understands); this second attribute names the ORIGINAL
+// photograph the rendition was drawn over. It is a reference in its own
+// right: it keeps the original alive under the Template deletion gate and it
+// tells the NodeView that "Annotate" should reopen the editable layer (kept
+// in the rendition asset's metadata — see src/lib/photoAnnotation.js) rather
+// than start again on the flattened pixels.
+export const EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR = "data-annotation-source-id";
+
 export const EDITOR_IMAGE_UNAVAILABLE_TEXT =
   "Image unavailable — its stored file could not be found.";
 export const EDITOR_IMAGE_LOADING_TEXT = "Loading image…";
@@ -88,6 +98,13 @@ export function assetIdFromAttrs(attrs) {
   return trimmedString(attrs && attrs.assetId);
 }
 
+/** The original-photo reference of an annotated image, or null. */
+export function annotationSourceIdFromAttrs(attrs) {
+  const id = trimmedString(attrs && attrs.annotationSourceId);
+  // A source that names the image itself is meaningless and is dropped.
+  return id && id !== assetIdFromAttrs(attrs) ? id : null;
+}
+
 /**
  * The exact HTML attributes an image node serializes to.
  *
@@ -104,6 +121,10 @@ export function editorImageAttrsToHTML(attrs) {
   if (assetId) {
     // Asset-backed: the reference IS the image. No src of any kind.
     out[EDITOR_IMAGE_ASSET_ATTR] = assetId;
+    // The original behind an annotated rendition; only ever alongside an
+    // asset reference (a remote or legacy image cannot have been annotated).
+    const sourceId = annotationSourceIdFromAttrs(source);
+    if (sourceId) out[EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR] = sourceId;
   } else if (isPersistableImageSrc(source.src)) {
     out.src = String(source.src).trim();
   }
@@ -145,6 +166,12 @@ export function editorImageAttrsFromElement(element) {
 
   const assetId = trimmedString(get(EDITOR_IMAGE_ASSET_ATTR));
   const rawSrc = get("src");
+  const annotationSourceId = assetId
+    ? annotationSourceIdFromAttrs({
+        assetId,
+        annotationSourceId: get(EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR),
+      })
+    : null;
 
   // Presentation attributes are normalized as one unit on the way in: a
   // missing/invalid width parses as null (legacy rendering), and a missing,
@@ -168,6 +195,7 @@ export function editorImageAttrsFromElement(element) {
     widthPct: normalizeMediaWidthPct(get(MEDIA_WIDTH_PCT_ATTR)),
     layoutMode: layout.mode,
     layoutSide: layout.side,
+    annotationSourceId,
   };
 }
 
@@ -177,8 +205,23 @@ export function editorImageAttrsFromElement(element) {
  * reference-aware cleanup) without needing to parse the document twice.
  */
 export function collectAssetIdsFromHtml(html) {
+  return collectAttrValuesFromHtml(html, EDITOR_IMAGE_ASSET_ATTR);
+}
+
+/**
+ * Every distinct ORIGINAL-photo id referenced by annotated images in a stored
+ * note HTML string (`data-annotation-source-id`), in first appearance order.
+ * Kept separate from `collectAssetIdsFromHtml` on purpose: these ids are not
+ * displayed or exported by the document — they are the originals the
+ * Template deletion gate must keep alive and the Photo Annotator reopens.
+ */
+export function collectAnnotationSourceIdsFromHtml(html) {
+  return collectAttrValuesFromHtml(html, EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR);
+}
+
+function collectAttrValuesFromHtml(html, attr) {
   if (typeof html !== "string" || !html) return [];
-  const re = new RegExp(`${EDITOR_IMAGE_ASSET_ATTR}\\s*=\\s*("([^"]*)"|'([^']*)')`, "gi");
+  const re = new RegExp(`${attr}\\s*=\\s*("([^"]*)"|'([^']*)')`, "gi");
   const seen = [];
   let match;
   while ((match = re.exec(html)) !== null) {

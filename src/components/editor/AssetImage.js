@@ -96,6 +96,12 @@ import {
 // The ONE container-geometry rule: a content-box width in the same coordinate
 // space the pointer is measured in, at any document zoom.
 import { measureMediaContentBoxWidth } from "../../lib/editorMediaGeometry";
+// PHOTO ANNOTATION (P4). The NodeView only RAISES a request; the workspace is
+// owned by PhotoAnnotatorHost (mounted once in the document workspace), and
+// the result is written back through one editor command — never through
+// this view. See src/lib/photoAnnotatorSession.js.
+import { isPhotoAnnotatable, photoAnnotateLabel } from "../../lib/photoAnnotation";
+import { requestPhotoAnnotation } from "../../lib/photoAnnotatorSession";
 
 /**
  * The width percentage a node view wrapper currently RENDERS at, measured
@@ -138,7 +144,7 @@ const stopDrag = (e) => {
 };
 
 function AssetImageView({ node, editor, getPos, selected, deleteNode, extension }) {
-  const { assetId, src, alt, title, width, height } = node.attrs;
+  const { assetId, src, alt, title, width, height, annotationSourceId } = node.attrs;
 
   // The live resize preview: inline width only, NEVER the document. Null when
   // idle, so a cancelled gesture reverts by itself — the rendered width falls
@@ -185,6 +191,21 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode, extension 
   const handleRemove = useCallback(() => {
     if (typeof deleteNode === "function") deleteNode();
   }, [deleteNode]);
+
+  // Annotate: raise the request with THIS node's asset, its original (when
+  // it is already an annotated rendition) and its position, so the host can
+  // write the result back to exactly this image.
+  const handleAnnotate = useCallback(() => {
+    if (!editable) return;
+    const pos = typeof getPos === "function" ? getPos() : null;
+    requestPhotoAnnotation({
+      assetId,
+      annotationSourceId,
+      alt,
+      editor,
+      pos: typeof pos === "number" ? pos : null,
+    });
+  }, [editable, getPos, assetId, annotationSourceId, alt, editor]);
 
   /**
    * One corner press begins one gesture, synchronously — the immutable
@@ -407,6 +428,11 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode, extension 
   // A placeholder has no meaningful proportional width, so it offers Remove
   // but no resize handles.
   const showHandles = showChrome && renderable;
+  // Only a stored, resolved photo can be annotated (src/lib/photoAnnotation.js):
+  // a legacy base64 or remote image keeps rendering exactly as before, with
+  // no control.
+  const showAnnotate = showChrome && isPhotoAnnotatable({ assetId, renderable });
+  const annotateLabel = photoAnnotateLabel(node.attrs);
 
   const classNames = mediaImageWrapperClassNames({
     layoutMode: node.attrs.layoutMode,
@@ -448,6 +474,18 @@ function AssetImageView({ node, editor, getPos, selected, deleteNode, extension 
           contentEditable={false}
           onDragStart={stopDrag}
         >
+          {showAnnotate && (
+            <button
+              type="button"
+              className={`${MEDIA_CLASS}-btn`}
+              data-media-annotate="true"
+              onClick={handleAnnotate}
+              title={`${annotateLabel} ${label} (⌘/Ctrl+Enter)`}
+              aria-label={`${annotateLabel}: ${label}`}
+            >
+              {annotateLabel}
+            </button>
+          )}
           <button
             type="button"
             className={`${MEDIA_CLASS}-btn ${MEDIA_CLASS}-btn--danger`}
@@ -553,6 +591,15 @@ export const AssetImage = Image.extend({
         parseHTML: (el) => editorImageAttrsFromElement(el).layoutSide,
         renderHTML: none,
       },
+      // The ORIGINAL photograph behind an annotated rendition (P4, see
+      // editorImageAssets.js). Null for every image that has never been
+      // annotated, and never emitted then, so existing documents round-trip
+      // byte-identically.
+      annotationSourceId: {
+        default: null,
+        parseHTML: (el) => editorImageAttrsFromElement(el).annotationSourceId,
+        renderHTML: none,
+      },
     };
   },
 
@@ -597,9 +644,29 @@ export const AssetImage = Image.extend({
           return measuredWidthPctOf(nodeViewWrapperOf(dom));
         },
       });
+    // Mod + Enter on a SELECTED stored image opens it for annotation — the
+    // keyboard route to the same request the Annotate control raises. Any
+    // other selection returns false, so the key keeps its ordinary meaning.
+    const annotateSelected = () => {
+      const editor = this.editor;
+      if (!editor || !editor.isEditable) return false;
+      const { selection } = editor.state;
+      const node = selection && selection.node;
+      if (!node || node.type.name !== "image") return false;
+      const assetId = node.attrs.assetId;
+      if (typeof assetId !== "string" || !assetId.trim()) return false;
+      return requestPhotoAnnotation({
+        assetId,
+        annotationSourceId: node.attrs.annotationSourceId,
+        alt: node.attrs.alt,
+        editor,
+        pos: selection.from,
+      });
+    };
     return {
       "Alt-ArrowRight": nudge(1),
       "Alt-ArrowLeft": nudge(-1),
+      "Mod-Enter": annotateSelected,
     };
   },
 

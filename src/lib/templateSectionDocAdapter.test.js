@@ -257,6 +257,8 @@ describe("photo conversion", () => {
       widthPct: 60,
       layoutMode: MEDIA_LAYOUT_MODE.BLOCK,
       layoutSide: null,
+      // P4: every parsed image carries the (null) original-photo reference.
+      annotationSourceId: null,
     });
   });
 

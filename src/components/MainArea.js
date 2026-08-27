@@ -5,6 +5,10 @@ import { useEditor } from "@tiptap/react";
 import EditorToolbar from "./EditorToolbar";
 import ExportMenu from "./editor/ExportMenu";
 import DocumentPreview from "./editor/DocumentPreview";
+// The Photo Annotator workspace (P4): mounted ONCE here, for every editor
+// surface in the document workspace — the Free-form note and a Template
+// Section both raise their Annotate requests to the same host.
+import PhotoAnnotatorHost from "./editor/PhotoAnnotatorHost";
 import BottomBar from "./BottomBar";
 // import FullNoteAIBar from "./FullNoteAIBar";
 import PdfEditorTab from "./editor/PdfEditorTab";
@@ -2215,6 +2219,8 @@ export default function MainArea() {
         </div>
       </div>
 
+      {/* Annotate a photo: modal workspace over the document (P4). */}
+      <PhotoAnnotatorHost />
     </main>
   );
 }

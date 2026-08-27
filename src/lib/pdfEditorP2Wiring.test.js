@@ -80,7 +80,8 @@ describe("Callout: one record, three clicks, one leader definition", () => {
 
 describe("clipboard: internal, structured, focus-gated", () => {
   test("the clipboard is a module-level session store, never the OS clipboard", () => {
-    expect(CLIPBOARD).toMatch(/const store = \{ payload: null \};/);
+    // P4 scoped the store by surface (PDF / image); it is still module memory.
+    expect(CLIPBOARD).toMatch(/const store = \{ \[CLIPBOARD_SCOPE\.PDF\]: null, \[CLIPBOARD_SCOPE\.IMAGE\]: null \};/);
     expect(CLIPBOARD).not.toMatch(/navigator\.clipboard|ClipboardEvent|clipboardData/);
     expect(ANNOTATOR).not.toMatch(/navigator\.clipboard|clipboardData/);
   });
@@ -92,7 +93,10 @@ describe("clipboard: internal, structured, focus-gated", () => {
   });
 
   test("shortcuts are gated by editorOwnsShortcut against the editor root, and text entries win", () => {
-    expect(ANNOTATOR).toMatch(/anyHost\?\.closest\?\.\("\[data-pdf-editor\]"\)/);
+    // P4: the root lookup goes through the shared selector, which names the
+    // PDF tab's marker and the Photo Annotator's.
+    expect(ANNOTATOR).toMatch(/anyHost\?\.closest\?\.\(ANNOTATION_EDITOR_ROOT_SELECTOR\)/);
+    expect(read("lib/pdfClipboard.js")).toMatch(/ANNOTATION_EDITOR_ROOT_SELECTOR = "\[data-annotation-editor\],\[data-pdf-editor\]"/);
     expect(ANNOTATOR).toMatch(/if \(!editorOwnsShortcut\(e\.target, focused, editorRoot\)\) return;/);
     expect(TAB).toMatch(/<div className="flex flex-col h-full min-h-0" data-pdf-editor="true">/);
     // One text-entry predicate serves Delete/Escape and the clipboard alike.

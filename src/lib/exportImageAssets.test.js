@@ -407,3 +407,18 @@ describe("stored layout survival (Phase C3)", () => {
     }
   });
 });
+
+describe("P4. an annotated photo exports as its rendition", () => {
+  const { EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR } = require("./editorImageAssets");
+
+  test("49/53. the rendition's bytes are inlined; the original is never read; the source reference is stripped", async () => {
+    const { reads, loadAsset } = store({ rend: asset("image/jpeg"), orig: asset("image/jpeg") });
+    const html = `<p>x</p>${imgRef("rend", ` ${EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR}="orig" alt="Wall"`)}`;
+    const out = await resolveExportImageHtml(html, { loadAsset, blobToDataUrl });
+    expect(reads).toEqual(["rend"]);
+    expect(out).toContain('src="data:image/jpeg;base64,QUJD"');
+    expect(out).not.toContain(EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR);
+    expect(out).not.toContain("orig");
+    expect(out).toContain('alt="Wall"');
+  });
+});

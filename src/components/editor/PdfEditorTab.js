@@ -81,46 +81,16 @@ import {
 import { pickPastePage } from "../../lib/pdfClipboard";
 import useTransientMessage from "../../hooks/useTransientMessage";
 import PdfOptionsBar from "./PdfOptionsBar";
+// The ribbon primitives are shared with the Photo Annotator (P4): one tool
+// button, one divider, one Text box glyph.
+import { TextBoxGlyph, ToolButton, ToolbarDivider } from "./AnnotationRibbon";
 import "../../pdf/pdfLayers.css";
 
 const PdfAnnotator = React.lazy(() => import("../../pdf/PdfAnnotator"));
 
-/** The Text box tool's glyph: a capital T, as the product asks for. */
-const TextBoxGlyph = () => (
-  <span aria-hidden="true" className="font-serif font-bold text-base leading-none">
-    T
-  </span>
-);
-
 // Object URLs for downloads are revoked on a conservative delay: revoking one
 // synchronously after the anchor click cancels the download in some browsers.
 const OBJECT_URL_TTL_MS = 60000;
-
-function ToolButton({ icon, label, active, onClick, disabled }) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-pressed={!!active}
-      disabled={disabled}
-      onClick={onClick}
-      className={`w-8 h-8 flex items-center justify-center rounded border text-sm transition shrink-0
-        ${disabled ? "opacity-40 cursor-not-allowed" : ""}
-        ${
-          active
-            ? "bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300"
-            : "bg-white dark:bg-[#1b1b1b] border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-[#2a2a2a]"
-        }`}
-    >
-      {icon}
-    </button>
-  );
-}
-
-function ToolbarDivider() {
-  return <div className="w-px self-stretch bg-gray-300 dark:bg-gray-700 mx-1" />;
-}
 
 /* ----------------------------- Page component ---------------------------- */
 // One rendered PDF page: canvas (bitmap), pdf.js text layer, search-highlight

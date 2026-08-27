@@ -361,3 +361,24 @@ describe("23/32. shortcut ownership — text editing keeps native precedence", (
     expect(editorOwnsShortcut(el("BODY"), el("BUTTON"), null)).toBe(true);
   });
 });
+
+describe("P4. the clipboard is scoped by surface", () => {
+  const { CLIPBOARD_SCOPE } = require("./pdfClipboard");
+  test("a PDF copy is not a photo paste, and vice versa", () => {
+    writeClipboard({ items: [rect("a")], basePage: 1, pasteCount: 0 }, CLIPBOARD_SCOPE.PDF);
+    expect(readClipboard(CLIPBOARD_SCOPE.IMAGE)).toBeNull();
+    expect(readClipboard(CLIPBOARD_SCOPE.PDF).items).toHaveLength(1);
+    writeClipboard({ items: [rect("b")], basePage: 1, pasteCount: 0 }, CLIPBOARD_SCOPE.IMAGE);
+    expect(readClipboard(CLIPBOARD_SCOPE.IMAGE).items[0].id).toBe("b");
+    expect(readClipboard(CLIPBOARD_SCOPE.PDF).items[0].id).toBe("a");
+    clearClipboard(CLIPBOARD_SCOPE.IMAGE);
+    expect(readClipboard(CLIPBOARD_SCOPE.IMAGE)).toBeNull();
+    expect(readClipboard(CLIPBOARD_SCOPE.PDF)).not.toBeNull();
+    clearClipboard();
+    expect(readClipboard(CLIPBOARD_SCOPE.PDF)).toBeNull();
+  });
+  test("the unscoped calls the PDF editor has always made read the PDF scope", () => {
+    writeClipboard({ items: [rect("a")], basePage: 1, pasteCount: 0 });
+    expect(readClipboard()).toBe(readClipboard(CLIPBOARD_SCOPE.PDF));
+  });
+});

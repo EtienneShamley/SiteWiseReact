@@ -22,7 +22,13 @@ import {
   fontFamilyKind,
   isNoFill,
 } from "../../lib/pdfAnnotationModel";
-import { EDITABLE_FIELDS, FIELD_DEFAULTS, MIXED, selectionSummary } from "../../lib/pdfSelection";
+import {
+  DEFAULT_OPTION_LIMITS,
+  EDITABLE_FIELDS,
+  FIELD_DEFAULTS,
+  MIXED,
+  selectionSummary,
+} from "../../lib/pdfSelection";
 import { TOOL, TOOL_LABELS, isCreationTool } from "../../pdf/pdfTools";
 import {
   BoundedNumberField,
@@ -40,9 +46,10 @@ const TOOL_FIELDS = {
   [TOOL.HIGHLIGHT]: ["color", "opacity", "thickness"],
 };
 
-const FONT_SIZE = { min: 6, max: 96, step: 1, decimals: 0 };
-const STROKE_WIDTH = { min: 0.5, max: 40, step: 0.5, decimals: 1 };
-const THICKNESS = { min: 4, max: 64, step: 1, decimals: 0 };
+// The numeric ranges the bar offers (src/lib/pdfSelection.js): PDF-page
+// numbers by default; the Photo Annotator passes its own set through
+// `limits`, scaled to the photograph's pixel space, because a 96-point
+// maximum font is a caption on a 4000-pixel image.
 
 const ALIGN_GLYPH = { left: "⇤", center: "↔", right: "⇥" };
 const ALIGN_LABEL = { left: "Align left", center: "Align centre", right: "Align right" };
@@ -63,7 +70,11 @@ export default function PdfOptionsBar({
   onApply, // (patch) => void — applies to the selection
   focusTick, // increments when the active tool is re-clicked → focus first control
   disabled,
+  limits, // optional numeric ranges (DEFAULT_OPTION_LIMITS shape); PDF passes nothing
 }) {
+  const FONT_SIZE = limits?.fontSize || DEFAULT_OPTION_LIMITS.fontSize;
+  const STROKE_WIDTH = limits?.strokeWidth || DEFAULT_OPTION_LIMITS.strokeWidth;
+  const THICKNESS = limits?.thickness || DEFAULT_OPTION_LIMITS.thickness;
   const barRef = useRef(null);
   const lastStrokeWidthRef = useRef(2);
 

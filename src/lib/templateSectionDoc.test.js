@@ -318,3 +318,28 @@ describe("asset references (the deletion gate's view)", () => {
     ).toBe(false);
   });
 });
+
+describe("P4. the deletion gate keeps an annotated image's ORIGINAL alive", () => {
+  const { sectionDocHtmlReferencesAsset, sectionDocRowAssetIds } = require("./templateSectionDoc");
+  const html = '<p>a</p><img data-asset-id="rend" data-annotation-source-id="orig"><p>b</p>';
+
+  test("34. the original is referenced while the rendition is in the document", () => {
+    expect(sectionDocHtmlReferencesAsset(html, "orig")).toBe(true);
+    expect(sectionDocHtmlReferencesAsset(html, "rend")).toBe(true);
+    expect(sectionDocHtmlReferencesAsset(html, "other")).toBe(false);
+    expect(sectionDocReferencesAsset({ r1: { format: "sectiondoc/1", html } }, "orig")).toBe(true);
+  });
+
+  test("deleting the row offers both the rendition and its original as candidates", () => {
+    expect(sectionDocRowAssetIds({ r1: { format: "sectiondoc/1", html } }, "r1")).toEqual(["rend", "orig"]);
+  });
+
+  test("the source reference survives the section document's own serialize → parse", () => {
+    const { parseSectionDocHtml, sectionDocHtmlFromNodes } = require("./templateSectionDoc");
+    const nodes = parseSectionDocHtml(html);
+    expect(nodes).not.toBeNull();
+    const image = nodes.find((n) => n.type === "image");
+    expect(image.attrs.annotationSourceId).toBe("orig");
+    expect(sectionDocHtmlFromNodes(nodes)).toContain('data-annotation-source-id="orig"');
+  });
+});

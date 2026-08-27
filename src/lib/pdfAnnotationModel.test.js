@@ -556,3 +556,15 @@ describe("freehand path simplification", () => {
     expect(stored.opacity).toBe(0.35);
   });
 });
+
+describe("P4. the typewriter box follows the font size", () => {
+  const { TYPEWRITER_BOX, annotationBounds, typewriterBox } = require("./pdfAnnotationModel");
+  test("is the historical 260 × 40 at (or below) the default size, and proportional above it", () => {
+    expect(typewriterBox(14)).toEqual(TYPEWRITER_BOX);
+    expect(typewriterBox(8)).toEqual(TYPEWRITER_BOX);
+    expect(typewriterBox(undefined)).toEqual(TYPEWRITER_BOX);
+    expect(typewriterBox(70)).toEqual({ w: 1300, h: 200 });
+    expect(annotationBounds({ type: "typewriter", x: 10, y: 100, fontSize: 70 })).toEqual({ x: 6, y: 26, w: 1300, h: 200 });
+    expect(annotationBounds({ type: "typewriter", x: 10, y: 100 })).toEqual({ x: 6, y: 82, w: 260, h: 40 });
+  });
+});

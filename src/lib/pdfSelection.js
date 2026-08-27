@@ -151,6 +151,18 @@ export const FIELD_DEFAULTS = Object.freeze({
 });
 
 /**
+ * The numeric RANGES the options bar offers for the length fields. These
+ * are PDF-page numbers (points on a ~600-unit page); the Photo Annotator
+ * scales them to the photograph's pixel space (src/lib/photoAnnotation.js →
+ * imageOptionLimits). The shape is the shared BoundedNumberField's.
+ */
+export const DEFAULT_OPTION_LIMITS = Object.freeze({
+  fontSize: Object.freeze({ min: 6, max: 96, step: 1, decimals: 0 }),
+  strokeWidth: Object.freeze({ min: 0.5, max: 40, step: 0.5, decimals: 1 }),
+  thickness: Object.freeze({ min: 4, max: 64, step: 1, decimals: 0 }),
+});
+
+/**
  * Summarize a selection for the contextual options bar.
  *
  * `fields` is the INTERSECTION of the selected types' editable fields — the

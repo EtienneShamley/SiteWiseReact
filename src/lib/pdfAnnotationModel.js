@@ -673,8 +673,20 @@ export function clampPathToPage(pts, bounds) {
 
 /** Fixed on-page size of the sticky-note marker, in page units. */
 export const STICKY_SIZE = 18;
-/** Typewriter text has no stored size; this is its on-page hit box. */
+/** Typewriter text has no stored size; this is its on-page hit box at the default font size. */
 export const TYPEWRITER_BOX = { w: 260, h: 40 };
+
+/**
+ * The typewriter's visible/hit box for a font size: TYPEWRITER_BOX at the
+ * default 14, growing in proportion above it so a large font (a photo's
+ * scaled default, or a user's choice) is not clipped to a few characters.
+ * Never smaller than the default box.
+ */
+export function typewriterBox(fontSize) {
+  const fs = positive(fontSize) ?? 14;
+  const k = Math.max(1, fs / 14);
+  return { w: TYPEWRITER_BOX.w * k, h: TYPEWRITER_BOX.h * k };
+}
 
 function boundsOfPoints(pts, pad = 0) {
   const xs = pts.map((p) => p.x);
@@ -709,7 +721,8 @@ export function annotationBounds(item) {
       const p = point(item);
       if (!p) return null;
       const fs = positive(item.fontSize) ?? 14;
-      return { x: p.x - 4, y: p.y - fs - 4, w: TYPEWRITER_BOX.w, h: TYPEWRITER_BOX.h };
+      const box = typewriterBox(fs);
+      return { x: p.x - 4, y: p.y - fs - 4, w: box.w, h: box.h };
     }
     case ANNOTATION_TYPES.STICKY: {
       const p = point(item);

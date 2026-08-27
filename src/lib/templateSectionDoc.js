@@ -103,6 +103,7 @@
 
 import {
   EDITOR_IMAGE_ASSET_ATTR,
+  collectAnnotationSourceIdsFromHtml,
   collectAssetIdsFromHtml,
   editorImageAttrsFromElement,
   editorImageAttrsToHTML,
@@ -205,9 +206,13 @@ export function sectionDocRowAssetIds(map, rowId) {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
   if (typeof entry.html !== "string") return [];
   const { imageIds, fileIds } = sectionDocAssetIds(entry.html);
+  // An annotated image's ORIGINAL photograph belongs to the row as much as
+  // the rendition does: it is offered for deletion with the row, and the
+  // gate below still refuses while any other document references it.
+  const sourceIds = collectAnnotationSourceIdsFromHtml(entry.html);
   const seen = new Set();
   const ids = [];
-  for (const id of [...imageIds, ...fileIds]) {
+  for (const id of [...imageIds, ...fileIds, ...sourceIds]) {
     if (!id || seen.has(id)) continue;
     seen.add(id);
     ids.push(id);
@@ -532,6 +537,10 @@ export function sectionDocHtmlReferencesAsset(html, assetId) {
   const { imageIds, fileIds } = sectionDocAssetIds(html);
   if (imageIds.includes(assetId)) return true;
   if (fileIds.includes(assetId)) return true;
+  // The original photograph behind an annotated image (P4) is referenced by
+  // the rendition that was drawn over it: while the annotated image is in
+  // the document, its original is live and must not be destroyed.
+  if (collectAnnotationSourceIdsFromHtml(html).includes(assetId)) return true;
   return fileAttrReferencesId(html, assetId);
 }
 

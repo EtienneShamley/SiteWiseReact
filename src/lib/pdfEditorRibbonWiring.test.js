@@ -15,6 +15,9 @@ const BAR = withoutComments(read("components/editor/PdfOptionsBar.js"));
 const CONTROLS = withoutComments(read("components/editor/PdfControls.js"));
 const ANNOTATOR = withoutComments(read("pdf/PdfAnnotator.js"));
 const MAIN_AREA = withoutComments(read("components/MainArea.js"));
+// The ribbon primitives (tool button, divider, Text box glyph) moved to the
+// shared AnnotationRibbon module in P4, where the Photo Annotator reads them.
+const RIBBON = withoutComments(read("components/editor/AnnotationRibbon.js"));
 
 const RIBBON_AT = TAB.indexOf('data-pdf-ribbon="true"');
 const SCROLLER_AT = TAB.indexOf("ref={scrollRef}");
@@ -148,12 +151,13 @@ describe("36/37/38. Highlight and Text box in the ribbon", () => {
 
   test("38. the Text box tool shows a capital T with the accessible name \"Text box\"", () => {
     expect(TAB).toMatch(/tb\(TOOL\.TEXTBOX, <TextBoxGlyph \/>\)/);
-    expect(TAB).toMatch(/const TextBoxGlyph = \(\) => \(\s*<span aria-hidden="true"[^>]*>\s*T\s*<\/span>/);
+    expect(RIBBON).toMatch(/export const TextBoxGlyph = \(\) => \(\s*<span aria-hidden="true"[^>]*>\s*T\s*<\/span>/);
+    expect(TAB).toMatch(/import \{ TextBoxGlyph, ToolButton, ToolbarDivider \} from "\.\/AnnotationRibbon"/);
     expect(read("pdf/pdfTools.js")).toMatch(/\[TOOL\.TEXTBOX\]: "Text box"/);
     // The I-cursor is not the Text box glyph (P3 uses it for Edit text).
     expect(TAB).not.toMatch(/tb\(TOOL\.TEXTBOX, <FaICursor/);
     // Every tool button still carries a real label and pressed state.
-    expect(TAB).toMatch(/aria-label=\{label\}\s*aria-pressed=\{!!active\}/);
+    expect(RIBBON).toMatch(/aria-label=\{label\}\s*aria-pressed=\{!!active\}/);
   });
 });
 

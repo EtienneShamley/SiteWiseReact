@@ -28,6 +28,7 @@
 import { getAsset, ASSET_KIND_EDITOR_IMAGE } from "./assetStorage";
 import { isAllowedImageMimeType, normalizeMimeType } from "./imageProcessing";
 import {
+  EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR,
   EDITOR_IMAGE_ASSET_ATTR,
   EXPORT_IMAGE_PLACEHOLDER_CLASS,
   EXPORT_IMAGE_UNAVAILABLE_TEXT,
@@ -224,8 +225,11 @@ export async function resolveExportImageHtml(html, deps = {}) {
     if (!id) continue;
     img.setAttribute("src", resolved.get(id));
     // The reference is meaningless outside this browser; the export carries the
-    // image itself.
+    // image itself. An annotated image's original-photo reference goes the
+    // same way: the export receives the flattened rendition, which IS the
+    // annotated picture — never the editable layer or the original.
     img.removeAttribute(EDITOR_IMAGE_ASSET_ATTR);
+    img.removeAttribute(EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR);
   }
 
   return container.innerHTML;

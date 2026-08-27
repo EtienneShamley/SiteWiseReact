@@ -73,3 +73,29 @@ describe("zoom select options", () => {
     expect(zoomOptionsFor(1.1)).toEqual([50, 75, 100, 110, 125, 150, 175, 200, 300]);
   });
 });
+
+describe("P4. a surface-specific zoom range", () => {
+  const { DEFAULT_ZOOM_RANGE } = require("./pdfZoom");
+  test("the default range IS the PDF viewer's, so every existing call is unchanged", () => {
+    expect(DEFAULT_ZOOM_RANGE).toEqual({ min: MIN_SCALE, max: MAX_SCALE });
+    expect(clampScale(0.1)).toBe(MIN_SCALE);
+  });
+  test("a wider range lets a large photograph fit and zoom to 8×", () => {
+    const range = { min: 0.05, max: 8 };
+    expect(clampScale(0.1, range)).toBe(0.1);
+    expect(clampScale(20, range)).toBe(8);
+    expect(clampScale(NaN, range)).toBe(1);
+    expect(clampScale(0.1, { min: -1, max: 0 })).toBe(MIN_SCALE); // invalid range → default
+  });
+  test("wheel zoom, focal scroll and the ladder all honour the range", () => {
+    const range = { min: 0.05, max: 8 };
+    const s = wheelZoomScale(0.1, 500, 0, range);
+    expect(s).toBeLessThan(0.1);
+    expect(s).toBeGreaterThanOrEqual(0.05);
+    // From 0.2 to 0.4 the point under the pointer stays put — only if 0.2 is
+    // not clamped up to the PDF minimum.
+    expect(focalScroll({ scrollLeft: 100, scrollTop: 100 }, { x: 50, y: 50 }, 0.2, 0.4, range)).toEqual({ scrollLeft: 250, scrollTop: 250 });
+    expect(zoomOptionsFor(0.1, [10, 25, 50, 100], range)).toEqual([10, 25, 50, 100]);
+    expect(zoomOptionsFor(0.19, [10, 25, 50, 100], range)).toEqual([10, 19, 25, 50, 100]);
+  });
+});

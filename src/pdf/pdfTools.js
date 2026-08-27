@@ -185,10 +185,101 @@ export const DEFAULT_TOOL_STYLES = Object.freeze({
   [TOOL.EDIT_TEXT]: {},
 });
 
-/** A fresh, mutable copy of every tool's default style (session memory). */
-export function createToolStyles() {
+/* -------------------------------------------------------------------------- */
+/* Surfaces                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The two surfaces the ONE annotation engine (src/pdf/PdfAnnotator.js) draws
+ * over: a pdf.js page, or a raster image (the Photo Annotator, P4). The
+ * engine itself is surface-agnostic — pages are `{ baseW, baseH, hasText }`
+ * and the annotation model is the same — so what differs per surface is
+ * deliberately small and lives here: WHICH tools the ribbon offers.
+ */
+export const ANNOTATION_SURFACE = Object.freeze({ PDF: "pdf", IMAGE: "image" });
+
+/**
+ * The PDF ribbon's tool catalogue, in ribbon order and grouped as the ribbon
+ * draws it (a divider between groups). Unchanged by P4: this is the P1–P3
+ * catalogue written down, so the Photo Annotator's subset can be asserted
+ * against it.
+ */
+export const PDF_TOOL_GROUPS = Object.freeze([
+  Object.freeze([TOOL.SELECT, TOOL.PAN]),
+  Object.freeze([TOOL.HIGHLIGHT, TOOL.UNDERLINE, TOOL.STRIKE]),
+  Object.freeze([TOOL.TYPEWRITER, TOOL.TEXTBOX, TOOL.CALLOUT, TOOL.STICKY, TOOL.EDIT_TEXT]),
+  Object.freeze([TOOL.ARROW, TOOL.LINE, TOOL.RECT, TOOL.ELLIPSE, TOOL.PEN, TOOL.FREEHAND_HIGHLIGHT]),
+]);
+
+/**
+ * The Photo Annotator's tool catalogue: the PDF tools that mean something on
+ * a raster image. Deliberately absent:
+ *   - Highlight / Underline / Strikethrough — they mark up the PDF's OWN text
+ *     (text-selection quads); a photo has no text layer, and the freehand
+ *     highlight covers "highlight an area of a picture";
+ *   - Edit text — PDF-only by definition (it replaces a run of the source
+ *     PDF's text through the text layer);
+ *   - Sticky note — its value is the openable bubble, which a flattened
+ *     raster cannot carry; a Text box or Callout is the raster-honest form.
+ */
+export const IMAGE_TOOL_GROUPS = Object.freeze([
+  Object.freeze([TOOL.SELECT, TOOL.PAN]),
+  Object.freeze([TOOL.TYPEWRITER, TOOL.TEXTBOX, TOOL.CALLOUT]),
+  Object.freeze([TOOL.ARROW, TOOL.LINE, TOOL.RECT, TOOL.ELLIPSE, TOOL.PEN, TOOL.FREEHAND_HIGHLIGHT]),
+]);
+
+/** The ribbon groups for a surface (PDF unless told otherwise). */
+export function toolGroupsForSurface(surface) {
+  return surface === ANNOTATION_SURFACE.IMAGE ? IMAGE_TOOL_GROUPS : PDF_TOOL_GROUPS;
+}
+
+/** Every tool a surface offers, flattened, in ribbon order. */
+export function toolsForSurface(surface) {
+  return toolGroupsForSurface(surface).flat();
+}
+
+/** Whether a surface offers `tool` at all. */
+export function surfaceOffersTool(surface, tool) {
+  return toolsForSurface(surface).includes(tool);
+}
+
+/**
+ * The style fields that are LENGTHS in the annotation's coordinate space.
+ * The defaults above are sized for a PDF page (~600 units wide); on a
+ * 4000-pixel photograph the same numbers are invisible, so the Photo
+ * Annotator scales exactly these fields by a size factor when it opens
+ * (src/lib/photoAnnotation.js → imageSizeFactor). Colours, alignment, head
+ * style and opacity are dimensionless and never scaled.
+ */
+export const SCALED_STYLE_FIELDS = Object.freeze(["strokeWidth", "fontSize", "thickness"]);
+
+/**
+ * A copy of `style` with its length fields multiplied by `factor`. A factor
+ * of 1 (or an invalid one) returns an identical copy. `strokeWidth: 0` — the
+ * canonical "No border" — stays 0.
+ */
+export function scaleToolStyle(style, factor) {
+  const k = typeof factor === "number" && Number.isFinite(factor) && factor > 0 ? factor : 1;
+  const out = { ...(style || {}) };
+  if (k === 1) return out;
+  for (const field of SCALED_STYLE_FIELDS) {
+    if (typeof out[field] === "number" && Number.isFinite(out[field]) && out[field] > 0) {
+      out[field] = Math.round(out[field] * k * 10) / 10;
+    }
+  }
+  return out;
+}
+
+/**
+ * A fresh, mutable copy of every tool's default style (session memory).
+ * `sizeFactor` scales the length fields for a larger coordinate space (see
+ * scaleToolStyle); the PDF editor passes nothing and gets the defaults.
+ */
+export function createToolStyles({ sizeFactor = 1 } = {}) {
   const out = {};
-  for (const [tool, style] of Object.entries(DEFAULT_TOOL_STYLES)) out[tool] = { ...style };
+  for (const [tool, style] of Object.entries(DEFAULT_TOOL_STYLES)) {
+    out[tool] = scaleToolStyle(style, sizeFactor);
+  }
   return out;
 }
 

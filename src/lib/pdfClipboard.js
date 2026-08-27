@@ -27,19 +27,39 @@ export const PASTE_OFFSET = 12;
 
 /* ------------------------------ Session store ----------------------------- */
 
-const store = { payload: null };
+/**
+ * The clipboard is SCOPED BY SURFACE (P4). PDF page space (points) and image
+ * space (native pixels) are both y-down unit spaces, so geometry would
+ * translate — but not SIZE: a 14-point text box copied from a PDF is a
+ * speck on a 4000-pixel photograph, and a 70-pixel one pasted into a PDF
+ * covers a page. Rather than paste something that is technically valid and
+ * practically wrong, each surface keeps its own clipboard; copying between
+ * two photos (or two PDFs) works as before. Cross-surface paste with a
+ * size translation is a deliberate non-goal for this pass.
+ */
+export const CLIPBOARD_SCOPE = Object.freeze({ PDF: "pdf", IMAGE: "image" });
 
-export function readClipboard() {
-  return store.payload;
+const store = { [CLIPBOARD_SCOPE.PDF]: null, [CLIPBOARD_SCOPE.IMAGE]: null };
+
+const scopeKey = (scope) => (scope === CLIPBOARD_SCOPE.IMAGE ? CLIPBOARD_SCOPE.IMAGE : CLIPBOARD_SCOPE.PDF);
+
+export function readClipboard(scope = CLIPBOARD_SCOPE.PDF) {
+  return store[scopeKey(scope)];
 }
 
-export function writeClipboard(payload) {
-  store.payload = payload || null;
-  return store.payload;
+export function writeClipboard(payload, scope = CLIPBOARD_SCOPE.PDF) {
+  store[scopeKey(scope)] = payload || null;
+  return store[scopeKey(scope)];
 }
 
-export function clearClipboard() {
-  store.payload = null;
+/** Clear one scope, or every scope when none is given. */
+export function clearClipboard(scope) {
+  if (scope === undefined) {
+    store[CLIPBOARD_SCOPE.PDF] = null;
+    store[CLIPBOARD_SCOPE.IMAGE] = null;
+    return;
+  }
+  store[scopeKey(scope)] = null;
 }
 
 /* ---------------------------------- Copy ---------------------------------- */
@@ -257,6 +277,14 @@ export function isTextEntryElement(el) {
   const role = typeof el.getAttribute === "function" ? el.getAttribute("role") : null;
   return role === "textbox" || role === "combobox" || role === "searchbox" || role === "spinbutton";
 }
+
+/**
+ * The element that marks an annotation editor's ROOT — the PDF editor tab
+ * (`data-pdf-editor`, P2) or the Photo Annotator workspace
+ * (`data-annotation-editor`, P4). The overlay finds the nearest one above
+ * its page hosts to decide whether focus is "inside the editor".
+ */
+export const ANNOTATION_EDITOR_ROOT_SELECTOR = "[data-annotation-editor],[data-pdf-editor]";
 
 /**
  * Whether the PDF editor owns a clipboard/select-all shortcut right now.

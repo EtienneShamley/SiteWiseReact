@@ -267,3 +267,38 @@ describe("collectAssetIdsFromHtml", () => {
     expect(collectAssetIdsFromHtml(null)).toEqual([]);
   });
 });
+
+describe("P4. an annotated image's original-photo reference", () => {
+  const {
+    EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR,
+    annotationSourceIdFromAttrs,
+    collectAnnotationSourceIdsFromHtml,
+    collectAssetIdsFromHtml,
+  } = require("./editorImageAssets");
+  const el = (map) => ({ getAttribute: (n) => (n in map ? map[n] : null) });
+
+  test("serializes beside the rendition reference and round-trips", () => {
+    const out = editorImageAttrsToHTML({ assetId: "rend", annotationSourceId: "orig", alt: "Wall" });
+    expect(out).toEqual({ "data-asset-id": "rend", [EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR]: "orig", alt: "Wall" });
+    expect(editorImageAttrsFromElement(el(out)).annotationSourceId).toBe("orig");
+  });
+
+  test("is never emitted for an image that has not been annotated, so legacy HTML is byte-identical", () => {
+    expect(editorImageAttrsToHTML({ assetId: "a" })).toEqual({ "data-asset-id": "a" });
+    expect(editorImageAttrsToHTML({ assetId: "a", annotationSourceId: null })).toEqual({ "data-asset-id": "a" });
+    expect(editorImageAttrsFromElement(el({ "data-asset-id": "a" })).annotationSourceId).toBeNull();
+  });
+
+  test("never accompanies a remote or legacy src, and never names the image itself", () => {
+    expect(editorImageAttrsToHTML({ src: "https://x/y.png", annotationSourceId: "orig" })).toEqual({ src: "https://x/y.png" });
+    expect(annotationSourceIdFromAttrs({ assetId: "a", annotationSourceId: "a" })).toBeNull();
+    expect(editorImageAttrsFromElement(el({ src: "https://x/y.png", [EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR]: "orig" })).annotationSourceId).toBeNull();
+  });
+
+  test("the source collector is separate from the display collector", () => {
+    const html = `<p>x</p><img data-asset-id="rend" ${EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR}='orig'><img data-asset-id="plain">`;
+    expect(collectAssetIdsFromHtml(html)).toEqual(["rend", "plain"]);
+    expect(collectAnnotationSourceIdsFromHtml(html)).toEqual(["orig"]);
+    expect(collectAnnotationSourceIdsFromHtml("")).toEqual([]);
+  });
+});

@@ -16,14 +16,29 @@ export const MIN_SCALE = 0.4;
 export const MAX_SCALE = 4;
 export const ZOOM_STEPS = [50, 75, 100, 125, 150, 175, 200, 300];
 
+/**
+ * A zoom RANGE: the bounds one surface allows. The PDF viewer's range is the
+ * default everywhere below, so every existing call is unchanged; the Photo
+ * Annotator passes its own (src/lib/photoAnnotation.js → imageZoomRange),
+ * because a 4000-pixel photograph must be able to fit a laptop viewport.
+ */
+export const DEFAULT_ZOOM_RANGE = Object.freeze({ min: MIN_SCALE, max: MAX_SCALE });
+
+function safeRange(range) {
+  const min = Number.isFinite(range?.min) && range.min > 0 ? range.min : MIN_SCALE;
+  const max = Number.isFinite(range?.max) && range.max >= min ? range.max : Math.max(min, MAX_SCALE);
+  return { min, max };
+}
+
 /** Per-notch multiplier for a click-wheel; a pinch supplies finer deltas. */
 const WHEEL_SENSITIVITY = 0.0025;
 /** No single event may move the scale by more than this factor. */
 const MAX_STEP_FACTOR = 1.25;
 
-export function clampScale(scale) {
+export function clampScale(scale, range = DEFAULT_ZOOM_RANGE) {
+  const { min, max } = safeRange(range);
   const n = Number.isFinite(scale) ? scale : 1;
-  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, n));
+  return Math.min(max, Math.max(min, n));
 }
 
 /** Whether a wheel event is a zoom gesture rather than a scroll. */
@@ -36,13 +51,13 @@ export function isZoomWheel(evt) {
  * Exponential so the feel is uniform across the range; bounded per event so
  * an inertial trackpad burst cannot run away; clamped to the viewer's range.
  */
-export function wheelZoomScale(scale, deltaY, deltaMode = 0) {
+export function wheelZoomScale(scale, deltaY, deltaMode = 0, range = DEFAULT_ZOOM_RANGE) {
   const d = Number.isFinite(deltaY) ? deltaY : 0;
   // deltaMode 1 = lines, 2 = pages; scale them up to pixel-ish magnitudes.
   const px = deltaMode === 1 ? d * 16 : deltaMode === 2 ? d * 400 : d;
   let factor = Math.exp(-px * WHEEL_SENSITIVITY);
   factor = Math.min(MAX_STEP_FACTOR, Math.max(1 / MAX_STEP_FACTOR, factor));
-  return clampScale(clampScale(scale) * factor);
+  return clampScale(clampScale(scale, range) * factor, range);
 }
 
 /**
@@ -55,8 +70,8 @@ export function wheelZoomScale(scale, deltaY, deltaMode = 0) {
  * pointer, measured in content px, is (scroll + focal) and moves by the
  * scale ratio.
  */
-export function focalScroll({ scrollLeft = 0, scrollTop = 0 }, focal, from, to) {
-  const ratio = clampScale(to) / clampScale(from);
+export function focalScroll({ scrollLeft = 0, scrollTop = 0 }, focal, from, to, range = DEFAULT_ZOOM_RANGE) {
+  const ratio = clampScale(to, range) / clampScale(from, range);
   const fx = Number.isFinite(focal?.x) ? focal.x : 0;
   const fy = Number.isFinite(focal?.y) ? focal.y : 0;
   return {
@@ -66,7 +81,8 @@ export function focalScroll({ scrollLeft = 0, scrollTop = 0 }, focal, from, to) 
 }
 
 /** Zoom-select options: the fixed steps plus the current value if it is off-ladder. */
-export function zoomOptionsFor(scale) {
-  const pct = Math.round(clampScale(scale) * 100);
-  return ZOOM_STEPS.includes(pct) ? ZOOM_STEPS : [...ZOOM_STEPS, pct].sort((a, b) => a - b);
+export function zoomOptionsFor(scale, steps = ZOOM_STEPS, range = DEFAULT_ZOOM_RANGE) {
+  const ladder = Array.isArray(steps) && steps.length ? steps : ZOOM_STEPS;
+  const pct = Math.round(clampScale(scale, range) * 100);
+  return ladder.includes(pct) ? ladder : [...ladder, pct].sort((a, b) => a - b);
 }
