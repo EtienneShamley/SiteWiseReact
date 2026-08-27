@@ -33,7 +33,8 @@ describe("1/2. the ribbon never scrolls with the document", () => {
     expect(TAB.match(/overflow-auto/g)).toHaveLength(1);
     expect(TAB.slice(SCROLLER_AT)).toMatch(/<PdfPage/);
     // The editor column is height-bounded so the scroller, not the page, grows.
-    expect(TAB).toMatch(/<div className="flex flex-col h-full min-h-0">/);
+    // (P2 added `data-pdf-editor` to this root for shortcut ownership.)
+    expect(TAB).toMatch(/<div className="flex flex-col h-full min-h-0"[^>]*>/);
     expect(TAB).toMatch(/className="flex-1 min-h-0 overflow-auto p-2"/);
     expect(TAB.slice(RIBBON_AT - 40, RIBBON_AT + 40)).toMatch(/shrink-0/);
   });

@@ -36,6 +36,7 @@ import {
   FaChevronDown,
   FaTimes,
   FaFileExport,
+  FaObjectGroup,
 } from "react-icons/fa";
 import {
   loadPdf,
@@ -74,6 +75,8 @@ import {
   wheelZoomScale,
   zoomOptionsFor,
 } from "../../lib/pdfZoom";
+import { pickPastePage } from "../../lib/pdfClipboard";
+import useTransientMessage from "../../hooks/useTransientMessage";
 import PdfOptionsBar from "./PdfOptionsBar";
 import "../../pdf/pdfLayers.css";
 
@@ -232,6 +235,8 @@ export default function PdfEditorTab({
   const [pageEls, setPageEls] = useState({});
   const [histState, setHistState] = useState({ canUndo: false, canRedo: false });
   const hasSelection = selection.ids.length > 0;
+  // Short, self-clearing editor notices (e.g. a partial paste). Not errors.
+  const notice = useTransientMessage();
 
   // Find/search state
   const [findOpen, setFindOpen] = useState(false);
@@ -529,6 +534,24 @@ export default function PdfEditorTab({
     annotatorRef.current?.applyToSelection(patch);
   }, []);
   const onEscape = useCallback(() => setActiveTool(TOOL.SELECT), []);
+  const showNotice = notice.showInfo;
+
+  // The page a paste lands on: the one occupying most of the visible
+  // viewer (src/lib/pdfClipboard.js → pickPastePage), measured from the ONE
+  // scroll container. Falls back to page 1 before layout exists.
+  const resolvePastePage = useCallback(() => {
+    const scroller = scrollRef.current;
+    if (!scroller || !layout.length) return layout[0]?.pageNo ?? 1;
+    const sRect = scroller.getBoundingClientRect();
+    const rects = layout.map((meta) => {
+      const container = pageEls[meta.pageNo]?.parentElement;
+      const r = container?.getBoundingClientRect();
+      return r
+        ? { pageNo: meta.pageNo, top: r.top - sRect.top, bottom: r.bottom - sRect.top }
+        : { pageNo: meta.pageNo, top: 0, bottom: 0 };
+    });
+    return pickPastePage(rects, 0, sRect.height) ?? layout[0].pageNo;
+  }, [layout, pageEls]);
 
   /* ------------------------------- Hand pan -------------------------------- */
 
@@ -749,7 +772,7 @@ export default function PdfEditorTab({
   );
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col h-full min-h-0" data-pdf-editor="true">
       {/* The RIBBON: two rows that never scroll — tools, then contextual
           options. Only the viewer below (scrollRef) scrolls. */}
       <div className="shrink-0" data-pdf-ribbon="true">
@@ -804,6 +827,7 @@ export default function PdfEditorTab({
 
         <ToolButton icon={<FaUndo />} label="Undo" disabled={!pdfDoc || !histState.canUndo} onClick={() => annotatorRef.current?.undo()} />
         <ToolButton icon={<FaRedo />} label="Redo" disabled={!pdfDoc || !histState.canRedo} onClick={() => annotatorRef.current?.redo()} />
+        <ToolButton icon={<FaObjectGroup />} label="Select all annotations" disabled={!pdfDoc} onClick={() => annotatorRef.current?.selectAll()} />
         <ToolButton icon={<FaTrashAlt />} label="Delete selected" disabled={!pdfDoc || !hasSelection} onClick={() => annotatorRef.current?.deleteSelected()} />
 
         <ToolbarDivider />
@@ -884,6 +908,19 @@ export default function PdfEditorTab({
         </div>
       )}
 
+      {/* Editor notices (e.g. a paste that skipped pages) — brief, self-clearing */}
+      <div aria-live="polite" className="sr-only">
+        {notice.message}
+      </div>
+      {notice.message && (
+        <div className="flex items-center justify-between gap-2 px-3 py-1.5 text-sm border-b bg-gray-50 dark:bg-[#1d1d1d] text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700">
+          <span>{notice.message}</span>
+          <button type="button" className="text-xs underline shrink-0" onClick={notice.clear}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Find bar */}
       {findOpen && (
         <div className="flex items-center gap-2 px-2 py-1.5 border-b border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-[#1d1d1d]">
@@ -928,8 +965,9 @@ export default function PdfEditorTab({
         {!pdfDoc && (
           <div className="text-sm opacity-70 p-4">
             Load a PDF. Pick a tool, then click/drag on the page — or select text with the
-            Highlight/Underline/Strikethrough tools to mark it up. Text and Sticky note tools
-            switch back to <em>Select</em> after placing an item. Ctrl/⌘ + scroll zooms.
+            Highlight/Underline/Strikethrough tools to mark it up. Text, Callout and Sticky note
+            tools switch back to <em>Select</em> after placing an item. Ctrl/⌘ + scroll zooms;
+            Ctrl/⌘ + C / V / D / A copy, paste, duplicate and select annotations.
           </div>
         )}
 
@@ -962,6 +1000,8 @@ export default function PdfEditorTab({
               onSelectionChange={setSelection}
               onToolConsumed={onEscape}
               onEscape={onEscape}
+              resolvePastePage={resolvePastePage}
+              onNotice={showNotice}
             />
           </Suspense>
         )}

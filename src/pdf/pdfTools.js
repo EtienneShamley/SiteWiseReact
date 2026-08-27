@@ -42,10 +42,17 @@ export const DRAG_CREATE_TOOLS = [
   TOOL.RECT,
   TOOL.ELLIPSE,
   TOOL.TEXTBOX,
-  TOOL.CALLOUT,
   TOOL.PEN,
   TOOL.FREEHAND_HIGHLIGHT,
 ];
+
+/**
+ * Tools whose annotation is built from several clicks (src/lib/pdfCallout.js:
+ * tip → box corner → opposite corner). The draft between clicks is transient
+ * editor state, not an annotation; the tool hands back to Select once the
+ * item exists, like the click-to-place tools.
+ */
+export const MULTI_CLICK_TOOLS = [TOOL.CALLOUT];
 
 /**
  * Tools whose annotation is placed with a single click. These hand the tool
@@ -55,7 +62,12 @@ export const DRAG_CREATE_TOOLS = [
 export const CLICK_PLACE_TOOLS = [TOOL.TYPEWRITER, TOOL.STICKY];
 
 /** Every tool that creates annotations (as opposed to Select / Pan). */
-export const CREATION_TOOLS = [...MARKUP_TOOLS, ...DRAG_CREATE_TOOLS, ...CLICK_PLACE_TOOLS];
+export const CREATION_TOOLS = [
+  ...MARKUP_TOOLS,
+  ...DRAG_CREATE_TOOLS,
+  ...MULTI_CLICK_TOOLS,
+  ...CLICK_PLACE_TOOLS,
+];
 
 export function isCreationTool(tool) {
   return CREATION_TOOLS.includes(tool);
@@ -63,12 +75,18 @@ export function isCreationTool(tool) {
 
 /**
  * Whether the annotation overlay must own the pointer for this tool on this
- * page. Drag-creation and click-placement tools always do; the text-markup
- * tools only on pages WITHOUT a text layer (drag-band fallback) — on text
- * pages the browser's own selection does the work.
+ * page. Drag-creation, multi-click and click-placement tools always do; the
+ * text-markup tools only on pages WITHOUT a text layer (drag-band fallback)
+ * — on text pages the browser's own selection does the work.
  */
 export function overlayOwnsPointer(tool, pageHasText) {
-  if (DRAG_CREATE_TOOLS.includes(tool) || CLICK_PLACE_TOOLS.includes(tool)) return true;
+  if (
+    DRAG_CREATE_TOOLS.includes(tool) ||
+    MULTI_CLICK_TOOLS.includes(tool) ||
+    CLICK_PLACE_TOOLS.includes(tool)
+  ) {
+    return true;
+  }
   if (MARKUP_TOOLS.includes(tool)) return !pageHasText;
   return false;
 }

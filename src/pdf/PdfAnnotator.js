@@ -26,6 +26,16 @@
 //   behave identically and a lost pointer cannot leave the editor stuck.
 //   During a gesture the overlay writes transient geometry only; the single
 //   persisted mutation happens once, on release.
+// - The Callout is built from three clicks (src/lib/pdfCallout.js). Between
+//   clicks the draft is transient state here — never an item, never
+//   persisted — and only the third click creates the record, as one history
+//   entry. Its leader is derived geometry of the one callout record, so it
+//   can never detach from the box.
+// - Copy / paste / duplicate / select-all (src/lib/pdfClipboard.js) work on
+//   the same selection list and the same records: an internal session
+//   clipboard of validated copies, new ids on every paste, one history entry
+//   per paste. Focus decides precedence — a text entry keeps the native
+//   shortcuts.
 import React, {
   forwardRef,
   useEffect,
@@ -87,6 +97,26 @@ import {
   resolveClickSelection,
   resolveMarqueeSelection,
 } from "../lib/pdfSelection";
+import {
+  ANNOTATION_SHORTCUT,
+  annotationShortcut,
+  copyAnnotations,
+  editorOwnsShortcut,
+  isTextEntryElement,
+  planDuplicate,
+  planPaste,
+  readClipboard,
+  selectAllIds,
+  writeClipboard,
+} from "../lib/pdfClipboard";
+import {
+  CALLOUT_STAGE,
+  calloutDraftPreview,
+  calloutLeaderGeometry,
+  completeCalloutDraft,
+  placeCalloutAnchor,
+  startCalloutDraft,
+} from "../lib/pdfCallout";
 import { MARKUP_TOOLS, TOOL, isCreationTool, overlayOwnsPointer } from "./pdfTools";
 
 /* -------------------------------------------------------------------------- */
@@ -104,21 +134,10 @@ export function isAdditiveSelect(e) {
 }
 
 // Delete/Backspace must never be stolen from a control where they have their
-// own meaning. Checked against both the event target and the focused element.
-function isTextEntryTarget(el) {
-  if (!el || typeof el !== "object") return false;
-  const tag = el.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "OPTION") return true;
-  if (el.isContentEditable) return true;
-  const role = typeof el.getAttribute === "function" ? el.getAttribute("role") : null;
-  if (role === "textbox" || role === "combobox" || role === "searchbox" || role === "spinbutton") {
-    return true;
-  }
-  return false;
-}
-
+// own meaning. Checked against both the event target and the focused element,
+// with the same predicate the clipboard shortcuts use (pdfClipboard.js).
 export function shouldIgnoreDeleteKey(target, activeElement) {
-  return isTextEntryTarget(target) || isTextEntryTarget(activeElement);
+  return isTextEntryElement(target) || isTextEntryElement(activeElement);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -138,6 +157,8 @@ export default forwardRef(function PdfAnnotator(
     onSelectionChange, // ({ ids, items }) — transient, for the contextual options
     onToolConsumed, // parent switches back to Select after place-and-edit tools
     onEscape, // Escape with nothing to cancel or deselect (parent returns to Select)
+    resolvePastePage, // () => pageNo the viewer is showing (paste target); optional
+    onNotice, // (message) — a short, non-error status the ribbon can show
   },
   ref
 ) {
@@ -164,6 +185,22 @@ export default forwardRef(function PdfAnnotator(
 
   // Sticky note bubble control — session state, never persisted.
   const [openStickyId, setOpenStickyId] = useState(null);
+
+  // The in-progress three-click Callout (page space), or null. Transient:
+  // it is not an item, is never persisted and never dirties a save.
+  const [calloutDraft, setCalloutDraft] = useState(null);
+  const calloutDraftRef = useRef(null);
+  useEffect(() => {
+    calloutDraftRef.current = calloutDraft;
+  }, [calloutDraft]);
+
+  const boundsFor = useCallback(
+    (pageNo) => {
+      const p = (pages || []).find((pg) => pg?.pageNo === pageNo);
+      return p ? { width: p.baseW, height: p.baseH } : null;
+    },
+    [pages]
+  );
 
   // Bounded, document-scoped annotation history (session-only).
   const historyRef = useRef(createHistory());
@@ -290,12 +327,134 @@ export default forwardRef(function PdfAnnotator(
     [write, notifyHistory]
   );
 
+  /* ---------------------------- Callout draft ----------------------------- */
+
+  const cancelCalloutDraft = useCallback(() => {
+    if (!calloutDraftRef.current) return false;
+    calloutDraftRef.current = null;
+    setCalloutDraft(null);
+    return true;
+  }, []);
+
+  // One click of the three-stage Callout on `pageNo` at page-space `p`.
+  // Stage 1 and 2 only advance the transient draft; stage 3 creates the
+  // complete record as ONE history entry and hands the tool back to Select.
+  // A click on a different page restarts the draft there.
+  const calloutDraftPoint = useCallback(
+    (pageNo, p) => {
+      const bounds = boundsFor(pageNo);
+      if (!bounds) return;
+      const draft = calloutDraftRef.current;
+      let next;
+      if (!draft || draft.page !== pageNo) {
+        next = startCalloutDraft(pageNo, p, bounds);
+      } else if (draft.stage === CALLOUT_STAGE.TIP) {
+        next = placeCalloutAnchor(draft, p, bounds);
+      } else {
+        const record = completeCalloutDraft(draft, p, bounds, styleRef.current);
+        calloutDraftRef.current = null;
+        setCalloutDraft(null);
+        if (!record) return;
+        const before = itemsRef.current;
+        pushMutation(historyRef.current, before);
+        write([...before, { ...record, editing: true }]);
+        setSelectedIds([record.id]);
+        notifyHistory();
+        onToolConsumed?.();
+        return;
+      }
+      calloutDraftRef.current = next;
+      setCalloutDraft(next);
+    },
+    [boundsFor, write, notifyHistory, onToolConsumed]
+  );
+
+  /* ------------------------------ Clipboard ------------------------------- */
+
+  // Copy the selected records (validated copies) to the session clipboard.
+  const copySelected = useCallback(() => {
+    const payload = copyAnnotations(itemsRef.current, selectedRef.current);
+    if (!payload) return false;
+    writeClipboard(payload);
+    return true;
+  }, []);
+
+  // Add a planned set of new records as ONE history entry and select them.
+  const adoptNewItems = useCallback(
+    (fresh) => {
+      if (!fresh?.length) return false;
+      const before = itemsRef.current;
+      pushMutation(historyRef.current, before);
+      write([...before, ...fresh]);
+      setSelectedIds(fresh.map((it) => it.id));
+      setOpenStickyId(null);
+      notifyHistory();
+      // The new selection is only interactive under Select.
+      if (isCreationTool(activeTool)) onToolConsumed?.();
+      return true;
+    },
+    [write, notifyHistory, activeTool, onToolConsumed]
+  );
+
+  // Paste the clipboard onto the page in view (or `targetPage`). Skipped
+  // items — those whose destination page does not exist — are reported, not
+  // re-homed. A no-op with an empty clipboard.
+  const paste = useCallback(
+    (targetPage) => {
+      const payload = readClipboard();
+      if (!payload?.items?.length) return false;
+      let target = Number.isInteger(targetPage) ? targetPage : null;
+      if (target === null && typeof resolvePastePage === "function") target = resolvePastePage();
+      if (!Number.isInteger(target)) target = pages?.[0]?.pageNo ?? 1;
+      const plan = planPaste(payload, { targetPage: target, boundsFor });
+      if (!plan.items.length) {
+        onNotice?.(
+          plan.skipped === 1
+            ? "Nothing pasted — the copied annotation's page does not exist in this document."
+            : "Nothing pasted — the copied annotations' pages do not exist in this document."
+        );
+        return false;
+      }
+      writeClipboard(plan.payload);
+      adoptNewItems(plan.items);
+      if (plan.skipped > 0) {
+        onNotice?.(
+          `Pasted ${plan.items.length} of ${plan.items.length + plan.skipped} annotations — ${plan.skipped} would have landed beyond the last page.`
+        );
+      }
+      return true;
+    },
+    [resolvePastePage, pages, boundsFor, adoptNewItems, onNotice]
+  );
+
+  // Duplicate the selection in place (offset, new ids). The clipboard is untouched.
+  const duplicateSelected = useCallback(() => {
+    const fresh = planDuplicate(itemsRef.current, selectedRef.current, boundsFor);
+    return adoptNewItems(fresh);
+  }, [boundsFor, adoptNewItems]);
+
+  // Select every annotation in the document (see pdfClipboard.selectAllIds).
+  const selectAll = useCallback(() => {
+    const ids = selectAllIds(itemsRef.current);
+    if (!ids.length) return false;
+    setSelectedIds(ids);
+    setOpenStickyId(null);
+    if (isCreationTool(activeTool)) onToolConsumed?.();
+    return true;
+  }, [activeTool, onToolConsumed]);
+
   useImperativeHandle(
     ref,
     () => ({
       serialize: () => JSON.stringify(itemsRef.current),
       getItems: () => itemsRef.current,
       getSelectedIds: () => selectedRef.current,
+      getCalloutDraft: () => calloutDraftRef.current,
+      copySelected,
+      paste,
+      duplicateSelected,
+      selectAll,
+      cancelCalloutDraft,
       load: (jsonOrArray) => {
         let parsed = jsonOrArray;
         if (typeof jsonOrArray === "string") {
@@ -309,6 +468,7 @@ export default forwardRef(function PdfAnnotator(
         resetHistory(historyRef.current);
         setSelectedIds([]);
         setOpenStickyId(null);
+        cancelCalloutDraft();
         notifyHistory();
       },
       undo,
@@ -317,19 +477,40 @@ export default forwardRef(function PdfAnnotator(
       applyToSelection,
       clearSelection,
     }),
-    [undo, redo, deleteSelected, applyToSelection, clearSelection, notifyHistory, write]
+    [
+      undo,
+      redo,
+      deleteSelected,
+      applyToSelection,
+      clearSelection,
+      notifyHistory,
+      write,
+      copySelected,
+      paste,
+      duplicateSelected,
+      selectAll,
+      cancelCalloutDraft,
+    ]
   );
 
   // Keyboard support: Delete/Backspace removes the selected annotation(s).
-  // Escape, in order: cancel an in-progress gesture; clear the selection;
-  // otherwise tell the parent (which returns a creation tool to Select).
-  // All are ignored while the user is typing, and Backspace only suppresses
-  // browser navigation when an annotation was actually deleted.
+  // Escape, in order: discard an unfinished Callout draft; cancel an
+  // in-progress gesture; clear the selection; otherwise tell the parent
+  // (which returns a creation tool to Select). All are ignored while the
+  // user is typing, and Backspace only suppresses browser navigation when an
+  // annotation was actually deleted.
+  //
+  // Cmd/Ctrl + C / V / D / A copy, paste, duplicate and select-all
+  // ANNOTATIONS — only when the PDF editor owns the shortcut
+  // (src/lib/pdfClipboard.js → editorOwnsShortcut): never while a text
+  // entry has focus, where the browser's own text clipboard and select-all
+  // must win, and never when focus is elsewhere in the application.
   useEffect(() => {
     function onKeyDown(e) {
       const focused = typeof document !== "undefined" ? document.activeElement : null;
       if (e.key === "Escape") {
         if (shouldIgnoreDeleteKey(e.target, focused)) return;
+        if (cancelCalloutDraft()) return;
         if (abortActiveGesture()) return;
         if (selectedRef.current.length) {
           setSelectedIds([]);
@@ -339,6 +520,38 @@ export default forwardRef(function PdfAnnotator(
         onEscape?.();
         return;
       }
+      const shortcut = annotationShortcut(e);
+      if (shortcut) {
+        if (e.defaultPrevented) return;
+        const anyHost = Object.values(pageEls || {}).find(Boolean);
+        const editorRoot = anyHost?.closest?.("[data-pdf-editor]") || null;
+        if (!editorOwnsShortcut(e.target, focused, editorRoot)) return;
+        let handled = false;
+        switch (shortcut) {
+          case ANNOTATION_SHORTCUT.COPY:
+            handled = copySelected();
+            break;
+          case ANNOTATION_SHORTCUT.PASTE:
+            handled = paste();
+            break;
+          case ANNOTATION_SHORTCUT.DUPLICATE:
+            handled = duplicateSelected();
+            break;
+          case ANNOTATION_SHORTCUT.SELECT_ALL:
+            handled = selectAll();
+            break;
+          default:
+            break;
+        }
+        // With nothing to act on, Copy/Paste fall through to the browser
+        // (e.g. copying selected PDF text); Duplicate and Select All are
+        // claimed regardless so the browser's bookmark / page-select-all
+        // never fire over the editor.
+        if (handled || shortcut === ANNOTATION_SHORTCUT.DUPLICATE || shortcut === ANNOTATION_SHORTCUT.SELECT_ALL) {
+          e.preventDefault();
+        }
+        return;
+      }
       if (e.key !== "Delete" && e.key !== "Backspace") return;
       if (shouldIgnoreDeleteKey(e.target, focused)) return;
       if (!selectedRef.current.length) return;
@@ -346,13 +559,26 @@ export default forwardRef(function PdfAnnotator(
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteSelected, abortActiveGesture, onEscape]);
+  }, [
+    deleteSelected,
+    abortActiveGesture,
+    onEscape,
+    cancelCalloutDraft,
+    copySelected,
+    paste,
+    duplicateSelected,
+    selectAll,
+    pageEls,
+  ]);
 
   // When the tool changes: arm creation tools (and drop the selection so the
   // options bar shows the TOOL, not a stale item). Switching TO Select —
   // including the auto-switch after placing a text item — keeps the current
   // selection so the just-placed item stays editable.
   useEffect(() => {
+    // Leaving the Callout tool (for any tool) discards an unfinished draft.
+    calloutDraftRef.current = null;
+    setCalloutDraft(null);
     if (isCreationTool(activeTool)) {
       setSelectedIds([]);
       setOpenStickyId(null);
@@ -463,6 +689,8 @@ export default forwardRef(function PdfAnnotator(
             openStickyId={openStickyId}
             setOpenStickyId={setOpenStickyId}
             onToolConsumed={onToolConsumed}
+            calloutDraft={calloutDraft}
+            onCalloutPoint={calloutDraftPoint}
           />,
           host
         );
@@ -498,6 +726,8 @@ function PageOverlay({
   openStickyId,
   setOpenStickyId,
   onToolConsumed,
+  calloutDraft,
+  onCalloutPoint,
 }) {
   const svgRef = useRef(null);
   const gesture = useRef(null);
@@ -509,6 +739,13 @@ function PageOverlay({
   // The drag-marquee in progress on THIS page (page space), or null.
   const [marquee, setMarquee] = useState(null);
   const marqueeRef = useRef(null);
+  // Pointer position (page space) while a Callout draft is open on THIS page,
+  // for the live preview. Local to the page: it never leaves the overlay.
+  const [calloutHover, setCalloutHover] = useState(null);
+  const draftHere = calloutDraft && calloutDraft.page === page.pageNo ? calloutDraft : null;
+  useEffect(() => {
+    if (!draftHere) setCalloutHover(null);
+  }, [draftHere]);
 
   const bounds = { width: page.baseW, height: page.baseH };
 
@@ -746,7 +983,7 @@ function PageOverlay({
   }
 
   function newBox(p0, kind, e) {
-    const isText = kind === TOOL.TEXTBOX || kind === TOOL.CALLOUT;
+    const isText = kind === TOOL.TEXTBOX;
     const a = {
       ...newAnnotationBase(page.pageNo, kind),
       x: p0.x,
@@ -770,7 +1007,6 @@ function PageOverlay({
             editing: false,
           }
         : {}),
-      ...(kind === TOOL.CALLOUT ? { leader: { x: p0.x - 40, y: p0.y - 20 } } : {}),
     };
     addTransient(
       a,
@@ -877,10 +1113,14 @@ function PageOverlay({
         newMark(p, tool, e);
         break;
       case TOOL.TEXTBOX:
-      case TOOL.CALLOUT:
       case TOOL.RECT:
       case TOOL.ELLIPSE:
         newBox(p, tool, e);
+        break;
+      case TOOL.CALLOUT:
+        // Three clicks: tip → box corner → opposite corner. No pointer
+        // capture and no gesture — each click is complete in itself.
+        onCalloutPoint?.(page.pageNo, p);
         break;
       case TOOL.ARROW:
       case TOOL.LINE:
@@ -1026,7 +1266,7 @@ function PageOverlay({
 
     // A freshly drawn textbox/callout goes straight into editing, and the
     // tool returns to Select so typing/adjusting doesn't create another box.
-    if (g.isNew && (g.kind === TOOL.TEXTBOX || g.kind === TOOL.CALLOUT)) {
+    if (g.isNew && g.kind === TOOL.TEXTBOX) {
       patchItem(g.id, { editing: true }, { persist: false });
       onToolConsumed?.();
     }
@@ -1160,8 +1400,10 @@ function PageOverlay({
         touchAction: ownsPointer ? "none" : "auto",
       }}
       onPointerDown={onSvgPointerDown}
+      onPointerMove={draftHere ? (e) => setCalloutHover(getLocal(e)) : undefined}
     >
       {pageItems.map((a) => renderItem(a))}
+      {draftHere && renderCalloutDraft(draftHere)}
       {marquee && marquee.w > 0 && marquee.h > 0 && (
         <rect
           data-marquee="true"
@@ -1210,6 +1452,110 @@ function PageOverlay({
       default:
         return null;
     }
+  }
+
+  /* ----------------------------- Callout draft ----------------------------- */
+
+  // Live feedback between the three clicks: the tip with its arrowhead, a
+  // dashed leader following the pointer (stage 1), then the provisional box
+  // with the leader attached to it (stage 2). Never interactive.
+  function renderCalloutDraft(draft) {
+    const preview = calloutDraftPreview(draft, calloutHover, bounds, toolStyle?.fontSize);
+    if (!preview) return null;
+    const dash = `${4 * hairline} ${3 * hairline}`;
+    return (
+      <g data-callout-draft={String(preview.stage)} pointerEvents="none">
+        <circle cx={preview.tip.x} cy={preview.tip.y} r={handleSize / 2} fill={SELECTION_BLUE} />
+        {preview.to && (
+          <line
+            x1={preview.to.x}
+            y1={preview.to.y}
+            x2={preview.tip.x}
+            y2={preview.tip.y}
+            stroke={SELECTION_BLUE}
+            strokeWidth={hairline}
+            strokeDasharray={dash}
+          />
+        )}
+        {preview.box && (
+          <rect
+            x={preview.box.x}
+            y={preview.box.y}
+            width={preview.box.w}
+            height={preview.box.h}
+            rx={8}
+            ry={8}
+            fill={SELECTION_BLUE}
+            fillOpacity={0.08}
+            stroke={SELECTION_BLUE}
+            strokeWidth={hairline}
+            strokeDasharray={dash}
+          />
+        )}
+      </g>
+    );
+  }
+
+  // The callout's leader: derived from the ONE record (src/lib/pdfCallout.js),
+  // drawn in page space outside the box's rotation group so the tip stays
+  // where the user put it whatever the box does. The line selects the
+  // callout; the tip handle (single selection) moves the tip only.
+  function renderCalloutLeader(a, isActive) {
+    const geometry = calloutLeaderGeometry(a);
+    if (!geometry) return null;
+    const stroke = a.stroke || "#333333";
+    const { tip, anchor, barbs, width } = geometry;
+    return (
+      <g data-callout-leader={a.id}>
+        <line
+          x1={anchor.x}
+          y1={anchor.y}
+          x2={tip.x}
+          y2={tip.y}
+          stroke="transparent"
+          strokeWidth={Math.max(14 * hairline, width + 10 * hairline)}
+          strokeLinecap="round"
+          style={{ ...grab, cursor: interactive ? "pointer" : undefined }}
+          onPointerDown={selectOnly(a)}
+        />
+        <line
+          x1={anchor.x}
+          y1={anchor.y}
+          x2={tip.x}
+          y2={tip.y}
+          stroke={stroke}
+          strokeWidth={width}
+          strokeLinecap="round"
+          pointerEvents="none"
+        />
+        {barbs.map((b, i) => (
+          <line
+            key={i}
+            x1={tip.x}
+            y1={tip.y}
+            x2={b.x}
+            y2={b.y}
+            stroke={stroke}
+            strokeWidth={width}
+            strokeLinecap="round"
+            pointerEvents="none"
+          />
+        ))}
+        {!a.editing && interactive && isActive && single && (
+          <circle
+            data-callout-tip-handle={a.id}
+            cx={tip.x}
+            cy={tip.y}
+            r={handleSize / 2}
+            fill="#fff"
+            stroke={SELECTION_BLUE}
+            strokeWidth={hairline}
+            style={{ ...grab, cursor: "move" }}
+            onPointerDown={startLeader(a)}
+          />
+        )}
+      </g>
+    );
   }
 
   /* --------------------------- shared selection UI ------------------------- */
@@ -1319,20 +1665,9 @@ function PageOverlay({
     const isActive = isSelected(a.id);
 
     return (
-      <g key={a.id} transform={transform} pointerEvents={itemPE(a)}>
-        {a.type === TOOL.CALLOUT && (
-          <line
-            x1={a.leader?.x ?? a.x - 20}
-            y1={a.leader?.y ?? a.y - 20}
-            x2={a.x}
-            y2={a.y}
-            stroke={a.stroke || "#333333"}
-            // The leader is the callout's point; it stays visible without a box border.
-            strokeWidth={strokeWidth || 1.5}
-            style={grab}
-            onPointerDown={startLeader(a)}
-          />
-        )}
+      <g key={a.id} pointerEvents={itemPE(a)}>
+        {a.type === TOOL.CALLOUT && renderCalloutLeader(a, isActive)}
+        <g transform={transform}>
         <rect
           x={a.x}
           y={a.y}
@@ -1436,6 +1771,7 @@ function PageOverlay({
             />
           </>
         )}
+        </g>
       </g>
     );
   }

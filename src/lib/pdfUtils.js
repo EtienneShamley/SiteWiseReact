@@ -20,6 +20,7 @@ import {
   setLineWidth,
 } from "pdf-lib";
 import { makePageToPdf } from "./pdfCoords";
+import { calloutLeaderGeometry } from "./pdfCallout";
 import {
   arrowHeadPoints,
   arrowHeadSize,
@@ -410,17 +411,30 @@ function drawBoxText(page, a, font, conv) {
     strokeWidth,
   });
 
-  if (a.type === "callout" && a.leader) {
-    const lp = conv.toPdf(a.leader.x, a.leader.y);
-    const corner = rotatePoint({ x: a.x, y: a.y }, centre, rotate);
-    const bp = conv.toPdf(corner.x, corner.y);
-    page.drawLine({
-      start: { x: lp.x, y: lp.y },
-      end: { x: bp.x, y: bp.y },
-      // The leader is the callout's point; it stays visible without a border.
-      thickness: strokeWidth || 1.5,
-      color: rgb(strokeColor.r, strokeColor.g, strokeColor.b),
-    });
+  if (a.type === "callout") {
+    // The leader is part of the callout: the same attachment point and
+    // arrowhead the editor overlay draws (src/lib/pdfCallout.js), so the
+    // flattened PDF cannot disagree with the screen.
+    const leader = calloutLeaderGeometry(a);
+    if (leader) {
+      const color = rgb(strokeColor.r, strokeColor.g, strokeColor.b);
+      page.drawLine({
+        start: conv.toPdf(leader.anchor.x, leader.anchor.y),
+        end: conv.toPdf(leader.tip.x, leader.tip.y),
+        thickness: leader.width,
+        color,
+        lineCap: LineCapStyle.Round,
+      });
+      for (const barb of leader.barbs) {
+        page.drawLine({
+          start: conv.toPdf(leader.tip.x, leader.tip.y),
+          end: conv.toPdf(barb.x, barb.y),
+          thickness: leader.width,
+          color,
+          lineCap: LineCapStyle.Round,
+        });
+      }
+    }
   }
 
   drawWrappedText(page, a.text, font, conv, {

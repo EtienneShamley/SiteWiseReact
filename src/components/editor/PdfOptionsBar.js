@@ -130,7 +130,13 @@ export default function PdfOptionsBar({
         <span className="text-[11px] font-medium uppercase tracking-wide text-gray-600 dark:text-gray-300 mr-1 whitespace-nowrap">
           {heading}
         </span>
-      ) : (
+      ) : null}
+      {creating && tool === TOOL.CALLOUT && (
+        <span className="text-[11px] text-gray-500 dark:text-gray-400 mr-1 whitespace-nowrap">
+          Click the point to call out, then the box's first corner, then its opposite corner. Esc cancels.
+        </span>
+      )}
+      {heading ? null : (
         <span className="text-[11px] text-gray-500 dark:text-gray-400">
           Select an annotation to edit it — click, Shift-click to add, or drag over blank page to select several. Pick a tool to see its options.
         </span>
