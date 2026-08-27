@@ -37,6 +37,7 @@ import {
   FaTimes,
   FaFileExport,
   FaObjectGroup,
+  FaICursor,
 } from "react-icons/fa";
 import {
   loadPdf,
@@ -54,6 +55,7 @@ import {
   loadAnnotations,
 } from "../../lib/pdfStorage";
 import { extractPageIndex, findMatchesInDocument } from "../../lib/pdfSearch";
+import { buildTextRuns, describeFont } from "../../lib/pdfTextRuns";
 import {
   normalizeAnnotationList,
   serializeAnnotations,
@@ -67,6 +69,7 @@ import {
   isCreationTool,
   patchToolStyle,
   toolStyleFor,
+  TEXT_EDIT_TOOLS,
 } from "../../pdf/pdfTools";
 import {
   clampScale,
@@ -244,6 +247,10 @@ export default function PdfEditorTab({
   const [matches, setMatches] = useState([]);
   const [currentMatch, setCurrentMatch] = useState(0);
   const pageIndexesRef = useRef(null);
+  // Per-page text runs for Edit text (src/lib/pdfTextRuns.js), extracted
+  // once per page per document — the same pdf.js text content the find
+  // index reads, grouped into lines with their font metrics.
+  const textRunsRef = useRef({});
 
   const annotatorRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -381,6 +388,7 @@ export default function PdfEditorTab({
         setPdfDoc(doc);
         setLayout(metas);
         pageIndexesRef.current = null;
+        textRunsRef.current = {};
         setMatches([]);
         setCurrentMatch(0);
       } catch (err) {
@@ -593,6 +601,36 @@ export default function PdfEditorTab({
     return idx;
   }, [pdfDoc, layout]);
 
+  // Runs of one page, with each run's closest editor font attached. The
+  // pdf.js font object (name, bold/italic/serif/monospace flags) is read
+  // from the page's loaded objects when the page has rendered; otherwise the
+  // generic family in the text content's styles decides.
+  const resolveTextRuns = useCallback(
+    async (pageNo) => {
+      const cached = textRunsRef.current[pageNo];
+      if (cached) return cached;
+      if (!pdfDoc) return [];
+      const meta = layout.find((p) => p.pageNo === pageNo);
+      if (!meta || !meta.hasText) return [];
+      const page = await pdfDoc.getPage(pageNo);
+      const textContent = await page.getTextContent();
+      const runs = buildTextRuns(textContent, meta.transform).map((run) => {
+        let fontObj = null;
+        try {
+          if (run.fontName && page.commonObjs?.has?.(run.fontName)) {
+            fontObj = page.commonObjs.get(run.fontName);
+          }
+        } catch {
+          fontObj = null;
+        }
+        return { ...run, font: describeFont({ fontName: run.fontName, styles: textContent.styles, fontObj }) };
+      });
+      textRunsRef.current[pageNo] = runs;
+      return runs;
+    },
+    [pdfDoc, layout]
+  );
+
   const scrollToMatch = useCallback(
     (match) => {
       if (!match) return;
@@ -760,7 +798,8 @@ export default function PdfEditorTab({
   const zoomOptions = zoomOptionsFor(zoomLabel);
 
   const textSelectableFor = (meta) =>
-    activeTool === TOOL.SELECT || (MARKUP_TOOLS.includes(activeTool) && meta.hasText);
+    activeTool === TOOL.SELECT ||
+    ((MARKUP_TOOLS.includes(activeTool) || TEXT_EDIT_TOOLS.includes(activeTool)) && meta.hasText);
 
   const tb = (tool, icon) => (
     <ToolButton
@@ -813,6 +852,7 @@ export default function PdfEditorTab({
         {tb(TOOL.TEXTBOX, <TextBoxGlyph />)}
         {tb(TOOL.CALLOUT, <FaComment />)}
         {tb(TOOL.STICKY, <FaStickyNote />)}
+        {tb(TOOL.EDIT_TEXT, <FaICursor />)}
 
         <ToolbarDivider />
 
@@ -1002,6 +1042,7 @@ export default function PdfEditorTab({
               onEscape={onEscape}
               resolvePastePage={resolvePastePage}
               onNotice={showNotice}
+              resolveTextRuns={resolveTextRuns}
             />
           </Suspense>
         )}

@@ -119,6 +119,9 @@ export const EDITABLE_FIELDS = Object.freeze({
   [T.TEXTBOX]: [...TEXT_FIELDS, "align", ...BOX_FIELDS],
   [T.CALLOUT]: [...TEXT_FIELDS, "align", ...BOX_FIELDS],
   [T.TYPEWRITER]: [...TEXT_FIELDS],
+  // A replacement's `fill` is its COVER over the original text; it has no
+  // border. Rotation is inherited from the source run and not editable here.
+  [T.TEXT_REPLACE]: [...TEXT_FIELDS, "align", "fill"],
   [T.RECT]: [...BOX_FIELDS],
   [T.ELLIPSE]: [...BOX_FIELDS],
   [T.ARROW]: ["stroke", "strokeWidth", "head"],

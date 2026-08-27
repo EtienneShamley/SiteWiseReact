@@ -30,6 +30,11 @@ export const ANNOTATION_TYPES = {
   PEN: "pen",
   FREEHAND_HIGHLIGHT: "freehandHighlight",
   POLYLINE: "polyline",
+  // A replacement for a run of the PDF's own text: ONE record carrying the
+  // cover (fill over the original glyphs) and the editable text that sits in
+  // its place, with the metrics inherited from the source run
+  // (src/lib/pdfTextRuns.js). The source bytes are never changed.
+  TEXT_REPLACE: "textReplace",
 };
 
 /**
@@ -71,6 +76,9 @@ export const Z_ORDER = {
   [ANNOTATION_TYPES.TEXTBOX]: 3,
   [ANNOTATION_TYPES.CALLOUT]: 3,
   [ANNOTATION_TYPES.TYPEWRITER]: 3,
+  // Covers must sit above shapes drawn near the text and below sticky notes,
+  // but under text boxes so a box placed over replaced text stays visible.
+  [ANNOTATION_TYPES.TEXT_REPLACE]: 2.5,
   [ANNOTATION_TYPES.STICKY]: 4,
 };
 
@@ -336,6 +344,26 @@ export function normalizeAnnotation(raw) {
       if (!normalizeBox(out, raw, { requireSize: false })) return null;
       const body = text(raw.text, 20000);
       if (body !== undefined) out.text = body;
+      break;
+    }
+
+    case ANNOTATION_TYPES.TEXT_REPLACE: {
+      if (!normalizeBox(out, raw, { requireSize: true })) return null;
+      const body = text(raw.text, 20000);
+      // An EMPTY replacement is meaningful (it removes the original text), so
+      // the field is always present.
+      out.text = body === undefined ? "" : body;
+      const source = text(raw.sourceText, 20000);
+      if (source !== undefined) out.sourceText = source;
+      // Metrics of the source run: ascent (>0) and descent (<0) as ratios of
+      // the font size, and an optional line pitch ratio for a multi-line
+      // replacement. Malformed values fall back to the module defaults.
+      const ascent = positive(raw.ascent);
+      if (ascent !== undefined && ascent <= 2) out.ascent = ascent;
+      const descent = finite(raw.descent);
+      if (descent !== undefined && descent < 0 && descent >= -1) out.descent = descent;
+      const lineHeight = positive(raw.lineHeight);
+      if (lineHeight !== undefined && lineHeight <= 4) out.lineHeight = lineHeight;
       break;
     }
 
@@ -672,7 +700,8 @@ export function annotationBounds(item) {
     case ANNOTATION_TYPES.RECT:
     case ANNOTATION_TYPES.ELLIPSE:
     case ANNOTATION_TYPES.TEXTBOX:
-    case ANNOTATION_TYPES.CALLOUT: {
+    case ANNOTATION_TYPES.CALLOUT:
+    case ANNOTATION_TYPES.TEXT_REPLACE: {
       const r = quad(item);
       return r ? normalizeRect(r) : null;
     }
@@ -747,7 +776,8 @@ export function translateAnnotation(item, dx, dy, bounds) {
     case ANNOTATION_TYPES.RECT:
     case ANNOTATION_TYPES.ELLIPSE:
     case ANNOTATION_TYPES.TEXTBOX:
-    case ANNOTATION_TYPES.CALLOUT: {
+    case ANNOTATION_TYPES.CALLOUT:
+    case ANNOTATION_TYPES.TEXT_REPLACE: {
       const moved = moveRect(item, ax, ay, bounds);
       const out = { ...item, ...moved };
       if (item.type === ANNOTATION_TYPES.CALLOUT && point(item.leader)) {

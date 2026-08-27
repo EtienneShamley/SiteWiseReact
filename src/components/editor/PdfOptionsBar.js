@@ -107,6 +107,7 @@ export default function PdfOptionsBar({
 
   // A box has a fill AND a border; a line only a stroke; a highlight only a colour.
   const isBox = has("fill") && has("stroke");
+  const coverOnly = selecting && summary.types.length === 1 && summary.types[0] === "textReplace";
   const fillValue = valueOf("fill");
   const fillMode = isMixed("fill") ? "" : isNoFill(fillValue) ? "none" : "solid";
   const borderNone = !isMixed("strokeWidth") && strokeWidth === 0;
@@ -131,6 +132,11 @@ export default function PdfOptionsBar({
           {heading}
         </span>
       ) : null}
+      {creating && tool === TOOL.EDIT_TEXT && (
+        <span className="text-[11px] text-gray-500 dark:text-gray-400 mr-1 whitespace-nowrap">
+          Click a line of the PDF's text, or drag across part of it, to replace it. Scanned pages have no editable text. Esc cancels.
+        </span>
+      )}
       {creating && tool === TOOL.CALLOUT && (
         <span className="text-[11px] text-gray-500 dark:text-gray-400 mr-1 whitespace-nowrap">
           Click the point to call out, then the box's first corner, then its opposite corner. Esc cancels.
@@ -240,10 +246,13 @@ export default function PdfOptionsBar({
           )}
         </Group>
       )}
-      {/* Highlight: its only colour IS its fill. */}
+      {/* Highlight: its only colour IS its fill. A replaced-text item's fill is
+          the COVER over the original text — offered as an explicit control
+          because the sampled page colour is a guess where text sits over a
+          picture or a gradient. */}
       {has("fill") && !isBox && (
         <ColourControl
-          label="Colour"
+          label={coverOnly ? "Cover" : "Colour"}
           value={fillValue}
           mixed={isMixed("fill")}
           disabled={disabled}

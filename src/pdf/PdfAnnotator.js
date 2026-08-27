@@ -47,6 +47,7 @@ import React, {
 import ReactDOM from "react-dom";
 import { clientRectToPageRect, normalizeQuads } from "../lib/pdfCoords";
 import {
+  ANNOTATION_TYPES,
   DEFAULT_FONT_FAMILY,
   MIN_SHAPE_SIZE,
   NO_FILL,
@@ -117,13 +118,65 @@ import {
   placeCalloutAnchor,
   startCalloutDraft,
 } from "../lib/pdfCallout";
-import { MARKUP_TOOLS, TOOL, isCreationTool, overlayOwnsPointer } from "./pdfTools";
+import {
+  hitTestRun,
+  replacementBaseline,
+  replacementFromRun,
+  replacementFromSelection,
+  replacementLineHeight,
+  runCorners,
+  sampleRunColours,
+} from "../lib/pdfTextRuns";
+import { MARKUP_TOOLS, TEXT_EDIT_TOOLS, TOOL, isCreationTool, overlayOwnsPointer } from "./pdfTools";
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
 const SELECTION_BLUE = "#3b82f6";
+
+/** Shown when Edit text is used on a page with no digital text layer. */
+export const NO_EDITABLE_TEXT_NOTICE =
+  "This page has no selectable text to edit — scanned pages need OCR, which NoteWise does not do. Use a Text box instead.";
+
+// Sample the page bitmap under a page-space rect (the run's frame, or its
+// rotated bounding box) so the cover colour and text colour come from the
+// page itself. Any failure — no canvas, a tainted canvas, jsdom — yields
+// nulls and the stable defaults apply.
+function samplePageColours(pageContainer, rect, angle, scale) {
+  try {
+    const canvas = pageContainer?.querySelector?.("canvas.nw-pdf-canvas");
+    if (!canvas || !canvas.width || !canvas.height) return null;
+    const corners = runCorners({ ...rect, angle: angle || 0 });
+    const xs = corners.map((c) => c.x);
+    const ys = corners.map((c) => c.y);
+    const cssW = canvas.clientWidth || parseFloat(canvas.style.width) || canvas.width;
+    const cssH = canvas.clientHeight || parseFloat(canvas.style.height) || canvas.height;
+    const fx = canvas.width / (cssW / (scale || 1));
+    const fy = canvas.height / (cssH / (scale || 1));
+    const x0 = Math.max(0, Math.floor(Math.min(...xs) * fx));
+    const y0 = Math.max(0, Math.floor(Math.min(...ys) * fy));
+    const x1 = Math.min(canvas.width, Math.ceil(Math.max(...xs) * fx));
+    const y1 = Math.min(canvas.height, Math.ceil(Math.max(...ys) * fy));
+    if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    return sampleRunColours(ctx.getImageData(x0, y0, x1 - x0, y1 - y0));
+  } catch {
+    return null;
+  }
+}
+
+function pageBoundsOfQuads(quads) {
+  const x = Math.min(...quads.map((q) => q.x));
+  const y = Math.min(...quads.map((q) => q.y));
+  return {
+    x,
+    y,
+    w: Math.max(...quads.map((q) => q.x + q.w)) - x,
+    h: Math.max(...quads.map((q) => q.y + q.h)) - y,
+  };
+}
 
 const dist = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
 const angleDeg = (a, b) => (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
@@ -159,6 +212,7 @@ export default forwardRef(function PdfAnnotator(
     onEscape, // Escape with nothing to cancel or deselect (parent returns to Select)
     resolvePastePage, // () => pageNo the viewer is showing (paste target); optional
     onNotice, // (message) — a short, non-error status the ribbon can show
+    resolveTextRuns, // async (pageNo) => text runs of that page (src/lib/pdfTextRuns.js); optional
   },
   ref
 ) {
@@ -691,6 +745,8 @@ export default forwardRef(function PdfAnnotator(
             onToolConsumed={onToolConsumed}
             calloutDraft={calloutDraft}
             onCalloutPoint={calloutDraftPoint}
+            resolveTextRuns={resolveTextRuns}
+            onNotice={onNotice}
           />,
           host
         );
@@ -728,10 +784,15 @@ function PageOverlay({
   onToolConsumed,
   calloutDraft,
   onCalloutPoint,
+  resolveTextRuns,
+  onNotice,
 }) {
   const svgRef = useRef(null);
   const gesture = useRef(null);
   const holdTimer = useRef(null);
+  // Replacements created by Edit text that should take focus as soon as
+  // their editor mounts (ids, consumed on first focus).
+  const focusPendingRef = useRef(new Set());
   const detachRef = useRef(null);
   // Window listeners dispatch through this ref so a gesture always runs the
   // CURRENT render's handlers — no stale scale, items or callbacks.
@@ -849,6 +910,133 @@ function PageOverlay({
     return () => pageContainer.removeEventListener("pointerdown", onDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostEl, tool, scale, page.pageNo, page.baseW, page.baseH, select, selectMany, clearSelection]);
+
+  /* ------------------------------ Edit text ------------------------------- */
+  // The PDF's own text becomes a replacement annotation. The text layer keeps
+  // the pointer (native selection works as usual); on release, a drag
+  // becomes a replacement of the selected range and a click a replacement of
+  // the line run under it (src/lib/pdfTextRuns.js). The new item opens in
+  // editing as a TRANSIENT gesture: Enter/blur commits it as ONE history
+  // entry (cover + text together), Escape with the text unchanged discards
+  // it and leaves no entry — the original text is simply visible again.
+  useEffect(() => {
+    if (!TEXT_EDIT_TOOLS.includes(tool)) return;
+    const pageContainer = hostEl?.parentElement;
+    if (!pageContainer) return;
+    let start = null;
+    let disposed = false;
+
+    function onDown(e) {
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      if (svgRef.current && svgRef.current.contains(e.target)) return;
+      start = { x: e.clientX, y: e.clientY };
+    }
+
+    function onUp(e) {
+      const origin = start;
+      start = null;
+      if (!origin) return;
+      // Let the browser finalise its selection before reading it.
+      window.setTimeout(() => {
+        if (!disposed) createReplacement(e);
+      }, 0);
+    }
+
+    async function createReplacement(e) {
+      if (!page.hasText) {
+        onNotice?.(NO_EDITABLE_TEXT_NOTICE);
+        return;
+      }
+      let runs = null;
+      try {
+        runs = await resolveTextRuns?.(page.pageNo);
+      } catch {
+        runs = null;
+      }
+      if (disposed) return;
+      if (!Array.isArray(runs) || !runs.length) {
+        onNotice?.(NO_EDITABLE_TEXT_NOTICE);
+        return;
+      }
+      const contRect = pageContainer.getBoundingClientRect();
+      const sc = scale || 1;
+      const sel = typeof window !== "undefined" ? window.getSelection?.() : null;
+      let seed = null;
+
+      const textLayer = pageContainer.querySelector(".textLayer");
+      if (sel && !sel.isCollapsed && sel.rangeCount > 0 && textLayer) {
+        const range = sel.getRangeAt(0);
+        let intersects = false;
+        try {
+          intersects = range.intersectsNode(textLayer);
+        } catch {
+          intersects = false;
+        }
+        if (intersects) {
+          const rects = Array.from(range.getClientRects()).filter((r) => {
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
+            return cx >= contRect.left && cx <= contRect.right && cy >= contRect.top && cy <= contRect.bottom;
+          });
+          const quads = normalizeQuads(rects.map((r) => clientRectToPageRect(r, contRect, sc))).filter(
+            (q) => q.h < page.baseH / 2
+          );
+          if (quads.length) {
+            const first = quads[0];
+            const run =
+              hitTestRun(runs, { x: first.x + Math.min(first.w, first.h) / 2, y: first.y + first.h / 2 }) ||
+              hitTestRun(runs, { x: first.x + first.w / 2, y: first.y + first.h / 2 });
+            if (run) {
+              seed = replacementFromSelection({
+                quads,
+                text: sel.toString(),
+                run,
+                font: run.font,
+                colours: samplePageColours(pageContainer, pageBoundsOfQuads(quads), 0, sc),
+              });
+            }
+          }
+        }
+      }
+
+      if (!seed) {
+        const p = { x: (e.clientX - contRect.left) / sc, y: (e.clientY - contRect.top) / sc };
+        const run = hitTestRun(runs, p, 3);
+        if (!run) return; // blank page: nothing to replace
+        seed = replacementFromRun(run, {
+          font: run.font,
+          colours: samplePageColours(pageContainer, run, run.angle, sc),
+        });
+      }
+      if (!seed) return;
+      try {
+        sel?.removeAllRanges?.();
+      } catch {
+        /* selection may be unavailable */
+      }
+      const a = {
+        ...newAnnotationBase(page.pageNo, ANNOTATION_TYPES.TEXT_REPLACE),
+        ...seed,
+        editing: true,
+      };
+      // The caret lands in the replacement when it mounts (see the editor's
+      // ref callback), so Enter/Escape/blur close the gesture.
+      focusPendingRef.current.add(a.id);
+      beginGesture();
+      write([...itemsRef.current, a], { persist: false });
+      select(a.id);
+      onToolConsumed?.();
+    }
+
+    pageContainer.addEventListener("pointerdown", onDown);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      disposed = true;
+      pageContainer.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("pointerup", onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostEl, tool, scale, page.pageNo, page.hasText, page.baseH, resolveTextRuns, onNotice, write, select, onToolConsumed]);
 
   /* ------------------------------ Gesture plumbing ------------------------ */
 
@@ -1426,6 +1614,7 @@ function PageOverlay({
     switch (a.type) {
       case TOOL.TEXTBOX:
       case TOOL.CALLOUT:
+      case ANNOTATION_TYPES.TEXT_REPLACE:
         return renderTextbox(a);
       case TOOL.TYPEWRITER:
         return renderTypewriter(a);
@@ -1663,6 +1852,20 @@ function PageOverlay({
     const noBorder = hasNoBorder(a);
     const strokeWidth = noBorder ? 0 : a.strokeWidth ?? 2;
     const isActive = isSelected(a.id);
+    // Replaced PDF text: no inset, square cover, one line per source line,
+    // and the editor's first baseline placed on the source baseline. The
+    // CSS line box puts its baseline ≈ (0.9 em + half-leading) below its
+    // top for the editor's sans/serif/mono families, so the box top is the
+    // measured baseline minus that.
+    const isReplace = a.type === ANNOTATION_TYPES.TEXT_REPLACE;
+    const fs = a.fontSize || 14;
+    const lineHeight = isReplace ? replacementLineHeight(a) : 1.25;
+    const inset = isReplace ? 0 : 6;
+    const textTop = isReplace
+      ? a.y + replacementBaseline(a) - (0.9 + (lineHeight - 1.15) / 2) * fs
+      : a.y + 6;
+    const textW = isReplace ? Math.max(20, a.w) : Math.max(20, a.w - 12);
+    const textH = isReplace ? Math.max(fs * lineHeight, a.h) : Math.max(20, a.h - 12);
 
     return (
       <g key={a.id} pointerEvents={itemPE(a)}>
@@ -1673,8 +1876,8 @@ function PageOverlay({
           y={a.y}
           width={a.w}
           height={a.h}
-          rx={a.corner || 8}
-          ry={a.corner || 8}
+          rx={isReplace ? 0 : a.corner || 8}
+          ry={isReplace ? 0 : a.corner || 8}
           // "transparent" (NO_FILL) keeps the box grabbable; "none" would not.
           fill={isNoFill(a.fill) ? "transparent" : a.fill}
           stroke={noBorder ? "none" : a.stroke || "#333333"}
@@ -1683,13 +1886,16 @@ function PageOverlay({
           onPointerDown={startMoveBox(a)}
         />
         <foreignObject
-          x={a.x + 6}
-          y={a.y + 6}
-          width={Math.max(20, a.w - 12)}
-          height={Math.max(20, a.h - 12)}
+          x={a.x + inset}
+          y={textTop}
+          width={textW}
+          height={textH}
+          style={isReplace ? { overflow: "visible" } : undefined}
         >
           <div
             dir="ltr"
+            data-replace-id={isReplace ? a.id : undefined}
+            aria-label={isReplace ? "Replacement text" : undefined}
             ref={(el) => {
               // Uncontrolled while focused: React must not overwrite the
               // live DOM text node the user is typing into, or the browser
@@ -1698,6 +1904,15 @@ function PageOverlay({
               if (el && document.activeElement !== el) {
                 const val = a.text || "";
                 if (el.textContent !== val) el.textContent = val;
+              }
+              // A fresh Edit-text replacement takes the caret on mount.
+              if (el && isReplace && focusPendingRef.current.has(a.id)) {
+                focusPendingRef.current.delete(a.id);
+                try {
+                  el.focus();
+                } catch {
+                  /* focus is best-effort */
+                }
               }
             }}
             style={{
@@ -1711,8 +1926,8 @@ function PageOverlay({
               fontWeight: a.bold ? 700 : 400,
               fontStyle: a.italic ? "italic" : "normal",
               textAlign: a.align || "left",
-              lineHeight: 1.25,
-              whiteSpace: "pre-wrap",
+              lineHeight,
+              whiteSpace: isReplace ? "pre" : "pre-wrap",
               direction: "ltr",
               unicodeBidi: "isolate",
               writingMode: "horizontal-tb",
@@ -1733,12 +1948,13 @@ function PageOverlay({
                 finishEdit(a.id);
               } else if (e.key === "Escape") {
                 e.preventDefault();
-                cancelIfEmpty(a.id);
+                if (isReplace) discardUnchangedReplacement(a.id);
+                else cancelIfEmpty(a.id);
               }
             }}
             onBlur={() => {
               finishEdit(a.id);
-              cancelIfEmpty(a.id);
+              if (!isReplace) cancelIfEmpty(a.id);
             }}
             onPointerDown={(e) => e.stopPropagation()}
           />
@@ -1750,6 +1966,7 @@ function PageOverlay({
           <>
             {selectionOutline({ x: a.x, y: a.y, w: a.w, h: a.h })}
             {cornerHandles(a)}
+            {!isReplace && (<>
             <circle
               cx={a.x + a.w / 2}
               cy={a.y - 24 * hairline}
@@ -1769,11 +1986,28 @@ function PageOverlay({
               strokeWidth={hairline}
               pointerEvents="none"
             />
+            </>)}
           </>
         )}
         </g>
       </g>
     );
+  }
+
+  // Escape inside a replacement whose text still equals the source text:
+  // a fresh replacement is discarded with no history entry (its creation
+  // was a transient gesture); an already-committed one is simply left as it
+  // is. Either way the visible page state is what it was before the edit.
+  function discardUnchangedReplacement(id) {
+    const it = itemsRef.current.find((x) => x.id === id);
+    if (!it) return;
+    if ((it.text ?? "") === (it.sourceText ?? "")) {
+      if (cancelGesture()) {
+        clearSelection();
+        return;
+      }
+    }
+    finishEdit(id);
   }
 
   function finishEdit(id) {

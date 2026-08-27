@@ -25,6 +25,7 @@ import { safeFilename } from "./exportUtils";
 import { NOTE_VIEW } from "./noteViews";
 import { captureExportIdentity } from "./exportIdentity";
 import { getNoteTemplateInstance } from "./templateModel";
+import { docxConversionOptions, prepareHtmlForDocx } from "./docxExportPrep";
 import {
   TEMPLATE_EXPORT_FAILURE,
   buildTemplateExportModel,
@@ -460,14 +461,10 @@ async function runDocx(model) {
   try {
     const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
     const htmlToDocx = mod.default || mod;
-    const html = buildTemplateExportDocument(model, {
-      flavor: EXPORT_FLAVOR.DOCX,
-    });
-    const generated = await htmlToDocx(html, null, {
-      table: { row: { cantSplit: true } },
-      footer: true,
-      pageNumber: true,
-    });
+    const html = prepareHtmlForDocx(
+      buildTemplateExportDocument(model, { flavor: EXPORT_FLAVOR.DOCX })
+    );
+    const generated = await htmlToDocx(html, null, docxConversionOptions({ fontSizePt: 11 }));
     downloadBlob(
       new Blob([generated], {
         type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -614,14 +611,10 @@ export async function buildTemplateExportArtifact(format, snapshot) {
     if (format === TEMPLATE_EXPORT_FORMAT.DOCX) {
       const mod = await import("html-to-docx/dist/html-to-docx.esm.js");
       const htmlToDocx = mod.default || mod;
-      const previewHtml = buildTemplateExportDocument(model, {
-        flavor: EXPORT_FLAVOR.DOCX,
-      });
-      const generated = await htmlToDocx(previewHtml, null, {
-        table: { row: { cantSplit: true } },
-        footer: true,
-        pageNumber: true,
-      });
+      const previewHtml = prepareHtmlForDocx(
+        buildTemplateExportDocument(model, { flavor: EXPORT_FLAVOR.DOCX })
+      );
+      const generated = await htmlToDocx(previewHtml, null, docxConversionOptions({ fontSizePt: 11 }));
       return {
         ok: true,
         name: exportFilename(model, "docx"),

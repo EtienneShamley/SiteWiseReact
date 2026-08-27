@@ -21,6 +21,7 @@ import {
 } from "pdf-lib";
 import { makePageToPdf } from "./pdfCoords";
 import { calloutLeaderGeometry } from "./pdfCallout";
+import { replacementBaseline, replacementLineHeight } from "./pdfTextRuns";
 import {
   arrowHeadPoints,
   arrowHeadSize,
@@ -280,18 +281,38 @@ function drawRoundedBox(page, rect, conv, { corner = 0, rotate = 0, fillColor, s
 // the page-space text angle so text reads upright on rotated pages. `align`
 // positions each line inside `maxWidth`; `rotate`/`centre` rotate the whole
 // block with its box.
+// `wrap: false` keeps each source line whole (a replacement for one line of
+// the PDF's text must not reflow inside the covered area); `firstBaseline`
+// and `lineHeight` place lines on a measured baseline and pitch instead of
+// the text-box defaults.
 function drawWrappedText(
   page,
   text,
   font,
   conv,
-  { x, yTop, maxWidth, fontSize, color, align = "left", rotate = 0, centre = null }
+  {
+    x,
+    yTop,
+    maxWidth,
+    fontSize,
+    color,
+    align = "left",
+    rotate = 0,
+    centre = null,
+    wrap = true,
+    firstBaseline = null,
+    lineHeight = 1.25,
+  }
 ) {
-  const str = String(text || "").trim();
+  const str = wrap ? String(text || "").trim() : String(text || "").replace(/\s+$/, "");
   if (!str) return;
   const paragraphs = str.split(/\n/);
   const lines = [];
   for (const para of paragraphs) {
+    if (!wrap) {
+      lines.push(para);
+      continue;
+    }
     const words = para.split(/\s+/).filter(Boolean);
     let line = "";
     for (const word of words) {
@@ -307,7 +328,7 @@ function drawWrappedText(
   }
   // Page-space clockwise rotation is a negative PDF (counter-clockwise) angle.
   const angle = degrees(conv.textAngleDeg - (rotate || 0));
-  let lineY = yTop + fontSize;
+  let lineY = firstBaseline != null ? firstBaseline : yTop + fontSize;
   for (const l of lines) {
     if (l) {
       const width = font.widthOfTextAtSize(l, fontSize);
@@ -318,8 +339,62 @@ function drawWrappedText(
       const p = conv.toPdf(anchor.x, anchor.y);
       page.drawText(l, { x: p.x, y: p.y, size: fontSize, font, color: rgb(color.r, color.g, color.b), rotate: angle });
     }
-    lineY += fontSize * 1.25;
+    lineY += fontSize * lineHeight;
   }
+}
+
+// Replaced PDF text: the cover (an unrotated-frame rectangle rotated about
+// its centre like the source run) painted in the sampled page colour, then
+// the replacement lines on the source baseline and pitch, unwrapped, in the
+// standard font closest to the original. Glyphs the standard font lacks are
+// substituted by pdf-lib's WinAnsi encoding; the source bytes are untouched.
+function drawTextReplace(page, a, font, conv) {
+  const rect = { x: a.x, y: a.y, w: a.w || 0, h: a.h || 0 };
+  const rotate = a.rotate || 0;
+  const centre = { x: a.x + rect.w / 2, y: a.y + rect.h / 2 };
+  if (!isNoFill(a.fill)) {
+    drawRoundedBox(page, rect, conv, {
+      corner: 0,
+      rotate,
+      fillColor: hexToRgb01(a.fill, { r: 1, g: 1, b: 1 }),
+      strokeColor: null,
+      strokeWidth: 0,
+    });
+  }
+  const fontSize = Math.max(1, a.fontSize || 12);
+  const text = sanitizeForStandardFont(a.text);
+  if (!text.trim()) return;
+  drawWrappedText(page, text, font, conv, {
+    x: a.x,
+    yTop: a.y,
+    maxWidth: Math.max(1, rect.w),
+    fontSize,
+    color: hexToRgb01(a.textColor, { r: 0.07, g: 0.07, b: 0.07 }),
+    align: a.align || "left",
+    rotate,
+    centre,
+    wrap: false,
+    firstBaseline: a.y + replacementBaseline(a),
+    lineHeight: replacementLineHeight(a),
+  });
+}
+
+// The 14 standard fonts are WinAnsi-encoded: a character outside that set
+// makes pdf-lib throw for the whole annotation. Replace such characters with
+// a visible placeholder rather than dropping the text.
+function sanitizeForStandardFont(text) {
+  let out = "";
+  for (const ch of String(text || "")) {
+    const c = ch.codePointAt(0);
+    const ok =
+      c === 9 ||
+      c === 10 ||
+      (c >= 0x20 && c <= 0x7e) ||
+      (c >= 0xa0 && c <= 0xff) ||
+      [0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2026, 0x20ac].includes(c);
+    out += ok ? ch : "?";
+  }
+  return out;
 }
 
 // Quad-based text markup (highlight / underline / strikeout created from a
@@ -645,6 +720,9 @@ export async function flattenAnnotations(src, annotations, pageMetas = {}) {
             break;
           case "typewriter":
             drawPlainText(page, ann, await fontFor(ann), conv);
+            break;
+          case "textReplace":
+            drawTextReplace(page, ann, await fontFor(ann), conv);
             break;
           case "arrow":
           case "line":

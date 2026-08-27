@@ -150,7 +150,8 @@ describe("36/37/38. Highlight and Text box in the ribbon", () => {
     expect(TAB).toMatch(/tb\(TOOL\.TEXTBOX, <TextBoxGlyph \/>\)/);
     expect(TAB).toMatch(/const TextBoxGlyph = \(\) => \(\s*<span aria-hidden="true"[^>]*>\s*T\s*<\/span>/);
     expect(read("pdf/pdfTools.js")).toMatch(/\[TOOL\.TEXTBOX\]: "Text box"/);
-    expect(TAB).not.toMatch(/FaICursor/);
+    // The I-cursor is not the Text box glyph (P3 uses it for Edit text).
+    expect(TAB).not.toMatch(/tb\(TOOL\.TEXTBOX, <FaICursor/);
     // Every tool button still carries a real label and pressed state.
     expect(TAB).toMatch(/aria-label=\{label\}\s*aria-pressed=\{!!active\}/);
   });

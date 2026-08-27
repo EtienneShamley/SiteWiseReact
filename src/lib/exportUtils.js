@@ -2,6 +2,7 @@
 import { resolveExportImageHtml } from "./exportImageAssets";
 import { resolveExportFileAttachmentHtml } from "./exportFileAttachments";
 import { mediaWrapExportCss } from "./editorMediaLayout";
+import { docxConversionOptions, prepareHtmlForDocx } from "./docxExportPrep";
 
 let TurndownServiceMod = null;
 let gfmPluginFn = null;
@@ -75,6 +76,9 @@ function downloadBlob(blob, filename) {
  * does not contain. `.tiptap-content` is `flow-root` so a float near the end
  * of the note extends the document rather than escaping it.
  */
+// The `td, th` border rule below, as the inline form the DOCX path needs.
+export const FREEFORM_DOCX_CELL_BORDER = "1px solid #CCCCCC";
+
 export const buildHTMLDoc = (html, { wrapMedia = true } = {}) => `
   <html><head>
     <meta charset="utf-8" />
@@ -180,12 +184,13 @@ export async function buildFreeformDocxFile({ title, html }) {
   // but this is the real, unmodified input the real DOCX was converted from.
   // wrapMedia: false — wrapped image placement degrades to block in DOCX (see
   // buildHTMLDoc), and the preview shows exactly that degradation.
-  const previewHtml = buildHTMLDoc(resolved, { wrapMedia: false });
-  const converted = await htmlToDocx(previewHtml, null, {
-    table: { row: { cantSplit: true } },
-    footer: true,
-    pageNumber: true,
+  // prepareHtmlForDocx is the Word fidelity boundary (src/lib/docxExportPrep.js):
+  // the stylesheet rules html-to-docx cannot read become the inline forms it
+  // can, on this DOCX copy only. The preview string IS this prepared input.
+  const previewHtml = prepareHtmlForDocx(buildHTMLDoc(resolved, { wrapMedia: false }), {
+    cellBorder: FREEFORM_DOCX_CELL_BORDER,
   });
+  const converted = await htmlToDocx(previewHtml, null, docxConversionOptions({ fontSizePt: 12 }));
   return {
     name: safeFilename(title, "docx"),
     previewHtml,

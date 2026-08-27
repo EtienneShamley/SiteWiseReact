@@ -12,6 +12,7 @@ import {
   overlayOwnsPointer,
   patchToolStyle,
   toolStyleFor,
+  annotationTypeForTool,
 } from "./pdfTools";
 import { ANNOTATION_TYPES } from "../lib/pdfAnnotationModel";
 
@@ -25,7 +26,8 @@ describe("3. tool state", () => {
 
   test("every creation tool creates a known annotation type and has a label", () => {
     for (const t of CREATION_TOOLS) {
-      expect(Object.values(ANNOTATION_TYPES)).toContain(t);
+      // P3: Edit text is the one tool whose product is not its own name.
+      expect(Object.values(ANNOTATION_TYPES)).toContain(annotationTypeForTool(t));
       expect(TOOL_LABELS[t]).toBeTruthy();
     }
   });
