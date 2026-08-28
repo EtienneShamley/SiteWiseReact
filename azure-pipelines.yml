@@ -47,10 +47,10 @@ stages:
             clean: true
             fetchDepth: 1
 
-          - task: NodeTool@0
+          - task: UseNode@1
             displayName: Use Node $(NODE_VERSION)
             inputs:
-              versionSpec: $(NODE_VERSION)
+              version: $(NODE_VERSION)
 
           - task: Cache@2
             displayName: Restore npm download cache
