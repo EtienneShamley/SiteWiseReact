@@ -16,7 +16,10 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 jest.mock("./pdfMigration", () => ({ migrateLegacyNotePdfs: async () => ({ migrated: false }) }));
-jest.mock("./templateMigration", () => ({ runTemplateMigration: () => {} }));
+jest.mock("./templateMigration", () => ({
+  runTemplateMigration: () => ({ status: "already-complete" }),
+  TEMPLATE_MIGRATION_STATUS: { FAILED: "failed" },
+}));
 jest.mock("./templateLogoMigration", () => ({ migrateTemplateLogos: async () => {} }));
 jest.mock("./noteAttachmentMigration", () => ({ migrateNoteAttachments: async () => {} }));
 

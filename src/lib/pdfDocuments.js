@@ -17,23 +17,19 @@
 // surface storage errors instead of silently losing data.
 
 import { newId } from "./id";
+import { DURABLE_KEYS, readDurableMap, writeDurableRecord } from "./durableStorage";
 
-export const PDF_DOCS_KEY = "notewise-pdf-docs-v1";
+export const PDF_DOCS_KEY = DURABLE_KEYS.pdfDocs;
 
-/** Loads the registry map. Malformed/absent data yields an empty map. */
+/** Loads the registry map. Absent data yields an empty map; a malformed
+ *  record is set aside for recovery first (src/lib/durableStorage.js). */
 export function getPdfDocs() {
-  try {
-    const raw = localStorage.getItem(PDF_DOCS_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return readDurableMap(PDF_DOCS_KEY).map;
 }
 
 /** Persists the registry map. Throws on quota/serialization failure. */
 export function savePdfDocs(map) {
-  localStorage.setItem(PDF_DOCS_KEY, JSON.stringify(map || {}));
+  writeDurableRecord(PDF_DOCS_KEY, map || {});
 }
 
 export function getPdfDoc(id) {

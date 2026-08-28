@@ -124,9 +124,11 @@ describe("the attachment node is registered and persistent", () => {
   });
 
   test("there is no second persistence route for Free-form content", () => {
-    // One localStorage write for note content, in the one effect that owns it.
-    const writes = mainArea.match(/localStorage\.setItem\(STORAGE_KEY/g) || [];
+    // One write of note content, through its owner module, in the one
+    // coalesced write path that owns it; the component never touches storage.
+    const writes = mainArea.match(/saveNoteContent\(/g) || [];
     expect(writes).toHaveLength(1);
+    expect(mainArea).not.toMatch(/localStorage\.setItem|sitewise-notes/);
   });
 });
 

@@ -13,6 +13,7 @@ import {
 import StylePresetSelect from "./StylePresetSelect";
 import { useRefine } from "../hooks/useRefine";
 import { useAppState } from "../context/AppStateContext";
+import { loadCoordSystem, saveCoordSystem } from "../lib/notePreferences";
 import {
   QUICK_ADD_KIND,
   canClearQuickAddTarget,
@@ -94,21 +95,9 @@ function loadImageFromBlobURL(url) {
 // The former per-note "AI writing style" map ("sitewise-note-style-v1") is
 // retired: the Refine mode is one app-wide preference now
 // (src/lib/refinePreference.js). The old key is left in storage untouched.
-const COORD_SYS_KEY = "sitewise-coord-system-v1"; // per-note memory
-
-function loadMap(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-function saveMap(key, obj) {
-  try {
-    localStorage.setItem(key, JSON.stringify(obj));
-  } catch {}
-}
+// The per-note coordinate-system memory is owned by src/lib/notePreferences.js
+// (read on note change, remembered on change, forgotten when the note is
+// deleted); this component never touches its storage key.
 
 export default function BottomBar({
   editor,
@@ -344,15 +333,12 @@ export default function BottomBar({
   // per note — see `stylePreset` above; the transcription language is not
   // this component's either: src/lib/transcriptionLanguage.js.)
   useEffect(() => {
-    const sysMap = loadMap(COORD_SYS_KEY);
-    setCoordSystem((currentNoteId && sysMap[currentNoteId]) || DEFAULT_COORD_SYSTEM);
+    setCoordSystem(loadCoordSystem(currentNoteId) || DEFAULT_COORD_SYSTEM);
   }, [currentNoteId]);
 
   useEffect(() => {
     if (!currentNoteId) return;
-    const sysMap = loadMap(COORD_SYS_KEY);
-    sysMap[currentNoteId] = coordSystem || DEFAULT_COORD_SYSTEM;
-    saveMap(COORD_SYS_KEY, sysMap);
+    saveCoordSystem(currentNoteId, coordSystem || DEFAULT_COORD_SYSTEM);
   }, [currentNoteId, coordSystem]);
 
   // ---------------- EXIF / GPS helpers ----------------

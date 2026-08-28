@@ -13,30 +13,34 @@ import { storedValueColumns } from "./templateColumns";
 import { brandingIdentity } from "./templateHeaderLayout";
 import { sectionContentReferencesAsset } from "./templateSectionContent";
 import { sectionDocReferencesAsset } from "./templateSectionDoc";
+import {
+  DURABLE_KEYS,
+  readDurableMap,
+  reportPersistenceIssue,
+  writeDurableRecord,
+} from "./durableStorage";
+import { assertNoteWritable, isNoteDeleted } from "./noteTombstones";
 
-export const TEMPLATES_KEY = "sitewise-templates-v1";
-export const TEMPLATE_VERSIONS_KEY = "sitewise-template-versions-v1";
-export const NOTE_TEMPLATE_INSTANCES_KEY = "sitewise-note-template-instances-v1";
+export const TEMPLATES_KEY = DURABLE_KEYS.templates;
+export const TEMPLATE_VERSIONS_KEY = DURABLE_KEYS.templateVersions;
+export const NOTE_TEMPLATE_INSTANCES_KEY = DURABLE_KEYS.templateInstances;
 export const TEMPLATE_MIGRATION_GUARD_KEY = "sitewise-template-migration-v1-complete";
 export const TEMPLATE_MIGRATION_V2_GUARD_KEY = "sitewise-template-migration-v2-complete";
 export const DEFAULT_TEMPLATE_KEY = "sitewise-template-default-v1";
 
+// Reads never throw. A record that does not parse is set aside for recovery
+// before it reads as empty (src/lib/durableStorage.js) — never silently
+// replaced by the next write.
 function loadMap(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+  return readDurableMap(key).map;
 }
 
+// Writes THROW when they cannot be trusted (quota, serialization, a blocked
+// record). Every template CRUD operation below propagates that, so a caller
+// can never report a publish, rename or delete that did not land. The
+// previous helper swallowed these (docs/PRODUCTION_READINESS_AUDIT.md P1-8).
 function saveMap(key, map) {
-  try {
-    localStorage.setItem(key, JSON.stringify(map));
-  } catch {
-    // ignore quota/serialization errors, mirrors existing storage handling in this codebase
-  }
+  writeDurableRecord(key, map);
 }
 
 // Templates: { [templateId]: { id, name, createdAt, updatedAt, currentVersionId } }
@@ -135,12 +139,20 @@ export function getDefaultTemplateId() {
   }
 }
 
+// The default pointer is recoverable (ensureDefaultTemplate re-derives it from
+// the oldest template), so a refused write is reported, not thrown.
 export function setDefaultTemplateId(templateId) {
   try {
     if (templateId) localStorage.setItem(DEFAULT_TEMPLATE_KEY, templateId);
     else localStorage.removeItem(DEFAULT_TEMPLATE_KEY);
+    return true;
   } catch {
-    // ignore, mirrors saveMap
+    reportPersistenceIssue({
+      kind: "preference-write-failed",
+      key: DEFAULT_TEMPLATE_KEY,
+      message: "Could not remember the default template. Browser storage may be full.",
+    });
+    return false;
   }
 }
 
@@ -446,31 +458,73 @@ export function getNoteTemplateInstance(noteId) {
   return (noteId && getNoteTemplateInstances()[noteId]) || null;
 }
 
+// BEST-EFFORT instance save, used only where a throw would be worse than a
+// missing record: seeding an EMPTY instance from a component's state
+// initializer (getOrCreateInstanceForNote) and re-pinning a template. Neither
+// carries user content the confirmed path below has not already written or
+// will not write on the next edit — and the Template form's first confirmed
+// write reports a refused store as "Save failed" rather than claiming success.
+// A refused write is still reported through the persistence-issue channel;
+// it is never silent.
 export function saveNoteTemplateInstance(instance) {
-  if (!instance?.noteId) return;
+  if (!instance?.noteId) return false;
+  // A deleted note is never resurrected by a best-effort seed (see
+  // src/lib/noteTombstones.js); the caller keeps its in-memory copy only.
+  if (isNoteDeleted(instance.noteId)) return false;
   const instances = getNoteTemplateInstances();
   instances[instance.noteId] = instance;
-  saveNoteTemplateInstances(instances);
+  try {
+    saveNoteTemplateInstances(instances);
+    return true;
+  } catch {
+    reportPersistenceIssue({
+      kind: "instance-seed-write-failed",
+      key: NOTE_TEMPLATE_INSTANCES_KEY,
+      message: "Could not store this note's template data. Browser storage may be full.",
+    });
+    return false;
+  }
 }
 
 // THROWING instance save for writes that must be confirmed before dependent
 // state changes (the attachment write sequence: Blob first, reference second —
-// see NoteTemplateDoc). saveMap/saveNoteTemplateInstance deliberately swallow
-// quota/serialization errors for low-stakes writes; this path propagates them
-// and verifies the record actually landed, mirroring the throwing-write
-// precedent in templateLogoMigration.js.
+// see NoteTemplateDoc). This path propagates quota/serialization errors and
+// verifies the record actually landed, mirroring the throwing-write precedent
+// in templateLogoMigration.js. It is the ONE write path of the Template form.
 export function saveNoteTemplateInstanceOrThrow(instance) {
   if (!instance?.noteId) {
     throw new Error("Cannot save a template instance without a noteId");
   }
+  // The canonical guard against a late asynchronous completion (a row Refine
+  // returning after its note was deleted) recreating the instance.
+  assertNoteWritable(instance.noteId);
   const instances = getNoteTemplateInstances();
   instances[instance.noteId] = instance;
-  localStorage.setItem(NOTE_TEMPLATE_INSTANCES_KEY, JSON.stringify(instances));
+  saveNoteTemplateInstances(instances);
   const readBack = getNoteTemplateInstances()[instance.noteId];
   if (!readBack) {
     throw new Error("The note's template data could not be persisted");
   }
   return readBack;
+}
+
+// Removes a note's instance (note deletion — see src/lib/noteDeletion.js).
+// Returns false when the note had no instance (nothing written). Throws when
+// the removal could not be persisted, so a caller never believes a record is
+// gone while it is still on disk. Template VERSIONS are never touched: other
+// notes may be pinned to them.
+export function deleteNoteTemplateInstance(noteId) {
+  if (typeof noteId !== "string" || !noteId) {
+    throw new Error("A note id is required");
+  }
+  const instances = getNoteTemplateInstances();
+  if (!(noteId in instances)) return false;
+  delete instances[noteId];
+  saveNoteTemplateInstances(instances);
+  if (noteId in getNoteTemplateInstances()) {
+    throw new Error("The note's template data could not be removed");
+  }
+  return true;
 }
 
 // A note's instance pins it to the specific template version it was created

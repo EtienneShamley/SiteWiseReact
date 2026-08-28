@@ -483,7 +483,10 @@ describe("the authoritative PDF pagination system is untouched", () => {
 
 describe("existing Free-form editor behaviour is unchanged", () => {
   test("autosave still routes through the one persistence path", () => {
-    expect(MAIN_AREA.match(/localStorage\.setItem\(STORAGE_KEY/g)).toHaveLength(1);
+    // One write of note content, through its owner module, from the one
+    // coalesced write path; the component never touches storage itself.
+    expect(MAIN_AREA.match(/saveNoteContent\(/g)).toHaveLength(1);
+    expect(MAIN_AREA).not.toMatch(/localStorage\.setItem/);
     expect(MAIN_AREA).toMatch(/markFreeformDirty\(noteKey\);/);
   });
 

@@ -18,7 +18,9 @@
 // the language to transcribe in. The engine does not report which language it
 // detected, so nothing here pretends to know.
 //
-// Pure except for the two localStorage helpers, which never throw.
+// Pure except for the localStorage helpers, which never throw.
+
+import { isNoteDeleted } from "./noteTombstones";
 
 export const TRANSCRIPTION_LANGUAGE_AUTO = "auto";
 
@@ -84,9 +86,39 @@ export function loadTranscriptionLanguage(noteId, storage = defaultStorage()) {
   return normalizeTranscriptionLanguage(readMemory(storage)[noteId]);
 }
 
+/** Every remembered language, keyed by note id and normalized. Never throws. */
+export function loadTranscriptionLanguageMap(storage = defaultStorage()) {
+  if (!storage) return {};
+  const raw = readMemory(storage);
+  const map = {};
+  for (const noteId of Object.keys(raw)) {
+    map[noteId] = normalizeTranscriptionLanguage(raw[noteId]);
+  }
+  return map;
+}
+
+/**
+ * Forgets a note's remembered language (note deletion). Never throws; returns
+ * false only when the memory could not be rewritten. This module is the ONE
+ * writer of the key — nothing else rewrites the map.
+ */
+export function forgetTranscriptionLanguage(noteId, storage = defaultStorage()) {
+  if (!noteId || !storage) return true;
+  try {
+    const map = readMemory(storage);
+    if (!(noteId in map)) return true;
+    delete map[noteId];
+    storage.setItem(TRANSCRIPTION_LANGUAGE_MEMORY_KEY, JSON.stringify(map));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Remember a note's transcription language. Never throws; writes nothing else. */
 export function saveTranscriptionLanguage(noteId, language, storage = defaultStorage()) {
   if (!noteId || !storage) return;
+  if (isNoteDeleted(noteId)) return; // never resurrect a deleted note's memory
   try {
     const map = readMemory(storage);
     map[noteId] = normalizeTranscriptionLanguage(language);

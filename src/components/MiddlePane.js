@@ -1,6 +1,7 @@
 // src/components/MiddlePane.js
 import React, { useState, useRef } from "react";
 import { useAppState } from "../context/AppStateContext";
+import { getNoteContent as readNoteContent } from "../lib/noteContentStorage";
 import {
   FaEllipsisV, FaPen, FaShare, FaTrash, FaRegStickyNote, FaAngleDoubleRight,
   FaGripVertical, FaFolderOpen,
@@ -17,7 +18,6 @@ import {
   notesRailRestoreLabel,
 } from "../lib/notesPaneRail";
 
-const STORAGE_KEY = "sitewise-notes";
 
 export default function MiddlePane({
   middlePaneHidden,
@@ -133,15 +133,10 @@ export default function MiddlePane({
     }
   };
 
+  // Share/Export reads the stored note through its owner module — this pane
+  // never knows where or how note content is kept.
   const getNoteContent = async (noteId) => {
-    let html = "<p></p>";
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      const parsed = raw ? JSON.parse(raw) : {};
-      if (parsed && typeof parsed === "object" && parsed[noteId]) {
-        html = parsed[noteId];
-      }
-    } catch {}
+    const html = readNoteContent(noteId) || "<p></p>";
     const title = notes.find(n => n.id === noteId)?.title || "Untitled";
     return { title, html };
   };

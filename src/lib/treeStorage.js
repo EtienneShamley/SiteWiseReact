@@ -10,7 +10,9 @@
 // Only durable structure is persisted here. Transient React selection state
 // (active project/folder, current note, current PDF) is deliberately NOT stored.
 
-export const TREE_KEY = "notewise-tree-v1";
+import { DURABLE_KEYS, readDurableRecord, writeDurableRecord } from "./durableStorage";
+
+export const TREE_KEY = DURABLE_KEYS.tree;
 
 const EMPTY_TREE = {
   projectData: [],
@@ -23,17 +25,12 @@ const EMPTY_TREE = {
 /**
  * Loads the persisted hierarchy. Returns a fully-shaped object, falling back to
  * empty slices for anything missing or malformed so a corrupt record can never
- * crash hydration. Returns { ...EMPTY_TREE } when nothing is stored.
+ * crash hydration. Returns { ...EMPTY_TREE } when nothing is stored. A record
+ * that does not parse is set aside for recovery before it reads as empty
+ * (src/lib/durableStorage.js) — it is never silently replaced.
  */
 export function loadTree() {
-  let parsed = null;
-  try {
-    const raw = localStorage.getItem(TREE_KEY);
-    if (!raw) return { ...EMPTY_TREE };
-    parsed = JSON.parse(raw);
-  } catch {
-    return { ...EMPTY_TREE };
-  }
+  const parsed = readDurableRecord(TREE_KEY).value;
   if (!parsed || typeof parsed !== "object") return { ...EMPTY_TREE };
 
   const arr = (v) => (Array.isArray(v) ? v : []);
@@ -101,5 +98,5 @@ export function saveTree(tree) {
     rootFolderNotesMap: tree.rootFolderNotesMap || {},
     rootNotes: tree.rootNotes || [],
   };
-  localStorage.setItem(TREE_KEY, JSON.stringify(payload));
+  writeDurableRecord(TREE_KEY, payload);
 }

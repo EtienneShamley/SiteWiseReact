@@ -54,16 +54,33 @@ export default function TemplateLibrary({ onEditTemplate }) {
     setDefaultId(getDefaultTemplateId());
   }
 
+  // Every template write throws when it did not land (src/lib/templateModel.js);
+  // the library reports that plainly instead of showing a change that was
+  // never stored. The list is refreshed either way so it shows what IS stored.
+  function runTemplateWrite(action, failureLabel) {
+    try {
+      return action();
+    } catch (err) {
+      alert(`${failureLabel} Browser storage may be full. (${err?.message || err})`);
+      return null;
+    } finally {
+      refresh();
+    }
+  }
+
   function handleCreate() {
     const suggested = `Template ${templates.length + 1}`;
     const name = prompt("Template name:", suggested);
     if (name === null) return; // cancelled
-    const tpl = createTemplate(name.trim() || suggested, {
-      leftPct: DEFAULT_LEFT_COL_PCT,
-      logoSrc: null,
-      rows: defaultRows.map((r) => ({ ...r })),
-    });
-    refresh();
+    const tpl = runTemplateWrite(
+      () =>
+        createTemplate(name.trim() || suggested, {
+          leftPct: DEFAULT_LEFT_COL_PCT,
+          logoSrc: null,
+          rows: defaultRows.map((r) => ({ ...r })),
+        }),
+      "The template could not be created."
+    );
     if (tpl && onEditTemplate) onEditTemplate(tpl.id);
   }
 
@@ -72,13 +89,11 @@ export default function TemplateLibrary({ onEditTemplate }) {
     if (name === null) return; // cancelled
     name = name.trim();
     if (!name) return; // blank: ignore
-    renameTemplate(tpl.id, name);
-    refresh();
+    runTemplateWrite(() => renameTemplate(tpl.id, name), "The template could not be renamed.");
   }
 
   function handleDuplicate(tpl) {
-    duplicateTemplate(tpl.id);
-    refresh();
+    runTemplateWrite(() => duplicateTemplate(tpl.id), "The template could not be duplicated.");
   }
 
   function handleDelete(tpl) {
@@ -90,8 +105,7 @@ export default function TemplateLibrary({ onEditTemplate }) {
         ? `Delete "${tpl.name}"? ${refCount} note(s) use it; they keep their current layout and answers.`
         : `Delete "${tpl.name}"?`;
     if (!window.confirm(message)) return;
-    deleteTemplate(tpl.id);
-    refresh();
+    runTemplateWrite(() => deleteTemplate(tpl.id), "The template could not be deleted.");
   }
 
   function handleSetDefault(tpl) {

@@ -14,20 +14,18 @@
 // Persisted in localStorage under a versioned key. `save` throws on failure so
 // callers can surface storage errors.
 
-export const NOTE_PDF_REFS_KEY = "notewise-note-pdf-refs-v1";
+import { DURABLE_KEYS, readDurableMap, writeDurableRecord } from "./durableStorage";
 
+export const NOTE_PDF_REFS_KEY = DURABLE_KEYS.notePdfRefs;
+
+/** Absent data yields an empty map; a malformed record is set aside for
+ *  recovery first (src/lib/durableStorage.js). */
 export function getNotePdfRefs() {
-  try {
-    const raw = localStorage.getItem(NOTE_PDF_REFS_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return readDurableMap(NOTE_PDF_REFS_KEY).map;
 }
 
 export function saveNotePdfRefs(map) {
-  localStorage.setItem(NOTE_PDF_REFS_KEY, JSON.stringify(map || {}));
+  writeDurableRecord(NOTE_PDF_REFS_KEY, map || {});
 }
 
 export function getNotePdfRef(map, noteId) {

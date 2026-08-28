@@ -1,5 +1,6 @@
 import React, { useRef, useState, useMemo, useEffect, useCallback } from "react";
 import { useAppState } from "../context/AppStateContext";
+import { getNoteContent as readNoteContent } from "../lib/noteContentStorage";
 import {
   FaEllipsisV, FaPen, FaTrash, FaShare, FaFolder, FaFilePdf, FaBookOpen,
   FaClipboardList, FaFileAlt, FaThLarge, FaCog, FaUserCircle,
@@ -217,7 +218,6 @@ export default function Sidebar({
   const dotBtnCls = iconButtonClass({ className: "ml-2 p-1 rounded" });
 
   // ---------- Share / Export helpers ----------
-  const STORAGE_KEY = "sitewise-notes";
 
   const noteTitleMap = useMemo(() => {
     const map = {};
@@ -239,15 +239,10 @@ export default function Sidebar({
     return map;
   }, [rootNotes, state]);
 
+  // Share/Export reads the stored note through its owner module — the
+  // sidebar never knows where or how note content is kept.
   const getNoteContent = async (noteId) => {
-    let html = "<p></p>";
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      const parsed = raw ? JSON.parse(raw) : {};
-      if (parsed && typeof parsed === "object" && parsed[noteId]) {
-        html = parsed[noteId];
-      }
-    } catch {}
+    const html = readNoteContent(noteId) || "<p></p>";
     const title = noteTitleMap[noteId] || "Untitled";
     return { title, html };
   };

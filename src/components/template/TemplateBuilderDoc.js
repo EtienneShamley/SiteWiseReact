@@ -627,7 +627,19 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
       }),
     };
 
-    const version = publishTemplateVersion(templateId, definition);
+    // Publishing throws when the version or the template record could not be
+    // stored (src/lib/templateModel.js). Nothing below runs in that case: the
+    // draft stays on screen, the draft assets are kept, and the user is told
+    // the template was NOT saved.
+    let version;
+    try {
+      version = publishTemplateVersion(templateId, definition);
+    } catch (err) {
+      alert(
+        `Failed to save template: it could not be written to browser storage. Browser storage may be full. (${err?.message || err})`
+      );
+      return;
+    }
     if (version) {
       // The published logo asset (if any) is now referenced by a version; keep
       // it and clean up any other unreferenced session drafts (replaced logos).

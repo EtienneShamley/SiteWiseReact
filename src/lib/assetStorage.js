@@ -312,6 +312,26 @@ export async function assetExists(id) {
   return (count || 0) > 0;
 }
 
+/**
+ * Enumerates stored assets WITHOUT their Blobs — `{ id, kind, name, mimeType,
+ * size, createdAt, updatedAt, metadata }` — optionally filtered by kind. This
+ * is the listing a reference-aware sweep needs (src/lib/assetReferences.js);
+ * it never loads binary data into memory for the whole store.
+ */
+export async function listAssets({ kind } = {}) {
+  const rows = await txRequest("readonly", (store) => store.getAll());
+  const list = Array.isArray(rows) ? rows : [];
+  return list
+    .filter((rec) => rec && rec.id && (!kind || rec.kind === kind))
+    .map(({ blob, ...meta }) => meta);
+}
+
+/** Every stored asset id. */
+export async function listAssetIds() {
+  const keys = await txRequest("readonly", (store) => store.getAllKeys());
+  return Array.isArray(keys) ? keys.filter((k) => typeof k === "string") : [];
+}
+
 // Creates and persists a NEW user-uploaded logo asset. Validates first; on
 // invalid input it throws with a user-facing message and creates NO record, so
 // the caller can preserve the previous logo. User uploads get a fresh UUID id.

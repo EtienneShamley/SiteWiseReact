@@ -13,7 +13,23 @@ import {
 import { getNotePdfRefs, saveNotePdfRefs } from "../lib/notePdfRefs";
 import { loadTree, saveTree, wouldClobberStoredTree } from "../lib/treeStorage";
 import { migrateLegacyNotePdfs } from "../lib/pdfMigration";
-import { runTemplateMigration } from "../lib/templateMigration";
+import { runTemplateMigration, TEMPLATE_MIGRATION_STATUS } from "../lib/templateMigration";
+import {
+  forgetTranscriptionLanguage,
+  loadTranscriptionLanguageMap,
+  normalizeTranscriptionLanguage,
+  saveTranscriptionLanguage,
+} from "../lib/transcriptionLanguage";
+import {
+  commitTreeDeletion,
+  noteTitleInTree,
+  removeFolderFromTree,
+  removeNoteFromTree,
+  removeProjectFromTree,
+  removeRootFolderFromTree,
+} from "../lib/treeDeletion";
+import { allowNoteId, isNoteDeleted } from "../lib/noteTombstones";
+import { subscribePersistenceIssues } from "../lib/durableStorage";
 import { migrateTemplateLogos } from "../lib/templateLogoMigration";
 import { migrateNoteAttachments } from "../lib/noteAttachmentMigration";
 import {
@@ -32,25 +48,8 @@ export const AppStateContext = createContext();
 // record ("sitewise-counters-v1") is no longer read or written; it is left in
 // storage untouched.
 
-/** NEW: per-note voice language memory (noteId -> "en" | "auto" | ...) */
-const VOICE_LANG_KEY = "sitewise-note-voice-lang-v1";
-
 /** In test mode, clear local storage on load. */
 const TEST_RESET = String(process.env.REACT_APP_TEST_RESET || "") === "1";
-
-/** NEW: voice language map load/save */
-function loadVoiceLangMap() {
-  try {
-    if (!TEST_RESET) {
-      const raw = localStorage.getItem(VOICE_LANG_KEY);
-      if (raw) return JSON.parse(raw) || {};
-    }
-  } catch {}
-  return {};
-}
-function saveVoiceLangMap(map) {
-  try { localStorage.setItem(VOICE_LANG_KEY, JSON.stringify(map)); } catch {}
-}
 
 export function AppStateProvider({ children }) {
   // -------- Structure state (persisted as one versioned tree record) --------
@@ -118,9 +117,20 @@ export function AppStateProvider({ children }) {
   // Visible surface for localStorage persistence failures (quota, etc.).
   const [persistenceError, setPersistenceError] = useState(null);
 
-  // -------- NEW: Note-specific voice language memory --------
-  const [noteVoiceLangMap, setNoteVoiceLangMap] = useState(loadVoiceLangMap);
-  useEffect(() => { saveVoiceLangMap(noteVoiceLangMap); }, [noteVoiceLangMap]);
+  // -------- Note-specific transcription (voice) language memory --------
+  // The stored map is OWNED by src/lib/transcriptionLanguage.js (the one
+  // writer of its key); this is a read-through copy for the session. Nothing
+  // here rewrites the whole map on every change any more.
+  const [noteVoiceLangMap, setNoteVoiceLangMap] = useState(() =>
+    TEST_RESET ? {} : loadTranscriptionLanguageMap()
+  );
+
+  // Persistence issues raised inside the storage layer — an unreadable record
+  // set aside for recovery, a refused write that was not silent — surface on
+  // the same banner as the tree/PDF write failures below.
+  useEffect(() => subscribePersistenceIssues((issue) => {
+    if (issue?.message) setPersistenceError(issue.message);
+  }), []);
 
   // -------- Persist the hierarchy (versioned tree record) --------
   // The first run after mount is never allowed to replace a stored, non-empty
@@ -187,7 +197,12 @@ export function AppStateProvider({ children }) {
     let cancelled = false;
     (async () => {
       try {
-        runTemplateMigration();
+        const templateMigration = runTemplateMigration();
+        if (templateMigration?.status === TEMPLATE_MIGRATION_STATUS.FAILED && !cancelled) {
+          setPersistenceError(
+            "Could not complete the template storage migration; it will retry on the next load. Browser storage may be full."
+          );
+        }
         await migrateTemplateLogos();
       } catch (err) {
         if (!cancelled) {
@@ -329,6 +344,9 @@ export function AppStateProvider({ children }) {
   }
   function linkNotePdf(noteId, pdfId) {
     if (!noteId || !pdfId) return;
+    // A PDF import that resolves after its note was deleted must not recreate
+    // the note's link (src/lib/noteTombstones.js).
+    if (isNoteDeleted(noteId)) return;
     setNotePdfRefs((prev) => ({ ...prev, [noteId]: pdfId }));
   }
   // Removes only the note's reference — never deletes the underlying PDF.
@@ -371,22 +389,65 @@ export function AppStateProvider({ children }) {
   /** NEW: set/save language for a note */
   function setNoteVoiceLanguage(nid, lang) {
     if (!nid) return;
-    setNoteVoiceLangMap(prev => {
-      const next = { ...prev, [nid]: lang || "auto" };
-      saveVoiceLangMap(next);
-      return next;
-    });
+    const value = normalizeTranscriptionLanguage(lang);
+    saveTranscriptionLanguage(nid, value);
+    setNoteVoiceLangMap(prev => ({ ...prev, [nid]: value }));
   }
   /** NEW: cleanup when a note is deleted */
   function removeNoteVoiceLanguage(nid) {
     if (!nid) return;
+    forgetTranscriptionLanguage(nid);
     setNoteVoiceLangMap(prev => {
       if (!(nid in prev)) return prev;
       const next = { ...prev };
       delete next[nid];
-      saveVoiceLangMap(next);
       return next;
     });
+  }
+
+  // -------- Note deletion (one confirmed operation) --------
+  // A note, folder or project deletion is ONE confirmed operation over the
+  // tree record and the notes' owned data (src/lib/treeDeletion.js): the next
+  // tree is written synchronously and confirmed FIRST, then each note's
+  // content, Template instance and preferences are removed and confirmed, and
+  // only then are the ids tombstoned and the state updated. A failure at any
+  // step is compensated (owned data restored from its snapshot, previous tree
+  // written back) so the user sees exactly what they saw before, with a
+  // message — bulk deletions are all-or-nothing. Assets are deliberately not
+  // touched (references are many-to-one; see noteDeletion.js). The PDF link
+  // is state-owned and cleared after commit (never the PDF itself).
+  function currentTree() {
+    return { projectData, folderMap, rootFolders, rootFolderNotesMap, rootNotes };
+  }
+  function applyTree(next) {
+    if (next.projectData !== projectData) setProjectData(next.projectData);
+    if (next.folderMap !== folderMap) setFolderMap(next.folderMap);
+    if (next.rootFolders !== rootFolders) setRootFolders(next.rootFolders);
+    if (next.rootFolderNotesMap !== rootFolderNotesMap) setRootFolderNotesMap(next.rootFolderNotesMap);
+    if (next.rootNotes !== rootNotes) setRootNotes(next.rootNotes);
+  }
+  // Returns true when the deletion committed (state now reflects it).
+  function runTreeDeletion({ prevTree, nextTree, notes }) {
+    const result = commitTreeDeletion({ prevTree, nextTree, notes });
+    if (result.ok) {
+      applyTree(nextTree);
+      for (const id of result.deletedIds) {
+        removeNoteVoiceLanguage(id);
+        unlinkNotePdf(id); // the note's PDF reference only — never the PDF
+        if (currentNoteId === id) setCurrentNoteIdRaw(null);
+      }
+      return true;
+    }
+    setPersistenceError(result.message);
+    // A second fault: the persisted tree is the truth the next reload shows,
+    // so the visible state follows it rather than pretending otherwise.
+    if (result.compensated === false && result.persistedTree) {
+      applyTree(result.persistedTree);
+      if (result.persistedTree === nextTree) {
+        for (const n of notes) if (currentNoteId === n.id) setCurrentNoteIdRaw(null);
+      }
+    }
+    return false;
   }
 
   // -------- Default names --------
@@ -428,6 +489,7 @@ export function AppStateProvider({ children }) {
     const name = title.trim() || suggested;
 
     const id = `root-note-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+    allowNoteId(id);
     setRootNotes((prev) => [...prev, { id, title: name }]);
     // Select it & enable editor
     setCurrentNoteId(id);
@@ -455,10 +517,9 @@ export function AppStateProvider({ children }) {
 
   function deleteRootNote(nid) {
     if (!window.confirm("Delete this note?")) return;
-    setRootNotes((prev) => prev.filter((note) => note.id !== nid));
-    if (currentNoteId === nid) setCurrentNoteIdRaw(null);
-    removeNoteVoiceLanguage(nid); // NEW: cleanup
-    unlinkNotePdf(nid);           // remove the note's PDF reference (keep the PDF)
+    const prevTree = currentTree();
+    const note = rootNotes.find((n) => n.id === nid) || { id: nid, title: "" };
+    runTreeDeletion({ prevTree, nextTree: removeNoteFromTree(prevTree, nid), notes: [note] });
   }
 
   function shareRootNote(nid) {
@@ -499,22 +560,12 @@ export function AppStateProvider({ children }) {
   function deleteProject(pid) {
     if (folderMap[pid]?.length) return alert("Delete folders first.");
     if (!window.confirm("Delete this project?")) return;
-    // Remove note voice-language + PDF references for this project's notes.
-    // Global PDFs are NOT deleted — a note reference never owns the PDF.
-    try {
-      const folders = folderMap[pid] || [];
-      const allNotes = folders.flatMap(f => f.notes || []);
-      allNotes.forEach(n => {
-        removeNoteVoiceLanguage(n.id);
-        unlinkNotePdf(n.id);
-      });
-    } catch {}
-    setProjectData((prev) => prev.filter((p) => p.id !== pid));
-    setFolderMap((prev) => {
-      const copy = { ...prev };
-      delete copy[pid];
-      return copy;
-    });
+    // A project can only be deleted once its folders are gone, so there are
+    // normally no notes to cascade; the same confirmed operation runs anyway
+    // so the rule is stated once. Global PDFs are NOT deleted.
+    const prevTree = currentTree();
+    const { tree: nextTree, notes } = removeProjectFromTree(prevTree, pid);
+    if (!runTreeDeletion({ prevTree, nextTree, notes })) return;
     if (activeProjectId === pid) {
       setActiveProjectId(null);
       setActiveFolderId(null);
@@ -572,20 +623,11 @@ export function AppStateProvider({ children }) {
 
   function deleteFolder(pid, fid) {
     if (!window.confirm("Delete this folder?")) return;
-    // cleanup note voice languages + PDF references within folder.
-    // Global PDFs are NOT deleted when a folder is deleted.
-    try {
-      const folders = folderMap[pid] || [];
-      const folder = folders.find(f => f.id === fid);
-      (folder?.notes || []).forEach(n => {
-        removeNoteVoiceLanguage(n.id);
-        unlinkNotePdf(n.id);
-      });
-    } catch {}
-    setFolderMap((prev) => ({
-      ...prev,
-      [pid]: prev[pid].filter((f) => f.id !== fid),
-    }));
+    // All-or-nothing: the folder and every note's owned data go together, or
+    // nothing changes and the user is told. Global PDFs are NOT deleted.
+    const prevTree = currentTree();
+    const { tree: nextTree, notes } = removeFolderFromTree(prevTree, pid, fid);
+    if (!runTreeDeletion({ prevTree, nextTree, notes })) return;
     if (activeFolderId === fid && activeProjectId === pid) {
       setActiveFolderId(null);
       setCurrentNoteIdRaw(null);
@@ -604,6 +646,7 @@ export function AppStateProvider({ children }) {
     const finalTitle = title.trim() || suggested;
 
     const nid = `note-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+    allowNoteId(nid);
     setFolderMap((prev) => ({
       ...prev,
       [pid]: prev[pid].map((f) =>
@@ -656,21 +699,10 @@ export function AppStateProvider({ children }) {
 
   function deleteRootFolder(fid) {
     if (!window.confirm("Delete this folder?")) return;
-    // cleanup note voice languages + PDF references within root folder.
-    // Global PDFs are NOT deleted when a folder is deleted.
-    try {
-      const list = rootFolderNotesMap[fid] || [];
-      list.forEach(n => {
-        removeNoteVoiceLanguage(n.id);
-        unlinkNotePdf(n.id);
-      });
-    } catch {}
-    setRootFolders((prev) => prev.filter((f) => f.id !== fid));
-    setRootFolderNotesMap((prev) => {
-      const m = { ...prev };
-      delete m[fid];
-      return m;
-    });
+    // Same all-or-nothing rule as deleteFolder. Global PDFs are NOT deleted.
+    const prevTree = currentTree();
+    const { tree: nextTree, notes } = removeRootFolderFromTree(prevTree, fid);
+    if (!runTreeDeletion({ prevTree, nextTree, notes })) return;
     if (!activeProjectId && activeFolderId === fid) {
       setActiveFolderId(null);
       setCurrentNoteIdRaw(null);
@@ -685,6 +717,7 @@ export function AppStateProvider({ children }) {
     const finalTitle = title.trim() || suggested;
 
     const nid = `note-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+    allowNoteId(nid);
     setRootFolderNotesMap((prev) => {
       const list = prev[fid] || [];
       return { ...prev, [fid]: [...list, { id: nid, title: finalTitle }] };
@@ -745,38 +778,12 @@ export function AppStateProvider({ children }) {
 
   function deleteNote(fid, nid) {
     if (!window.confirm("Delete this note?")) return;
-
-    // project folders
-    setFolderMap((prev) => {
-      const updated = {};
-      for (const pid in prev) {
-        updated[pid] = prev[pid].map((folder) =>
-          folder.id === fid
-            ? { ...folder, notes: folder.notes.filter((note) => note.id !== nid) }
-            : folder
-        );
-      }
-      return updated;
+    const prevTree = currentTree();
+    runTreeDeletion({
+      prevTree,
+      nextTree: removeNoteFromTree(prevTree, nid),
+      notes: [{ id: nid, title: noteTitleInTree(prevTree, nid) }],
     });
-
-    // root folders
-    setRootFolderNotesMap((prev) => {
-      const out = { ...prev };
-      for (const rf in out) {
-        const before = out[rf];
-        const after = before.filter((n) => n.id !== nid);
-        if (after.length !== before.length) {
-          out[rf] = after;
-          break;
-        }
-      }
-      return out;
-    });
-
-    // root notes handled by deleteRootNote
-    if (currentNoteId === nid) setCurrentNoteIdRaw(null);
-    removeNoteVoiceLanguage(nid); // NEW: cleanup
-    unlinkNotePdf(nid);           // remove the note's PDF reference (keep the PDF)
   }
 
   function shareNote(nid) {

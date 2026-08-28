@@ -87,6 +87,8 @@ import {
 } from "../lib/documentZoom";
 import { actionButtonClass, iconButtonClass } from "../lib/interactionStyles";
 import useSaveStatus from "../hooks/useSaveStatus";
+import { loadNoteContentMap, saveNoteContent } from "../lib/noteContentStorage";
+import { createWriteCoalescer } from "../lib/writeCoalescer";
 import {
   QUICK_ADD_KIND,
   quickAddCapture,
@@ -116,7 +118,6 @@ const EMPTY_DOC = "<p></p>";
 // The Quick Add composer's collapse/restore wording (exported for the tests).
 export const COMPOSER_COLLAPSE_LABEL = "Collapse Quick Add composer";
 export const COMPOSER_RESTORE_LABEL = "Restore Quick Add composer";
-const STORAGE_KEY = "sitewise-notes";
 
 // Secondary metadata line for a PDF workspace header (muted grey).
 function pdfMetaLine(doc) {
@@ -151,14 +152,10 @@ export default function MainArea() {
   } = useAppState();
   const { refineText } = useRefine();
 
-  const [docState, setDocState] = useState(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
+  // Free-form content, hydrated once from its owner module. This component
+  // never knows the storage key or its representation: it reads the map on
+  // mount and hands every change to the one write path below.
+  const [docState, setDocState] = useState(loadNoteContentMap);
 
   // Whether the note view or the linked PDF is showing ("note" | "pdf"). It
   // lives in AppStateContext because the left sidebar's "This note" navigation
@@ -378,28 +375,59 @@ export default function MainArea() {
   /**
    * The ONE place Free-form note content reaches storage.
    *
-   * The write is synchronous and immediate — nothing is debounced, so no recent
-   * edit can be lost. Returning without throwing IS the confirmation; a failure
-   * (most often this origin's localStorage budget, e.g. a large legacy embedded
-   * image) is reported as "Save failed" and never swallowed. The content stays
-   * on screen and editable either way, and the next edit retries through this
+   * Every change is handed to a write coalescer (src/lib/writeCoalescer.js)
+   * holding the LATEST HTML per note: it is written 500 ms after the last
+   * change, no later than 2 s after the first unwritten one, and immediately
+   * when the note is left, this component unmounts, or the page is hidden or
+   * unloaded — so a burst of keystrokes is one write, and no edit is left
+   * unwritten. The write itself (`saveNoteContent`) is synchronous and
+   * confirmed: returning without throwing IS the confirmation; a failure (most
+   * often this origin's localStorage budget) is reported as "Save failed" for
+   * exactly the note that failed and never swallowed. The content stays on
+   * screen and editable either way, and the next edit retries through this
    * same path.
    */
+  const settleSaveRef = useRef(settleSave);
+  settleSaveRef.current = settleSave;
+  const contentWriterRef = useRef(null);
+  if (contentWriterRef.current === null) {
+    contentWriterRef.current = createWriteCoalescer({
+      write: (targetNoteId, html) => saveNoteContent(targetNoteId, html),
+      // Settles exactly the notes a flush wrote — timer-driven or explicit —
+      // against the sequence stamped when their change was made.
+      onFlush: (results) => {
+        const pending = pendingFreeformRef.current;
+        for (const { id, ok } of results) {
+          const seq = pending.get(id);
+          pending.delete(id);
+          if (seq) settleSaveRef.current(id, NOTE_VIEW.FREEFORM, seq, ok);
+        }
+      },
+    });
+  }
+  const flushFreeformWrites = useCallback(() => {
+    contentWriterRef.current?.flush();
+  }, []);
+
+  // Unmounting, hiding the page (tab switch, app backgrounded) and unloading
+  // it flush every pending write. Leaving a note flushes too — see below,
+  // once the open note is known.
   useEffect(() => {
-    let ok = true;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(docState));
-    } catch {
-      ok = false;
-    }
-    const pending = pendingFreeformRef.current;
-    if (pending.size === 0) return; // mount / no user-driven change to report
-    const settled = [...pending.entries()];
-    pending.clear();
-    for (const [targetNoteId, seq] of settled) {
-      settleSave(targetNoteId, NOTE_VIEW.FREEFORM, seq, ok);
-    }
-  }, [docState, settleSave]);
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flushFreeformWrites();
+    };
+    window.addEventListener("pagehide", flushFreeformWrites);
+    window.addEventListener("beforeunload", flushFreeformWrites);
+    document.addEventListener("visibilitychange", onVisibility);
+    const writer = contentWriterRef.current;
+    return () => {
+      window.removeEventListener("pagehide", flushFreeformWrites);
+      window.removeEventListener("beforeunload", flushFreeformWrites);
+      document.removeEventListener("visibilitychange", onVisibility);
+      flushFreeformWrites();
+      writer?.dispose();
+    };
+  }, [flushFreeformWrites]);
 
   // Records that a real Free-form change was made to a SPECIFIC note, and
   // queues it for the write above. The note is always passed explicitly, never
@@ -514,7 +542,9 @@ export default function MainArea() {
         // change, so the status becomes "Saving…" and the write below settles
         // it. Unchanged persistence behaviour — the same immediate write.
         markFreeformDirty(noteKey);
-        setDocState((prev) => ({ ...prev, [noteKey]: editor.getHTML() }));
+        const html = editor.getHTML();
+        setDocState((prev) => ({ ...prev, [noteKey]: html }));
+        contentWriterRef.current?.schedule(noteKey, html);
       },
       // Where a Quick Add would land. Captured from the editor's OWN events, so
       // the stored point is always somewhere the user actually put the caret —
@@ -540,6 +570,10 @@ export default function MainArea() {
     },
     [noteKey]
   );
+
+  // Leaving the open note flushes its pending write at once, so returning to
+  // it (or exporting it) reads what was typed, not what the timer had reached.
+  useEffect(() => () => flushFreeformWrites(), [noteKey, flushFreeformWrites]);
 
   // Loading a note into the editor is not an edit. `emitUpdate: false` is
   // explicit because the installed editor emits an update from setContent by
@@ -1422,6 +1456,20 @@ export default function MainArea() {
     pruneSaveStatuses(liveNoteIds);
     setRefineBackups((prev) => pruneRefineBackups(prev, liveNoteIds));
     setSectionRefineBackups((prev) => pruneRowRefineBackups(prev, liveNoteIds));
+    // A deleted note's content is removed from storage by the delete cascade
+    // (src/lib/noteDeletion.js). Its in-memory copy and any write still
+    // waiting for it are dropped here so nothing can write it back.
+    setDocState((prev) => {
+      let next = null;
+      for (const id of Object.keys(prev)) {
+        if (liveNoteIds.has(id)) continue;
+        if (next === null) next = { ...prev };
+        delete next[id];
+        contentWriterRef.current?.cancel(id);
+        pendingFreeformRef.current.delete(id);
+      }
+      return next === null ? prev : next;
+    });
   }, [liveNoteIds, pruneSaveStatuses]);
 
   // Template Section Refine backup writers handed to NoteTemplateDoc. Both are

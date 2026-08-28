@@ -313,7 +313,10 @@ describe("row, field-type and section handlers are unchanged", () => {
   });
 
   test("Submit template still publishes a new immutable version", () => {
-    expect(doc).toContain("const version = publishTemplateVersion(templateId, definition);");
+    // Publishing is now a confirmed write: it throws when the version could
+    // not be stored, and the builder reports that instead of "Template saved."
+    expect(doc).toContain("version = publishTemplateVersion(templateId, definition);");
+    expect(doc).toMatch(/catch \(err\) \{\s*\n\s*alert\(\s*\n?\s*`Failed to save template/);
     expect(doc).toContain("if (onTemplateSubmit) onTemplateSubmit(version);");
   });
 
