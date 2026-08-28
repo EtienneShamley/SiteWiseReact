@@ -261,6 +261,9 @@ const REFINE_ERROR_MESSAGE = {
   [REFINE_ERROR_CODE.INVALID_LANGUAGE]: "Unsupported language.",
 };
 
+// The only fields a refine request body may carry.
+const REFINE_REQUEST_FIELDS = Object.freeze(["text", "style", "language"]);
+
 function invalid(code) {
   return { ok: false, code, message: REFINE_ERROR_MESSAGE[code] };
 }
@@ -268,8 +271,11 @@ function invalid(code) {
 /**
  * Validate an incoming refine request body.
  *
- * Accepts ONLY { text, style?, language? }. Any other property is ignored
- * rather than forwarded, so the client cannot smuggle provider parameters.
+ * Accepts ONLY { text, style?, language? }. Any other property REJECTS the
+ * request (`invalid_body`): the body is a fixed contract at the server's
+ * trust boundary, and an unexpected field is a malformed request, not
+ * something to silently drop. Nothing from the body is ever forwarded to the
+ * provider except the validated text.
  *
  * @returns {{ok: true, value: {text, style, language, instruction}}}
  *        | {{ok: false, code: string, message: string}}
@@ -277,6 +283,10 @@ function invalid(code) {
 function validateRefineRequest(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return invalid(REFINE_ERROR_CODE.INVALID_BODY);
+  }
+
+  for (const key of Object.keys(body)) {
+    if (!REFINE_REQUEST_FIELDS.includes(key)) return invalid(REFINE_ERROR_CODE.INVALID_BODY);
   }
 
   const { text, style, language } = body;
@@ -819,6 +829,7 @@ module.exports = {
 
   REFINE_ERROR_CODE,
   REFINE_ERROR_MESSAGE,
+  REFINE_REQUEST_FIELDS,
   validateRefineRequest,
   validateRefineOutput,
   REFINE_FINISH_TRUNCATED,

@@ -180,8 +180,14 @@ describe("5/12. one session, owned above the sidebar and the workspace", () => {
 
 describe("13–16. transcription language: real auto-detect, explicit choice, note suggestion, no document binding", () => {
   test("13. Auto-detect is genuine: the server omits the language and the primary model detects it", () => {
-    expect(ROUTE).toMatch(/const primary = \{ model: "gpt-4o-mini-transcribe", file \};\s*\n\s*if \(explicitLanguage\) primary\.language = explicitLanguage;/);
-    expect(ROUTE).toMatch(/const explicitLanguage = \/\^\[a-z\]\{2\}\$\/\.test\(language\) \? language : null;/);
+    // "auto" resolves to NO language parameter; an explicit code is passed
+    // through; the route only adds `language` when the hint carries one.
+    const { resolveLanguageHint, PRIMARY_MODEL } = require("../../server/transcriptionPolicy");
+    expect(PRIMARY_MODEL).toBe("gpt-4o-mini-transcribe");
+    expect(resolveLanguageHint("auto")).toEqual({ ok: true, language: null });
+    expect(resolveLanguageHint("en")).toEqual({ ok: true, language: "en" });
+    expect(resolveLanguageHint("english")).toEqual({ ok: false });
+    expect(ROUTE).toMatch(/const p = \{ model, file \};\s*\n\s*if \(hint\.language\) p\.language = hint\.language;/);
     // Neither model reports the detected language; nothing in the client
     // claims to know it.
     expect(DIALOG).not.toMatch(/detected language|Detected:/i);

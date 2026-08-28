@@ -260,12 +260,17 @@ describe("9-12. nothing about the prompts or targeting moved", () => {
 
 describe("15-16. only the Refine route's model changed", () => {
   test("15. transcription still uses its own, unrelated models", () => {
+    // The transcription models are declared by the transcription policy
+    // module (server/transcriptionPolicy.js) and consumed by the route.
+    const policy = require("../../server/transcriptionPolicy");
+    expect(policy.PRIMARY_MODEL).toBe("gpt-4o-mini-transcribe");
+    expect(policy.FALLBACK_MODEL).toBe("whisper-1");
     const transcribe = require("fs").readFileSync(
       `${__dirname}/../../routes/transcribe.js`,
       "utf8"
     );
-    expect(transcribe).toContain('model: "gpt-4o-mini-transcribe"');
-    expect(transcribe).toContain('model: "whisper-1"');
+    expect(transcribe).toContain("params(PRIMARY_MODEL)");
+    expect(transcribe).toContain("params(FALLBACK_MODEL)");
     expect(transcribe).not.toContain("gpt-5.6-terra");
     // Transcription is a different endpoint with its own client.
     expect(transcribe).not.toContain("refineContract");
