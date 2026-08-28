@@ -18,7 +18,6 @@ if (process.env.REACT_APP_TEST_RESET === "1") {
 
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
 
 require("dotenv").config();
 

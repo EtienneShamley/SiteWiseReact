@@ -1,0 +1,83 @@
+# NoteWise — Azure Pipelines CI (Phase 2: engineering foundation)
+#
+# Purpose: prove on every change to `main` that NoteWise installs, lints,
+# tests and builds from repository state alone — no developer-local files,
+# no .env, no pre-existing node_modules, no secrets.
+#
+# This pipeline VERIFIES only. It does not deploy. Deployment stages are a
+# later phase and will consume the `frontend-build` artifact published here.
+#
+# Source of truth stays on GitHub; Azure DevOps runs this file through a
+# GitHub service connection. The pipeline calls the project's own npm scripts
+# (see package.json) rather than restating them, so local and CI runs stay
+# identical:  npm ci → npm run lint → npm run test:ci → npm run build
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  NODE_VERSION: "22.x"
+  # CI=true makes CRA treat build warnings as errors and keeps Jest
+  # non-interactive. Tests also set --ci explicitly via `npm run test:ci`.
+  CI: "true"
+  # Point npm's download cache into the pipeline workspace so Cache@2 can
+  # persist it between runs. node_modules itself is never cached: `npm ci`
+  # always installs from the lockfile into a fresh tree.
+  npm_config_cache: $(Pipeline.Workspace)/.npm
+
+stages:
+  - stage: Validate
+    displayName: Validate (install · lint · test · build)
+    jobs:
+      - job: build_and_test
+        displayName: Node $(NODE_VERSION) clean build
+        timeoutInMinutes: 45
+        steps:
+          - checkout: self
+            clean: true
+            fetchDepth: 1
+
+          - task: UseNode@1
+            displayName: Use Node $(NODE_VERSION)
+            inputs:
+              version: $(NODE_VERSION)
+
+          - task: Cache@2
+            displayName: Restore npm download cache
+            inputs:
+              key: 'npm | "$(Agent.OS)" | package-lock.json'
+              restoreKeys: |
+                npm | "$(Agent.OS)"
+              path: $(npm_config_cache)
+
+          - script: |
+              node --version
+              npm --version
+              npm ci
+            displayName: Install (npm ci)
+
+          - script: npm run lint
+            displayName: Lint (app source + backend)
+
+          - script: npm run test:ci
+            displayName: Automated test suite (Jest)
+
+          - script: npm run build
+            displayName: Production build (CRA, CI=true)
+
+          # Not a deployment. The built static frontend is kept as a pipeline
+          # artifact so a later release stage can deploy exactly what was
+          # verified, and so a failing build can be inspected without a rebuild.
+          - publish: build
+            artifact: frontend-build
+            displayName: Publish frontend build artifact
