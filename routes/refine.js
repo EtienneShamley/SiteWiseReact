@@ -206,12 +206,30 @@ function logRefineFailure(outcome, err, textLength) {
   );
 }
 
+// Content-free diagnostics for the request log written by server/app.js:
+// outcome, attempts, provider status and error category — never text.
+// Guarded so the handler also runs under a bare test double with no locals.
+function diag(res, fields) {
+  if (!res || !res.locals) return;
+  res.locals.diag = Object.assign(res.locals.diag || {}, fields);
+}
+
+function providerDiag(err) {
+  return {
+    providerStatus: err && typeof err.status === "number" ? err.status : undefined,
+    providerCode: err && typeof err.code === "string" ? err.code : undefined,
+    providerErrorName: err && typeof err.name === "string" ? err.name : undefined,
+  };
+}
+
 router.post("/refine", async (req, res) => {
-  // 1. Shape and content validation, against the shared contract. Rejects an
-  //    empty note, an oversized note, an unknown style preset and an
-  //    unsupported language, all as 400s with safe messages.
+  // 1. Shape and content validation, against the shared contract. Rejects a
+  //    missing or non-object body, an unexpected field, an empty note, an
+  //    oversized note, an unknown style preset and an unsupported language,
+  //    all as 400s with safe messages — before any provider work.
   const request = validateRefineRequest(req.body);
   if (!request.ok) {
+    diag(res, { outcome: "rejected", errorCategory: request.code });
     return res.status(400).json({ error: request.message, code: request.code });
   }
 
@@ -229,7 +247,9 @@ router.post("/refine", async (req, res) => {
   // One provider attempt: the same call, optionally carrying one corrective
   // instruction of OURS. It returns the refined text, or the reason it is not
   // usable. Nothing here writes anything.
+  let attemptsMade = 0;
   const attempt = async (corrective, n) => {
+    attemptsMade = n;
     const completion = await getClient().chat.completions.create(
       refineProviderParams({ system, source, corrective }),
       { timeout: REFINE_TIMEOUT_MS }
@@ -241,10 +261,12 @@ router.post("/refine", async (req, res) => {
   logRefine(`mode: ${mode}`);
   logRefine(`source shape: ${shape}`);
   logRefine(`source chars: ${text.length}`);
+  diag(res, { mode, sourceChars: text.length });
 
-  const failSafely = (reason) => {
+  const failSafely = (reason, category) => {
     logRefineFailure(REFINE_OUTCOME.FAILURE, new Error(reason), text.length);
     logRefine("final: failure");
+    diag(res, { outcome: REFINE_OUTCOME.FAILURE, attempts: attemptsMade, errorCategory: category });
     return res
       .status(httpStatusForOutcome(REFINE_OUTCOME.FAILURE))
       .json({
@@ -267,6 +289,7 @@ router.post("/refine", async (req, res) => {
     const outcome = classifyProviderError(err);
     logRefineFailure(outcome, err, text.length);
     logRefine(`final: ${outcome}`);
+    diag(res, { outcome, attempts: attemptsMade, errorCategory: "provider", ...providerDiag(err) });
     return res
       .status(httpStatusForOutcome(outcome))
       .json({ error: refineMessageFor(outcome), outcome });
@@ -278,7 +301,7 @@ router.post("/refine", async (req, res) => {
   //    and NEITHER IS RETRIED: a truncation is a size problem, not a contract
   //    problem, and asking again would spend a second request on the same
   //    outcome. Both settle through the existing FAILURE path.
-  if (!output.ok) return failSafely(`provider output rejected: ${output.reason}`);
+  if (!output.ok) return failSafely(`provider output rejected: ${output.reason}`, "output_rejected");
 
   // 5. THE MODE'S OBJECTIVE CONTRACT. Only measurable violations — a Summary
   //    that is as long as its source, a prose note returned as a wall of
@@ -294,7 +317,7 @@ router.post("/refine", async (req, res) => {
     const corrective = refineCorrection(mode, check.code);
     // No corrective for this failure means there is nothing specific to ask
     // for, and a vague retry is just a second guess: fail rather than spend it.
-    if (!corrective) return failSafely(`mode contract failed: ${check.code}`);
+    if (!corrective) return failSafely(`mode contract failed: ${check.code}`, "contract_failed");
 
     // 6. EXACTLY ONE corrective retry. Same source, same mode, same model, same
     //    system prompt, plus one instruction naming the rule that was broken.
@@ -306,12 +329,13 @@ router.post("/refine", async (req, res) => {
       const outcome = classifyProviderError(err);
       logRefineFailure(outcome, err, text.length);
       logRefine(`final: ${outcome}`);
+      diag(res, { outcome, attempts: attemptsMade, errorCategory: "provider", ...providerDiag(err) });
       return res
         .status(httpStatusForOutcome(outcome))
         .json({ error: refineMessageFor(outcome), outcome });
     }
 
-    if (!output.ok) return failSafely(`provider output rejected: ${output.reason}`);
+    if (!output.ok) return failSafely(`provider output rejected: ${output.reason}`, "output_rejected");
 
     check = validateRefineTransform({ mode, shape, source: text, output: output.refined });
     logAttemptValidation(2, text, output.refined, check);
@@ -320,13 +344,14 @@ router.post("/refine", async (req, res) => {
       //    applied to somebody's note merely because the provider returned
       //    text: the note stays exactly as it was and the user sees the one
       //    safe message.
-      return failSafely(`mode contract failed after retry: ${check.code}`);
+      return failSafely(`mode contract failed after retry: ${check.code}`, "contract_failed_after_retry");
     }
   }
 
   // 8. Success. The payload carries the refined text and nothing else — no
   //    provider metadata, no model name, no configuration, no key material.
   logRefine("final: success");
+  diag(res, { outcome: "success", attempts: attemptsMade, outputChars: output.refined.length });
   return res.json({ refined: output.refined });
 });
 
