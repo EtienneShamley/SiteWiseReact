@@ -224,6 +224,11 @@ const REFINE_OUTCOME = {
   UNAVAILABLE: "unavailable",
   // Temporary: timeout, network, provider error, malformed response.
   FAILURE: "failure",
+  // Identity (since 2026-08-29): no accepted sign-in — the request never
+  // left the browser, or the backend refused the session (401).
+  UNAUTHENTICATED: "unauthenticated",
+  // Signed in, but the email is not verified: the account may not spend (403).
+  EMAIL_NOT_VERIFIED: "email_not_verified",
 };
 
 // The ONLY strings shown to a user. Deliberately free of provider names,
@@ -233,6 +238,10 @@ const REFINE_MESSAGE = {
     "AI Refine is currently unavailable. Your note has not been changed.",
   [REFINE_OUTCOME.FAILURE]:
     "AI Refine could not complete. Your note has not been changed.",
+  [REFINE_OUTCOME.UNAUTHENTICATED]:
+    "Sign in to use AI Refine. Your note has not been changed.",
+  [REFINE_OUTCOME.EMAIL_NOT_VERIFIED]:
+    "Verify your email address to use AI Refine. Your note has not been changed.",
 };
 
 function refineMessageFor(outcome) {
@@ -431,9 +440,12 @@ function httpStatusForOutcome(outcome) {
 /**
  * Client-side mapping of a response status onto an outcome.
  * 404 means the refine route is not mounted at all — an unavailable service,
- * not a transient failure.
+ * not a transient failure. 401 is a session the backend does not accept;
+ * 403 is the verified-email requirement (the only 403 the route produces).
  */
 function outcomeForHttpStatus(status) {
+  if (status === 401) return REFINE_OUTCOME.UNAUTHENTICATED;
+  if (status === 403) return REFINE_OUTCOME.EMAIL_NOT_VERIFIED;
   if (status === 404 || status === 503) return REFINE_OUTCOME.UNAVAILABLE;
   return REFINE_OUTCOME.FAILURE;
 }

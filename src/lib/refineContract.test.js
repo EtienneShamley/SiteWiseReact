@@ -217,6 +217,8 @@ describe("error classification", () => {
   test("a missing route (404) and a 503 both read as unavailable to the client", () => {
     expect(outcomeForHttpStatus(404)).toBe(REFINE_OUTCOME.UNAVAILABLE);
     expect(outcomeForHttpStatus(503)).toBe(REFINE_OUTCOME.UNAVAILABLE);
+    expect(outcomeForHttpStatus(401)).toBe(REFINE_OUTCOME.UNAUTHENTICATED);
+    expect(outcomeForHttpStatus(403)).toBe(REFINE_OUTCOME.EMAIL_NOT_VERIFIED);
     expect(outcomeForHttpStatus(502)).toBe(REFINE_OUTCOME.FAILURE);
     expect(outcomeForHttpStatus(500)).toBe(REFINE_OUTCOME.FAILURE);
     expect(outcomeForHttpStatus(0)).toBe(REFINE_OUTCOME.FAILURE);

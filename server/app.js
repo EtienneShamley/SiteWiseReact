@@ -12,12 +12,17 @@
 //   3. origin policy               unknown Origin → 403 before any work
 //   4. CORS headers / preflight    explicit origins, no credentials
 //   5. health
-//   6. provider-backed routes      gate (production fail-closed) → rate limit
-//                                  → body parser with a route-sized limit → route
+//   6. provider-backed routes      per-IP limiter (coarse, in front of
+//                                  verification) → Firebase ID-token
+//                                  verification → verified email → per-user
+//                                  rate limit → body parser with a
+//                                  route-sized limit → route
 //   7. JSON 404
 //   8. JSON error contract         413 / 400 / 415 for body problems; 500 generic
 //
-// Nothing here reads process.env; see server/config.js.
+// Nothing here reads process.env; see server/config.js. Nothing here reads
+// the Firebase SDK either: the verifier is built once from the config
+// (server/firebaseAdmin.js) or injected by a test.
 
 const crypto = require("crypto");
 const express = require("express");
@@ -27,6 +32,8 @@ const multer = require("multer");
 const { rateLimit } = require("express-rate-limit");
 
 const { createLogger } = require("./log");
+const { createFirebaseIdTokenVerifier } = require("./firebaseAdmin");
+const { requireFirebaseUser, requireVerifiedEmail } = require("./auth");
 const refineRouter = require("../routes/refine");
 const transcribeRouter = require("../routes/transcribe");
 
@@ -34,11 +41,6 @@ const transcribeRouter = require("../routes/transcribe");
 // business logic. Messages are generic on purpose.
 const APP_ERROR = Object.freeze({
   ORIGIN_NOT_ALLOWED: { status: 403, code: "origin_not_allowed", error: "Origin not allowed" },
-  AI_ROUTES_DISABLED: {
-    status: 503,
-    code: "ai_routes_disabled",
-    error: "AI features are not enabled on this server.",
-  },
   RATE_LIMITED: {
     status: 429,
     code: "rate_limited",
@@ -117,12 +119,13 @@ function originGate(config) {
 function corsPolicy(config) {
   return cors({
     origin: (origin, cb) => cb(null, !origin ? false : isAllowedOrigin(config, origin)),
-    // No cookies, no Authorization echo: the API has no session to carry.
-    // When authentication arrives it will travel as a header the browser
-    // sends explicitly, and this decision is revisited then, not assumed.
+    // No cookies. Identity travels as an `Authorization: Bearer` header the
+    // browser sets explicitly per request (src/lib/apiAuth.js), which is not
+    // a "credential" in the CORS sense: the API has no ambient session that
+    // a cross-site page could ride on, so `credentials` stays off.
     credentials: false,
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"],
+    allowedHeaders: ["Content-Type", "Authorization"],
     exposedHeaders: ["X-Request-Id", "Retry-After", "RateLimit", "RateLimit-Policy"],
     maxAge: 600,
     optionsSuccessStatus: 204,
@@ -131,29 +134,56 @@ function corsPolicy(config) {
 
 /* ------------------------- provider route policy ------------------------ */
 
-function aiRoutesGate(config) {
-  return (req, res, next) => {
-    if (config.ai.routesEnabled) return next();
-    res.locals.diag.gate = "ai_routes_disabled";
-    return send(res, APP_ERROR.AI_ROUTES_DISABLED);
+function rateLimitHandler(name) {
+  return (req, res) => {
+    const resetSeconds =
+      res.getHeader("Retry-After") !== undefined ? Number(res.getHeader("Retry-After")) : undefined;
+    res.locals.diag.rateLimited = name;
+    return send(res, APP_ERROR.RATE_LIMITED, {
+      retryAfterSeconds: Number.isFinite(resetSeconds) ? resetSeconds : undefined,
+    });
   };
 }
 
-function providerRateLimit(config, limit, name) {
+// The PRIMARY limiter: one budget per verified user, whichever network they
+// are on. Runs after authentication, so the key is the token's uid and an
+// unauthenticated request never consumes anyone's budget. Its headers are the
+// ones the browser sees.
+function userRateLimit(config, limit, name) {
   return rateLimit({
     windowMs: config.rateLimits.windowMs,
     limit,
+    keyGenerator: (req) => `uid:${req.auth.uid}`,
     standardHeaders: "draft-8",
     legacyHeaders: false,
-    handler: (req, res) => {
-      const resetSeconds =
-        res.getHeader("Retry-After") !== undefined ? Number(res.getHeader("Retry-After")) : undefined;
-      res.locals.diag.rateLimited = name;
-      return send(res, APP_ERROR.RATE_LIMITED, {
-        retryAfterSeconds: Number.isFinite(resetSeconds) ? resetSeconds : undefined,
-      });
-    },
+    handler: rateLimitHandler(name),
   });
+}
+
+// The SECONDARY limiter: per client IP, in front of token verification, at a
+// multiple of the per-user budget. It bounds what an unauthenticated caller
+// can make the verifier do and what one address can spend across accounts;
+// it is not the per-user accounting and sends no RateLimit headers of its
+// own so the two cannot be confused.
+function ipRateLimit(config, limit, name) {
+  return rateLimit({
+    windowMs: config.rateLimits.windowMs,
+    limit: limit * config.rateLimits.ipMultiplier,
+    standardHeaders: false,
+    legacyHeaders: false,
+    handler: rateLimitHandler(`${name}_ip`),
+  });
+}
+
+// Everything a provider-backed route requires before its body is even
+// parsed, in order. `verifyIdToken` is the whole authentication dependency.
+function providerRoutePolicy(config, verifyIdToken, limit, name, logger) {
+  return [
+    ipRateLimit(config, limit, name),
+    requireFirebaseUser(verifyIdToken, { logger }),
+    requireVerifiedEmail(),
+    userRateLimit(config, limit, name),
+  ];
 }
 
 /* ---------------------------- error contract ---------------------------- */
@@ -220,10 +250,19 @@ function errorContract(logger) {
 
 /**
  * @param {ReturnType<import("./config").loadServerConfig>} config
- * @param {{ logger?: { event: Function } }} [deps]
+ * @param {{
+ *   logger?: { event: Function },
+ *   verifyIdToken?: null | ((idToken: string) => Promise<object>),
+ * }} [deps]
+ *   `verifyIdToken` — injected by tests (a double that needs no Firebase
+ *   project or credentials). When the key is absent the verifier is built
+ *   from the config; an explicit `null` means "no verifier", which every
+ *   provider route answers with 503 auth_not_configured.
  */
 function createApp(config, deps = {}) {
   const logger = deps.logger || createLogger(config.mode);
+  const verifyIdToken =
+    "verifyIdToken" in deps ? deps.verifyIdToken : createFirebaseIdTokenVerifier(config);
   const app = express();
 
   app.disable("x-powered-by");
@@ -241,19 +280,17 @@ function createApp(config, deps = {}) {
 
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
-  // Provider-backed routes. The gate and limiter are keyed on the exact
-  // route path so a second route added later does not silently inherit a
-  // policy sized for a different cost profile.
+  // Provider-backed routes. The policy chain is keyed on the exact route
+  // path so a second route added later does not silently inherit a policy
+  // sized for a different cost profile — and cannot be mounted without one.
   app.use(
     "/api/refine",
-    aiRoutesGate(config),
-    providerRateLimit(config, config.rateLimits.refine, "refine"),
+    ...providerRoutePolicy(config, verifyIdToken, config.rateLimits.refine, "refine", logger),
     express.json({ limit: config.limits.refineJsonBytes })
   );
   app.use(
     "/api/transcribe",
-    aiRoutesGate(config),
-    providerRateLimit(config, config.rateLimits.transcribe, "transcribe")
+    ...providerRoutePolicy(config, verifyIdToken, config.rateLimits.transcribe, "transcribe", logger)
   );
   app.use("/api", refineRouter);
   app.use("/api", transcribeRouter);

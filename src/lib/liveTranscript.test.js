@@ -213,6 +213,10 @@ describe("9/10. permission, device, unsupported and provider failures are worded
     expect(liveTranscriptErrorMessage(new Error("Request timed out"))).toBe(LIVE_TRANSCRIPT_MESSAGE.TIMEOUT);
     expect(liveTranscriptErrorMessage(new Error("No audio captured"))).toBe(LIVE_TRANSCRIPT_MESSAGE.NO_AUDIO);
     expect(liveTranscriptErrorMessage(new Error("Transcription failed"))).toBe(LIVE_TRANSCRIPT_MESSAGE.FAILED);
+    expect(liveTranscriptErrorMessage(new Error("Sign in required"))).toBe(LIVE_TRANSCRIPT_MESSAGE.SIGN_IN_REQUIRED);
+    expect(liveTranscriptErrorMessage(new Error("Email verification required"))).toBe(
+      LIVE_TRANSCRIPT_MESSAGE.EMAIL_VERIFICATION_REQUIRED
+    );
   });
 
   test("an unrecognised failure falls back to one plain sentence; no error → no message", () => {

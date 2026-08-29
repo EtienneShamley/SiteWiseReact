@@ -62,6 +62,8 @@ This summary is intentionally high-level and vendor-neutral — specific technol
 
 See [`docs/SECURITY.md`](docs/SECURITY.md#environment-variables) for the complete, current variable list and their sensitivity classification. In summary: server-side secrets live in a local `.env` file (never committed), and client-side, non-secret configuration lives in a separate development env file.
 
+Since 2026-08-29 NoteWise requires a Firebase project for sign-in: the backend needs `FIREBASE_PROJECT_ID` (nothing else — no service-account key), and the frontend build needs `REACT_APP_FIREBASE_API_KEY`, `REACT_APP_FIREBASE_AUTH_DOMAIN`, `REACT_APP_FIREBASE_PROJECT_ID` and `REACT_APP_FIREBASE_APP_ID` from the project's web-app settings. Without them the app shows a "Sign-in is not configured" notice. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#environment-variables) for the per-environment table and the one-time Firebase Console steps.
+
 ### Install and Run
 
 ```bash

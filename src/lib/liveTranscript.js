@@ -254,6 +254,10 @@ export const LIVE_TRANSCRIPT_MESSAGE = Object.freeze({
     "The transcription service could not be reached. Check your connection and try again.",
   TIMEOUT: "Transcribing took too long and was stopped. Try a shorter recording.",
   FAILED: "This part of the recording could not be transcribed. Nothing has been added to your note.",
+  SIGN_IN_REQUIRED:
+    "Sign in to transcribe recordings. This part of the recording was not transcribed.",
+  EMAIL_VERIFICATION_REQUIRED:
+    "Verify your email address to transcribe recordings. This part of the recording was not transcribed.",
   EMPTY: "The transcript is empty — there is nothing to insert.",
   // Insertion is unavailable because there is nowhere to put the text. Live
   // transcript is a WORKSPACE-level tool, so it keeps recording, editing,
@@ -294,6 +298,8 @@ export function liveTranscriptErrorMessage(error) {
   if (raw === "Network error") return LIVE_TRANSCRIPT_MESSAGE.NETWORK;
   if (raw === "Transcription is currently unavailable.") return LIVE_TRANSCRIPT_MESSAGE.UNAVAILABLE;
   if (raw === "Transcription failed") return LIVE_TRANSCRIPT_MESSAGE.FAILED;
+  if (raw === "Sign in required") return LIVE_TRANSCRIPT_MESSAGE.SIGN_IN_REQUIRED;
+  if (raw === "Email verification required") return LIVE_TRANSCRIPT_MESSAGE.EMAIL_VERIFICATION_REQUIRED;
   // Own wording (this module's constants, or the refine contract's): already
   // written for the user.
   if (Object.values(LIVE_TRANSCRIPT_MESSAGE).includes(raw)) return raw;

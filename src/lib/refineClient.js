@@ -19,6 +19,7 @@ import {
   validateRefineOutput,
   validateRefineRequest,
 } from "./refineContract";
+import { ApiAuthError, API_AUTH_OUTCOME, authorizedFetch } from "./apiAuth";
 
 export const DEFAULT_API_BASE = process.env.REACT_APP_API_BASE || "";
 
@@ -26,11 +27,26 @@ function failure(outcome) {
   return { ok: false, outcome, message: refineMessageFor(outcome) };
 }
 
+function outcomeForAuthError(err) {
+  return err.outcome === API_AUTH_OUTCOME.EMAIL_NOT_VERIFIED
+    ? REFINE_OUTCOME.EMAIL_NOT_VERIFIED
+    : REFINE_OUTCOME.UNAUTHENTICATED;
+}
+
 /**
  * Request one refinement.
  *
  * Exactly one provider request per call: there is no automatic retry here, the
  * server disables SDK-level retries, and an aborted request is not reissued.
+ * (The identity layer may resend the SAME request once with a refreshed
+ * token if the backend says the token expired — src/lib/apiAuth.js; that is
+ * a transport retry the provider never sees, because an expired token is
+ * refused before any provider work.)
+ *
+ * Identity travels with the request through `authorizedFetch`: a session that
+ * does not exist is reported as UNAUTHENTICATED without touching the network.
+ * `getToken` is injectable for tests; production uses the provider the auth
+ * context registered.
  *
  * @returns {Promise<{ok: true, refined: string}
  *                 | {ok: false, outcome: string, message: string}>}
@@ -41,6 +57,7 @@ export async function requestRefine({
   language,
   apiBase = DEFAULT_API_BASE,
   fetchImpl,
+  getToken,
   timeoutMs = REFINE_CLIENT_TIMEOUT_MS,
   signal,
 } = {}) {
@@ -54,15 +71,6 @@ export async function requestRefine({
       message: request.message,
     };
   }
-
-  const doFetch =
-    fetchImpl ||
-    (typeof window !== "undefined" && typeof window.fetch === "function"
-      ? window.fetch.bind(window)
-      : typeof fetch === "function"
-        ? fetch
-        : null);
-  if (!doFetch) return failure(REFINE_OUTCOME.UNAVAILABLE);
 
   // A client deadline guarantees the loading state always ends, even if the
   // server never answers. Timing out is not a reason to try again by itself.
@@ -79,16 +87,26 @@ export async function requestRefine({
   }
 
   try {
-    const resp = await doFetch(`${apiBase}/api/refine`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text: request.value.text,
-        style: request.value.style,
-        language: request.value.language,
-      }),
-      signal: controller ? controller.signal : undefined,
-    });
+    let resp;
+    try {
+      resp = await authorizedFetch(
+        `${apiBase}/api/refine`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: request.value.text,
+            style: request.value.style,
+            language: request.value.language,
+          }),
+          signal: controller ? controller.signal : undefined,
+        },
+        { fetchImpl, getToken }
+      );
+    } catch (err) {
+      if (err instanceof ApiAuthError) return failure(outcomeForAuthError(err));
+      throw err;
+    }
 
     if (!resp || !resp.ok) {
       const status = resp ? resp.status : 0;

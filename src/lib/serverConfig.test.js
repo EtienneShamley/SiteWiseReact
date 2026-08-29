@@ -5,55 +5,85 @@
 //
 // The backend's configuration is resolved from a plain environment object
 // (server/config.js). These tests pin the mode-dependent defaults — above
-// all that production FAILS CLOSED — and that no secret ever lands in the
-// resolved object or its printable summary.
+// all that production CANNOT START without a way to verify identity, and
+// that the former pre-authentication opt-in no longer exists — and that no
+// secret ever lands in the resolved object or its printable summary.
 
 const {
   SERVER_MODE,
   DEVELOPMENT_ORIGINS,
-  PRE_AUTH_AI_ROUTES_VARIABLE,
+  FIREBASE_PROJECT_ID_VARIABLE,
+  FIREBASE_AUTH_EMULATOR_VARIABLE,
+  IP_LIMIT_MULTIPLIER,
   ServerConfigError,
   loadServerConfig,
   describeServerConfig,
   normalizeOrigin,
 } = require("../../server/config");
 
+const PROD = { NODE_ENV: "production", [FIREBASE_PROJECT_ID_VARIABLE]: "notewise-prod" };
+
 describe("server mode", () => {
   test("NODE_ENV selects one of three explicit modes; anything else is development", () => {
-    expect(loadServerConfig({ NODE_ENV: "production" }).mode).toBe(SERVER_MODE.PRODUCTION);
+    expect(loadServerConfig(PROD).mode).toBe(SERVER_MODE.PRODUCTION);
     expect(loadServerConfig({ NODE_ENV: "test" }).mode).toBe(SERVER_MODE.TEST);
     expect(loadServerConfig({ NODE_ENV: "development" }).mode).toBe(SERVER_MODE.DEVELOPMENT);
     expect(loadServerConfig({}).mode).toBe(SERVER_MODE.DEVELOPMENT);
     expect(loadServerConfig({ NODE_ENV: "staging" }).mode).toBe(SERVER_MODE.DEVELOPMENT);
-    expect(loadServerConfig({ NODE_ENV: " Production " }).isProduction).toBe(true);
+    expect(loadServerConfig({ NODE_ENV: " Production ", [FIREBASE_PROJECT_ID_VARIABLE]: "notewise-prod" }).isProduction).toBe(true);
+  });
+});
+
+describe("authentication configuration", () => {
+  test("development and test boot without a Firebase project (auth reported as not configured)", () => {
+    const dev = loadServerConfig({ NODE_ENV: "development" });
+    expect(dev.auth).toEqual({ configured: false, projectId: null, emulatorHost: null });
+    expect(loadServerConfig({ NODE_ENV: "test" }).auth.configured).toBe(false);
+  });
+
+  test("a project id makes verification possible in every mode", () => {
+    const config = loadServerConfig({ [FIREBASE_PROJECT_ID_VARIABLE]: " notewise-dev-1 " });
+    expect(config.auth).toEqual({ configured: true, projectId: "notewise-dev-1", emulatorHost: null });
+    expect(Object.isFrozen(config.auth)).toBe(true);
+  });
+
+  test("production REQUIRES a Firebase project id — it will not start without one, whatever else is set", () => {
+    expect(() => loadServerConfig({ NODE_ENV: "production", OPENAI_API_KEY: "sk-not-real" })).toThrow(
+      ServerConfigError
+    );
+    expect(() => loadServerConfig({ NODE_ENV: "production" })).toThrow(FIREBASE_PROJECT_ID_VARIABLE);
+    expect(() => loadServerConfig({ NODE_ENV: "production", [FIREBASE_PROJECT_ID_VARIABLE]: "  " })).toThrow(
+      /required in production/
+    );
+    expect(loadServerConfig(PROD).auth.projectId).toBe("notewise-prod");
+  });
+
+  test("a value that cannot be a Firebase project id fails start-up with a readable reason", () => {
+    for (const bad of ["Not A Project", "a", "x".repeat(31), "proj_id", "https://x"]) {
+      expect(() => loadServerConfig({ [FIREBASE_PROJECT_ID_VARIABLE]: bad })).toThrow(/not a valid Firebase project id/);
+    }
+  });
+
+  test("the Auth emulator is recorded outside production and refused in production", () => {
+    const dev = loadServerConfig({
+      [FIREBASE_PROJECT_ID_VARIABLE]: "notewise-dev",
+      [FIREBASE_AUTH_EMULATOR_VARIABLE]: "127.0.0.1:9099",
+    });
+    expect(dev.auth.emulatorHost).toBe("127.0.0.1:9099");
+    expect(() => loadServerConfig({ ...PROD, [FIREBASE_AUTH_EMULATOR_VARIABLE]: "127.0.0.1:9099" })).toThrow(
+      /must not be set in production/
+    );
+  });
+
+  test("the former pre-authentication opt-in no longer exists in the configuration", () => {
+    const config = loadServerConfig({ ...PROD, NOTEWISE_AI_ROUTES_PRE_AUTH: "allow" });
+    expect(config.ai).toEqual({ configured: false });
+    expect(JSON.stringify(config)).not.toMatch(/preAuth|routesEnabled|PRE_AUTH/);
+    expect(require("../../server/config").PRE_AUTH_AI_ROUTES_VARIABLE).toBeUndefined();
   });
 });
 
 describe("provider-backed routes", () => {
-  test("are reachable in development and test (still 503 without a key — that is the route's job)", () => {
-    expect(loadServerConfig({ NODE_ENV: "development" }).ai.routesEnabled).toBe(true);
-    expect(loadServerConfig({ NODE_ENV: "test" }).ai.routesEnabled).toBe(true);
-  });
-
-  test("production fails closed by default, even with a provider key configured", () => {
-    const config = loadServerConfig({ NODE_ENV: "production", OPENAI_API_KEY: "sk-not-real" });
-    expect(config.ai.routesEnabled).toBe(false);
-    expect(config.ai.configured).toBe(true);
-    expect(config.ai.preAuthOptIn).toBe(false);
-  });
-
-  test("production opens the routes only for the exact documented opt-in value", () => {
-    expect(
-      loadServerConfig({ NODE_ENV: "production", [PRE_AUTH_AI_ROUTES_VARIABLE]: "allow" }).ai
-        .routesEnabled
-    ).toBe(true);
-    for (const wrong of ["true", "1", "yes", "ALLOW", " allow", ""]) {
-      expect(
-        loadServerConfig({ NODE_ENV: "production", [PRE_AUTH_AI_ROUTES_VARIABLE]: wrong }).ai
-          .routesEnabled
-      ).toBe(false);
-    }
-  });
 
   test("the key is reported as configured/absent only — never copied into the config", () => {
     const config = loadServerConfig({ OPENAI_API_KEY: "sk-decoy-value-123" });
@@ -73,7 +103,7 @@ describe("allowed origins", () => {
   });
 
   test("production with no configured origins accepts NO browser origin", () => {
-    const config = loadServerConfig({ NODE_ENV: "production" });
+    const config = loadServerConfig(PROD);
     expect(config.cors.allowedOrigins).toEqual([]);
     expect(config.cors.source).toBe("none");
     expect(describeServerConfig(config)).toContain("NONE");
@@ -81,7 +111,7 @@ describe("allowed origins", () => {
 
   test("CORS_ALLOWED_ORIGINS is an explicit, normalised, de-duplicated list", () => {
     const config = loadServerConfig({
-      NODE_ENV: "production",
+      ...PROD,
       CORS_ALLOWED_ORIGINS:
         " https://App.Example.com , https://staging.example.com:443/, https://app.example.com,http://localhost:3000",
     });
@@ -126,7 +156,8 @@ describe("numeric settings", () => {
     const config = loadServerConfig({});
     expect(config.port).toBe(5050);
     expect(config.trustProxy).toBe(0);
-    expect(config.rateLimits).toEqual({ windowMs: 600000, refine: 30, transcribe: 60 });
+    expect(config.rateLimits).toEqual({ windowMs: 600000, refine: 30, transcribe: 60, ipMultiplier: 4 });
+    expect(IP_LIMIT_MULTIPLIER).toBe(4);
     expect(config.limits).toEqual({ refineJsonBytes: 262144, transcribeAudioBytes: 26214400 });
   });
 
@@ -158,24 +189,31 @@ describe("numeric settings", () => {
 });
 
 describe("boot summary", () => {
-  test("names the mode, the origin source and the fail-closed state in production", () => {
-    const text = describeServerConfig(loadServerConfig({ NODE_ENV: "production" }));
+  test("names the mode, the origin source and the identity requirement in production", () => {
+    const text = describeServerConfig(loadServerConfig(PROD));
     expect(text).toContain("mode: production");
-    expect(text).toContain("AI routes: DISABLED");
-    expect(text).toContain(PRE_AUTH_AI_ROUTES_VARIABLE);
+    expect(text).toContain("authentication: verified Firebase sign-in required (project notewise-prod)");
+    expect(text).toContain("AI routes: provider key ABSENT");
     expect(text).toContain("allowed origins (not configured): NONE");
+    expect(text).toContain("rate limits per user");
+    expect(text).not.toMatch(/PRE-AUTH|NOTEWISE_AI_ROUTES_PRE_AUTH/);
   });
 
-  test("names the interim policy when it is in force", () => {
+  test("says plainly when identity cannot be verified (development without a project)", () => {
+    const text = describeServerConfig(loadServerConfig({ NODE_ENV: "development" }));
+    expect(text).toContain(`authentication: DISABLED — ${FIREBASE_PROJECT_ID_VARIABLE} not set`);
+  });
+
+  test("names the emulator and the key state, never the key", () => {
     const text = describeServerConfig(
       loadServerConfig({
-        NODE_ENV: "production",
-        [PRE_AUTH_AI_ROUTES_VARIABLE]: "allow",
+        [FIREBASE_PROJECT_ID_VARIABLE]: "notewise-dev",
+        [FIREBASE_AUTH_EMULATOR_VARIABLE]: "127.0.0.1:9099",
         OPENAI_API_KEY: "sk-x",
         CORS_ALLOWED_ORIGINS: "https://app.example.com",
       })
     );
-    expect(text).toContain("PRE-AUTH INTERIM POLICY");
+    expect(text).toContain("AUTH EMULATOR 127.0.0.1:9099");
     expect(text).toContain("provider key configured");
     expect(text).toContain("allowed origins (CORS_ALLOWED_ORIGINS): https://app.example.com");
     expect(text).not.toContain("sk-x");

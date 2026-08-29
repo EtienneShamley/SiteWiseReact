@@ -38,6 +38,9 @@ const SERVER_VARIABLES = [
   "TRUST_PROXY",
   "CORS_ALLOWED_ORIGINS",
   "NOTEWISE_AI_ROUTES_PRE_AUTH",
+  "FIREBASE_PROJECT_ID",
+  "FIREBASE_AUTH_EMULATOR_HOST",
+  "GOOGLE_APPLICATION_CREDENTIALS",
   "RATE_LIMIT_REFINE",
   "RATE_LIMIT_TRANSCRIBE",
 ];
@@ -120,7 +123,7 @@ function get(port, reqPath, headers = {}) {
   });
 }
 
-function postJson(port, reqPath, value) {
+function postJson(port, reqPath, value, headers = {}) {
   const payload = JSON.stringify(value);
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -129,7 +132,7 @@ function postJson(port, reqPath, value) {
         port,
         path: reqPath,
         method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload), ...headers },
       },
       (res) => {
         let body = "";
@@ -187,56 +190,81 @@ describe("server/index.js — the real entry point", () => {
     expect(output).not.toMatch(/sk-|OPENAI_API_KEY=|AIza/);
   });
 
-  test("development: the refine route is reachable and answers a safe 503 without a key", async () => {
+  test("development: the refine route is reachable, and with no way to verify identity it answers a safe 503", async () => {
     const { result } = await withServer({}, (port) => postJson(port, "/api/refine", { text: "site notes" }));
     expect(result.status).toBe(503);
-    expect(result.body).toContain("AI Refine is currently unavailable. Your note has not been changed.");
-    expect(result.body).not.toMatch(/sk-|apiKey|OPENAI_API_KEY|openai|at Object\./i);
+    expect(JSON.parse(result.body).code).toBe("auth_not_configured");
+    expect(result.body).not.toMatch(/sk-|apiKey|OPENAI_API_KEY|openai|firebase|at Object\./i);
   });
 
-  test("production: fails closed — AI routes 503 with a stable code, health still up, summary says so", async () => {
+  test("development without a Firebase project: refine answers 503 auth_not_configured, summary says identity is disabled", async () => {
+    const { output, result } = await withServer({}, (port) =>
+      postJson(port, "/api/refine", { text: "site notes" }, { Authorization: "Bearer a.b.c" })
+    );
+    expect(result.status).toBe(503);
+    expect(JSON.parse(result.body)).toEqual({
+      error: "Sign-in is not configured on this server.",
+      code: "auth_not_configured",
+    });
+    expect(output).toContain("authentication: DISABLED — FIREBASE_PROJECT_ID not set");
+  });
+
+  test("production REFUSES TO START without FIREBASE_PROJECT_ID — no policy opens the routes instead", async () => {
+    const { output, exitCode } = await withServer(
+      { NODE_ENV: "production", OPENAI_API_KEY: "sk-decoy-must-not-print", NOTEWISE_AI_ROUTES_PRE_AUTH: "allow" },
+      () => {
+        throw new Error("should not have started");
+      }
+    );
+    expect(exitCode).toBe(1);
+    expect(output).toContain("[server] configuration error");
+    expect(output).toContain("FIREBASE_PROJECT_ID");
+    expect(output).not.toContain("sk-decoy");
+  });
+
+  test("production with a Firebase project: unauthenticated AI requests are 401, health is public, summary names the project", async () => {
     const { output, result } = await withServer(
-      { NODE_ENV: "production", OPENAI_API_KEY: "sk-decoy-must-not-print" },
+      { NODE_ENV: "production", FIREBASE_PROJECT_ID: "notewise-prod", OPENAI_API_KEY: "sk-decoy-must-not-print" },
       async (port) => ({
         health: await get(port, "/api/health"),
         refine: await postJson(port, "/api/refine", { text: "site notes" }),
+        malformed: await postJson(port, "/api/refine", { text: "site notes" }, { Authorization: "Token abc" }),
         origin: await get(port, "/api/health", { Origin: "https://anything.example" }),
       })
     );
     expect(result.health.status).toBe(200);
-    expect(result.refine.status).toBe(503);
-    expect(JSON.parse(result.refine.body)).toEqual({
-      error: "AI features are not enabled on this server.",
-      code: "ai_routes_disabled",
-    });
+    expect(result.refine.status).toBe(401);
+    expect(JSON.parse(result.refine.body)).toEqual({ error: "Sign in to use this feature.", code: "auth_required" });
+    expect(result.malformed.status).toBe(401);
     expect(result.origin.status).toBe(403);
     expect(output).toContain("mode: production");
-    expect(output).toContain("AI routes: DISABLED");
+    expect(output).toContain("authentication: verified Firebase sign-in required (project notewise-prod)");
     expect(output).toContain("NONE (every browser origin is rejected)");
     expect(output).not.toContain("sk-decoy");
+    expect(output).not.toMatch(/PRE-AUTH|NOTEWISE_AI_ROUTES_PRE_AUTH/);
   });
 
-  test("production with the interim opt-in and configured origins: routes open, origins explicit", async () => {
-    const { output, result } = await withServer(
-      {
-        NODE_ENV: "production",
-        NOTEWISE_AI_ROUTES_PRE_AUTH: "allow",
-        CORS_ALLOWED_ORIGINS: "https://app.example.com",
-      },
-      async (port) => ({
-        refine: await postJson(port, "/api/refine", { text: "site notes" }),
-        ok: await get(port, "/api/health", { Origin: "https://app.example.com" }),
-        no: await get(port, "/api/health", { Origin: "http://localhost:3000" }),
-      })
+  test("production: a token that is not a real Firebase token for the project is refused as invalid, without the SDK's reason", async () => {
+    // A syntactically valid JWS the REAL Admin SDK verifier rejects (no
+    // Google signing key, wrong audience) — proving the shipped verifier is
+    // wired in, not a test double, and that its refusal is sanitised.
+    const b64 = (v) => Buffer.from(JSON.stringify(v)).toString("base64url");
+    const forged = `${b64({ alg: "RS256", typ: "JWT", kid: "nope" })}.${b64({
+      uid: "attacker",
+      sub: "attacker",
+      aud: "notewise-prod",
+      iss: "https://securetoken.google.com/notewise-prod",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      iat: Math.floor(Date.now() / 1000),
+    })}.c2lnbmF0dXJl`;
+    const { result } = await withServer(
+      { NODE_ENV: "production", FIREBASE_PROJECT_ID: "notewise-prod" },
+      (port) => postJson(port, "/api/refine", { text: "site notes" }, { Authorization: `Bearer ${forged}` })
     );
-    // Open, but unconfigured: the route's own 503, not the gate's.
-    expect(result.refine.status).toBe(503);
-    expect(JSON.parse(result.refine.body).outcome).toBe("unavailable");
-    expect(result.ok.status).toBe(200);
-    expect(result.ok.headers["access-control-allow-origin"]).toBe("https://app.example.com");
-    expect(result.no.status).toBe(403);
-    expect(output).toContain("PRE-AUTH INTERIM POLICY");
-    expect(output).toContain("allowed origins (CORS_ALLOWED_ORIGINS): https://app.example.com");
+    expect([401, 503]).toContain(result.status);
+    const body = JSON.parse(result.body);
+    expect(["auth_invalid", "auth_unavailable"]).toContain(body.code);
+    expect(result.body).not.toMatch(/firebase|kid|securetoken|attacker|stack/i);
   });
 
   test("a misconfiguration stops the process with a readable reason instead of a different policy", async () => {
@@ -248,7 +276,12 @@ describe("server/index.js — the real entry point", () => {
     expect(output).toContain("CORS_ALLOWED_ORIGINS");
   });
 
-  test("an invalid body is rejected with 400 before any provider work", async () => {
+  test("identity is decided before the body is even looked at: every body shape gets the same identity answer", async () => {
+    // Through the real entry point no token can be minted (no Firebase
+    // project), so what this pins is the ORDER: the identity gate answers
+    // before any body validation runs. The 400 contract for each of these
+    // bodies is exercised through the same app, with an injected verifier,
+    // in src/lib/serverApp.test.js.
     const cases = [
       { text: "" },
       { text: "   " },
@@ -265,7 +298,7 @@ describe("server/index.js — the real entry point", () => {
       return statuses;
     });
     expect(result).toHaveLength(cases.length);
-    expect(result.every((s) => s === 400)).toBe(true);
+    expect(result.every((s) => s === 503)).toBe(true);
   });
 
   test("no response payload contains a secret or environment detail", async () => {

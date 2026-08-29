@@ -31,12 +31,17 @@ async function start(env = {}, deps) {
   return { port: running.port, config };
 }
 
+// Every request is made as a verified test user (the harness verifier
+// double); the identity contract itself is pinned in serverAuth.test.js.
+const AUTH = h.authHeaders();
+const PROD = { NODE_ENV: "production", FIREBASE_PROJECT_ID: h.TEST_PROJECT_ID };
+
 function post(port, parts, extraHeaders = {}) {
   const form = h.multipart(parts);
   return h.request(port, {
     method: "POST",
     path: "/api/transcribe",
-    headers: { ...form.headers, ...extraHeaders },
+    headers: { ...form.headers, ...AUTH, ...extraHeaders },
     body: form.body,
   });
 }
@@ -227,7 +232,7 @@ describe("request validation", () => {
     const res = await h.request(port, {
       method: "POST",
       path: "/api/transcribe",
-      headers: { "Content-Type": "multipart/form-data; boundary=zzz" },
+      headers: { "Content-Type": "multipart/form-data; boundary=zzz", ...AUTH },
       body: "this is not multipart at all",
     });
     expect(res.status).toBe(400);
@@ -236,7 +241,7 @@ describe("request validation", () => {
     const noBoundary = await h.request(port, {
       method: "POST",
       path: "/api/transcribe",
-      headers: { "Content-Type": "multipart/form-data" },
+      headers: { "Content-Type": "multipart/form-data", ...AUTH },
       body: "x",
     });
     expect(noBoundary.status).toBeGreaterThanOrEqual(400);
@@ -246,7 +251,7 @@ describe("request validation", () => {
 
   test("a JSON body is not a transcription request", async () => {
     const { port } = await start();
-    const res = await h.postJson(port, "/api/transcribe", { audio: "ZGF0YQ==" });
+    const res = await h.postJson(port, "/api/transcribe", { audio: "ZGF0YQ==" }, AUTH);
     expect(res.status).toBe(400);
     expect(res.json.code).toBe("audio_missing");
   });
@@ -377,7 +382,7 @@ describe("audio stays transient and out of the logs", () => {
 
   test("the request log records sizes and categories, never audio bytes or transcript text", async () => {
     const rec = h.recordingLogger();
-    await start({ NODE_ENV: "production", NOTEWISE_AI_ROUTES_PRE_AUTH: "allow" }, { logger: rec.logger });
+    await start(PROD, { logger: rec.logger });
     const transcript = "The retaining wall at chainage 1450 shows seepage.";
     mockAudioCreate.mockResolvedValueOnce({ text: transcript });
     const audio = h.webmBytes(512);
@@ -409,7 +414,7 @@ describe("audio stays transient and out of the logs", () => {
 
   test("a provider failure is logged as a category, without the provider's message", async () => {
     const rec = h.recordingLogger();
-    await start({ NODE_ENV: "production", NOTEWISE_AI_ROUTES_PRE_AUTH: "allow" }, { logger: rec.logger });
+    await start(PROD, { logger: rec.logger });
     mockAudioCreate.mockRejectedValueOnce(providerError({ status: 401, code: "invalid_api_key" }));
     await post(running.port, [{ name: "audio", data: h.webmBytes() }]);
     expect(rec.events[0]).toMatchObject({
@@ -422,7 +427,7 @@ describe("audio stays transient and out of the logs", () => {
 
   test("a fallback is visible in the log as an event, not as content", async () => {
     const rec = h.recordingLogger();
-    await start({ NODE_ENV: "production", NOTEWISE_AI_ROUTES_PRE_AUTH: "allow" }, { logger: rec.logger });
+    await start(PROD, { logger: rec.logger });
     mockAudioCreate
       .mockRejectedValueOnce(providerError({ status: 404, code: "model_not_found" }))
       .mockResolvedValueOnce({ text: "from whisper" });

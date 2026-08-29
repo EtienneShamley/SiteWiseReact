@@ -21,12 +21,74 @@ if (typeof global.File === "undefined") {
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 
-/** Build the real app for one environment. Fresh modules each time. */
-function buildApp(env, deps) {
+/* ------------------------------ identity -------------------------------- */
+//
+// Tests never hold Firebase credentials and never contact Firebase. They
+// inject a verifier double into the real app (server/app.js `deps`) that
+// accepts only tokens minted by `issueTestIdToken` below — three base64url
+// segments like a real JWS, with a fixed test "signature" — and rejects
+// everything else with the SDK's own error codes. The middleware under test
+// is the shipped one; only the cryptographic check is replaced.
+
+const TEST_TOKEN_SIGNATURE = "test-signature";
+const TEST_PROJECT_ID = "notewise-test";
+
+function b64url(value) {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+/**
+ * A token the test verifier accepts. `exp` (seconds since epoch) in the past
+ * makes the verifier reject it as expired.
+ */
+function issueTestIdToken({ uid = "user-test-1", emailVerified = true, exp } = {}) {
+  const header = { alg: "RS256", typ: "JWT", kid: "test" };
+  const payload = { uid, sub: uid, email_verified: emailVerified, aud: TEST_PROJECT_ID };
+  if (exp !== undefined) payload.exp = exp;
+  return `${b64url(header)}.${b64url(payload)}.${TEST_TOKEN_SIGNATURE}`;
+}
+
+function firebaseStyleError(code) {
+  return Object.assign(new Error(`Firebase ID token verification failed (${code})`), { code });
+}
+
+/** The verifier double: accepts `issueTestIdToken` output and nothing else. */
+function testIdTokenVerifier() {
+  return async (idToken) => {
+    const parts = String(idToken).split(".");
+    if (parts.length !== 3 || parts[2] !== TEST_TOKEN_SIGNATURE) {
+      throw firebaseStyleError("auth/argument-error");
+    }
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    } catch {
+      throw firebaseStyleError("auth/argument-error");
+    }
+    if (typeof payload.exp === "number" && payload.exp < Math.floor(Date.now() / 1000)) {
+      throw firebaseStyleError("auth/id-token-expired");
+    }
+    return payload;
+  };
+}
+
+/** `{ Authorization }` for a verified (by default) test user. */
+function authHeaders(options) {
+  return { Authorization: `Bearer ${issueTestIdToken(options)}` };
+}
+
+/**
+ * Build the real app for one environment. Fresh modules each time. Unless a
+ * test passes its own `verifyIdToken` (including `null` for "no verifier"),
+ * the test verifier above is injected, and FIREBASE_PROJECT_ID is supplied
+ * so a production-mode config resolves — the Firebase SDK is never loaded.
+ */
+function buildApp(env, deps = {}) {
   const { loadServerConfig } = require(path.join(REPO_ROOT, "server", "config"));
   const { createApp } = require(path.join(REPO_ROOT, "server", "app"));
-  const config = loadServerConfig({ NODE_ENV: "test", ...env });
-  return { app: createApp(config, deps), config };
+  const config = loadServerConfig({ NODE_ENV: "test", FIREBASE_PROJECT_ID: TEST_PROJECT_ID, ...env });
+  const withVerifier = "verifyIdToken" in deps ? deps : { ...deps, verifyIdToken: testIdTokenVerifier() };
+  return { app: createApp(config, withVerifier), config };
 }
 
 /** Start the app on an ephemeral port; returns { port, close }. */
@@ -177,6 +239,11 @@ function recordingLogger() {
 
 module.exports = {
   REPO_ROOT,
+  TEST_PROJECT_ID,
+  TEST_TOKEN_SIGNATURE,
+  issueTestIdToken,
+  testIdTokenVerifier,
+  authHeaders,
   buildApp,
   listen,
   request,
