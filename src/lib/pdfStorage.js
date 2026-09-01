@@ -4,9 +4,18 @@
 // native IndexedDB (no wrapper dependency).
 //
 // Canonical model (DB v2): PDFs are independent documents, so both stores are
-// keyed by a stable PDF `documentId` — NOT by a note id:
+// keyed by stable PDF identities — NOT by a note id:
 //   - "pdfDocBytes":       { documentId, bytes: ArrayBuffer, name, updatedAt }
+//                          keyed by the document's SOURCE id
+//                          (`pdfSourceId(doc)`, src/lib/pdfDocuments.js): one
+//                          immutable version of the file. A replaced file is
+//                          stored under a NEW source id; the record field is
+//                          still named `documentId` (it is the IndexedDB key
+//                          path) and equals the document id for documents
+//                          created before source ids existed.
 //   - "pdfDocAnnotations": { documentId, items: Array, updatedAt }
+//                          keyed by the DOCUMENT id — annotations belong to the
+//                          document, and are reset when its file is replaced.
 //
 // The v1 database keyed the same data by `noteId` in stores named "pdfBytes"
 // and "annotations". Those legacy stores are preserved on upgrade so a one-time
@@ -147,11 +156,27 @@ export async function loadAnnotations(documentId) {
   return rec && Array.isArray(rec.items) ? rec.items : [];
 }
 
-/** Removes both the stored PDF bytes and annotations for a document. */
+/** Removes the stored bytes of ONE source id (a document's current file, or a
+ *  superseded one). Resolves when the transaction has completed. */
+export async function removePdfBytes(sourceId) {
+  if (!sourceId) return;
+  await txRequest(STORE_BYTES, "readwrite", (store) => store.delete(sourceId));
+}
+
+/** Removes a document's stored annotations. */
+export async function removeAnnotations(documentId) {
+  if (!documentId) return;
+  await txRequest(STORE_ANN, "readwrite", (store) => store.delete(documentId));
+}
+
+/** Removes both the stored PDF bytes and annotations of a document whose
+ *  bytes are keyed by its own id (a pre-source-id document). Documents with
+ *  a distinct source id remove the two records separately — see
+ *  AppStateContext.deletePdf. */
 export async function removePdfDocumentData(documentId) {
   if (!documentId) return;
-  await txRequest(STORE_BYTES, "readwrite", (store) => store.delete(documentId));
-  await txRequest(STORE_ANN, "readwrite", (store) => store.delete(documentId));
+  await removePdfBytes(documentId);
+  await removeAnnotations(documentId);
 }
 
 /* --------------------------- legacy (v1) migration ----------------------- */

@@ -23,6 +23,8 @@ import {
 import {
   loadAnnotations,
   loadPdfBytes,
+  removeAnnotations,
+  removePdfBytes,
   removePdfDocumentData,
   saveAnnotations,
   savePdfBytes,
@@ -160,6 +162,24 @@ describe("32. deletion behaviour", () => {
     expect(await loadPdfBytes("doc1")).toBeNull();
     expect(await loadAnnotations("doc1")).toEqual([]);
     expect((await loadPdfBytes("doc2")).name).toBe("Other.pdf");
+  });
+
+  test("bytes keyed by a SOURCE id and annotations keyed by the DOCUMENT id are removed independently (Phase 7.0)", async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+    await savePdfBytes("src-old", bytes, "Plan.pdf");
+    await savePdfBytes("src-new", bytes, "Plan-v2.pdf");
+    await saveAnnotations("doc9", [{ id: "a", type: "rect", page: 1, rect: { x: 1, y: 1, w: 2, h: 2 } }]);
+
+    await removePdfBytes("src-old");
+    expect(await loadPdfBytes("src-old")).toBeNull();
+    expect((await loadPdfBytes("src-new")).name).toBe("Plan-v2.pdf");
+    expect(await loadAnnotations("doc9")).toHaveLength(1);
+
+    await removeAnnotations("doc9");
+    expect(await loadAnnotations("doc9")).toEqual([]);
+    expect((await loadPdfBytes("src-new")).name).toBe("Plan-v2.pdf");
+    await removePdfBytes("");
+    await removeAnnotations(null);
   });
 });
 

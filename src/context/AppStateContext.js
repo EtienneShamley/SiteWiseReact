@@ -3,14 +3,19 @@ import React, { createContext, useContext, useState, useEffect, useRef } from "r
 import {
   savePdfBytes,
   saveAnnotations,
-  removePdfDocumentData,
+  removeAnnotations,
+  removePdfBytes,
 } from "../lib/pdfStorage";
 import {
   makePdfDoc,
   getPdfDocs,
+  pdfSourceId,
   savePdfDocs,
+  withReplacedPdfSource,
 } from "../lib/pdfDocuments";
+import { validatePdfSource } from "../lib/pdfImportPolicy";
 import { getNotePdfRefs, saveNotePdfRefs } from "../lib/notePdfRefs";
+import { newId } from "../lib/id";
 import { loadTree, saveTree, wouldClobberStoredTree } from "../lib/treeStorage";
 import { migrateLegacyNotePdfs } from "../lib/pdfMigration";
 import { runTemplateMigration, TEMPLATE_MIGRATION_STATUS } from "../lib/templateMigration";
@@ -109,9 +114,19 @@ export function AppStateProvider({ children }) {
   // -------- PDF document registry + note references --------
   const [pdfDocs, setPdfDocs] = useState(() => (TEST_RESET ? {} : getPdfDocs()));
   const [notePdfRefs, setNotePdfRefs] = useState(() => (TEST_RESET ? {} : getNotePdfRefs()));
+  // The latest registry / references as persisted — read by the CONFIRMED PDF
+  // operations below (create, replace, delete), which write the durable
+  // record synchronously before React state moves, so a refused write can
+  // be compensated instead of surfacing only from the persist effect.
+  // Initialised to null so the first persist effect still writes; a state
+  // value that IS the object already persisted by one of those operations
+  // is not written (or reported) a second time.
+  const pdfDocsRef = useRef(null);
+  const notePdfRefsRef = useRef(null);
 
-  // Session-only PDF byte cache, keyed by documentId (fast path; IndexedDB is
-  // the source of truth across reloads).
+  // Session-only PDF byte cache, keyed by the document's SOURCE id
+  // (src/lib/pdfDocuments.js → pdfSourceId) — a fast path; IndexedDB is the
+  // source of truth across reloads.
   const [pdfBytesCache, setPdfBytesCache] = useState(() => ({}));
 
   // Visible surface for localStorage persistence failures (quota, etc.).
@@ -154,11 +169,17 @@ export function AppStateProvider({ children }) {
 
   // -------- Persist the PDF registry + note references --------
   useEffect(() => {
+    const alreadyPersisted = pdfDocsRef.current === pdfDocs;
+    pdfDocsRef.current = pdfDocs;
+    if (alreadyPersisted) return;
     try { savePdfDocs(pdfDocs); }
     catch (err) { setPersistenceError("Could not save the PDF list: " + (err?.message || err)); }
   }, [pdfDocs]);
 
   useEffect(() => {
+    const alreadyPersisted = notePdfRefsRef.current === notePdfRefs;
+    notePdfRefsRef.current = notePdfRefs;
+    if (alreadyPersisted) return;
     try { saveNotePdfRefs(notePdfRefs); }
     catch (err) { setPersistenceError("Could not save note↔PDF links: " + (err?.message || err)); }
   }, [notePdfRefs]);
@@ -272,33 +293,154 @@ export function AppStateProvider({ children }) {
     return (id && pdfDocs[id]) || null;
   }
 
-  // Creates a canonical, global PDF document (projectId/folderId null), persists
-  // its bytes, and returns the new doc. `file` may be a File or { name/fileName,
-  // bytes }. There is only ONE PDF storage model — note imports use this too.
-  async function createGlobalPdf(file) {
-    let name, bytes;
+  // Reads the picked input into { name, bytes }. `file` may be a File or
+  // { name/fileName, bytes }.
+  async function readPdfInput(file) {
     if (file instanceof File) {
-      name = file.name;
-      bytes = new Uint8Array(await file.arrayBuffer());
-    } else {
-      name = file?.name || file?.fileName || "Untitled PDF";
-      bytes = file?.bytes;
+      return { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) };
     }
-    if (!bytes || !bytes.byteLength) {
-      setPersistenceError("That PDF appears to be empty and was not added.");
+    return { name: file?.name || file?.fileName || "Untitled PDF", bytes: file?.bytes || null };
+  }
+
+  function errorText(err) {
+    return err?.message || String(err);
+  }
+
+  // Creates a canonical, global PDF document (projectId/folderId null), persists
+  // its bytes, and returns the new doc. There is only ONE PDF storage model —
+  // note imports use this too.
+  //
+  // The bytes are validated FROM THEIR CONTENT (src/lib/pdfImportPolicy.js)
+  // before anything is written. Then, in order: bytes under the document's
+  // source id → empty annotations under the document id → the registry
+  // record, written and CONFIRMED synchronously. A refused later step removes
+  // what the earlier steps wrote, so no bytes are ever left without a
+  // registry entry that names them. Resolves null when the input was refused
+  // (the banner says why); rejects when storage refused (also reported).
+  async function createGlobalPdf(file) {
+    const { name, bytes } = await readPdfInput(file);
+    const check = validatePdfSource(bytes);
+    if (!check.ok) {
+      setPersistenceError(check.error);
       return null;
     }
     const doc = makePdfDoc({ projectId: null, folderId: null, name });
+    const sourceId = pdfSourceId(doc);
     try {
-      await savePdfBytes(doc.id, bytes, name);
-      await saveAnnotations(doc.id, []);
+      await savePdfBytes(sourceId, bytes, name);
     } catch (err) {
-      setPersistenceError("Could not save the PDF to browser storage: " + (err?.message || err));
+      setPersistenceError("Could not save the PDF to browser storage: " + errorText(err));
       throw err;
     }
-    setPdfBytesCacheFor(doc.id, bytes);
+    try {
+      await saveAnnotations(doc.id, []);
+      savePdfDocs({ ...pdfDocsRef.current, [doc.id]: doc });
+    } catch (err) {
+      // Compensation: nothing written so far is named by any record, so it
+      // is removed. A refused removal is said as well — it leaves an
+      // unreferenced record, never a document.
+      const leftovers = [];
+      await removePdfBytes(sourceId).catch(() => leftovers.push("file"));
+      await removeAnnotations(doc.id).catch(() => leftovers.push("annotations"));
+      setPersistenceError(
+        "Could not save the PDF to browser storage: " +
+          errorText(err) +
+          (leftovers.length ? ` (an unreferenced ${leftovers.join(" and ")} record could not be removed)` : "")
+      );
+      throw err;
+    }
+    pdfDocsRef.current = { ...pdfDocsRef.current, [doc.id]: doc };
+    setPdfBytesCacheFor(sourceId, bytes);
     setPdfDocs((prev) => ({ ...prev, [doc.id]: doc }));
     return doc;
+  }
+
+  // Replaces a document's FILE. The document keeps its id (note links, the
+  // library row and the open editor keep their identity); the new bytes are
+  // stored under a NEW source id — nothing is overwritten in place under the
+  // old one, locally or (later) in the cloud. Its annotations are reset:
+  // they were drawn against the previous file.
+  //
+  // Durable order: new bytes → registry (new source id) → annotations reset.
+  // The replacement is complete only when ALL THREE landed; a refusal at any
+  // step compensates the steps before it, so the durable model is either
+  //   A. registry → new source, annotations empty, or
+  //   B. registry → previous source, previous annotations, new bytes gone
+  // — never the previous file's annotations attached to the new file. Only
+  // after A does the previous file leave this browser's store (a refused
+  // removal leaves an unreferenced record — reported, never a document).
+  //
+  // Second fault (the registry could be written but not restored after a
+  // refused annotation reset): the persisted registry wins — the editor and
+  // state follow the new source, the stale annotation record is reported,
+  // and the editor's own annotation flush (an empty list) replaces it at
+  // the next opportunity; no user data is at stake because those
+  // annotations were the ones the replacement removes.
+  //
+  // Resolves { ok: true, doc, bytes, warning } or { ok: false, error } —
+  // never rejects; the caller (the editor tab) shows the sentence.
+  async function replacePdfSource(pdfId, file) {
+    const doc = pdfDocsRef.current[pdfId];
+    if (!doc) return { ok: false, error: "That PDF no longer exists." };
+    let input;
+    try {
+      input = await readPdfInput(file);
+    } catch (err) {
+      return { ok: false, error: "Could not read the selected PDF: " + errorText(err) };
+    }
+    const check = validatePdfSource(input.bytes);
+    if (!check.ok) return { ok: false, error: check.error };
+
+    const previousSourceId = pdfSourceId(doc);
+    const nextSourceId = newId();
+    const nextDoc = withReplacedPdfSource(doc, { sourceAssetId: nextSourceId, name: input.name });
+    try {
+      await savePdfBytes(nextSourceId, input.bytes, nextDoc.name);
+    } catch (err) {
+      return { ok: false, error: "Could not save the PDF to browser storage: " + errorText(err) };
+    }
+    const previousDocs = pdfDocsRef.current;
+    try {
+      savePdfDocs({ ...previousDocs, [pdfId]: nextDoc });
+    } catch (err) {
+      await removePdfBytes(nextSourceId).catch(() => {});
+      return { ok: false, error: "Could not record the replaced PDF: " + errorText(err) };
+    }
+    const warnings = [];
+    try {
+      await saveAnnotations(pdfId, []);
+    } catch (err) {
+      // Compensation: put the registry back on the previous source and drop
+      // the new bytes. The previous annotations were never touched.
+      let restored = true;
+      try {
+        savePdfDocs(previousDocs);
+      } catch {
+        restored = false;
+      }
+      if (restored) {
+        await removePdfBytes(nextSourceId).catch(() => {});
+        return { ok: false, error: "Could not reset the stored annotations, so the PDF was not replaced: " + errorText(err) };
+      }
+      warnings.push(
+        "The previous annotations could not be cleared from browser storage (" +
+          errorText(err) +
+          "); they will be cleared with your next annotation change."
+      );
+    }
+    pdfDocsRef.current = { ...pdfDocsRef.current, [pdfId]: nextDoc };
+    setPdfDocs((prev) => (prev[pdfId] ? { ...prev, [pdfId]: nextDoc } : prev));
+    setPdfBytesCacheFor(nextSourceId, input.bytes);
+    if (previousSourceId !== nextSourceId) removePdfBytesCache(previousSourceId);
+
+    if (previousSourceId && previousSourceId !== nextSourceId) {
+      try {
+        await removePdfBytes(previousSourceId);
+      } catch (err) {
+        warnings.push("The previous file could not be removed from browser storage: " + errorText(err));
+      }
+    }
+    return { ok: true, doc: nextDoc, bytes: input.bytes, warning: warnings.length ? warnings.join(" ") : null };
   }
 
   function renamePdf(pdfId) {
@@ -313,14 +455,64 @@ export function AppStateProvider({ children }) {
     );
   }
 
-  // User-facing delete: confirms, then removes metadata, note references,
-  // session cache, selection, and (async) the IndexedDB bytes + annotations.
+  // User-facing delete: confirms, then removes the document CONFIRMED-FIRST,
+  // as one all-or-nothing durable operation in the Phase 4 manner
+  // (src/lib/treeDeletion.js): every note reference is written and confirmed
+  // FIRST, then the registry record. That order makes every persisted
+  // intermediate state a valid one — a document with fewer links exists; a
+  // link to a document that no longer exists never does. A refused link
+  // write changes nothing. A refused registry write is compensated by
+  // writing the previous links back; if that second write is refused too,
+  // state follows what persisted (the links are gone, the document stays
+  // listed) and both faults are reported. Only after both writes landed do
+  // the session cache and selection move, and only then are the stored
+  // bytes and annotations removed — a refused removal is reported, never
+  // hidden, and can leave only an unreferenced record.
+  // Resolves true when the document was removed from the registry.
   async function deletePdf(pdfId) {
-    const doc = pdfDocs[pdfId];
-    if (!doc) return;
+    const doc = pdfDocsRef.current[pdfId];
+    if (!doc) return false;
     if (!window.confirm(`Delete "${doc.name}"? This permanently removes the PDF and its annotations.`)) {
-      return;
+      return false;
     }
+    const previousDocs = pdfDocsRef.current;
+    const previousRefs = notePdfRefsRef.current;
+    const nextDocs = { ...previousDocs };
+    delete nextDocs[pdfId];
+    const nextRefs = {};
+    for (const k of Object.keys(previousRefs)) {
+      if (previousRefs[k] !== pdfId) nextRefs[k] = previousRefs[k];
+    }
+    try {
+      saveNotePdfRefs(nextRefs);
+    } catch (err) {
+      setPersistenceError("Could not delete the PDF: " + errorText(err));
+      return false;
+    }
+    try {
+      savePdfDocs(nextDocs);
+    } catch (err) {
+      try {
+        saveNotePdfRefs(previousRefs);
+        setPersistenceError("Could not delete the PDF: " + errorText(err));
+      } catch (restoreErr) {
+        // Second fault: the links are gone and cannot be put back; the
+        // document is still listed. State follows what persisted — the very
+        // object that landed, so the persist effect neither rewrites nor
+        // re-reports it.
+        notePdfRefsRef.current = nextRefs;
+        setNotePdfRefs(nextRefs);
+        setPersistenceError(
+          "Could not delete the PDF: " +
+            errorText(err) +
+            ". Its note links were removed and could not be restored: " +
+            errorText(restoreErr)
+        );
+      }
+      return false;
+    }
+    pdfDocsRef.current = nextDocs;
+    notePdfRefsRef.current = nextRefs;
     setPdfDocs((prev) => {
       if (!(pdfId in prev)) return prev;
       const next = { ...prev };
@@ -328,13 +520,27 @@ export function AppStateProvider({ children }) {
       return next;
     });
     clearNoteRefsTo(pdfId);
-    removePdfBytesCache(pdfId);
+    removePdfBytesCache(pdfSourceId(doc));
     if (currentPdfId === pdfId) setCurrentPdfIdRaw(null);
+
+    const problems = [];
     try {
-      await removePdfDocumentData(pdfId);
+      await removePdfBytes(pdfSourceId(doc));
     } catch (err) {
-      setPersistenceError("Could not fully delete PDF data: " + (err?.message || err));
+      problems.push("its file: " + errorText(err));
     }
+    try {
+      await removeAnnotations(pdfId);
+    } catch (err) {
+      problems.push("its annotations: " + errorText(err));
+    }
+    if (problems.length) {
+      setPersistenceError(
+        "The PDF was removed from your list, but browser storage could not be fully cleaned up — " +
+          problems.join("; ")
+      );
+    }
+    return true;
   }
 
   /* --------------------------- Note ⟷ PDF references ----------------------- */
@@ -968,6 +1174,7 @@ export function AppStateProvider({ children }) {
         listAllPdfs,
         getPdfDocById,
         createGlobalPdf,
+        replacePdfSource,
         renamePdf,
         deletePdf,
 
@@ -977,7 +1184,7 @@ export function AppStateProvider({ children }) {
         unlinkNotePdf,
         importPdfForNote,
 
-        // PDF byte session cache (keyed by documentId)
+        // PDF byte session cache (keyed by the document's source id)
         getPdfBytesCache,
         setPdfBytesCache: setPdfBytesCacheFor,
 

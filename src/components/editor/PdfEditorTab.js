@@ -48,12 +48,8 @@ import {
   EXPORT_STATE,
   canStartExport,
 } from "../../lib/pdfUtils";
-import {
-  savePdfBytes,
-  loadPdfBytes,
-  saveAnnotations,
-  loadAnnotations,
-} from "../../lib/pdfStorage";
+import { loadPdfBytes, saveAnnotations, loadAnnotations } from "../../lib/pdfStorage";
+import { pdfSourceId } from "../../lib/pdfDocuments";
 import { extractPageIndex, findMatchesInDocument } from "../../lib/pdfSearch";
 import { buildTextRuns, describeFont } from "../../lib/pdfTextRuns";
 import {
@@ -184,7 +180,17 @@ export default function PdfEditorTab({
   onInitialFileConsumed,
   onExportFlattened,
 }) {
-  const { getPdfBytesCache, setPdfBytesCache } = useAppState();
+  const { getPdfBytesCache, setPdfBytesCache, getPdfDocById, replacePdfSource } = useAppState();
+
+  // The document's CURRENT source id — where its bytes live (see
+  // src/lib/pdfDocuments.js → pdfSourceId; a document created before source
+  // ids existed resolves to its own id). Read through a ref by the load
+  // effect so a replace, which changes the registry's source id, does not
+  // re-run the load of bytes the editor already holds.
+  const registryDoc = docId && typeof getPdfDocById === "function" ? getPdfDocById(docId) : null;
+  const sourceId = registryDoc ? pdfSourceId(registryDoc) : docId;
+  const sourceIdRef = useRef(sourceId);
+  sourceIdRef.current = sourceId;
 
   const [sourceBytes, setSourceBytes] = useState(null); // canonical export bytes
   const [renderBytes, setRenderBytes] = useState(null); // pdf.js working copy
@@ -204,6 +210,10 @@ export default function PdfEditorTab({
   const [exportMessage, setExportMessage] = useState("");
   const [panning, setPanning] = useState(false);
   const [storageError, setStorageError] = useState(null);
+  // True when the registry knows this document but its file is not in this
+  // browser's storage (nor the session cache) — an explicit state, never the
+  // first-run help text.
+  const [sourceMissing, setSourceMissing] = useState(false);
   const [initialAnnotations, setInitialAnnotations] = useState(null); // null = not loaded yet
   const [pageEls, setPageEls] = useState({});
   const [histState, setHistState] = useState({ canUndo: false, canRedo: false });
@@ -242,26 +252,39 @@ export default function PdfEditorTab({
 
   /* ------------------------------ Load per note ---------------------------- */
 
-  const adoptNewSource = useCallback(
-    (bytes, name) => {
-      setSourceBytes(bytes);
-      setRenderBytes(bytes.slice(0));
-      setInitialAnnotations([]);
-      latestItemsRef.current = [];
-      annotatorRef.current?.load([]);
-      setStorageError(null);
-      if (docId) {
-        setPdfBytesCache(docId, bytes);
-        savePdfBytes(docId, bytes, name).catch((err) =>
-          reportStorageError("Could not save the PDF to browser storage", err)
-        );
-        saveAnnotations(docId, []).catch((err) =>
-          reportStorageError("Could not reset stored annotations", err)
-        );
+  // Adopts new bytes into the EDITOR only. Storage is the application
+  // state's job (AppStateContext.replacePdfSource): the bytes reaching this
+  // function have already been validated and stored under their new source
+  // id, or belong to a document-less session that stores nothing.
+  const adoptNewSource = useCallback((bytes) => {
+    setSourceBytes(bytes);
+    setRenderBytes(bytes.slice(0));
+    setInitialAnnotations([]);
+    latestItemsRef.current = [];
+    annotatorRef.current?.load([]);
+    setStorageError(null);
+    setSourceMissing(false);
+  }, []);
+
+  // Replaces the document's file through the confirmed application path. A
+  // refused replacement (not a PDF, over the limit, storage refused) leaves
+  // the current file and its annotations untouched and says so here.
+  const replaceSource = useCallback(
+    async (file) => {
+      if (!docId || typeof replacePdfSource !== "function") {
+        const ab = await file.arrayBuffer();
+        adoptNewSource(new Uint8Array(ab));
+        return;
       }
+      const result = await replacePdfSource(docId, file);
+      if (!result || !result.ok) {
+        setStorageError(result?.error || "Could not replace the PDF.");
+        return;
+      }
+      adoptNewSource(result.bytes);
+      if (result.warning) setStorageError(result.warning);
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [docId, reportStorageError]
+    [docId, replacePdfSource, adoptNewSource]
   );
 
   useEffect(() => {
@@ -269,10 +292,9 @@ export default function PdfEditorTab({
     (async () => {
       if (initialFile instanceof File) {
         try {
-          const ab = await initialFile.arrayBuffer();
-          if (cancelled) return;
           consumedInitialFile.current = true;
-          adoptNewSource(new Uint8Array(ab), initialFile.name);
+          await replaceSource(initialFile);
+          if (cancelled) return;
           onInitialFileConsumed?.();
         } catch (err) {
           if (!cancelled) reportStorageError("Could not read the selected PDF", err);
@@ -289,24 +311,29 @@ export default function PdfEditorTab({
         consumedInitialFile.current = false;
         return;
       }
+      const loadSourceId = sourceIdRef.current;
       let rec = null;
       let anns = [];
       try {
-        [rec, anns] = await Promise.all([loadPdfBytes(docId), loadAnnotations(docId)]);
+        [rec, anns] = await Promise.all([loadPdfBytes(loadSourceId), loadAnnotations(docId)]);
       } catch (err) {
-        if (!cancelled) reportStorageError("Could not read this note's PDF from browser storage", err);
+        if (!cancelled) reportStorageError("Could not read this PDF from browser storage", err);
       }
       if (cancelled) return;
       if (rec) {
         setSourceBytes(rec.bytes);
         setRenderBytes(rec.bytes.slice(0));
-        setPdfBytesCache(docId, rec.bytes);
+        setPdfBytesCache(loadSourceId, rec.bytes);
+        setSourceMissing(false);
       } else {
         // Fall back to the in-memory session cache (e.g. storage unavailable).
-        const cached = getPdfBytesCache(docId);
+        const cached = getPdfBytesCache(loadSourceId);
         if (cached) {
           setSourceBytes(cached);
           setRenderBytes(cached.slice(0));
+          setSourceMissing(false);
+        } else {
+          setSourceMissing(true);
         }
       }
       // Stored records pass the whitelist before they can reach the renderer,
@@ -325,16 +352,19 @@ export default function PdfEditorTab({
     const f = e.target.files?.[0];
     e.target.value = "";
     if (!f) return;
-    const existing = latestItemsRef.current || [];
+    // Replacing resets the document's annotations. Ask whenever there ARE
+    // annotations — and whenever it is not yet known whether there are (the
+    // stored ones have not loaded): never wipe silently on a guess.
+    const existing = latestItemsRef.current;
+    const mayHaveAnnotations = existing === null || existing.length > 0;
     if (
-      existing.length &&
-      !window.confirm("Replacing the PDF removes this note's existing annotations. Continue?")
+      mayHaveAnnotations &&
+      !window.confirm("Replacing the PDF removes this document's existing annotations. Continue?")
     ) {
       return;
     }
     try {
-      const ab = await f.arrayBuffer();
-      adoptNewSource(new Uint8Array(ab), f.name);
+      await replaceSource(f);
     } catch (err) {
       reportStorageError("Could not read the selected PDF", err);
     }
@@ -972,7 +1002,15 @@ export default function PdfEditorTab({
         style={{ cursor: activeTool === TOOL.PAN ? (panning ? "grabbing" : "grab") : undefined }}
         onMouseDown={onScrollAreaMouseDown}
       >
-        {!pdfDoc && (
+        {!pdfDoc && sourceMissing && (
+          <div className="text-sm p-4" role="status" data-pdf-source-missing="true">
+            The file for this PDF could not be found in this browser's storage. Use{" "}
+            <em>Open PDF</em> to supply it again — it will be stored as a new version of this
+            document.
+          </div>
+        )}
+
+        {!pdfDoc && !sourceMissing && (
           <div className="text-sm opacity-70 p-4">
             Load a PDF. Pick a tool, then click/drag on the page — or select text with the
             Highlight/Underline/Strikethrough tools to mark it up. Text, Callout and Sticky note
