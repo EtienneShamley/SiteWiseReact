@@ -7,6 +7,7 @@ import {
   TEMPLATE_VERSIONS_KEY,
   NOTE_TEMPLATE_INSTANCES_KEY,
   DEFAULT_TEMPLATE_KEY,
+  WORKSPACE_SETTINGS_KEY,
   createTemplate,
   deleteNoteTemplateInstance,
   deleteTemplate,
@@ -134,7 +135,9 @@ describe("27. quota / storage write failure is observable", () => {
     const tpl = createTemplate("Report", { rows: [] });
     const issues = [];
     subscribePersistenceIssues((i) => issues.push(i));
-    refuseWritesTo([DEFAULT_TEMPLATE_KEY]);
+    // The pointer has two homes since Phase 6 (the durable workspace-settings
+    // record and the legacy string key); only when BOTH refuse is it lost.
+    refuseWritesTo([DEFAULT_TEMPLATE_KEY, WORKSPACE_SETTINGS_KEY]);
     expect(setDefaultTemplateId(tpl.id)).toBe(false);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toMatch(/default template/i);

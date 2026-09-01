@@ -16,8 +16,11 @@ import { sectionDocReferencesAsset } from "./templateSectionDoc";
 import {
   DURABLE_KEYS,
   readDurableMap,
+  readScopedValue,
+  removeScopedValue,
   reportPersistenceIssue,
   writeDurableRecord,
+  writeScopedValue,
 } from "./durableStorage";
 import { assertNoteWritable, isNoteDeleted } from "./noteTombstones";
 
@@ -129,31 +132,50 @@ export function listTemplates() {
   );
 }
 
+export const WORKSPACE_SETTINGS_KEY = DURABLE_KEYS.workspaceSettings;
+
+// The RAW default pointer: the durable workspace-settings record first, then
+// the pre-account string key it replaces. Both FOLLOW the durable scope
+// (src/lib/durableStorage.js): a workspace's default template is that
+// workspace's, never the browser's.
+function readDefaultTemplatePointer() {
+  const settings = readDurableMap(WORKSPACE_SETTINGS_KEY).map;
+  if (typeof settings.defaultTemplateId === "string" && settings.defaultTemplateId) {
+    return settings.defaultTemplateId;
+  }
+  return readScopedValue(DEFAULT_TEMPLATE_KEY);
+}
+
 // Returns null when the pointer is unset or points at a deleted template.
 export function getDefaultTemplateId() {
-  try {
-    const id = localStorage.getItem(DEFAULT_TEMPLATE_KEY);
-    return id && getTemplates()[id] ? id : null;
-  } catch {
-    return null;
-  }
+  const id = readDefaultTemplatePointer();
+  return id && getTemplates()[id] ? id : null;
 }
 
 // The default pointer is recoverable (ensureDefaultTemplate re-derives it from
-// the oldest template), so a refused write is reported, not thrown.
+// the oldest template), so a refused write is reported, not thrown. It is
+// written as a durable record so the cloud layer captures it like any other
+// workspace-level fact; the legacy string key is kept in step for rollback.
 export function setDefaultTemplateId(templateId) {
+  let ok = true;
   try {
-    if (templateId) localStorage.setItem(DEFAULT_TEMPLATE_KEY, templateId);
-    else localStorage.removeItem(DEFAULT_TEMPLATE_KEY);
-    return true;
+    const settings = readDurableMap(WORKSPACE_SETTINGS_KEY).map;
+    if (templateId) settings.defaultTemplateId = templateId;
+    else delete settings.defaultTemplateId;
+    writeDurableRecord(WORKSPACE_SETTINGS_KEY, settings);
   } catch {
-    reportPersistenceIssue({
-      kind: "preference-write-failed",
-      key: DEFAULT_TEMPLATE_KEY,
-      message: "Could not remember the default template. Browser storage may be full.",
-    });
-    return false;
+    ok = false;
   }
+  const legacyOk = templateId
+    ? writeScopedValue(DEFAULT_TEMPLATE_KEY, templateId)
+    : removeScopedValue(DEFAULT_TEMPLATE_KEY);
+  if (ok || legacyOk) return true;
+  reportPersistenceIssue({
+    kind: "preference-write-failed",
+    key: DEFAULT_TEMPLATE_KEY,
+    message: "Could not remember the default template. Browser storage may be full.",
+  });
+  return false;
 }
 
 // definition: { leftPct, logoAssetId, logoSrc, branding, rows }

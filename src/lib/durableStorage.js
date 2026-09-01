@@ -37,6 +37,27 @@
 //
 // Every function takes an optional `storage` so the behaviour is testable
 // against an in-memory Storage as well as jsdom's real localStorage.
+//
+// SCOPE (Production Readiness Phase 6). The catalogue names LOGICAL records;
+// where each one physically lives depends on the active durable scope:
+//
+//   { kind: "local" }               the legacy, pre-account records under the
+//                                   bare key — this browser's own data, the
+//                                   SOURCE of the explicit local→cloud
+//                                   migration and never written by a signed-in
+//                                   session;
+//   { kind: "workspace", id }       the signed-in account's workspace: every
+//                                   key is namespaced under the workspace id
+//                                   (`notewise-workspace-v1/<id>/<key>`), so
+//                                   two accounts on one browser can never read
+//                                   or write each other's records, and a
+//                                   workspace's records are its MIRROR of the
+//                                   cloud source of truth (src/lib/cloud/).
+//
+// Owner modules never see this: they keep asking for the logical key and the
+// scope decides the physical one. A WRITE CAPTURE hook (installed by the
+// cloud layer) sees every durable write with its previous value, which is how
+// entity-level cloud writes are derived without the owner modules changing.
 
 export const DURABLE_KEYS = Object.freeze({
   tree: "notewise-tree-v1",
@@ -46,6 +67,10 @@ export const DURABLE_KEYS = Object.freeze({
   templateInstances: "sitewise-note-template-instances-v1",
   pdfDocs: "notewise-pdf-docs-v1",
   notePdfRefs: "notewise-note-pdf-refs-v1",
+  // Workspace-level pointers (the default template). Added in Phase 6 so the
+  // pointer is a durable, captured record; the pre-account string key it
+  // replaces is still read as a fallback (src/lib/templateModel.js).
+  workspaceSettings: "notewise-workspace-settings-v1",
 });
 
 // User-facing names for the catalogue above — what a persistence message may
@@ -58,6 +83,7 @@ const RECORD_LABELS = Object.freeze({
   [DURABLE_KEYS.templateInstances]: "your template notes",
   [DURABLE_KEYS.pdfDocs]: "your PDF list",
   [DURABLE_KEYS.notePdfRefs]: "your note↔PDF links",
+  [DURABLE_KEYS.workspaceSettings]: "your workspace settings",
 });
 
 export const CORRUPT_RECORD_INDEX_KEY = "notewise-corrupt-records-v1";
@@ -82,6 +108,116 @@ export function recordLabel(key) {
 function defaultStorage() {
   try {
     return typeof window !== "undefined" ? window.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+/* ---------------------------------- scope -------------------------------- */
+
+export const DURABLE_SCOPE_KIND = Object.freeze({ LOCAL: "local", WORKSPACE: "workspace" });
+export const WORKSPACE_SCOPE_PREFIX = "notewise-workspace-v1/";
+const LOCAL_SCOPE = Object.freeze({ kind: DURABLE_SCOPE_KIND.LOCAL, id: null });
+
+let activeScope = LOCAL_SCOPE;
+
+/** A frozen, validated scope. Anything that is not a workspace with an id is
+ *  the local scope. */
+export function normalizeDurableScope(scope) {
+  if (
+    scope &&
+    scope.kind === DURABLE_SCOPE_KIND.WORKSPACE &&
+    typeof scope.id === "string" &&
+    /^[A-Za-z0-9_-]{1,128}$/.test(scope.id)
+  ) {
+    return Object.freeze({ kind: DURABLE_SCOPE_KIND.WORKSPACE, id: scope.id });
+  }
+  return LOCAL_SCOPE;
+}
+
+/** Makes `scope` the one every durable read and write resolves against. */
+export function setDurableScope(scope) {
+  activeScope = normalizeDurableScope(scope);
+  return activeScope;
+}
+
+export function getDurableScope() {
+  return activeScope;
+}
+
+/** The physical storage key of a logical key in a scope (default: active). */
+export function scopedStorageKey(key, scope = activeScope) {
+  const s = normalizeDurableScope(scope);
+  return s.kind === DURABLE_SCOPE_KIND.WORKSPACE ? `${WORKSPACE_SCOPE_PREFIX}${s.id}/${key}` : key;
+}
+
+/** True when `physicalKey` belongs to a workspace scope; returns its id. */
+export function workspaceIdOfStorageKey(physicalKey) {
+  if (typeof physicalKey !== "string" || !physicalKey.startsWith(WORKSPACE_SCOPE_PREFIX)) return null;
+  const rest = physicalKey.slice(WORKSPACE_SCOPE_PREFIX.length);
+  const slash = rest.indexOf("/");
+  return slash > 0 ? rest.slice(0, slash) : null;
+}
+
+/* -------------------- scope-following, non-durable values ---------------- */
+// Small markers that must FOLLOW the scope (migration guards, the default
+// template pointer) without being durable records: tolerant helpers that
+// never throw and never quarantine. They exist so no owner module has to
+// know how a key is namespaced.
+
+export function readScopedValue(key, storage = defaultStorage(), scope = activeScope) {
+  if (!storage) return null;
+  try {
+    const value = storage.getItem(scopedStorageKey(key, scope));
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeScopedValue(key, value, storage = defaultStorage()) {
+  if (!storage) return false;
+  try {
+    storage.setItem(scopedStorageKey(key), String(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function removeScopedValue(key, storage = defaultStorage()) {
+  if (!storage) return false;
+  try {
+    storage.removeItem(scopedStorageKey(key));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* ------------------------------ write capture ---------------------------- */
+// One capture at a time. `needsPrevious(physicalKey)` says whether the
+// capture wants the stored value read BEFORE the write (it keeps its own
+// snapshot afterwards); `record(event)` runs after a CONFIRMED write with
+//   { key, scope, physicalKey, previous, value, origin }
+// where `origin` is "app" for an ordinary write and "cloud" for a value the
+// cloud layer is placing into the mirror (which must never round-trip back).
+
+let writeCapture = null;
+
+export const WRITE_ORIGIN = Object.freeze({ APP: "app", CLOUD: "cloud" });
+
+export function setDurableWriteCapture(capture) {
+  writeCapture =
+    capture && typeof capture.record === "function" && typeof capture.needsPrevious === "function"
+      ? capture
+      : null;
+}
+
+function parseOrNull(raw) {
+  if (typeof raw !== "string" || raw === "") return null;
+  try {
+    return JSON.parse(raw);
   } catch {
     return null;
   }
@@ -137,7 +273,8 @@ function readIndex(storage) {
   }
 }
 
-/** Every record set aside so far: [{ key, quarantineKey, at, bytes }]. */
+/** Every record set aside so far: [{ key, quarantineKey, at, bytes }].
+ *  `key` is the PHYSICAL key (scope-qualified for a workspace record). */
 export function listQuarantinedRecords(storage = defaultStorage()) {
   if (!storage) return [];
   return readIndex(storage).map((e) => ({
@@ -148,15 +285,15 @@ export function listQuarantinedRecords(storage = defaultStorage()) {
   }));
 }
 
-/** True when writes to `key` are currently refused (see the header). */
+/** True when writes to `key` (in the active scope) are currently refused. */
 export function isDurableWriteBlocked(key) {
-  return blockedKeys.has(key);
+  return blockedKeys.has(scopedStorageKey(key));
 }
 
 /** Lifts a write block after the caller has dealt with the unreadable
  *  record (exported the raw value, decided to discard it). */
 export function acknowledgeCorruptRecord(key) {
-  blockedKeys.delete(key);
+  blockedKeys.delete(scopedStorageKey(key));
 }
 
 // Copies the raw text aside. Returns true when a copy is safely stored (now
@@ -197,11 +334,12 @@ function quarantine(storage, key, raw, now) {
  * returns; callers then degrade to their empty shape. Storage being entirely
  * unavailable reads as "missing" — there is nothing to protect.
  */
-export function readDurableRecord(key, { storage = defaultStorage(), now = Date.now } = {}) {
+export function readDurableRecord(key, { storage = defaultStorage(), now = Date.now, scope = activeScope } = {}) {
   if (!storage) return { state: RECORD_STATE.MISSING, value: null };
+  const physicalKey = scopedStorageKey(key, scope);
   let raw = null;
   try {
-    raw = storage.getItem(key);
+    raw = storage.getItem(physicalKey);
   } catch {
     return { state: RECORD_STATE.MISSING, value: null };
   }
@@ -211,9 +349,9 @@ export function readDurableRecord(key, { storage = defaultStorage(), now = Date.
   try {
     return { state: RECORD_STATE.OK, value: JSON.parse(raw) };
   } catch {
-    const quarantined = quarantine(storage, key, raw, now());
-    if (quarantined) blockedKeys.delete(key);
-    else blockedKeys.add(key);
+    const quarantined = quarantine(storage, physicalKey, raw, now());
+    if (quarantined) blockedKeys.delete(physicalKey);
+    else blockedKeys.add(physicalKey);
     reportPersistenceIssue({
       kind: quarantined
         ? PERSISTENCE_ISSUE.CORRUPT_QUARANTINED
@@ -249,8 +387,14 @@ export function readDurableMap(key, options) {
  *   - storage refuses the write (quota, unavailable).
  * Returning without throwing IS the confirmation.
  */
-export function writeDurableRecord(key, value, { storage = defaultStorage() } = {}) {
-  if (blockedKeys.has(key)) {
+export function writeDurableRecord(
+  key,
+  value,
+  { storage = defaultStorage(), origin = WRITE_ORIGIN.APP, scope = activeScope } = {}
+) {
+  const writeScope = normalizeDurableScope(scope);
+  const physicalKey = scopedStorageKey(key, writeScope);
+  if (blockedKeys.has(physicalKey)) {
     const err = new DurableWriteBlockedError(key);
     reportPersistenceIssue({ kind: PERSISTENCE_ISSUE.WRITE_BLOCKED, key, message: err.message });
     throw err;
@@ -260,19 +404,50 @@ export function writeDurableRecord(key, value, { storage = defaultStorage() } = 
   if (typeof serialized !== "string") {
     throw new Error("The record could not be serialized");
   }
-  storage.setItem(key, serialized);
+  const capture = writeCapture;
+  const previous =
+    capture && capture.needsPrevious(physicalKey) ? parseOrNull(storage.getItem(physicalKey)) : undefined;
+  storage.setItem(physicalKey, serialized);
+  if (capture) {
+    capture.record({ key, scope: writeScope, physicalKey, previous, value, origin });
+  }
 }
 
 /** Removes one durable record. Throws if storage refuses. */
-export function removeDurableRecord(key, { storage = defaultStorage() } = {}) {
+export function removeDurableRecord(
+  key,
+  { storage = defaultStorage(), origin = WRITE_ORIGIN.APP, scope = activeScope } = {}
+) {
   if (!storage) throw new Error("Browser storage is not available");
-  storage.removeItem(key);
+  const removeScope = normalizeDurableScope(scope);
+  const physicalKey = scopedStorageKey(key, removeScope);
+  const capture = writeCapture;
+  const previous =
+    capture && capture.needsPrevious(physicalKey) ? parseOrNull(storage.getItem(physicalKey)) : undefined;
+  storage.removeItem(physicalKey);
+  if (capture) {
+    capture.record({ key, scope: removeScope, physicalKey, previous, value: null, origin });
+  }
+}
+
+/** True when a record (any content) is physically stored for `key` in the
+ *  active scope. Never parses. */
+export function hasDurableRecord(key, storage = defaultStorage(), scope = activeScope) {
+  if (!storage) return false;
+  try {
+    const raw = storage.getItem(scopedStorageKey(key, scope));
+    return typeof raw === "string" && raw !== "";
+  } catch {
+    return false;
+  }
 }
 
 /* --------------------------------- tests --------------------------------- */
 
-/** Test-only: forgets in-memory blocks and listeners. */
+/** Test-only: forgets in-memory blocks, listeners, the scope and the capture. */
 export function __resetDurableStorageForTests() {
   blockedKeys.clear();
   listeners.clear();
+  activeScope = LOCAL_SCOPE;
+  writeCapture = null;
 }

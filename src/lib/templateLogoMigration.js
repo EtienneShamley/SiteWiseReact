@@ -35,6 +35,7 @@
 //     TemplateBuilderDoc rendering).
 
 import { getTemplateVersions, TEMPLATE_VERSIONS_KEY } from "./templateModel";
+import { readDurableRecord, readScopedValue, writeDurableRecord, writeScopedValue } from "./durableStorage";
 import {
   makeAssetRecord,
   saveAsset,
@@ -55,8 +56,11 @@ export function migrationLogoAssetId(versionId) {
 // saveTemplateVersions() helper swallows localStorage failures, which is unsafe
 // here: the migration must know the record actually persisted before treating a
 // version as migrated. This propagates any write failure to the caller.
+// Routed through the durable-storage boundary so the write lands in the
+// ACTIVE scope (this workspace's mirror, or the browser's local records) and
+// is captured for cloud persistence like every other durable write.
 function writeTemplateVersionsOrThrow(versions) {
-  localStorage.setItem(TEMPLATE_VERSIONS_KEY, JSON.stringify(versions));
+  writeDurableRecord(TEMPLATE_VERSIONS_KEY, versions);
 }
 
 // Confirms, by re-reading persisted storage, that the given version now carries
@@ -64,13 +68,8 @@ function writeTemplateVersionsOrThrow(versions) {
 // the representation swap did not actually land — so a swallowed/partial write
 // can never be mistaken for a completed migration.
 function assertVersionPersisted(versionId, assetId) {
-  let stored = null;
-  try {
-    stored = JSON.parse(localStorage.getItem(TEMPLATE_VERSIONS_KEY) || "{}");
-  } catch {
-    stored = null;
-  }
-  const rec = stored && stored[versionId];
+  const stored = readDurableRecord(TEMPLATE_VERSIONS_KEY).value;
+  const rec = stored && typeof stored === "object" ? stored[versionId] : null;
   if (!rec || rec.logoAssetId !== assetId || rec.logoSrc != null) {
     throw new Error(
       `Template logo migration could not confirm version ${versionId} was persisted`
@@ -79,7 +78,8 @@ function assertVersionPersisted(versionId, assetId) {
 }
 
 export async function migrateTemplateLogos() {
-  if (localStorage.getItem(TEMPLATE_LOGO_MIGRATION_GUARD)) {
+  // The guard follows the durable scope: each workspace runs this once.
+  if (readScopedValue(TEMPLATE_LOGO_MIGRATION_GUARD)) {
     return { migrated: false, count: 0 };
   }
 
@@ -135,6 +135,6 @@ export async function migrateTemplateLogos() {
   }
 
   // Guard set only after EVERY version above was confirmed persisted.
-  localStorage.setItem(TEMPLATE_LOGO_MIGRATION_GUARD, String(Date.now()));
+  writeScopedValue(TEMPLATE_LOGO_MIGRATION_GUARD, String(Date.now()));
   return { migrated: count > 0, count };
 }

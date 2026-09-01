@@ -25,6 +25,7 @@ import {
 import { getPdfDocs, savePdfDocs } from "./pdfDocuments";
 import { getNotePdfRefs, saveNotePdfRefs } from "./notePdfRefs";
 import { newId } from "./id";
+import { DURABLE_SCOPE_KIND, getDurableScope, readScopedValue, writeScopedValue } from "./durableStorage";
 
 export const PDF_DOCID_MIGRATION_GUARD = "notewise-pdf-docid-migration-v1-complete";
 
@@ -35,13 +36,20 @@ export const PDF_DOCID_MIGRATION_GUARD = "notewise-pdf-docid-migration-v1-comple
  * (importantly) leave the guard UNSET so it can be retried next load.
  */
 export async function migrateLegacyNotePdfs() {
-  if (localStorage.getItem(PDF_DOCID_MIGRATION_GUARD)) {
+  // The legacy v1 IndexedDB records are this BROWSER's pre-account data. A
+  // signed-in workspace never imports them on start-up: that would move local
+  // data into an account without the explicit migration step. They convert
+  // only in the local scope, where they have always lived.
+  if (getDurableScope().kind === DURABLE_SCOPE_KIND.WORKSPACE) {
+    return { migrated: false, count: 0 };
+  }
+  if (readScopedValue(PDF_DOCID_MIGRATION_GUARD)) {
     return { migrated: false, count: 0 };
   }
 
   const legacy = await listLegacyPdfRecords();
   if (!legacy.length) {
-    localStorage.setItem(PDF_DOCID_MIGRATION_GUARD, "1");
+    writeScopedValue(PDF_DOCID_MIGRATION_GUARD, "1");
     return { migrated: false, count: 0 };
   }
 
@@ -81,6 +89,6 @@ export async function migrateLegacyNotePdfs() {
   savePdfDocs(docs);
   saveNotePdfRefs(refs);
 
-  localStorage.setItem(PDF_DOCID_MIGRATION_GUARD, "1");
+  writeScopedValue(PDF_DOCID_MIGRATION_GUARD, "1");
   return { migrated: true, count };
 }

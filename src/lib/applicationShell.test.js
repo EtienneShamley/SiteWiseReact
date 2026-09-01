@@ -326,7 +326,7 @@ describe("23/24/25. sidebar collapse and document expand are independent and coe
     expect(TOOLBAR).toMatch(/role="status"\s*\n\s*aria-live="polite"/);
     expect((TOOLBAR.match(/aria-live="polite"/g) || []).length).toBe(1);
     expect(TOOLBAR).toMatch(/saveStatus = null,/);
-    expect(NOTE_MAIN).toMatch(/saveStatus=\{\{ label: activeSaveLabel, failed: activeSaveFailed \}\}/);
+    expect(NOTE_MAIN).toMatch(/saveStatus=\{\{ label: activeSaveLabel, failed: activeSaveFailed, hint: activeSaveHint \}\}/);
     // MainArea no longer renders a second save-status live region.
     expect(MAIN_AREA).not.toMatch(/SAVED_LOCALLY_HINT|SAVE_FAILED_DETAIL/);
     // Its accessibility semantics are intact: focusable label, hint outside

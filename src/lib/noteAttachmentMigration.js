@@ -48,6 +48,7 @@ import {
   ATTACHMENT_KIND,
   LEGACY_ATTACHMENT_SOURCE,
 } from "./noteAttachments";
+import { readDurableRecord, readScopedValue, writeDurableRecord, writeScopedValue } from "./durableStorage";
 
 export const NOTE_ATTACHMENT_MIGRATION_GUARD =
   "sitewise-note-attachment-migration-v1-complete";
@@ -63,20 +64,17 @@ export function migrationAttachmentId(noteId, fieldId, index) {
 
 // Migration-specific THROWING write (the normal save helper swallows failures,
 // which is unsafe here — a version treated as migrated must actually persist).
+// Routed through the durable-storage boundary so the write lands in the
+// ACTIVE scope and is captured for cloud persistence like every other write.
 function writeInstancesOrThrow(instances) {
-  localStorage.setItem(NOTE_TEMPLATE_INSTANCES_KEY, JSON.stringify(instances));
+  writeDurableRecord(NOTE_TEMPLATE_INSTANCES_KEY, instances);
 }
 
 // Confirms, by re-reading persisted storage, that every converted entry of the
 // instance now carries its expected assetId and is no longer a string.
 function assertInstancePersisted(noteId, convertedEntries) {
-  let stored = null;
-  try {
-    stored = JSON.parse(localStorage.getItem(NOTE_TEMPLATE_INSTANCES_KEY) || "{}");
-  } catch {
-    stored = null;
-  }
-  const rec = stored && stored[noteId];
+  const stored = readDurableRecord(NOTE_TEMPLATE_INSTANCES_KEY).value;
+  const rec = stored && typeof stored === "object" ? stored[noteId] : null;
   for (const { fieldId, index, assetId } of convertedEntries) {
     const entry = rec?.attachments?.[fieldId]?.[index];
     if (!entry || typeof entry !== "object" || entry.assetId !== assetId) {
@@ -88,7 +86,8 @@ function assertInstancePersisted(noteId, convertedEntries) {
 }
 
 export async function migrateNoteAttachments() {
-  if (localStorage.getItem(NOTE_ATTACHMENT_MIGRATION_GUARD)) {
+  // The guard follows the durable scope: each workspace runs this once.
+  if (readScopedValue(NOTE_ATTACHMENT_MIGRATION_GUARD)) {
     return { migrated: false, count: 0 };
   }
 
@@ -174,6 +173,6 @@ export async function migrateNoteAttachments() {
   }
 
   // Guard set only after EVERY instance above was confirmed persisted.
-  localStorage.setItem(NOTE_ATTACHMENT_MIGRATION_GUARD, String(Date.now()));
+  writeScopedValue(NOTE_ATTACHMENT_MIGRATION_GUARD, String(Date.now()));
   return { migrated: count > 0, count };
 }

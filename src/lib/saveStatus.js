@@ -8,18 +8,20 @@
 // what actually happened to those writes.
 //
 // Two rules define the whole module:
-//   1. `Saved locally` may only ever follow a CONFIRMED write. React state
-//      updating, the editor rendering, a timer elapsing or a write merely being
-//      attempted are all insufficient — see settleSave/markLoaded.
+//   1. `Saved` may only ever follow a write Firestore has ACCEPTED (Production
+//      Readiness Phase 6). React state updating, the editor rendering, a timer
+//      elapsing, a write merely being attempted, or even the local mirror
+//      write having landed are all insufficient — see settleSave/markLoaded.
+//      A local write that is still waiting for the connection is its own
+//      state, `queued` ("Saved on this device"), never "Saved".
 //   2. Status is owned per NOTE ID and per NOTE VIEW, and every transition
 //      carries a monotonically increasing sequence number. A completion settles
 //      only the exact note, view and sequence that started it, so an older
 //      completion can never overwrite a newer `Saving…` or a newer failure, and
 //      a background write for one note can never alter another note's status.
 //
-// The wording is deliberately "Saved locally", never "Saved": NoteWise is
-// single-browser and single-device today, and the status must not imply cloud
-// synchronization.
+// The wording says where the change is: "Saved" once it is in the account,
+// "Saved on this device" while it is only in this browser's mirror and queue.
 //
 // Kept free of React, storage and the DOM so every rule is directly testable
 // (no DOM testing library is installed — see docs/TESTING.md). The timers that
@@ -35,27 +37,49 @@ export const SAVE_STATUS = {
   DIRTY: "dirty",
   SAVING: "saving",
   SAVED: "saved",
+  QUEUED: "queued",
   FAILED: "failed",
 };
+
+// The outcome a completion may report.
+export const SAVE_OUTCOME = Object.freeze({
+  SAVED: "saved",
+  QUEUED: "queued",
+  FAILED: "failed",
+});
 
 // The complete user-facing vocabulary. `idle` has no label: nothing has
 // happened yet, and inventing a reassuring one would be a claim about storage.
 export const SAVE_STATUS_LABEL = {
   [SAVE_STATUS.DIRTY]: "Saving…",
   [SAVE_STATUS.SAVING]: "Saving…",
-  [SAVE_STATUS.SAVED]: "Saved locally",
+  [SAVE_STATUS.SAVED]: "Saved",
+  [SAVE_STATUS.QUEUED]: "Saved on this device",
   [SAVE_STATUS.FAILED]: "Save failed",
 };
 
-// Explains what "Saved locally" actually means. Shown as the status tooltip and
-// as its accessible description.
-export const SAVED_LOCALLY_HINT =
-  "Changes are automatically saved in this browser.";
+// Explains what "Saved" actually means. Shown as the status tooltip and as
+// its accessible description.
+export const SAVED_HINT = "Changes are automatically saved to your NoteWise account.";
+// Kept under its former name for the callers that still import it.
+export const SAVED_LOCALLY_HINT = SAVED_HINT;
+
+// Explains "Saved on this device": the change is in this browser and queued
+// for the account.
+export const QUEUED_HINT =
+  "Saved in this browser. It will be saved to your account when the connection returns.";
 
 // The failure explanation. Restrained by design: it never contains an exception
 // message, a stack trace, a storage key or any user content.
 export const SAVE_FAILED_DETAIL =
-  "Your latest changes could not be saved. Browser storage may be full.";
+  "Your latest changes could not be saved to your account. They stay on screen and in this browser; your next change will try again.";
+
+/** The hint that belongs with an entry's status, or null for none. */
+export function saveStatusHint(entry) {
+  if (entry?.status === SAVE_STATUS.QUEUED) return QUEUED_HINT;
+  if (entry?.status === SAVE_STATUS.FAILED) return null;
+  return SAVED_HINT;
+}
 
 // How long "Saving…" stays visible before a CONFIRMED success is allowed to
 // replace it. This coalesces the display only — the underlying write is
@@ -98,6 +122,10 @@ export function saveStatusLabel(entry) {
 
 export function isSaveFailed(entry) {
   return entry?.status === SAVE_STATUS.FAILED;
+}
+
+export function isSaveQueued(entry) {
+  return entry?.status === SAVE_STATUS.QUEUED;
 }
 
 export function isSavePending(entry) {
@@ -151,8 +179,16 @@ export function beginSave(statusByNote, noteId, view, seq) {
   });
 }
 
+function statusOfOutcome(outcome) {
+  if (outcome === true || outcome === SAVE_OUTCOME.SAVED) return SAVE_STATUS.SAVED;
+  if (outcome === SAVE_OUTCOME.QUEUED) return SAVE_STATUS.QUEUED;
+  return SAVE_STATUS.FAILED;
+}
+
 /**
- * Record the CONFIRMED outcome of one write.
+ * Record the CONFIRMED outcome of one write: `true`/"saved" (accepted by the
+ * account), "queued" (in this browser, waiting for the connection) or
+ * `false`/"failed".
  *
  * Ignored unless this note/view is still waiting for exactly this sequence, so:
  *   - a superseded completion cannot overwrite a newer `Saving…`;
@@ -161,20 +197,22 @@ export function beginSave(statusByNote, noteId, view, seq) {
  *     here (it is keyed by its own note and view, never by "whatever is
  *     visible now").
  */
-export function settleSave(statusByNote, noteId, view, seq, ok) {
+export function settleSave(statusByNote, noteId, view, seq, outcome) {
   const refused = guard(statusByNote, noteId, view, seq);
   if (refused) return refused;
   const current = getSaveStatus(statusByNote, noteId, view);
   if (current.seq !== seq) return statusByNote;
   return withEntry(statusByNote, noteId, view, {
-    status: ok ? SAVE_STATUS.SAVED : SAVE_STATUS.FAILED,
+    status: statusOfOutcome(outcome),
     seq,
   });
 }
 
 /**
- * This note/view's stored state was READ BACK successfully, so it is genuinely
- * saved locally and may say so without passing through `Saving…`.
+ * This note/view's stored state was READ BACK successfully from the workspace
+ * mirror, so it is genuinely persisted and may say so without passing through
+ * `Saving…` — "Saved" when nothing for it is still queued for the account,
+ * "Saved on this device" (`queued: true`) when a change is still waiting.
  *
  * Callers must only reach here after an actual successful read of stored
  * content — never because a note object exists, React state initialized, an
@@ -183,13 +221,13 @@ export function settleSave(statusByNote, noteId, view, seq, ok) {
  * Applies only to an `idle` view: a note that already has a real status this
  * session (including a genuine failure) keeps it when the user returns to it.
  */
-export function markLoaded(statusByNote, noteId, view, seq) {
+export function markLoaded(statusByNote, noteId, view, seq, { queued = false } = {}) {
   const refused = guard(statusByNote, noteId, view, seq);
   if (refused) return refused;
   const current = getSaveStatus(statusByNote, noteId, view);
   if (current.status !== SAVE_STATUS.IDLE) return statusByNote;
   return withEntry(statusByNote, noteId, view, {
-    status: SAVE_STATUS.SAVED,
+    status: queued ? SAVE_STATUS.QUEUED : SAVE_STATUS.SAVED,
     seq,
   });
 }

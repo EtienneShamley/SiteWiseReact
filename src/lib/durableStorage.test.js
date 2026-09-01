@@ -69,6 +69,7 @@ describe("1. valid persisted JSON", () => {
       templateInstances: "sitewise-note-template-instances-v1",
       pdfDocs: "notewise-pdf-docs-v1",
       notePdfRefs: "notewise-note-pdf-refs-v1",
+      workspaceSettings: "notewise-workspace-settings-v1",
     });
     for (const key of Object.values(DURABLE_KEYS)) {
       expect(recordLabel(key)).not.toBe("some stored data");

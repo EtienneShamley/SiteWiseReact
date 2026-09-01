@@ -57,7 +57,8 @@
     "eject": "react-scripts eject",
     "server": "node server/index.js",
     "lint": "eslint \"src/**/*.js\" \"server/**/*.js\" \"routes/**/*.js\" --ignore-pattern \"*.test.js\" --max-warnings=0",
-    "test:ci": "craco test --watchAll=false --ci --maxWorkers=2"
+    "test:ci": "craco test --watchAll=false --ci --maxWorkers=2",
+    "test:rules": "firebase emulators:exec --only firestore --project notewise-rules-test \"node --test test/rules/firestore.rules.test.js\""
   },
   "eslintConfig": {
     "extends": [
@@ -84,12 +85,14 @@
   "packageManager": "npm@10.9.8",
   "devDependencies": {
     "@craco/craco": "^7.1.0",
+    "@firebase/rules-unit-testing": "^5.0.2",
     "assert": "^2.1.0",
     "autoprefixer": "^10.4.21",
     "browserify-zlib": "^0.2.0",
     "buffer": "^6.0.3",
     "crypto-browserify": "^3.12.1",
     "fake-indexeddb": "^6.2.5",
+    "firebase-tools": "^15.28.2",
     "http-proxy-middleware": "^3.0.5",
     "https-browserify": "^1.0.0",
     "nodemon": "^3.1.10",

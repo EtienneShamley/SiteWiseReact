@@ -18,7 +18,11 @@
 //                                  while local data existed
 //     lastUid, lastSeenAt,         the most recent one
 //     uids: [...],                 every distinct account seen (capped)
-//     migration: { status: "not-started" }   reserved for the migration phase
+//     migration: { status, uid, workspaceId, sourceId, startedAt, completedAt, counts }
+//                                  the explicit local→cloud migration's record
+//                                  (src/lib/cloud/localMigration.js): which
+//                                  account moved this data into which
+//                                  workspace, and how far it got
 //   }
 //
 // It is a preference-grade record: tolerant, never throwing, never blocking,
@@ -29,7 +33,12 @@
 import { DURABLE_KEYS } from "./durableStorage";
 
 export const LOCAL_DATA_BINDING_KEY = "notewise-local-data-account-v1";
-export const MIGRATION_STATUS = Object.freeze({ NOT_STARTED: "not-started" });
+export const MIGRATION_STATUS = Object.freeze({
+  NOT_STARTED: "not-started",
+  IN_PROGRESS: "in-progress",
+  COMPLETED: "completed",
+  FAILED: "failed",
+});
 const MAX_UIDS = 10;
 
 function defaultStorage() {
@@ -58,6 +67,19 @@ export function hasLocalCustomerData(storage = defaultStorage()) {
   return false;
 }
 
+function normalizeMigration(raw) {
+  const m = raw && typeof raw === "object" ? raw : {};
+  const status = Object.values(MIGRATION_STATUS).includes(m.status) ? m.status : MIGRATION_STATUS.NOT_STARTED;
+  const out = { status };
+  if (typeof m.uid === "string") out.uid = m.uid;
+  if (typeof m.workspaceId === "string") out.workspaceId = m.workspaceId;
+  if (typeof m.sourceId === "string") out.sourceId = m.sourceId;
+  if (Number(m.startedAt)) out.startedAt = Number(m.startedAt);
+  if (Number(m.completedAt)) out.completedAt = Number(m.completedAt);
+  if (m.counts && typeof m.counts === "object") out.counts = m.counts;
+  return out;
+}
+
 /** The record, or null when absent or unreadable. */
 export function readLocalDataBinding(storage = defaultStorage()) {
   if (!storage) return null;
@@ -73,12 +95,7 @@ export function readLocalDataBinding(storage = defaultStorage()) {
       lastUid: typeof parsed.lastUid === "string" ? parsed.lastUid : null,
       lastSeenAt: Number(parsed.lastSeenAt) || 0,
       uids: Array.isArray(parsed.uids) ? parsed.uids.filter((u) => typeof u === "string") : [],
-      migration: {
-        status:
-          parsed.migration && typeof parsed.migration.status === "string"
-            ? parsed.migration.status
-            : MIGRATION_STATUS.NOT_STARTED,
-      },
+      migration: normalizeMigration(parsed.migration),
     };
   } catch {
     return null;
@@ -119,6 +136,31 @@ export function recordAccountSession(uid, { storage = defaultStorage(), now = Da
     storage.setItem(LOCAL_DATA_BINDING_KEY, JSON.stringify(next));
   } catch {
     // Preference-grade: a refused write loses a hint, never content.
+  }
+  return next;
+}
+
+/**
+ * Records the state of the explicit local→cloud migration. Writes even when
+ * the binding does not exist yet (a run can only start with local data, so
+ * the binding normally does). Never throws; returns the record as stored.
+ */
+export function recordMigrationState(migration, { storage = defaultStorage(), now = Date.now() } = {}) {
+  if (!storage || !migration || typeof migration !== "object") return null;
+  const existing = readLocalDataBinding(storage) || {
+    version: 1,
+    firstUid: typeof migration.uid === "string" ? migration.uid : null,
+    firstSeenAt: now,
+    lastUid: typeof migration.uid === "string" ? migration.uid : null,
+    lastSeenAt: now,
+    uids: typeof migration.uid === "string" ? [migration.uid] : [],
+    migration: { status: MIGRATION_STATUS.NOT_STARTED },
+  };
+  const next = { ...existing, migration: normalizeMigration(migration) };
+  try {
+    storage.setItem(LOCAL_DATA_BINDING_KEY, JSON.stringify(next));
+  } catch {
+    // Preference-grade: the data itself is safe in the mirror and outbox.
   }
   return next;
 }

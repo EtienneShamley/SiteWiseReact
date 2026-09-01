@@ -43,6 +43,12 @@ const { hasApiTokenProvider, authorizedFetch, __resetApiAuthForTests } = require
 const { DURABLE_KEYS, __resetDurableStorageForTests } = require("./durableStorage");
 const { LOCAL_DATA_BINDING_KEY, readLocalDataBinding } = require("./localDataBinding");
 const { __resetNoteTombstonesForTests } = require("./noteTombstones");
+const { createMemoryWorkspaceStore } = require("./cloud/memoryWorkspaceStore");
+const { __resetCloudCaptureForTests } = require("./cloud/cloudCapture");
+const { readWorkspaceBinding } = require("./cloud/workspaceBindingCache");
+const { getNoteContent, saveNoteContent } = require("./noteContentStorage");
+const { MIGRATION_TITLE, MIGRATION_NOT_NOW_LABEL } = require("../components/auth/LocalDataMigrationDialog");
+const { WORKSPACE_ERROR_TITLE, WORKSPACE_RETRY_LABEL } = require("../components/auth/WorkspaceGate");
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -213,6 +219,7 @@ const USERS = {
 beforeEach(() => {
   window.localStorage.clear();
   __resetDurableStorageForTests();
+  __resetCloudCaptureForTests();
   __resetApiAuthForTests();
   __resetNoteTombstonesForTests();
   mockReadConfig.mockReset();
@@ -223,6 +230,10 @@ beforeEach(() => {
 
 afterEach(async () => {
   await unmount();
+  // the deferred session close
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  __resetCloudCaptureForTests();
+  __resetDurableStorageForTests();
 });
 
 /* ------------------------------- AuthGate ------------------------------- */
@@ -543,7 +554,7 @@ describe("Settings account section", () => {
     );
     expect(text()).toContain("verified@example.com");
     expect(text()).toContain("Email verified");
-    expect(text()).toContain("stay here after you sign out");
+    expect(text()).toContain("saved to your account");
     await click(button(SIGN_OUT_LABEL));
     expect(adapter.calls.signOut).toBe(1);
     expect(latestAuth.status).toBe(AUTH_STATUS.SIGNED_OUT);
@@ -614,12 +625,22 @@ function seededValuesUnchanged() {
   for (const [k, v] of Object.entries(SEED)) expect(window.localStorage.getItem(k)).toBe(v);
 }
 
-function fullShell(adapter) {
+// Phase 6: the data scope resolves a CLOUD workspace through the store. The
+// in-memory store stands in for Firestore; the session options keep the sync
+// engine synchronous. A signed-in session with local data present lands on
+// the explicit migration step; "Not now" opens the workspace.
+const SESSION_OPTIONS = {
+  syncOptions: { isOnline: () => true, addOnlineListener: () => () => {}, setTimer: () => 0, clearTimer: () => {} },
+  setTimer: (fn, ms) => setTimeout(fn, ms),
+  clearTimer: (t) => clearTimeout(t),
+};
+
+function fullShell(adapter, store) {
   return (
     <AuthProvider adapter={adapter}>
       <AuthProbe />
       <AuthGate>
-        <DataScopeProvider>
+        <DataScopeProvider store={store} sessionOptions={SESSION_OPTIONS}>
           <AppStateProvider>
             <AppStateProbe />
             <ScopeProbe />
@@ -630,81 +651,151 @@ function fullShell(adapter) {
   );
 }
 
+// The store follows the auth adapter's session like the Firestore SDK does.
+function storeFollowing(adapter) {
+  const store = createMemoryWorkspaceStore();
+  const originalSubscribe = adapter.subscribe.bind(adapter);
+  adapter.subscribe = (fn) =>
+    originalSubscribe((snapshot) => {
+      store.setUser(snapshot ? snapshot.uid : null);
+      fn(snapshot);
+    });
+  return store;
+}
+
+async function settle() {
+  for (let i = 0; i < 12; i++) {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+}
+
 describe("data scope and existing local data", () => {
   test("signed out: the application state provider is not mounted and local records are untouched", async () => {
     seed();
-    await render(fullShell(memoryAdapter()));
+    const adapter = memoryAdapter();
+    await render(fullShell(adapter, storeFollowing(adapter)));
     expect(latestAppState).toBeNull();
     expect(latestScope).toBeNull();
     seededValuesUnchanged();
     expect(window.localStorage.getItem(LOCAL_DATA_BINDING_KEY)).toBeNull();
   });
 
-  test("signing in mounts the application over the SAME local data, derives the scope from the verified user, and records the account", async () => {
+  test("21. signing in resolves a cloud workspace, records the account, and OFFERS — never performs — the migration of local data", async () => {
     seed();
     const adapter = memoryAdapter({ users: USERS });
-    await render(fullShell(adapter));
+    const store = storeFollowing(adapter);
+    await render(fullShell(adapter, store));
     await act(async () => {
       await adapter.signIn("verified@example.com", "correct-horse");
     });
-    expect(text()).toContain("NW-APP-ROOT");
-    expect(latestScope).toEqual({ uid: "uid-v", emailVerified: true, workspace: { kind: "local", id: null } });
-    expect(Object.isFrozen(latestScope)).toBe(true);
-    // The tree the app sees IS the stored tree.
-    expect(latestAppState.state.projectData).toEqual([{ id: "p1", name: "Site A" }]);
+    await settle();
+    // the explicit step, not the application
+    expect(text()).toContain(MIGRATION_TITLE);
+    expect(text()).not.toContain("NW-APP-ROOT");
+    expect(Object.keys(store.listWorkspaceDocs(store.getUser() && readWorkspaceBinding("uid-v").workspaceId, "noteContent"))).toEqual([]);
     seededValuesUnchanged();
     const binding = readLocalDataBinding();
     expect(binding.firstUid).toBe("uid-v");
-    expect(binding.uids).toEqual(["uid-v"]);
     expect(binding.migration.status).toBe("not-started");
+
+    // "Not now" opens the workspace with the real, authoritative scope
+    await click(button(MIGRATION_NOT_NOW_LABEL));
+    await settle();
+    expect(text()).toContain("NW-APP-ROOT");
+    expect(latestScope.uid).toBe("uid-v");
+    expect(latestScope.emailVerified).toBe(true);
+    expect(latestScope.workspace.kind).toBe("cloud");
+    expect(latestScope.workspace.id).toBe(readWorkspaceBinding("uid-v").workspaceId);
+    expect(latestScope.workspace.role).toBe("owner");
+    expect(Object.isFrozen(latestScope)).toBe(true);
+    // the workspace is EMPTY: the browser's local tree was not adopted
+    expect(latestAppState.state.projectData).toEqual([]);
+    seededValuesUnchanged();
   });
 
-  test("no fake identity: the scope carries the real uid and no invented workspace id", async () => {
+  test("7. no fake identity: the scope carries the real uid and a workspace the store actually resolved", async () => {
     const adapter = memoryAdapter({ initialUser: { uid: "real-firebase-uid", email: "a@b.co", emailVerified: false } });
-    await render(fullShell(adapter));
+    const store = storeFollowing(adapter);
+    await render(fullShell(adapter, store));
+    await settle();
     expect(latestScope.uid).toBe("real-firebase-uid");
-    expect(latestScope.workspace.id).toBeNull();
-    expect(latestScope.workspace.kind).toBe("local");
+    expect(latestScope.workspace.id).toMatch(/^ws-/);
+    expect(store.get(["workspaces", latestScope.workspace.id, "members", "real-firebase-uid"]).role).toBe("owner");
     expect(latestScope.emailVerified).toBe(false);
   });
 
-  test("signing out unmounts the application and deletes nothing; signing back in finds it all again", async () => {
-    seed();
+  test("8/9/32/33. signing out clears the scope; another account on the same browser resolves ITS OWN workspace and sees none of the first's data", async () => {
     const adapter = memoryAdapter({ initialUser: VERIFIED_USER });
-    await render(fullShell(adapter));
+    const store = storeFollowing(adapter);
+    await render(fullShell(adapter, store));
+    await settle();
+    const first = latestScope.workspace.id;
     expect(text()).toContain("NW-APP-ROOT");
+    // A writes a note in A's workspace
+    saveNoteContent("a-note", "<p>Alice's field note</p>");
+    await act(async () => {
+      await latestScope.sync.flush();
+    });
+    expect(store.get(["workspaces", first, "noteContent", "a-note"]).html).toBe("<p>Alice's field note</p>");
+
     await act(async () => {
       await adapter.signOut();
     });
+    await settle();
     expect(text()).not.toContain("NW-APP-ROOT");
-    seededValuesUnchanged();
-    await act(async () => adapter.setUser(VERIFIED_USER));
-    expect(text()).toContain("NW-APP-ROOT");
-    expect(latestAppState.state.projectData).toEqual([{ id: "p1", name: "Site A" }]);
-    seededValuesUnchanged();
-  });
+    latestScope = null;
+    latestAppState = null;
 
-  test("a second account on the same browser sees the same local data and is recorded as a second account — nothing is re-keyed", async () => {
-    seed();
-    const adapter = memoryAdapter({ initialUser: VERIFIED_USER });
-    await render(fullShell(adapter));
     await act(async () => adapter.setUser({ uid: "uid-other", email: "other@example.com", emailVerified: true }));
+    await settle();
     expect(latestScope.uid).toBe("uid-other");
-    expect(latestAppState.state.projectData).toEqual([{ id: "p1", name: "Site A" }]);
-    seededValuesUnchanged();
-    expect(readLocalDataBinding().uids).toEqual(["uid-v", "uid-other"]);
+    expect(latestScope.workspace.id).not.toBe(first);
+    expect(getNoteContent("a-note")).toBeNull();
+    expect(latestAppState.state.projectData).toEqual([]);
+
+    // and A, back again, finds A's workspace and A's note
+    await act(async () => adapter.setUser(null));
+    await settle();
+    await act(async () => adapter.setUser(VERIFIED_USER));
+    await settle();
+    expect(latestScope.workspace.id).toBe(first);
+    expect(getNoteContent("a-note")).toBe("<p>Alice's field note</p>");
   });
 
   test("sign-up does not upload or mutate local content", async () => {
     seed();
     const adapter = memoryAdapter();
-    await render(fullShell(adapter));
+    const store = storeFollowing(adapter);
+    await render(fullShell(adapter, store));
     await act(async () => {
       await adapter.signUp("brand-new@example.com", "eightchars");
     });
-    expect(text()).toContain("NW-APP-ROOT");
+    await settle();
+    expect(text()).toContain(MIGRATION_TITLE);
     seededValuesUnchanged();
-    // Nothing left the browser: the adapter recorded no token request.
+    const wid = readWorkspaceBinding("uid-1").workspaceId;
+    expect(Object.keys(store.listWorkspaceDocs(wid, "noteContent"))).toEqual([]);
+    expect(Object.keys(store.listWorkspaceDocs(wid, "nodes"))).toEqual([]);
+    // Nothing left the browser through the API boundary: no token request.
     expect(adapter.calls.getIdToken).toEqual([]);
+  });
+
+  test("the workspace cannot be resolved (no cloud, no cached copy): an error screen, never local data, never the application", async () => {
+    seed();
+    const adapter = memoryAdapter({ initialUser: VERIFIED_USER });
+    const store = storeFollowing(adapter);
+    store.failNext("transaction", "unavailable");
+    await render(fullShell(adapter, store));
+    await settle();
+    expect(text()).toContain(WORKSPACE_ERROR_TITLE);
+    expect(text()).not.toContain("NW-APP-ROOT");
+    expect(latestAppState).toBeNull();
+    seededValuesUnchanged();
+    // Retry resolves once the cloud answers
+    await click(button(WORKSPACE_RETRY_LABEL));
+    await settle();
+    expect(text()).toContain(MIGRATION_TITLE);
   });
 });

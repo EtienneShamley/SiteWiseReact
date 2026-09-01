@@ -10,7 +10,7 @@
 # Source of truth stays on GitHub; Azure DevOps runs this file through a
 # GitHub service connection. The pipeline calls the project's own npm scripts
 # (see package.json) rather than restating them, so local and CI runs stay
-# identical:  npm ci → npm run lint → npm run test:ci → npm run build
+# identical:  npm ci → npm run lint → npm run test:ci → npm run test:rules → npm run build
 
 trigger:
   branches:
@@ -72,6 +72,25 @@ stages:
 
           - script: npm run test:ci
             displayName: Automated test suite (Jest)
+
+          # Firestore Security Rules against the REAL rules file, in the
+          # Firestore emulator (Java is preinstalled on the hosted image; the
+          # emulator jar is downloaded once and cached). No Firebase project,
+          # credential or network access to Firebase is involved.
+          - task: Cache@2
+            displayName: Restore Firebase emulator cache
+            inputs:
+              key: 'firebase-emulators | "$(Agent.OS)" | package-lock.json'
+              restoreKeys: |
+                firebase-emulators | "$(Agent.OS)"
+              path: $(HOME)/.cache/firebase/emulators
+
+          - script: npm run test:rules
+            displayName: Firestore rules tests (emulator)
+            env:
+              # firebase-tools 15 needs a JDK ≥ 21; the hosted image ships one.
+              JAVA_HOME: $(JAVA_HOME_21_X64)
+              PATH: $(JAVA_HOME_21_X64)/bin:$(PATH)
 
           - script: npm run build
             displayName: Production build (CRA, CI=true)

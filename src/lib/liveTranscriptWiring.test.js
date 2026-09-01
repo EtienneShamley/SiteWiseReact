@@ -474,7 +474,7 @@ describe("38–41. three independent space controls; scroll ownership and save s
   });
 
   test("41. the save status stays on the toolbar in every combination", () => {
-    expect(NOTE_MAIN).toMatch(/saveStatus=\{\{ label: activeSaveLabel, failed: activeSaveFailed \}\}/);
+    expect(NOTE_MAIN).toMatch(/saveStatus=\{\{ label: activeSaveLabel, failed: activeSaveFailed, hint: activeSaveHint \}\}/);
     expect(TOOLBAR).toMatch(/role="status"\s*\n\s*aria-live="polite"/);
   });
 });

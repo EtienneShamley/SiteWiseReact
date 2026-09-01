@@ -87,6 +87,10 @@ import {
 } from "../lib/documentZoom";
 import { actionButtonClass, iconButtonClass } from "../lib/interactionStyles";
 import useSaveStatus from "../hooks/useSaveStatus";
+import { useOptionalDataScope } from "../context/DataScopeContext";
+import { FLUSH_PENDING_WRITES_EVENT } from "./auth/WorkspaceGate";
+import { CLOUD_COLLECTION } from "../lib/cloud/cloudModel";
+import { SYNC_OUTCOME } from "../lib/cloud/cloudSync";
 import { loadNoteContentMap, saveNoteContent } from "../lib/noteContentStorage";
 import { createWriteCoalescer } from "../lib/writeCoalescer";
 import {
@@ -108,8 +112,10 @@ import {
   quickAddHintMessage,
 } from "../lib/quickAddHint";
 import {
+  SAVE_OUTCOME,
   getSaveStatus,
   isSaveFailed,
+  saveStatusHint,
   saveStatusLabel,
 } from "../lib/saveStatus";
 
@@ -151,6 +157,14 @@ export default function MainArea() {
     setNoteWorkspaceTab,
   } = useAppState();
   const { refineText } = useRefine();
+  // The workspace's sync engine (Production Readiness Phase 6). A local
+  // write is confirmed into the workspace MIRROR; "Saved" is claimed only
+  // once the engine reports that Firestore accepted the entity. Absent only
+  // outside a resolved workspace (tests), where the local write settles.
+  const dataScope = useOptionalDataScope();
+  const cloudSync = dataScope ? dataScope.sync : null;
+  const cloudSyncRef = useRef(cloudSync);
+  cloudSyncRef.current = cloudSync;
 
   // Free-form content, hydrated once from its owner module. This component
   // never knows the storage key or its representation: it reads the map on
@@ -389,18 +403,31 @@ export default function MainArea() {
    */
   const settleSaveRef = useRef(settleSave);
   settleSaveRef.current = settleSave;
+  // "collection/id" → the sequence of the latest LOCAL write that is waiting
+  // for the account's answer. Filled when a local write lands, read when the
+  // sync engine reports the entity's outcome; a newer local write replaces
+  // the sequence so an older outcome can never settle it (the model's own
+  // sequence guard enforces that too).
+  const cloudPendingRef = useRef(new Map());
+  const awaitCloud = useCallback((collection, id, seq) => {
+    cloudPendingRef.current.set(`${collection}/${id}`, seq);
+  }, []);
   const contentWriterRef = useRef(null);
   if (contentWriterRef.current === null) {
     contentWriterRef.current = createWriteCoalescer({
       write: (targetNoteId, html) => saveNoteContent(targetNoteId, html),
       // Settles exactly the notes a flush wrote — timer-driven or explicit —
-      // against the sequence stamped when their change was made.
+      // against the sequence stamped when their change was made. A local
+      // FAILURE settles at once; a local success only hands the sequence to
+      // the cloud outcome below (or settles, outside a workspace).
       onFlush: (results) => {
         const pending = pendingFreeformRef.current;
         for (const { id, ok } of results) {
           const seq = pending.get(id);
           pending.delete(id);
-          if (seq) settleSaveRef.current(id, NOTE_VIEW.FREEFORM, seq, ok);
+          if (!seq) continue;
+          if (ok && cloudSyncRef.current) awaitCloud(CLOUD_COLLECTION.NOTE_CONTENT, id, seq);
+          else settleSaveRef.current(id, NOTE_VIEW.FREEFORM, seq, ok);
         }
       },
     });
@@ -408,6 +435,35 @@ export default function MainArea() {
   const flushFreeformWrites = useCallback(() => {
     contentWriterRef.current?.flush();
   }, []);
+
+  // The account's answer for every entity this component reported as
+  // written: Firestore accepted it → "Saved"; queued for the connection →
+  // "Saved on this device"; refused → "Save failed". Keyed by the entity,
+  // never by what is on screen, so a note the user has left settles itself.
+  useEffect(() => {
+    if (!cloudSync) return undefined;
+    return cloudSync.subscribe((event) => {
+      if (event.type !== "outcome") return;
+      for (const result of event.results || []) {
+        const view =
+          result.collection === CLOUD_COLLECTION.NOTE_CONTENT
+            ? NOTE_VIEW.FREEFORM
+            : result.collection === CLOUD_COLLECTION.TEMPLATE_INSTANCES
+              ? NOTE_VIEW.TEMPLATE_FORM
+              : null;
+        if (!view) continue;
+        const seq = cloudPendingRef.current.get(`${result.collection}/${result.id}`);
+        if (!seq) continue;
+        const outcome =
+          result.outcome === SYNC_OUTCOME.SYNCED
+            ? SAVE_OUTCOME.SAVED
+            : result.outcome === SYNC_OUTCOME.QUEUED
+              ? SAVE_OUTCOME.QUEUED
+              : SAVE_OUTCOME.FAILED;
+        settleSaveRef.current(result.id, view, seq, outcome);
+      }
+    });
+  }, [cloudSync]);
 
   // Unmounting, hiding the page (tab switch, app backgrounded) and unloading
   // it flush every pending write. Leaving a note flushes too — see below,
@@ -418,11 +474,14 @@ export default function MainArea() {
     };
     window.addEventListener("pagehide", flushFreeformWrites);
     window.addEventListener("beforeunload", flushFreeformWrites);
+    // Signing out asks every editor to flush before the session ends.
+    window.addEventListener(FLUSH_PENDING_WRITES_EVENT, flushFreeformWrites);
     document.addEventListener("visibilitychange", onVisibility);
     const writer = contentWriterRef.current;
     return () => {
       window.removeEventListener("pagehide", flushFreeformWrites);
       window.removeEventListener("beforeunload", flushFreeformWrites);
+      window.removeEventListener(FLUSH_PENDING_WRITES_EVENT, flushFreeformWrites);
       document.removeEventListener("visibilitychange", onVisibility);
       flushFreeformWrites();
       writer?.dispose();
@@ -1390,6 +1449,7 @@ export default function MainArea() {
   const activeSaveStatus = getSaveStatus(saveStatusByNote, noteKey, activeView);
   const activeSaveLabel = saveStatusLabel(activeSaveStatus);
   const activeSaveFailed = isSaveFailed(activeSaveStatus);
+  const activeSaveHint = saveStatusHint(activeSaveStatus);
 
   /**
    * An EXISTING Free-form note whose stored content was read successfully is
@@ -1403,7 +1463,10 @@ export default function MainArea() {
   useEffect(() => {
     if (!noteKey) return;
     if (typeof docStateRef.current[noteKey] !== "string") return;
-    markSaveLoaded(noteKey, NOTE_VIEW.FREEFORM);
+    // Read back from the workspace mirror: "Saved" when nothing for it is
+    // still queued for the account, "Saved on this device" otherwise.
+    const queued = Boolean(cloudSyncRef.current?.hasPending(CLOUD_COLLECTION.NOTE_CONTENT, noteKey));
+    markSaveLoaded(noteKey, NOTE_VIEW.FREEFORM, { queued });
   }, [noteKey, markSaveLoaded]);
 
   /* --------------------- Template form status reporting ------------------- */
@@ -1417,14 +1480,21 @@ export default function MainArea() {
     [beginSaveStatus]
   );
 
+  // A confirmed local instance write hands its sequence to the cloud outcome
+  // (above); a local failure settles at once.
   const settleTemplateSave = useCallback(
-    (targetNoteId, seq, ok) =>
-      settleSave(targetNoteId, NOTE_VIEW.TEMPLATE_FORM, seq, ok),
-    [settleSave]
+    (targetNoteId, seq, ok) => {
+      if (ok && cloudSyncRef.current) awaitCloud(CLOUD_COLLECTION.TEMPLATE_INSTANCES, targetNoteId, seq);
+      else settleSave(targetNoteId, NOTE_VIEW.TEMPLATE_FORM, seq, ok);
+    },
+    [settleSave, awaitCloud]
   );
 
   const markTemplateLoaded = useCallback(
-    (targetNoteId) => markSaveLoaded(targetNoteId, NOTE_VIEW.TEMPLATE_FORM),
+    (targetNoteId) =>
+      markSaveLoaded(targetNoteId, NOTE_VIEW.TEMPLATE_FORM, {
+        queued: Boolean(cloudSyncRef.current?.hasPending(CLOUD_COLLECTION.TEMPLATE_INSTANCES, targetNoteId)),
+      }),
     [markSaveLoaded]
   );
 
@@ -1980,7 +2050,7 @@ export default function MainArea() {
           imagePolicy={toolbarImagePolicy}
           filePolicy={toolbarFilePolicy}
           disabledHint={toolbarHint}
-          saveStatus={{ label: activeSaveLabel, failed: activeSaveFailed }}
+          saveStatus={{ label: activeSaveLabel, failed: activeSaveFailed, hint: activeSaveHint }}
           documentZoom={documentZoom}
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}

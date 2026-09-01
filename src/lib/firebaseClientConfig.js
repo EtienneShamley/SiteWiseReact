@@ -17,7 +17,8 @@
 //   REACT_APP_FIREBASE_PROJECT_ID
 //   REACT_APP_FIREBASE_APP_ID
 // Optional:
-//   REACT_APP_FIREBASE_AUTH_EMULATOR_HOST   e.g. 127.0.0.1:9099 — local only
+//   REACT_APP_FIREBASE_AUTH_EMULATOR_HOST        e.g. 127.0.0.1:9099 — local only
+//   REACT_APP_FIREBASE_FIRESTORE_EMULATOR_HOST   e.g. 127.0.0.1:8080 — local only
 
 export const FIREBASE_CLIENT_VARIABLES = Object.freeze({
   apiKey: "REACT_APP_FIREBASE_API_KEY",
@@ -27,6 +28,7 @@ export const FIREBASE_CLIENT_VARIABLES = Object.freeze({
 });
 
 export const FIREBASE_AUTH_EMULATOR_VARIABLE = "REACT_APP_FIREBASE_AUTH_EMULATOR_HOST";
+export const FIREBASE_FIRESTORE_EMULATOR_VARIABLE = "REACT_APP_FIREBASE_FIRESTORE_EMULATOR_HOST";
 
 function clean(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -35,7 +37,7 @@ function clean(value) {
 /**
  * Resolve the client configuration from a map of the raw values.
  *
- *   { ok: true,  config: { apiKey, authDomain, projectId, appId, emulatorHost|null } }
+ *   { ok: true,  config: { apiKey, authDomain, projectId, appId, emulatorHost|null, firestoreEmulatorHost|null } }
  *   { ok: false, missing: ["REACT_APP_FIREBASE_…", …] }
  *
  * Pure: pass the literal `process.env.REACT_APP_…` reads in (CRA inlines
@@ -54,9 +56,14 @@ export function resolveFirebaseClientConfig(values = {}) {
   if (missing.length > 0) return { ok: false, missing };
 
   const emulatorHost = clean(values.emulatorHost);
+  const firestoreEmulatorHost = clean(values.firestoreEmulatorHost);
   return {
     ok: true,
-    config: Object.freeze({ ...config, emulatorHost: emulatorHost || null }),
+    config: Object.freeze({
+      ...config,
+      emulatorHost: emulatorHost || null,
+      firestoreEmulatorHost: firestoreEmulatorHost || null,
+    }),
   };
 }
 
@@ -68,5 +75,6 @@ export function readFirebaseClientConfigFromEnv() {
     projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID,
     appId: process.env.REACT_APP_FIREBASE_APP_ID,
     emulatorHost: process.env.REACT_APP_FIREBASE_AUTH_EMULATOR_HOST,
+    firestoreEmulatorHost: process.env.REACT_APP_FIREBASE_FIRESTORE_EMULATOR_HOST,
   });
 }

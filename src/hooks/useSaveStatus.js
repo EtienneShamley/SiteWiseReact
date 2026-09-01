@@ -14,6 +14,7 @@
 //     them survives unmount.
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  SAVE_OUTCOME,
   SAVING_MIN_VISIBLE_MS,
   createSaveStatusState,
   markDirty as markDirtyStatus,
@@ -96,17 +97,21 @@ export default function useSaveStatus() {
   );
 
   /**
-   * Record a write's CONFIRMED outcome.
+   * Record a write's CONFIRMED outcome: `true`/"saved" (accepted by the
+   * account), "queued" (saved in this browser, waiting for the connection)
+   * or `false`/"failed".
    *
-   * A failure is applied immediately. A success is applied once "Saving…" has
-   * been visible long enough, and is still subject to the model's sequence
-   * guard when it lands — so it cannot overwrite a newer failure or a newer
-   * pending write, and it can only ever touch its own note and view.
+   * A failure is applied immediately. A success or a queued outcome is
+   * applied once "Saving…" has been visible long enough, and is still subject
+   * to the model's sequence guard when it lands — so it cannot overwrite a
+   * newer failure or a newer pending write, and it can only ever touch its
+   * own note and view.
    */
   const settle = useCallback(
-    (noteId, view, seq, ok) => {
+    (noteId, view, seq, outcome) => {
       if (!noteId || !seq) return;
       const key = saveStatusKey(noteId, view);
+      const ok = outcome === true || outcome === SAVE_OUTCOME.SAVED || outcome === SAVE_OUTCOME.QUEUED;
 
       if (!ok) {
         clearTimer(key);
@@ -114,6 +119,7 @@ export default function useSaveStatus() {
         setStatusByNote((prev) => settleSaveStatus(prev, noteId, view, seq, false));
         return;
       }
+      const settled = outcome === SAVE_OUTCOME.QUEUED ? SAVE_OUTCOME.QUEUED : SAVE_OUTCOME.SAVED;
 
       const since = pendingSinceRef.current.get(key);
       const remaining =
@@ -122,14 +128,14 @@ export default function useSaveStatus() {
 
       if (remaining <= 0) {
         pendingSinceRef.current.delete(key);
-        setStatusByNote((prev) => settleSaveStatus(prev, noteId, view, seq, true));
+        setStatusByNote((prev) => settleSaveStatus(prev, noteId, view, seq, settled));
         return;
       }
 
       const timer = setTimeout(() => {
         timersRef.current.delete(key);
         pendingSinceRef.current.delete(key);
-        setStatusByNote((prev) => settleSaveStatus(prev, noteId, view, seq, true));
+        setStatusByNote((prev) => settleSaveStatus(prev, noteId, view, seq, settled));
       }, remaining);
       timersRef.current.set(key, timer);
     },
@@ -141,9 +147,9 @@ export default function useSaveStatus() {
    * with a confirmed read — never merely because something mounted.
    */
   const markLoaded = useCallback(
-    (noteId, view) => {
+    (noteId, view, { queued = false } = {}) => {
       if (!noteId) return;
-      setStatusByNote((prev) => markLoadedStatus(prev, noteId, view, nextSeq()));
+      setStatusByNote((prev) => markLoadedStatus(prev, noteId, view, nextSeq(), { queued }));
     },
     [nextSeq]
   );

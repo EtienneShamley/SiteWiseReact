@@ -97,8 +97,8 @@ describe("the autosave status replaced it", () => {
     const mainArea = read("components/MainArea.js");
     const toolbar = read("components/EditorToolbar.js");
     expect(mainArea).toMatch(/saveStatusLabel/);
-    expect(mainArea).toMatch(/saveStatus=\{\{ label: activeSaveLabel, failed: activeSaveFailed \}\}/);
-    expect(toolbar).toMatch(/SAVED_LOCALLY_HINT/);
+    expect(mainArea).toMatch(/saveStatus=\{\{ label: activeSaveLabel, failed: activeSaveFailed, hint: activeSaveHint \}\}/);
+    expect(toolbar).toMatch(/SAVED_HINT/);
     expect(toolbar).toMatch(/SAVE_FAILED_DETAIL/);
     expect(toolbar).toMatch(/aria-live="polite"/);
   });

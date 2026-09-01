@@ -2,7 +2,7 @@ import React from "react";
 import { FaChevronUp, FaChevronDown, FaSearchMinus, FaSearchPlus } from "react-icons/fa";
 import FormattingControls from "./editor/FormattingControls";
 import { iconButtonClass } from "../lib/interactionStyles";
-import { SAVED_LOCALLY_HINT, SAVE_FAILED_DETAIL } from "../lib/saveStatus";
+import { SAVED_HINT, SAVE_FAILED_DETAIL } from "../lib/saveStatus";
 import {
   canZoomIn,
   canZoomOut,
@@ -49,9 +49,9 @@ const SAVE_STATUS_HINT_ID = "note-save-status-hint";
  *                      (null = the Free-form note's own). Forwarded unchanged.
  * @param disabledHint  why the controls are disabled, when there is something
  *                      useful to say.
- * @param saveStatus    `{ label, failed }` for the ACTIVE note and the ACTIVE
+ * @param saveStatus    `{ label, failed, hint }` for the ACTIVE note and the ACTIVE
  *                      view — the confirmed result of real writes ("Saving…",
- *                      "Saved locally", "Save failed"; see src/lib/saveStatus.js).
+ *                      "Saved", "Saved on this device", "Save failed"; see src/lib/saveStatus.js).
  *                      Rendered here, at the toolbar's right, because the
  *                      toolbar is the one chrome that survives every layout
  *                      state, so the status is never hidden by expanding the
@@ -90,6 +90,10 @@ export default function EditorToolbar({
 
   const saveLabel = saveStatus?.label || "";
   const saveFailed = !!saveStatus?.failed;
+  // What the label means: "Saved" → the account; "Saved on this device" →
+  // this browser, waiting for the connection. The caller supplies it from
+  // the status model; the account hint is the default.
+  const saveHint = saveStatus?.hint || SAVED_HINT;
   const showZoom =
     documentZoom !== null &&
     typeof onZoomIn === "function" &&
@@ -164,11 +168,11 @@ export default function EditorToolbar({
         {/* Autosave status for the ACTIVE note and the ACTIVE view. There is
             no manual save: editing persists continuously, and this reports
             the confirmed result of those writes — "Saving…" only while a real
-            change is pending or being written, "Saved locally" only after a
-            write has actually completed (never merely because React state or
-            the editor updated), and "Save failed" only after a confirmed
-            failure. Deliberately "Saved locally", never "Saved": there is no
-            cloud sync. The live region is always present so a change of
+            change is pending or being written, "Saved" only after the account
+            has ACCEPTED the write (never merely because React state, the
+            editor or this browser's copy updated), "Saved on this device"
+            while a write is queued for the connection, and "Save failed" only
+            after a confirmed failure. The live region is always present so a change of
             state is announced; the hint sits OUTSIDE it so the explanation is
             not re-announced every time. Subtle by design: small muted text,
             red only on failure, and the words themselves state the outcome. */}
@@ -186,7 +190,7 @@ export default function EditorToolbar({
                   // is read with it, so the "saved in this browser" description
                   // must not also be attached — it would describe the wrong
                   // outcome.
-                  title={saveFailed ? undefined : SAVED_LOCALLY_HINT}
+                  title={saveFailed ? undefined : saveHint}
                   aria-describedby={saveFailed ? undefined : SAVE_STATUS_HINT_ID}
                   className={[
                     // Focusable (it carries the "saved in this browser" hint),
@@ -207,7 +211,7 @@ export default function EditorToolbar({
               )}
             </div>
             <span id={SAVE_STATUS_HINT_ID} className="sr-only">
-              {SAVED_LOCALLY_HINT}
+              {saveHint}
             </span>
           </>
         )}

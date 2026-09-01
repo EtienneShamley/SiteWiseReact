@@ -21,7 +21,7 @@ const FULL = {
 describe("resolveFirebaseClientConfig", () => {
   test("a complete set resolves, trimmed and frozen, with no emulator by default", () => {
     const result = resolveFirebaseClientConfig({ ...FULL, projectId: " notewise-dev " });
-    expect(result).toEqual({ ok: true, config: { ...FULL, emulatorHost: null } });
+    expect(result).toEqual({ ok: true, config: { ...FULL, emulatorHost: null, firestoreEmulatorHost: null } });
     expect(Object.isFrozen(result.config)).toBe(true);
   });
 
@@ -67,7 +67,7 @@ describe("no project configuration lives in the source", () => {
     expect(files.length).toBeGreaterThan(50);
   });
 
-  test("only the adapter imports the Firebase SDK", () => {
+  test("only the three SDK modules import Firebase: the shared app, the auth adapter, the Firestore store", () => {
     const src = path.join(__dirname, "..");
     const importers = [];
     const walk = (dir) => {
@@ -80,6 +80,6 @@ describe("no project configuration lives in the source", () => {
       }
     };
     walk(src);
-    expect(importers).toEqual(["lib/firebaseAuthAdapter.js"]);
+    expect(importers).toEqual(["lib/cloud/firestoreWorkspaceStore.js", "lib/firebaseApp.js", "lib/firebaseAuthAdapter.js"]);
   });
 });

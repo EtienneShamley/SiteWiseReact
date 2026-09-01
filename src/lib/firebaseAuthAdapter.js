@@ -1,6 +1,8 @@
 // src/lib/firebaseAuthAdapter.js
 //
-// The ONLY module in the application that imports the Firebase SDK.
+// The auth half of the application's Firebase SDK surface (the other half is
+// src/lib/cloud/firestoreWorkspaceStore.js; the shared app is
+// src/lib/firebaseApp.js). No component imports the SDK.
 //
 // It turns the SDK into a small adapter the auth context consumes
 // (src/context/AuthContext.js): one subscription, six actions, one token
@@ -18,7 +20,7 @@
 // its refresh; the application never reads or stores a token itself
 // (src/lib/apiAuth.js reads one per request, in memory).
 
-import { getApp, getApps, initializeApp } from "firebase/app";
+import { ensureFirebaseApp } from "./firebaseApp";
 import {
   browserLocalPersistence,
   connectAuthEmulator,
@@ -32,8 +34,6 @@ import {
   signOut,
 } from "firebase/auth";
 
-const APP_NAME = "notewise";
-
 function snapshotOf(user) {
   if (!user) return null;
   return { uid: user.uid, email: user.email || null, emailVerified: user.emailVerified === true };
@@ -43,17 +43,9 @@ function snapshotOf(user) {
  * @param {{ apiKey: string, authDomain: string, projectId: string, appId: string, emulatorHost: string|null }} config
  */
 export function createFirebaseAuthAdapter(config) {
-  const app = getApps().some((a) => a.name === APP_NAME)
-    ? getApp(APP_NAME)
-    : initializeApp(
-        {
-          apiKey: config.apiKey,
-          authDomain: config.authDomain,
-          projectId: config.projectId,
-          appId: config.appId,
-        },
-        APP_NAME
-      );
+  // The shared named app (src/lib/firebaseApp.js) — Firestore runs on the
+  // same instance so it carries this user's identity.
+  const app = ensureFirebaseApp(config);
 
   const auth = initializeAuth(app, {
     persistence: [indexedDBLocalPersistence, browserLocalPersistence],

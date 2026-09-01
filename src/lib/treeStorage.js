@@ -10,7 +10,7 @@
 // Only durable structure is persisted here. Transient React selection state
 // (active project/folder, current note, current PDF) is deliberately NOT stored.
 
-import { DURABLE_KEYS, readDurableRecord, writeDurableRecord } from "./durableStorage";
+import { DURABLE_KEYS, hasDurableRecord, readDurableRecord, writeDurableRecord } from "./durableStorage";
 
 export const TREE_KEY = DURABLE_KEYS.tree;
 
@@ -64,11 +64,7 @@ export function isEmptyTree(tree) {
 
 /** True when a readable, non-empty hierarchy is already in storage. */
 export function hasStoredTree() {
-  try {
-    if (!localStorage.getItem(TREE_KEY)) return false;
-  } catch {
-    return false;
-  }
+  if (!hasDurableRecord(TREE_KEY)) return false;
   return !isEmptyTree(loadTree());
 }
 

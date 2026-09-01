@@ -1,7 +1,8 @@
 // Unit tests for the autosave status model (src/lib/saveStatus.js).
 //
-// These cover the guarantees the feature's honesty depends on: "Saved locally"
-// following a CONFIRMED write and nothing else, per-note and per-view
+// These cover the guarantees the feature's honesty depends on: "Saved"
+// following a write the ACCOUNT accepted (and "Saved on this device" for a
+// write still queued for the connection) and nothing else, per-note and per-view
 // isolation, the sequence rules that stop a stale completion overwriting a
 // newer state, recovery from a failure, and the exact user-facing wording.
 //
@@ -10,8 +11,11 @@
 // checklist — no DOM testing library is installed, see docs/TESTING.md.
 import { NOTE_VIEW } from "./noteViews";
 import {
+  QUEUED_HINT,
+  SAVED_HINT,
   SAVED_LOCALLY_HINT,
   SAVE_FAILED_DETAIL,
+  SAVE_OUTCOME,
   SAVE_STATUS,
   SAVING_MIN_VISIBLE_MS,
   beginSave,
@@ -23,6 +27,8 @@ import {
   markDirty,
   markLoaded,
   pruneSaveStatus,
+  isSaveQueued,
+  saveStatusHint,
   saveStatusKey,
   saveStatusLabel,
   settleSave,
@@ -52,7 +58,7 @@ describe("initial state", () => {
     expect(emptyNoteSaveStatus()[FREEFORM].status).toBe(SAVE_STATUS.IDLE);
   });
 
-  test("a new empty Free-form note does not claim Saved locally before a confirmed write", () => {
+  test("a new empty Free-form note does not claim Saved before a confirmed write", () => {
     const next = sequencer();
     const storedDocs = {}; // nothing has ever been persisted for this note
     let state = createSaveStatusState();
@@ -68,10 +74,10 @@ describe("initial state", () => {
     state = markDirty(state, "new-note", FREEFORM, seq);
     expect(saveStatusLabel(getSaveStatus(state, "new-note", FREEFORM))).toBe("Saving…");
 
-    // Only the confirmed write may say Saved locally.
+    // Only the confirmed write may say Saved.
     state = settleSave(state, "new-note", FREEFORM, seq, true);
     expect(saveStatusLabel(getSaveStatus(state, "new-note", FREEFORM))).toBe(
-      "Saved locally"
+      "Saved"
     );
   });
 
@@ -91,11 +97,11 @@ describe("initial state", () => {
     expect(getSaveStatus(state, "note-a", FREEFORM).status).toBe(SAVE_STATUS.SAVED);
   });
 
-  test("a loaded note shows Saved locally without ever passing through Saving…", () => {
+  test("a loaded note shows Saved without ever passing through Saving…", () => {
     const next = sequencer();
     const state = markLoaded(createSaveStatusState(), "note-a", FREEFORM, next());
     expect(saveStatusLabel(getSaveStatus(state, "note-a", FREEFORM))).toBe(
-      "Saved locally"
+      "Saved"
     );
     expect(isSavePending(getSaveStatus(state, "note-a", FREEFORM))).toBe(false);
   });
@@ -116,7 +122,7 @@ describe("initial state", () => {
 });
 
 describe("the write lifecycle", () => {
-  test("an edit enters Saving and a confirmed write enters Saved locally", () => {
+  test("an edit enters Saving and a confirmed write enters Saved", () => {
     const next = sequencer();
     let state = createSaveStatusState();
     const seq = next();
@@ -130,7 +136,7 @@ describe("the write lifecycle", () => {
 
     state = settleSave(state, "note-a", FREEFORM, seq, true);
     expect(saveStatusLabel(getSaveStatus(state, "note-a", FREEFORM))).toBe(
-      "Saved locally"
+      "Saved"
     );
   });
 
@@ -164,7 +170,7 @@ describe("the write lifecycle", () => {
     // …and only the confirmed write clears it.
     state = settleSave(state, "note-a", FREEFORM, retry, true);
     expect(saveStatusLabel(getSaveStatus(state, "note-a", FREEFORM))).toBe(
-      "Saved locally"
+      "Saved"
     );
   });
 
@@ -208,7 +214,7 @@ describe("stale completions", () => {
 
     state = settleSave(state, "note-a", FREEFORM, newer, true);
     expect(saveStatusLabel(getSaveStatus(state, "note-a", FREEFORM))).toBe(
-      "Saved locally"
+      "Saved"
     );
   });
 
@@ -245,7 +251,7 @@ describe("stale completions", () => {
     state = settleSave(state, "note-a", FREEFORM, noteASeq, false);
 
     expect(saveStatusLabel(getSaveStatus(state, "note-b", FREEFORM))).toBe(
-      "Saved locally"
+      "Saved"
     );
     expect(saveStatusLabel(getSaveStatus(state, "note-a", FREEFORM))).toBe(
       "Save failed"
@@ -279,7 +285,7 @@ describe("isolation by note and by view", () => {
     state = settleSave(state, "note-a", TEMPLATE_FORM, tplSeq, false);
 
     expect(saveStatusLabel(getSaveStatus(state, "note-a", FREEFORM))).toBe(
-      "Saved locally"
+      "Saved"
     );
     expect(saveStatusLabel(getSaveStatus(state, "note-a", TEMPLATE_FORM))).toBe(
       "Save failed"
@@ -322,7 +328,7 @@ describe("isolation by note and by view", () => {
     state = markDirty(state, "note-b", TEMPLATE_FORM, bSeq);
 
     expect(saveStatusLabel(getSaveStatus(state, "note-a", FREEFORM))).toBe(
-      "Saved locally"
+      "Saved"
     );
     expect(saveStatusLabel(getSaveStatus(state, "note-b", TEMPLATE_FORM))).toBe(
       "Saving…"
@@ -349,29 +355,44 @@ describe("deleted-note cleanup", () => {
 });
 
 describe("wording and accessibility text", () => {
-  test("the three user-facing labels are exactly these", () => {
+  test("the four user-facing labels are exactly these", () => {
     expect(saveStatusLabel({ status: SAVE_STATUS.DIRTY })).toBe("Saving…");
     expect(saveStatusLabel({ status: SAVE_STATUS.SAVING })).toBe("Saving…");
-    expect(saveStatusLabel({ status: SAVE_STATUS.SAVED })).toBe("Saved locally");
+    expect(saveStatusLabel({ status: SAVE_STATUS.SAVED })).toBe("Saved");
+    expect(saveStatusLabel({ status: SAVE_STATUS.QUEUED })).toBe("Saved on this device");
     expect(saveStatusLabel({ status: SAVE_STATUS.FAILED })).toBe("Save failed");
     expect(saveStatusLabel({ status: SAVE_STATUS.IDLE })).toBeNull();
   });
 
-  test("success is never described as merely 'Saved'", () => {
-    // "Saved" alone would imply synchronization that does not exist.
-    expect(saveStatusLabel({ status: SAVE_STATUS.SAVED })).not.toBe("Saved");
-    expect(saveStatusLabel({ status: SAVE_STATUS.SAVED })).toMatch(/locally/);
+  test("'Saved' means the account accepted it; a write still waiting for the connection says so", () => {
+    const next = sequencer();
+    let state = createSaveStatusState();
+    const seq = next();
+    state = markDirty(state, "n", FREEFORM, seq);
+    state = settleSave(state, "n", FREEFORM, seq, SAVE_OUTCOME.QUEUED);
+    expect(saveStatusLabel(getSaveStatus(state, "n", FREEFORM))).toBe("Saved on this device");
+    expect(isSaveQueued(getSaveStatus(state, "n", FREEFORM))).toBe(true);
+    expect(saveStatusHint(getSaveStatus(state, "n", FREEFORM))).toBe(QUEUED_HINT);
+    // the same sequence is later accepted by the account → Saved
+    state = settleSave(state, "n", FREEFORM, seq, SAVE_OUTCOME.SAVED);
+    expect(saveStatusLabel(getSaveStatus(state, "n", FREEFORM))).toBe("Saved");
+    expect(saveStatusHint(getSaveStatus(state, "n", FREEFORM))).toBe(SAVED_HINT);
+    // a loaded note that still has a queued change says "on this device"
+    let loaded = createSaveStatusState();
+    loaded = markLoaded(loaded, "m", FREEFORM, next(), { queued: true });
+    expect(saveStatusLabel(getSaveStatus(loaded, "m", FREEFORM))).toBe("Saved on this device");
+    expect(saveStatusHint({ status: SAVE_STATUS.FAILED })).toBeNull();
   });
 
-  test("the Saved locally hint explains browser-local storage", () => {
-    expect(SAVED_LOCALLY_HINT).toBe(
-      "Changes are automatically saved in this browser."
-    );
+  test("the Saved hint explains the account; the former export name still resolves to it", () => {
+    expect(SAVED_HINT).toBe("Changes are automatically saved to your NoteWise account.");
+    expect(SAVED_LOCALLY_HINT).toBe(SAVED_HINT);
+    expect(QUEUED_HINT).toMatch(/this browser/);
   });
 
   test("the failure text is restrained and exposes no internals", () => {
     expect(SAVE_FAILED_DETAIL).toBe(
-      "Your latest changes could not be saved. Browser storage may be full."
+      "Your latest changes could not be saved to your account. They stay on screen and in this browser; your next change will try again."
     );
     expect(SAVE_FAILED_DETAIL).not.toMatch(
       /Error|error|Exception|stack|localStorage|IndexedDB|quota|sitewise|notewise/

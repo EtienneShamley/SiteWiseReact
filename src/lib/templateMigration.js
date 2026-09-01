@@ -36,7 +36,7 @@ import {
   ensureDefaultTemplate,
   listTemplates,
 } from "./templateModel";
-import { writeDurableRecord } from "./durableStorage";
+import { readScopedValue, writeDurableRecord, writeScopedValue } from "./durableStorage";
 import {
   DEFAULT_LEFT_COL_PCT,
   defaultRows,
@@ -53,13 +53,12 @@ export const TEMPLATE_MIGRATION_STATUS = Object.freeze({
   FAILED: "failed", // a write could not be confirmed; guard left unset
 });
 
+// Legacy keys and guards FOLLOW the durable scope (src/lib/durableStorage.js):
+// in a signed-in workspace they resolve under that workspace, where no legacy
+// record exists — this browser's pre-account data is never imported into an
+// account by a start-up migration, only by the explicit local→cloud one.
 function readLegacy(key) {
-  let raw = null;
-  try {
-    raw = localStorage.getItem(key);
-  } catch {
-    return { present: false, value: null, malformed: false };
-  }
+  const raw = readScopedValue(key);
   if (raw === null || raw === undefined) return { present: false, value: null, malformed: false };
   try {
     return { present: true, value: JSON.parse(raw), malformed: false };
@@ -75,19 +74,15 @@ function hasKeys(map) {
 // Both guards, written with a throwing write and confirmed by read-back.
 function setGuards() {
   const stamp = String(Date.now());
-  localStorage.setItem(TEMPLATE_MIGRATION_GUARD_KEY, stamp);
-  localStorage.setItem(TEMPLATE_MIGRATION_V2_GUARD_KEY, stamp);
-  if (localStorage.getItem(TEMPLATE_MIGRATION_V2_GUARD_KEY) !== stamp) {
+  writeScopedValue(TEMPLATE_MIGRATION_GUARD_KEY, stamp);
+  writeScopedValue(TEMPLATE_MIGRATION_V2_GUARD_KEY, stamp);
+  if (readScopedValue(TEMPLATE_MIGRATION_V2_GUARD_KEY) !== stamp) {
     throw new Error("The migration marker could not be written");
   }
 }
 
 function guardPresent() {
-  try {
-    return !!localStorage.getItem(TEMPLATE_MIGRATION_V2_GUARD_KEY);
-  } catch {
-    return false;
-  }
+  return !!readScopedValue(TEMPLATE_MIGRATION_V2_GUARD_KEY);
 }
 
 // Rebuilds legacy per-note content into instances pinned to `template`. Only
