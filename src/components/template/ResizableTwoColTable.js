@@ -57,6 +57,7 @@ import { ROW_REFINE_STATUS } from "../../lib/templateRowRefine";
 import { sectionRefineTargetKey } from "../../lib/templateSectionRefine";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
 import ThreeDotMenu from "../ThreeDotMenu";
+import { BusySpinner } from "../BusyStatus";
 import { BrandedHeaderBlock, BrandedTitleBlock } from "./BrandedDocumentHeader";
 import { brandingStyles, normalizeBranding } from "../../lib/templateBranding";
 import { mmToPx } from "../../lib/pageGeometry";
@@ -2211,13 +2212,25 @@ export default function ResizableTwoColTable({
           style={{ gridColumn: cellGridSpan(cells[0]), ...fillStyle(cells[0].fill) }}
         >
           <label className={`attach-upload-btn ${busy ? "attach-upload-btn--busy" : ""}`}>
-            {busy ? "Uploading…" : isPhoto ? "Upload Photo" : "Add File"}
+            {/* While the bytes are decoded, normalized and written to this
+                device's storage the label says so — "Adding", never
+                "Uploading": nothing leaves the device. The spinner is
+                decorative; the words are the input's accessible name. */}
+            {busy && <BusySpinner className="mr-1 align-middle" />}
+            {busy
+              ? isPhoto
+                ? "Adding image…"
+                : "Adding file…"
+              : isPhoto
+              ? "Upload Photo"
+              : "Add File"}
             <input
               type="file"
               multiple
               className="sr-only"
               accept={isPhoto ? PHOTO_ACCEPT : FILE_ACCEPT}
               disabled={busy}
+              aria-busy={busy || undefined}
               aria-label={
                 isPhoto
                   ? `Upload photos for ${row.label || "this field"}`

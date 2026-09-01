@@ -62,6 +62,7 @@ import { setSectionRefineBackup } from "../lib/templateSectionRefine";
 import { SECTION_TOOLBAR_IMAGE_POLICY } from "../lib/templateSectionToolbarImage";
 import { SECTION_TOOLBAR_FILE_POLICY } from "../lib/templateSectionToolbarFile";
 import { insertLocalImageAsset } from "../lib/editorImageInsert";
+import { BusySpinner } from "./BusyStatus";
 import { insertFreeformFileAttachment } from "../lib/editorFileInsert";
 import {
   QUICK_ADD_DELIVERY_MESSAGE,
@@ -2007,17 +2008,21 @@ export default function MainArea() {
                   role="status"
                   aria-live="polite"
                   className={[
-                    "text-xs",
+                    "inline-flex items-center gap-1 text-xs",
                     insertNotice.tone === MESSAGE_TONE.ERROR
                       ? "text-red-600 dark:text-red-400"
                       : "text-gray-500 dark:text-gray-400",
                   ].join(" ")}
                 >
-                  {insertBusy === "image"
-                    ? "Adding image…"
-                    : insertBusy === "file"
-                    ? "Adding file…"
-                    : insertNotice.message}
+                  {/* The spinner is decorative; the words carry the meaning. */}
+                  {!!insertBusy && <BusySpinner />}
+                  <span>
+                    {insertBusy === "image"
+                      ? "Adding image…"
+                      : insertBusy === "file"
+                      ? "Adding file…"
+                      : insertNotice.message}
+                  </span>
                 </span>
               )}
 

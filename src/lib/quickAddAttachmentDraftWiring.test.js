@@ -340,7 +340,10 @@ describe("Send is enabled by an attachment alone", () => {
   test("the gate is the shared composer rule, not a text check", () => {
     expect(bottomBar).toMatch(/canSubmit = canSendQuickAddComposer\(\{/);
     expect(bottomBar).toMatch(/attachmentCount: stagedAttachments\.length/);
-    expect(bottomBar).toMatch(/disabled=\{!canSubmit \|\| isDisabled\}/);
+    // Send also waits while a photo is still being prepared (stamped), so a
+    // Send cannot go without the image the user just took — see
+    // BottomBarImageBusy.test.js for the rendered behaviour.
+    expect(bottomBar).toMatch(/disabled=\{!canSubmit \|\| isDisabled \|\| preparingImage\}/);
   });
 });
 

@@ -31,6 +31,7 @@ import { importImageFromUrl } from "../../lib/editorImageUrlImport";
 import { iconButtonClass, menuItemClass } from "../../lib/interactionStyles";
 import useTransientMessage from "../../hooks/useTransientMessage";
 import { MESSAGE_TONE } from "../../lib/transientMessage";
+import { BusySpinner } from "../BusyStatus";
 
 /**
  * @param editor    the editor this toolbar currently OWNS. In the Free-form
@@ -717,7 +718,10 @@ export default function FormattingControls({
         {show("imageUrl") && (
         <button
           onClick={insertImageUrl}
-          disabled={offFor("imageUrl")}
+          // Shares the image busy flag with the local picker: a second image
+          // operation while one is in flight would clear the first's status
+          // early, so it waits.
+          disabled={offFor("imageUrl") || imageBusy}
           className={`${btnBase} ${btnDisabled}`}
           title="Insert image from a web address"
           aria-label="Insert image from a web address"
@@ -865,17 +869,21 @@ export default function FormattingControls({
           role="status"
           aria-live="polite"
           className={[
-            "ml-1 text-xs max-w-xs",
+            "ml-1 inline-flex items-center gap-1 text-xs max-w-xs",
             controlMessage.tone === MESSAGE_TONE.ERROR
               ? "text-red-600 dark:text-red-400"
               : "text-gray-500 dark:text-gray-400",
           ].join(" ")}
         >
-          {imageBusy
-            ? "Adding image…"
-            : fileBusy
-            ? "Attaching file…"
-            : controlMessage.message}
+          {/* The spinner is decorative; the words carry the meaning. */}
+          {(imageBusy || fileBusy) && <BusySpinner />}
+          <span>
+            {imageBusy
+              ? "Adding image…"
+              : fileBusy
+              ? "Attaching file…"
+              : controlMessage.message}
+          </span>
         </span>
       )}
     </div>

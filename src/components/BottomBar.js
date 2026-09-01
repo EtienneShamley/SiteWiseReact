@@ -11,6 +11,7 @@ import {
   FaMicrophone,
 } from "react-icons/fa";
 import StylePresetSelect from "./StylePresetSelect";
+import BusyStatus from "./BusyStatus";
 import { useRefine } from "../hooks/useRefine";
 import { useAppState } from "../context/AppStateContext";
 import { loadCoordSystem, saveCoordSystem } from "../lib/notePreferences";
@@ -171,6 +172,15 @@ export default function BottomBar({
   // A composer Send in flight. Separate from `busy` (AI refine) so a delivery
   // cannot be started twice and cannot be confused with a refinement.
   const [sending, setSending] = useState(false);
+  // How many photos are being PREPARED right now — validated and, for a camera
+  // capture, stamped (EXIF, geolocation, reverse geocode, map thumbnail,
+  // re-encode), which is the slow part of adding an image and happens before
+  // anything is staged or handed to MainArea. A count rather than a boolean so
+  // an overlapping preparation can never clear another's status early. While
+  // it is non-zero the capture controls and Send are held: a second pick of
+  // the same photo is refused, and a Send cannot leave the photo behind.
+  const [preparingImages, setPreparingImages] = useState(0);
+  const preparingImage = preparingImages > 0;
 
   /* ------------------------- Staged attachments ---------------------------- */
   //
@@ -596,31 +606,41 @@ export default function BottomBar({
   // file, because a file cannot say how it was obtained — only the control the
   // user pressed knows that.
   async function preparePhotoBytes(file, { stamp }) {
-    // The 20 MB source limit is applied to the picked file FIRST, before any
-    // expensive decode/stamp work — and to the file the user actually chose,
-    // never to our own derived canvas output.
-    const check = validateEditorImageFile(file);
-    if (!check.ok) {
-      onImageError?.(check.error);
-      return null;
-    }
-    if (!stamp) {
-      // The picked file, untouched. No location, no map, no labels.
-      return { blob: file, mimeType: check.mimeType };
-    }
-    let stamped = null;
+    // The busy status covers the whole preparation, however it ends: the
+    // `finally` below is the ONLY place it is released, so a refusal, a failed
+    // stamp or a thrown error can never leave the composer looking busy. An
+    // unstamped pick has no await between the two updates, so React batches
+    // them and nothing flashes.
+    setPreparingImages((n) => n + 1);
     try {
-      stamped = await buildStampedImageBLOB(file, check.mimeType);
-    } catch {
-      onImageError?.(IMAGE_DECODE_MESSAGE);
-      return null;
+      // The 20 MB source limit is applied to the picked file FIRST, before any
+      // expensive decode/stamp work — and to the file the user actually chose,
+      // never to our own derived canvas output.
+      const check = validateEditorImageFile(file);
+      if (!check.ok) {
+        onImageError?.(check.error);
+        return null;
+      }
+      if (!stamp) {
+        // The picked file, untouched. No location, no map, no labels.
+        return { blob: file, mimeType: check.mimeType };
+      }
+      let stamped = null;
+      try {
+        stamped = await buildStampedImageBLOB(file, check.mimeType);
+      } catch {
+        onImageError?.(IMAGE_DECODE_MESSAGE);
+        return null;
+      }
+      // A failed stamp — geolocation denied, the map thumbnail unavailable, a
+      // canvas that produced nothing — falls back to the original photo rather
+      // than losing the capture. buildStampedImageBLOB already treats a missing
+      // position and an unreachable map tile as omissions rather than errors, so
+      // a camera capture stays usable in all three cases.
+      return { blob: stamped || file, mimeType: check.mimeType };
+    } finally {
+      setPreparingImages((n) => Math.max(0, n - 1));
     }
-    // A failed stamp — geolocation denied, the map thumbnail unavailable, a
-    // canvas that produced nothing — falls back to the original photo rather
-    // than losing the capture. buildStampedImageBLOB already treats a missing
-    // position and an unreachable map tile as omissions rather than errors, so
-    // a camera capture stays usable in all three cases.
-    return { blob: stamped || file, mimeType: check.mimeType };
   }
 
   // The ONE image insertion path for this bar. It never touches the editor
@@ -651,7 +671,10 @@ export default function BottomBar({
   };
 
   const handleSend = async () => {
-    if (sending) return;
+    // Enter in the text area reaches here directly, so the same hold the Send
+    // button shows is enforced here too: not twice, and not while a photo is
+    // still being prepared.
+    if (sending || preparingImage) return;
     const text = (refinedDraft ?? input).trim();
 
     // Read the queue from the STORE, not from render state, so a staging that
@@ -908,6 +931,17 @@ export default function BottomBar({
           "px-3 pt-3 pb-12",
         ].join(" ")}
       >
+        {/* A photo being prepared — validated and, for a camera capture,
+            stamped — before it appears below as a staged attachment (or, with
+            no composing destination, is handed to MainArea, whose own status
+            then takes over). Activity only, never a fabricated percentage. */}
+        {preparingImage && (
+          <BusyStatus
+            className="mb-2"
+            label="Processing image…"
+          />
+        )}
+
         {/* STAGED ATTACHMENTS — held by the composer, not yet in the note.
             They wrap rather than overflowing, stay visually subordinate to the
             document, and each one carries its own named remove control. */}
@@ -1064,7 +1098,8 @@ export default function BottomBar({
             aria-label={captureLabel}
             onClick={() => fileInputRef.current?.click()}
             className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
-            disabled={isDisabled || !canCaptureAnything}
+            disabled={isDisabled || !canCaptureAnything || preparingImage}
+            aria-busy={preparingImage || undefined}
           >
             <FaPlus />
           </button>
@@ -1088,7 +1123,8 @@ export default function BottomBar({
             aria-label="Take a photo with the camera"
             onClick={() => cameraInputRef.current?.click()}
             className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
-            disabled={isDisabled || !canCaptureImage}
+            disabled={isDisabled || !canCaptureImage || preparingImage}
+            aria-busy={preparingImage || undefined}
           >
             <FaCamera />
           </button>
@@ -1152,7 +1188,9 @@ export default function BottomBar({
             onClick={handleSend}
             // Enabled by text OR by at least one staged attachment: a photo on
             // its own is a complete capture and must not require a sentence.
-            disabled={!canSubmit || isDisabled}
+            // Held while a photo is still being prepared, so a Send cannot go
+            // without the image the user just took.
+            disabled={!canSubmit || isDisabled || preparingImage}
             title={
               canSend
                 ? chipLabel
