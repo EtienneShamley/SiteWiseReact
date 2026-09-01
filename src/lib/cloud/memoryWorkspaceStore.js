@@ -15,8 +15,20 @@
 // transaction reject with a Firestore-shaped `{ code }` error; `offline`
 // makes commits hang (like the SDK does without a network) until
 // `setOffline(false)`.
+//
+// ASSET METADATA (Production Readiness Phase 7): `readAssetIndex`,
+// `readAssetDocument` and `deleteAssetDocument` mirror the Firestore store's
+// operations over `workspaces/{wid}/assets/{assetId}` and are gated on
+// membership like every other workspace read/write. They take the existing
+// `read` / `commit` failure kinds. `readWorkspace` excludes the collection:
+// asset metadata is not part of the workspace mirror the owner modules read,
+// exactly as in the Firestore store. NOTE that `firestore.rules` does not
+// admit the `assets` collection yet — the rules for it arrive with the asset
+// cloud model — so these operations succeed here before they succeed against
+// the real service.
 
 import { MEMBER_ROLE } from "./workspaceBootstrap";
+import { ASSET_COLLECTION, assetCollectionPath, assetDocumentPath } from "./assetPaths";
 
 const TIMESTAMP = Object.freeze({ __serverTimestamp: true });
 
@@ -174,7 +186,7 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
         const rest = key.slice(prefix.length).split("/");
         if (rest.length !== 2) continue;
         const [collection, id] = rest;
-        if (["members", "migrations"].includes(collection)) continue;
+        if (["members", "migrations", ASSET_COLLECTION].includes(collection)) continue;
         const chunks = [];
         if (value.chunked === true) {
           for (let i = 0; i < Number(value.chunkCount) || 0; i++) {
@@ -217,6 +229,41 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
         });
       }
       return run();
+    },
+
+    async readAssetIndex(workspaceId) {
+      assertAuthenticated();
+      take("read");
+      calls.reads += 1;
+      if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
+      const prefix = pathOf(assetCollectionPath(workspaceId)) + "/";
+      const assets = [];
+      for (const [key, value] of docs) {
+        if (!key.startsWith(prefix)) continue;
+        const id = key.slice(prefix.length);
+        if (id.includes("/")) continue;
+        assets.push({ id, fields: { ...value } });
+      }
+      return { assets };
+    },
+
+    async readAssetDocument(workspaceId, assetId) {
+      assertAuthenticated();
+      take("read");
+      calls.reads += 1;
+      if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
+      const value = docs.get(pathOf(assetDocumentPath(workspaceId, assetId)));
+      return value ? { exists: true, fields: { ...value } } : { exists: false, fields: null };
+    },
+
+    async deleteAssetDocument(workspaceId, assetId) {
+      assertAuthenticated();
+      take("commit");
+      const path = pathOf(assetDocumentPath(workspaceId, assetId));
+      calls.commits.push([{ type: "delete", path: `${ASSET_COLLECTION}/${assetId}` }]);
+      if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
+      const existed = docs.delete(path);
+      return { deleted: existed };
     },
 
     async setDocument(path, data) {

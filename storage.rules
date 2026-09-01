@@ -1,0 +1,28 @@
+rules_version = '2';
+
+// NoteWise — Firebase Storage Security Rules.
+//
+// PHASE 7.1: DENY-ALL, deliberately.
+//
+// The Storage bucket exists in configuration from this phase (the client
+// config, the adapter and the emulator), but NOTHING in the product reads or
+// writes an object yet. Until the asset cloud model is defined and tested,
+// the only correct rule is the closed one: no read, no create, no update, no
+// delete, for anybody, authenticated or not — a bucket is never left open
+// while its access model is still being designed.
+//
+// The membership-based rules that replace this — objects under
+// `workspaces/{workspaceId}/assets/{assetId}` readable and creatable by that
+// workspace's members, immutable once written, deletion owner-authorised,
+// with a size ceiling and a content-type allow-list — arrive with the asset
+// cloud model. Until they do, no claim is made here that they exist.
+//
+// Tested against the emulator: test/rules/storage.rules.test.js.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

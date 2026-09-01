@@ -11,7 +11,23 @@
 //   readWorkspace(workspaceId)        every entity document + its chunks
 //   commitBatch(workspaceId, ops)     [{ type: "set"|"delete", path, fields }]
 //   setDocument(path, data)
+//   readAssetIndex(workspaceId)       every asset metadata document
+//   readAssetDocument(wid, assetId)   one asset metadata document
+//   deleteAssetDocument(wid, assetId) remove one asset metadata document
 //   close()
+//
+// ASSET METADATA (Production Readiness Phase 7). `workspaces/{wid}/assets/
+// {assetId}` is the Firestore record of an asset whose BYTES live in
+// Firebase Storage at the same path (src/lib/cloud/firebaseStorageAdapter.js;
+// the shared path convention is src/lib/cloud/assetPaths.js). The three
+// operations above are the reads a later phase's reconciliation and the
+// reference-driven sweep need, and the delete that sweep performs; the
+// documents themselves are written through `commitBatch` like every other
+// entity. `readWorkspace` does NOT include them — they are not part of the
+// workspace mirror the owner modules read. The metadata FIELD MODEL, and the
+// Firestore rules that admit the collection at all, arrive with the asset
+// cloud model; until then these operations are refused by `firestore.rules`,
+// which has no `assets` match.
 //
 // CACHE DECISION (Production Readiness Phase 6). The SDK's persistent
 // IndexedDB cache is deliberately NOT enabled: NoteWise keeps its own
@@ -28,7 +44,9 @@
 import {
   collection as collectionRef,
   connectFirestoreEmulator,
+  deleteDoc,
   doc,
+  getDoc,
   getDocs,
   initializeFirestore,
   memoryLocalCache,
@@ -40,6 +58,7 @@ import {
 } from "firebase/firestore";
 import { ensureFirebaseApp } from "../firebaseApp";
 import { ENTITY_COLLECTIONS } from "./cloudModel";
+import { assetCollectionPath, assetDocumentPath } from "./assetPaths";
 
 /**
  * @param {{ apiKey: string, authDomain: string, projectId: string, appId: string, firestoreEmulatorHost: string|null }} config
@@ -107,6 +126,23 @@ export function createFirestoreWorkspaceStore(config) {
 
     async setDocument(path, data) {
       await setDoc(ref(path), data);
+    },
+
+    /** Every asset metadata document of one workspace. */
+    async readAssetIndex(workspaceId) {
+      const snapshot = await getDocs(collectionRef(db, ...assetCollectionPath(workspaceId)));
+      return { assets: snapshot.docs.map((d) => ({ id: d.id, fields: d.data() })) };
+    },
+
+    /** One asset metadata document. */
+    async readAssetDocument(workspaceId, assetId) {
+      const snapshot = await getDoc(ref(assetDocumentPath(workspaceId, assetId)));
+      return snapshot.exists() ? { exists: true, fields: snapshot.data() } : { exists: false, fields: null };
+    },
+
+    /** Remove one asset metadata document (the sweep's own write). */
+    async deleteAssetDocument(workspaceId, assetId) {
+      await deleteDoc(ref(assetDocumentPath(workspaceId, assetId)));
     },
 
     async close() {
