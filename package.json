@@ -58,7 +58,7 @@
     "server": "node server/index.js",
     "lint": "eslint \"src/**/*.js\" \"server/**/*.js\" \"routes/**/*.js\" --ignore-pattern \"*.test.js\" --max-warnings=0",
     "test:ci": "craco test --watchAll=false --ci --maxWorkers=2",
-    "test:rules": "firebase emulators:exec --only firestore,storage --project notewise-rules-test \"node --test --test-concurrency=1 test/rules/firestore.rules.test.js test/rules/storage.rules.test.js\""
+    "test:rules": "firebase emulators:exec --only firestore,storage --project notewise-rules-test \"node --test --test-concurrency=1 test/rules/firestore.rules.test.js test/rules/storage.rules.test.js test/rules/assetUploadLifecycle.test.js\""
   },
   "eslintConfig": {
     "extends": [

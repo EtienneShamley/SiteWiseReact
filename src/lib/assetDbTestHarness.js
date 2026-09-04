@@ -25,6 +25,30 @@ import { ASSET_DB_NAME, ASSET_STORE, resetAssetDbConnection } from "./assetDb";
 
 /* global globalThis */ // the ES2020 global object; the CRA browser env predates it
 
+/**
+ * Rebuild plain objects and arrays in THIS realm.
+ *
+ * `v8.deserialize` is native Node code, so the values it produces carry
+ * NODE's `Object.prototype` — not the one the modules under test see inside
+ * jsdom. A browser has no such split: what IndexedDB hands back belongs to the
+ * page. Without this, a perfectly ordinary stored object fails any check of
+ * the form `Object.getPrototypeOf(value) === Object.prototype` — which
+ * `validateAssetMetadata` (src/lib/cloud/assetCloudModel.js) makes, and which
+ * is correct — and the test would be failing the shim, not the code.
+ *
+ * `Object.prototype.toString` and `Array.isArray` are the two cross-realm-safe
+ * ways to ask "is this a plain object / an array"; binary values (Blobs,
+ * ArrayBuffers, typed arrays) are passed through untouched, exactly as
+ * IndexedDB hands them back.
+ */
+function inThisRealm(value) {
+  if (Array.isArray(value)) return value.map(inThisRealm);
+  if (Object.prototype.toString.call(value) !== "[object Object]") return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) out[k] = inThisRealm(v);
+  return out;
+}
+
 /** Installs the structuredClone shim once per test process. */
 export function installStructuredCloneShim() {
   if (typeof globalThis.structuredClone === "function") return;
@@ -36,9 +60,9 @@ export function installStructuredCloneShim() {
         if (v instanceof NodeBlob) blobs[k] = v;
         else rest[k] = v;
       }
-      return { ...deserialize(serialize(rest)), ...blobs };
+      return { ...inThisRealm(deserialize(serialize(rest))), ...blobs };
     }
-    return deserialize(serialize(value));
+    return inThisRealm(deserialize(serialize(value)));
   };
 }
 

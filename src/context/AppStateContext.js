@@ -14,6 +14,7 @@ import {
   withReplacedPdfSource,
 } from "../lib/pdfDocuments";
 import { validatePdfSource } from "../lib/pdfImportPolicy";
+import { enqueuePdfSourceUpload, releasePdfSourceUpload } from "../lib/pdfSourceUploads";
 import { getNotePdfRefs, saveNotePdfRefs } from "../lib/notePdfRefs";
 import { newId } from "../lib/id";
 import { loadTree, saveTree, wouldClobberStoredTree } from "../lib/treeStorage";
@@ -352,6 +353,13 @@ export function AppStateProvider({ children }) {
     pdfDocsRef.current = { ...pdfDocsRef.current, [doc.id]: doc };
     setPdfBytesCacheFor(sourceId, bytes);
     setPdfDocs((prev) => ({ ...prev, [doc.id]: doc }));
+    // The cloud is owed these bytes. This runs only AFTER the document is
+    // durable, because the two databases cannot be written in one transaction
+    // (src/lib/pdfSourceUploads.js): the one thing a failure here can lose is
+    // the knowledge that the PDF is owed, and the reconciliation at the next
+    // session start recovers exactly that. It is therefore not reported as a
+    // storage failure — nothing of the user's is at risk.
+    enqueuePdfSourceUpload(sourceId, { at: doc.createdAt }).catch(() => {});
     return doc;
   }
 
@@ -432,6 +440,15 @@ export function AppStateProvider({ children }) {
     setPdfDocs((prev) => (prev[pdfId] ? { ...prev, [pdfId]: nextDoc } : prev));
     setPdfBytesCacheFor(nextSourceId, input.bytes);
     if (previousSourceId !== nextSourceId) removePdfBytesCache(previousSourceId);
+
+    // The replacement is durable, so the cloud is owed the NEW source. The
+    // superseded one is released first: a file replaced before it ever
+    // uploaded must not still be sent, and one that already reached the cloud
+    // is left there for the collector rather than removed from under it.
+    if (previousSourceId && previousSourceId !== nextSourceId) {
+      await releasePdfSourceUpload(previousSourceId).catch(() => {});
+    }
+    enqueuePdfSourceUpload(nextSourceId, { at: nextDoc.updatedAt }).catch(() => {});
 
     if (previousSourceId && previousSourceId !== nextSourceId) {
       try {
@@ -524,6 +541,10 @@ export function AppStateProvider({ children }) {
     if (currentPdfId === pdfId) setCurrentPdfIdRaw(null);
 
     const problems = [];
+    // Before the bytes go: a document that no longer exists must not still be
+    // owed to the cloud. An already-uploaded object is left for the collector
+    // (see src/lib/pdfSourceUploads.js) — this only drops a pending identity.
+    await releasePdfSourceUpload(pdfSourceId(doc)).catch(() => {});
     try {
       await removePdfBytes(pdfSourceId(doc));
     } catch (err) {

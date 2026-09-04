@@ -26,15 +26,21 @@
 // REFUSED rather than served the local/unscoped case: a local-only asset is
 // owed to nobody and is never queued at all.
 //
-// DELIBERATELY NOT HERE (Phase 7.4): backoff timers, `online` listeners, the
-// drain loop, and any Firebase Storage call. This module records what is
-// owed and what has been tried; it never decides when to try.
+// DELIBERATELY NOT HERE: backoff timers, `online` listeners, the drain loop,
+// and any Firebase Storage call — those belong to the upload engine
+// (src/lib/cloud/assetUploadSync.js). This module records what is owed and
+// what has been tried; it never decides when to try. The one thing it does
+// own is the END of an upload: `settleAssetUploadAsStored` writes the remote
+// index and removes the queue entry in ONE transaction, so local sync state
+// cannot become self-contradictory.
 
 import {
+  ASSET_REMOTE_INDEX_STORE,
   ASSET_UPLOAD_QUEUE_STORE,
   assetDbTransaction,
   workspaceAssetKeyRange,
 } from "./assetDb";
+import { REMOTE_ASSET_STATE, makeRemoteAssetEntry } from "./assetRemoteIndex";
 import { isValidAssetSegment } from "./cloud/assetPaths";
 
 /**
@@ -178,6 +184,66 @@ export async function settleAssetUpload(workspaceId, assetId) {
   await assetDbTransaction(ASSET_UPLOAD_QUEUE_STORE, "readwrite", (stores) =>
     stores[ASSET_UPLOAD_QUEUE_STORE].delete([workspaceId, assetId])
   );
+}
+
+/**
+ * The END of one successful upload, as ONE local transaction (Production
+ * Readiness Phase 7.4): what the cloud is now known to hold is recorded in
+ * `assetRemoteIndex`, and the workspace stops owing the asset, together or
+ * not at all.
+ *
+ * WHY IT IS ONE TRANSACTION. The two writes are the two halves of a single
+ * fact — "this asset is in the cloud". Written separately, a crash between
+ * them leaves this browser contradicting itself in one of two ways: an index
+ * saying `stored` with a queue entry that will re-upload (harmless but
+ * wasteful, and it makes "what is pending" a lie), or a settled queue with an
+ * index that never learned, which is the dangerous one — nothing would ever
+ * re-derive that the asset is in the cloud. Both stores live in the SAME
+ * IndexedDB database (src/lib/assetDb.js), so one transaction is available
+ * and there is no reason to accept the contradiction.
+ *
+ * The uploaded BYTES are deliberately not touched: a synced asset stays in
+ * this browser's cache, and cache eviction is its own approved policy.
+ *
+ * @param {{ workspaceId, assetId, kind, name, mimeType, size, sourceAssetId,
+ *           at }} entry the asset as it was actually uploaded.
+ * @returns the remote-index record that was written.
+ */
+export async function settleAssetUploadAsStored({
+  workspaceId,
+  assetId,
+  kind,
+  name,
+  mimeType,
+  size,
+  sourceAssetId,
+  at,
+} = {}) {
+  requireWorkspaceId(workspaceId);
+  requireAssetId(assetId);
+  // Built BEFORE the transaction opens, exactly as the atomic creation in
+  // src/lib/assetStorage.js does: a refused record must never be the reason a
+  // transaction aborts halfway.
+  const record = makeRemoteAssetEntry({
+    workspaceId,
+    assetId,
+    kind,
+    name,
+    mimeType,
+    size,
+    sourceAssetId,
+    state: REMOTE_ASSET_STATE.STORED,
+    updatedAt: Number.isFinite(at) ? at : Date.now(),
+  });
+  await assetDbTransaction(
+    [ASSET_REMOTE_INDEX_STORE, ASSET_UPLOAD_QUEUE_STORE],
+    "readwrite",
+    (stores) => {
+      stores[ASSET_REMOTE_INDEX_STORE].put(record);
+      stores[ASSET_UPLOAD_QUEUE_STORE].delete([workspaceId, assetId]);
+    }
+  );
+  return record;
 }
 
 /**

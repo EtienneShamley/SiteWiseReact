@@ -19,9 +19,18 @@
 //     workspace: { kind: "cloud", id, role, created },
 //     mode: "online" | "offline",         offline = opened from this browser's mirror
 //     sync,                               the workspace's sync engine (status, outcomes)
+//     assetSync,                          the workspace's ASSET UPLOAD engine
+//                                         (Phase 7.4) — status, per-asset
+//                                         outcomes, Retry Now. Reports
+//                                         "unconfigured" and uploads nothing
+//                                         while this build has no Storage
+//                                         bucket; the product stays local-first
+//                                         either way.
 //     localData,                          what this browser holds outside any account
 //     migration: { offered, state, run, dismiss },
-//     prepareSignOut(),                   flushes queued writes before the session ends
+//     prepareSignOut(),                   flushes queued writes, then gives the
+//                                         file uploads a BOUNDED chance to
+//                                         finish, before the session ends
 //   }
 //
 // What it deliberately never does: fall back to the pre-account local
@@ -38,8 +47,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "./AuthContext";
 import { recordAccountSession } from "../lib/localDataBinding";
-import { readFirebaseClientConfigFromEnv } from "../lib/firebaseClientConfig";
+import { readFirebaseClientConfigFromEnv, resolveFirebaseStorageConfig } from "../lib/firebaseClientConfig";
 import { SESSION_MODE, openWorkspaceSession } from "../lib/cloud/workspaceSession";
+import { createAssetUploadSync } from "../lib/cloud/assetUploadSync";
 import { detectLocalData, readLocalMigrationState, runLocalMigration, shouldOfferLocalMigration } from "../lib/cloud/localMigration";
 import { MALFORMED_CLOUD_RECORD_MESSAGE } from "../lib/cloud/workspaceHydration";
 import { reportPersistenceIssue } from "../lib/durableStorage";
@@ -67,13 +77,37 @@ async function loadDefaultStore() {
 }
 
 /**
+ * The workspace's ASSET store, or null when this build has no bucket.
+ *
+ * A missing `REACT_APP_FIREBASE_STORAGE_BUCKET` is NOT an error and does not
+ * stop the session: the product is local-first, and every note, image, PDF
+ * and attachment keeps working on this device exactly as before. What it does
+ * mean is that nothing can be uploaded — so the engine is created without a
+ * store, reports `unconfigured`, and the product never claims a file is in
+ * the account when it is not. There is no second, fallback cloud path.
+ */
+async function loadDefaultAssetStore() {
+  const resolved = readFirebaseClientConfigFromEnv();
+  if (!resolved.ok) return null;
+  if (!resolveFirebaseStorageConfig(resolved.config).ok) return null;
+  const { createFirebaseStorageAdapter } = await import("../lib/cloud/firebaseStorageAdapter");
+  return createFirebaseStorageAdapter(resolved.config);
+}
+
+/**
  * @param {{
  *   store?: object,               injected by tests (an in-memory store)
  *   sessionOptions?: object,      injected by tests (timers, sync cadence)
  *   children: React.ReactNode,
  * }} props
  */
-export function DataScopeProvider({ store: injectedStore = null, sessionOptions = null, children }) {
+export function DataScopeProvider({
+  store: injectedStore = null,
+  assetStore: injectedAssetStore = undefined,
+  uploadOptions = null,
+  sessionOptions = null,
+  children,
+}) {
   const { user } = useAuth();
   const uid = user ? user.uid : null;
   const emailVerified = Boolean(user && user.emailVerified);
@@ -87,6 +121,10 @@ export function DataScopeProvider({ store: injectedStore = null, sessionOptions 
   const [migrationRun, setMigrationRun] = useState(null); // { busy, phase, result }
   const sessionRef = useRef(null);
   const storeRef = useRef(null);
+  // The workspace's asset upload engine (Production Readiness Phase 7.4).
+  // One per session, bound to that session's workspace, stopped with it.
+  const assetSyncRef = useRef(null);
+  const [assetSync, setAssetSync] = useState(null);
 
   // Record the account on the local-data binding (a hint for the migration,
   // never a claim on the data) — unchanged from Phase 5.
@@ -104,6 +142,7 @@ export function DataScopeProvider({ store: injectedStore = null, sessionOptions 
     setPhase(SCOPE_PHASE.RESOLVING);
     setError(null);
     setSession(null);
+    setAssetSync(null);
     setMigrationRun(null);
 
     (async () => {
@@ -124,6 +163,30 @@ export function DataScopeProvider({ store: injectedStore = null, sessionOptions 
         }
         sessionRef.current = opened;
         setSession(opened);
+
+        // The upload engine starts only now: the workspace is resolved, the
+        // durable scope is on it, and the engine is bound to THAT workspace
+        // id for its whole life. An account switch closes this session and
+        // stops it, so its remaining work can never touch the next account's
+        // queue.
+        const assetStore =
+          injectedAssetStore !== undefined
+            ? injectedAssetStore
+            : injectedStore
+              ? null
+              : await loadDefaultAssetStore().catch(() => null);
+        if (cancelled) {
+          await opened.close();
+          return;
+        }
+        const uploads = createAssetUploadSync({
+          workspaceId: opened.workspace.id,
+          assetStore,
+          workspaceStore: store,
+          ...(uploadOptions || {}),
+        }).start();
+        assetSyncRef.current = uploads;
+        setAssetSync(uploads);
         const detected = detectLocalData(uid);
         setLocalData(detected);
         setMigrationState(readLocalMigrationState());
@@ -145,14 +208,20 @@ export function DataScopeProvider({ store: injectedStore = null, sessionOptions 
     return () => {
       cancelled = true;
       const opened = sessionRef.current;
+      const uploads = assetSyncRef.current;
       sessionRef.current = null;
+      assetSyncRef.current = null;
+      // Stopped SYNCHRONOUSLY, before anything else unwinds: from this moment
+      // no in-flight upload of the closing session may write to the queue or
+      // the remote index, whichever account signs in next.
+      if (uploads) uploads.stop();
       if (opened) {
         setTimeout(() => {
           opened.close();
         }, 0);
       }
     };
-  }, [uid, attempt, injectedStore, sessionOptions]);
+  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, sessionOptions]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
@@ -173,6 +242,19 @@ export function DataScopeProvider({ store: injectedStore = null, sessionOptions 
       } catch {
         // reported by the engine's own outcomes
       }
+    }
+    // Then give the files a BOUNDED chance to finish. Never longer than the
+    // engine's own deadline, and never at the cost of anything: whatever is
+    // still queued keeps its entry AND its local bytes for the next sign-in
+    // of this workspace on this device. Signing out fast is not worth losing
+    // a file for.
+    const uploads = assetSyncRef.current;
+    if (!uploads) return { assets: null };
+    try {
+      return { assets: await uploads.drainForSignOut() };
+    } catch {
+      // The engine's outcomes have already reported it; sign-out proceeds.
+      return { assets: null };
     }
   }, []);
 
@@ -212,6 +294,7 @@ export function DataScopeProvider({ store: injectedStore = null, sessionOptions 
       }),
       mode: session.mode,
       sync: session.sync,
+      assetSync,
       localData,
       migration: Object.freeze({
         offered: phase === SCOPE_PHASE.MIGRATION,
@@ -227,7 +310,7 @@ export function DataScopeProvider({ store: injectedStore = null, sessionOptions 
         setMigrationState(readLocalMigrationState());
       },
     });
-  }, [uid, emailVerified, session, localData, phase, migrationState, migrationRun, runMigration, dismissMigration, prepareSignOut]);
+  }, [uid, emailVerified, session, assetSync, localData, phase, migrationState, migrationRun, runMigration, dismissMigration, prepareSignOut]);
 
   if (!uid) return null;
 

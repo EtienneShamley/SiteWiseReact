@@ -9,6 +9,8 @@
 //   bucket                                          the resolved bucket name
 //   objectPath(workspaceId, assetId)                the canonical object path
 //   objectExists(workspaceId, assetId)              → boolean
+//   objectMetadata(workspaceId, assetId)            → { exists, path, size,
+//                                                       contentType, metadata }
 //   uploadAsset(workspaceId, assetId, data, opts)   → { path, size, contentType }
 //   downloadAsset(workspaceId, assetId)             → Blob
 //   deleteAsset(workspaceId, assetId)               → { deleted: boolean }
@@ -26,9 +28,21 @@
 //     Blob's own type — never from a filename or extension. An upload with
 //     neither is refused rather than stored as an unknown type.
 //   - The adapter does not decide WHEN to upload, retry or dedupe (that is
-//     the upload queue's job, Phase 7.2) and does not enforce object
+//     the upload engine's job, Phase 7.4) and does not enforce object
 //     immutability (that is the Storage rules' job, Phase 7.3). It performs
 //     one operation per call and reports success or the SDK's own error.
+//   - `objectMetadata` exists because "the object is already there" is not
+//     enough to conclude an upload succeeded earlier (Phase 7.4): the engine
+//     has to see that the object standing on the path IS the asset it was
+//     about to write — its recorded identity, type and size — before it
+//     treats the upload as done. It returns what the service holds, and
+//     judges nothing.
+//   - Progress is REAL or absent. With an `onProgress` callback the upload
+//     runs as a RESUMABLE upload and forwards the SDK's own
+//     `bytesTransferred` / `totalBytes`; without one it stays the single
+//     `uploadBytes` request it has always been. No percentage is ever
+//     synthesised, and a small file that completes in one chunk simply
+//     reports its completion.
 //   - `deleteAsset` reports `{ deleted: false }` for an object that is
 //     already gone — a garbage collector that runs twice is not an error —
 //     and lets every other failure propagate.
@@ -46,6 +60,7 @@ import {
   getStorage,
   ref as storageRef,
   uploadBytes,
+  uploadBytesResumable,
 } from "firebase/storage";
 import { ensureFirebaseApp } from "../firebaseApp";
 import { resolveFirebaseStorageConfig } from "../firebaseClientConfig";
@@ -72,6 +87,32 @@ function resolveContentType(data, contentType) {
   if (explicit) return explicit;
   const own = data && typeof data.type === "string" ? data.type.trim() : "";
   return own;
+}
+
+/**
+ * One RESUMABLE upload, reporting the SDK's own byte counters as they arrive.
+ * Resolves with the same `{ metadata }` shape `uploadBytes` resolves with, so
+ * the caller above is written once for both paths.
+ */
+function uploadWithProgress(ref, data, metadata, onProgress) {
+  return new Promise((resolve, reject) => {
+    const task = uploadBytesResumable(ref, data, metadata);
+    task.on(
+      "state_changed",
+      (snapshot) => {
+        try {
+          onProgress({
+            bytesTransferred: snapshot.bytesTransferred,
+            totalBytes: snapshot.totalBytes,
+          });
+        } catch {
+          // A progress listener must never break an upload in flight.
+        }
+      },
+      (error) => reject(error),
+      () => resolve(task.snapshot)
+    );
+  });
 }
 
 /**
@@ -121,9 +162,39 @@ export function createFirebaseStorageAdapter(config) {
     },
 
     /**
+     * What the service holds at this asset's path.
+     *
+     * `{ exists: false, path }` when there is no object; otherwise
+     * `{ exists: true, path, size, contentType, metadata }`, where `metadata`
+     * is the object's CUSTOM metadata (the identity the create rule required)
+     * as a plain object — `{}` when the object carries none.
+     */
+    async objectMetadata(workspaceId, assetId) {
+      const path = objectPath(workspaceId, assetId);
+      try {
+        const meta = await getMetadata(refFor(workspaceId, assetId));
+        const size = typeof meta.size === "number" ? meta.size : Number(meta.size) || 0;
+        return {
+          exists: true,
+          path,
+          size,
+          contentType: typeof meta.contentType === "string" ? meta.contentType : "",
+          metadata: meta.customMetadata ? { ...meta.customMetadata } : {},
+        };
+      } catch (error) {
+        if (isAssetNotFound(error)) return { exists: false, path };
+        throw normalizeError(error);
+      }
+    },
+
+    /**
      * Write the bytes of one asset.
      * @param {Blob|Uint8Array|ArrayBuffer} data
-     * @param {{ contentType?: string, metadata?: Record<string,string> }} [options]
+     * @param {{ contentType?: string, metadata?: Record<string,string>,
+     *           onProgress?: (p: { bytesTransferred: number, totalBytes: number }) => void }} [options]
+     *        `onProgress` receives the SDK's OWN counters from a resumable
+     *        upload. It is never called with a value this adapter invented,
+     *        and a listener that throws never breaks the upload.
      */
     async uploadAsset(workspaceId, assetId, data, options = {}) {
       const path = objectPath(workspaceId, assetId);
@@ -134,11 +205,15 @@ export function createFirebaseStorageAdapter(config) {
       if (!contentType) {
         throw assetStorageError(ASSET_STORAGE_ERROR.INVALID_ARGUMENT, "An asset upload needs a content type");
       }
+      const metadata = {
+        contentType,
+        ...(options.metadata ? { customMetadata: options.metadata } : {}),
+      };
+      const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
       try {
-        const result = await uploadBytes(refFor(workspaceId, assetId), data, {
-          contentType,
-          ...(options.metadata ? { customMetadata: options.metadata } : {}),
-        });
+        const result = onProgress
+          ? await uploadWithProgress(refFor(workspaceId, assetId), data, metadata, onProgress)
+          : await uploadBytes(refFor(workspaceId, assetId), data, metadata);
         const written = (result && result.metadata) || {};
         return {
           path,

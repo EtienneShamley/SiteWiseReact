@@ -164,6 +164,79 @@ describe("createMemoryAssetStore", () => {
   });
 });
 
+describe("objectMetadata", () => {
+  test("reports the identity an upload engine must compare against", async () => {
+    const store = createMemoryAssetStore();
+    await store.uploadAsset(WID_A, AID, blobOf("hello", "text/plain"), {
+      metadata: { assetId: AID, workspaceId: WID_A, assetKind: "note-file" },
+    });
+    expect(await store.objectMetadata(WID_A, AID)).toEqual({
+      exists: true,
+      path: `workspaces/${WID_A}/assets/${AID}`,
+      size: 5,
+      contentType: "text/plain",
+      metadata: { assetId: AID, workspaceId: WID_A, assetKind: "note-file" },
+    });
+  });
+
+  test("absence is an answer, and it never reaches another workspace's object", async () => {
+    const store = createMemoryAssetStore();
+    await store.uploadAsset(WID_A, AID, blobOf("hello", "text/plain"));
+    expect(await store.objectMetadata(WID_B, AID)).toEqual({
+      exists: false,
+      path: `workspaces/${WID_B}/assets/${AID}`,
+    });
+  });
+
+  test("it hands back a COPY of the metadata, not the store's own map", async () => {
+    const store = createMemoryAssetStore();
+    await store.uploadAsset(WID_A, AID, blobOf("hello", "text/plain"), {
+      metadata: { assetId: AID, workspaceId: WID_A, assetKind: "note-file" },
+    });
+    const head = await store.objectMetadata(WID_A, AID);
+    head.metadata.assetKind = "tampered";
+    expect((await store.objectMetadata(WID_A, AID)).metadata.assetKind).toBe("note-file");
+  });
+
+  test("a failure injection applies to it as it does to objectExists", async () => {
+    const store = createMemoryAssetStore();
+    store.failNext("exists", ASSET_STORAGE_ERROR.UNAUTHORIZED);
+    await expect(store.objectMetadata(WID_A, AID)).rejects.toMatchObject({
+      code: ASSET_STORAGE_ERROR.UNAUTHORIZED,
+    });
+  });
+});
+
+describe("upload progress", () => {
+  test("reports the REAL completed byte count, once", async () => {
+    const store = createMemoryAssetStore();
+    const seen = [];
+    await store.uploadAsset(WID_A, AID, blobOf("hello", "text/plain"), { onProgress: (p) => seen.push(p) });
+    expect(seen).toEqual([{ bytesTransferred: 5, totalBytes: 5 }]);
+  });
+
+  test("a listener that throws never breaks the upload", async () => {
+    const store = createMemoryAssetStore();
+    const result = await store.uploadAsset(WID_A, AID, blobOf("hello", "text/plain"), {
+      onProgress: () => {
+        throw new Error("listener exploded");
+      },
+    });
+    expect(result.size).toBe(5);
+    expect(await store.objectExists(WID_A, AID)).toBe(true);
+  });
+
+  test("a refused upload reports no progress at all", async () => {
+    const store = createMemoryAssetStore();
+    await store.uploadAsset(WID_A, AID, blobOf("first", "text/plain"));
+    const seen = [];
+    await expect(
+      store.uploadAsset(WID_A, AID, blobOf("second", "text/plain"), { onProgress: (p) => seen.push(p) })
+    ).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    expect(seen).toEqual([]);
+  });
+});
+
 describe("with a workspace store attached — the Storage rules' equivalent", () => {
   const { createMemoryWorkspaceStore } = require("./memoryWorkspaceStore");
 

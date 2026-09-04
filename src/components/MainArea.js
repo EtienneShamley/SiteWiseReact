@@ -63,6 +63,7 @@ import { SECTION_TOOLBAR_IMAGE_POLICY } from "../lib/templateSectionToolbarImage
 import { SECTION_TOOLBAR_FILE_POLICY } from "../lib/templateSectionToolbarFile";
 import { insertLocalImageAsset } from "../lib/editorImageInsert";
 import { BusySpinner } from "./BusyStatus";
+import AssetUploadStatus from "./AssetUploadStatus";
 import { insertFreeformFileAttachment } from "../lib/editorFileInsert";
 import {
   QUICK_ADD_DELIVERY_MESSAGE,
@@ -2030,6 +2031,11 @@ export default function MainArea() {
                   ACTIVE NOTE VIEW (never by the toolbar's editor), and the
                   preview shows exactly what that export produces — the same
                   `exportSource`, so the two can never disagree. */}
+              {/* Files leaving the device for the account. Real bytes only,
+                  and silent unless an upload is actually in flight — a queue
+                  that is merely waiting is reported in Settings, in words. */}
+              <AssetUploadStatus assetSync={dataScope ? dataScope.assetSync : null} />
+
               <ExportMenu source={exportSource} />
               <DocumentPreview source={exportSource} />
             </div>

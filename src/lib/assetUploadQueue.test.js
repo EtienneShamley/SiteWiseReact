@@ -12,6 +12,7 @@
 import "fake-indexeddb/auto";
 import {
   clearWorkspaceAssetUploads,
+  settleAssetUploadAsStored,
   countPendingAssetUploads,
   enqueueAssetUpload,
   getAssetUpload,
@@ -21,6 +22,7 @@ import {
   settleAssetUpload,
   updateAssetUploadAttempt,
 } from "./assetUploadQueue";
+import { REMOTE_ASSET_STATE, getRemoteAssetEntry } from "./assetRemoteIndex";
 import { resetAssetDbConnection } from "./assetDb";
 import { deleteAssetDb, installStructuredCloneShim } from "./assetDbTestHarness";
 
@@ -186,5 +188,63 @@ describe("durability", () => {
     resetAssetDbConnection();
     expect(await getAssetUpload(WS_A, ASSET)).toMatchObject({ assetId: ASSET, kind: "editor-file", at: 42 });
     expect(await countPendingAssetUploads(WS_A)).toBe(1);
+  });
+});
+
+describe("settleAssetUploadAsStored — the end of one upload, atomically", () => {
+  test("records what the cloud holds and stops owing it, together", async () => {
+    await enqueueAssetUpload({ workspaceId: WS_A, assetId: ASSET, kind: "editor-image" });
+
+    const record = await settleAssetUploadAsStored({
+      workspaceId: WS_A,
+      assetId: ASSET,
+      kind: "editor-image",
+      name: "photo.png",
+      mimeType: "image/png",
+      size: 1234,
+      at: 5000,
+    });
+
+    expect(record).toMatchObject({
+      workspaceId: WS_A,
+      assetId: ASSET,
+      kind: "editor-image",
+      name: "photo.png",
+      mimeType: "image/png",
+      size: 1234,
+      state: REMOTE_ASSET_STATE.STORED,
+      updatedAt: 5000,
+    });
+    expect(await getRemoteAssetEntry(WS_A, ASSET)).toMatchObject({ state: REMOTE_ASSET_STATE.STORED });
+    expect(await getAssetUpload(WS_A, ASSET)).toBeNull();
+  });
+
+  test("settling something already settled is success, not an error", async () => {
+    await settleAssetUploadAsStored({ workspaceId: WS_A, assetId: ASSET, kind: "pdf-source", size: 1 });
+    await expect(
+      settleAssetUploadAsStored({ workspaceId: WS_A, assetId: ASSET, kind: "pdf-source", size: 1 })
+    ).resolves.toMatchObject({ state: REMOTE_ASSET_STATE.STORED });
+  });
+
+  test("a refused record leaves NEITHER store changed", async () => {
+    await enqueueAssetUpload({ workspaceId: WS_A, assetId: ASSET, kind: "editor-image" });
+    // The entry is built before the transaction opens, so an invalid identity
+    // rejects without touching either store.
+    await expect(settleAssetUploadAsStored({ workspaceId: WS_A, assetId: "../escape" })).rejects.toThrow();
+    expect(await getAssetUpload(WS_A, ASSET)).not.toBeNull();
+    expect(await getRemoteAssetEntry(WS_A, ASSET)).toBeNull();
+  });
+
+  test("it can never settle or index another workspace's asset", async () => {
+    await enqueueAssetUpload({ workspaceId: WS_B, assetId: ASSET, kind: "editor-image" });
+    await settleAssetUploadAsStored({ workspaceId: WS_A, assetId: ASSET, kind: "editor-image", size: 2 });
+    expect(await getAssetUpload(WS_B, ASSET)).not.toBeNull();
+    expect(await getRemoteAssetEntry(WS_B, ASSET)).toBeNull();
+  });
+
+  test("a valid workspace is required", async () => {
+    await expect(settleAssetUploadAsStored({ workspaceId: "", assetId: ASSET })).rejects.toThrow(
+      /valid workspace id/i
+    );
   });
 });

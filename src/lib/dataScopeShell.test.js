@@ -359,7 +359,12 @@ describe("Settings", () => {
     await click(button(MIGRATION_NOT_NOW_LABEL));
     expect(text()).toContain("Everything is saved to your account.");
     expect(button(MIGRATE_LOCAL_LABEL)).not.toBeNull();
-    expect(text()).toContain("stay on the device they were added on");
+    // Re-targeted in Phase 7.4: files are no longer stranded on one device —
+    // the sentence now says what actually happens to them.
+    expect(text()).toContain("Files");
+    expect(text()).toContain("uploaded to it as well");
+    expect(text()).toContain("uploading files to your account is not switched on in this version");
+    expect(text()).not.toContain("until file sync arrives in a later update");
     expect(syncStatusLine({ status: SYNC_STATUS.OFFLINE, pending: 2 })).toMatch(/Offline — 2 changes/);
     expect(syncStatusLine({ status: SYNC_STATUS.ERROR, pending: 1, error: "permission-denied" })).toMatch(/not allowed/);
 
@@ -398,6 +403,66 @@ describe("MainArea autosave wiring (source text)", () => {
   test("46. sign-out asks every editor to flush its pending local writes first", () => {
     expect(MAIN_AREA).toMatch(/window\.addEventListener\(FLUSH_PENDING_WRITES_EVENT, flushFreeformWrites\)/);
     const SETTINGS = fs.readFileSync(path.join(__dirname, "..", "components", "SettingsModal.js"), "utf8");
-    expect(SETTINGS).toMatch(/if \(scope\) await scope\.prepareSignOut\(\);\s*const result = await signOut\(\)/);
+    // Re-targeted in Phase 7.4: the preparation now also reports what the file
+    // uploads could not finish, and its result is what sign-out reads.
+    expect(SETTINGS).toMatch(/const prepared = scope \? await scope\.prepareSignOut\(\) : null;/);
+    expect(SETTINGS).toMatch(/const result = await signOut\(\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Production Readiness Phase 7.4 — the asset upload engine's wiring.
+//
+// The engine itself is tested directly (src/lib/cloud/assetUploadSync.test.js);
+// what is asserted here is that it is BOUND to one session and stopped with
+// it, that a build without a bucket still opens a working local-first session,
+// and that sign-out gives the uploads a bounded chance and then says what is
+// left.
+describe("the asset upload engine's session binding (source)", () => {
+  const SCOPE = fs.readFileSync(path.join(__dirname, "..", "context", "DataScopeContext.js"), "utf8");
+  const SETTINGS = fs.readFileSync(path.join(__dirname, "..", "components", "SettingsModal.js"), "utf8");
+  const MAIN = fs.readFileSync(path.join(__dirname, "..", "components", "MainArea.js"), "utf8");
+  const APP_STATE = fs.readFileSync(path.join(__dirname, "..", "context", "AppStateContext.js"), "utf8");
+
+  test("one engine per session, created with THAT session's workspace id", () => {
+    expect(SCOPE).toMatch(/createAssetUploadSync\(\{\s*workspaceId: opened\.workspace\.id,/);
+    expect(SCOPE).toMatch(/assetSyncRef\.current = uploads;/);
+  });
+
+  test("it is stopped synchronously when the session closes or the account changes", () => {
+    expect(SCOPE).toMatch(/if \(uploads\) uploads\.stop\(\);/);
+    expect(SCOPE).toMatch(/assetSyncRef\.current = null;/);
+    expect(SCOPE).toMatch(/\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, sessionOptions\]/);
+  });
+
+  test("a missing bucket yields no store rather than an error, and no second cloud path", () => {
+    expect(SCOPE).toMatch(/if \(!resolveFirebaseStorageConfig\(resolved\.config\)\.ok\) return null;/);
+    expect(SCOPE).toMatch(/loadDefaultAssetStore\(\)\.catch\(\(\) => null\)/);
+  });
+
+  test("sign-out drains within the engine's bound deadline and reports the remainder", () => {
+    expect(SCOPE).toMatch(/return \{ assets: await uploads\.drainForSignOut\(\) \};/);
+    expect(SETTINGS).toMatch(/prepared\.assets \? prepared\.assets\.message : null/);
+  });
+
+  test("the toolbar reports uploads from the scope's engine, and BusyStatus keeps its local wording", () => {
+    expect(MAIN).toMatch(/<AssetUploadStatus assetSync=\{dataScope \? dataScope\.assetSync : null\} \/>/);
+    expect(MAIN).toMatch(/"Adding image…"/);
+    expect(MAIN).toMatch(/"Adding file…"/);
+    expect(MAIN).not.toMatch(/insertBusy === "image"\s*\? "Uploading/);
+  });
+
+  test("Settings offers Retry Now for the files that need attention", () => {
+    expect(SETTINGS).toMatch(/scope\.assetSync\.retryNow\(\)/);
+    expect(SETTINGS).toMatch(/assetSyncAttentionLine\(assetStatus\)/);
+  });
+
+  test("the PDF lifecycle enqueues only after the document is durable, and releases before the bytes go", () => {
+    // Creation: the registry write and the state update come first.
+    expect(APP_STATE).toMatch(/setPdfDocs\(\(prev\) => \(\{ \.\.\.prev, \[doc\.id\]: doc \}\)\);[\s\S]{0,600}?enqueuePdfSourceUpload\(sourceId/);
+    // Replacement: the superseded source is released before the new one is owed.
+    expect(APP_STATE).toMatch(/await releasePdfSourceUpload\(previousSourceId\)[\s\S]{0,200}?enqueuePdfSourceUpload\(nextSourceId/);
+    // Deletion: released BEFORE the bytes are removed.
+    expect(APP_STATE).toMatch(/await releasePdfSourceUpload\(pdfSourceId\(doc\)\)[\s\S]{0,300}?await removePdfBytes\(pdfSourceId\(doc\)\)/);
   });
 });

@@ -15,7 +15,13 @@
 //   - `deleteAsset` reporting `{ deleted: false }` for an object that is
 //     already gone;
 //   - the content-type rule: the caller's explicit type or the Blob's own,
-//     never a filename.
+//     never a filename;
+//   - `objectMetadata`, so an engine recovering from a lost acknowledgement
+//     can compare the object standing on the path against the asset it meant
+//     to write (Phase 7.4) here exactly as it does against the service;
+//   - `onProgress`, called once with the REAL completed byte count — this
+//     double writes in one step and has no fractions to report, and inventing
+//     them would let a test pass on a number the product cannot produce.
 //
 // THE STORAGE RULES (Phase 7.3). The real rules decide membership and
 // ownership by reading FIRESTORE cross-service (storage.rules →
@@ -174,6 +180,27 @@ export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => D
       return objects.has(path);
     },
 
+    /**
+     * What is stored at this asset's path — the identity an upload engine
+     * compares against before it may treat an existing object as its own
+     * earlier, acknowledged upload. Same shape as the real adapter's.
+     */
+    async objectMetadata(workspaceId, assetId) {
+      const path = objectPath(workspaceId, assetId);
+      take("exists");
+      calls.exists += 1;
+      authorize("get", workspaceId);
+      const record = objects.get(path);
+      if (!record) return { exists: false, path };
+      return {
+        exists: true,
+        path,
+        size: record.size,
+        contentType: record.contentType,
+        metadata: { ...record.metadata },
+      };
+    },
+
     async uploadAsset(workspaceId, assetId, data, options = {}) {
       const path = objectPath(workspaceId, assetId);
       take("upload");
@@ -200,6 +227,15 @@ export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => D
         createdAt: now(),
       });
       calls.uploads.push({ path, size, contentType });
+      // Real progress or none: this double writes in one step, so the only
+      // honest report is the completed transfer. It never invents fractions.
+      if (typeof options.onProgress === "function") {
+        try {
+          options.onProgress({ bytesTransferred: size, totalBytes: size });
+        } catch {
+          // A progress listener must never break an upload.
+        }
+      }
       return { path, size, contentType };
     },
 

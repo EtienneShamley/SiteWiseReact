@@ -18,6 +18,7 @@ const mockSdk = {
   ref: jest.fn((storage, path) => ({ storage, path })),
   getMetadata: jest.fn(),
   uploadBytes: jest.fn(),
+  uploadBytesResumable: jest.fn(),
   getBlob: jest.fn(),
   deleteObject: jest.fn(),
 };
@@ -33,6 +34,7 @@ jest.mock("firebase/storage", () => ({
   ref: (...args) => mockSdk.ref(...args),
   getMetadata: (...args) => mockSdk.getMetadata(...args),
   uploadBytes: (...args) => mockSdk.uploadBytes(...args),
+  uploadBytesResumable: (...args) => mockSdk.uploadBytesResumable(...args),
   getBlob: (...args) => mockSdk.getBlob(...args),
   deleteObject: (...args) => mockSdk.deleteObject(...args),
 }));
@@ -164,6 +166,131 @@ describe("objectExists", () => {
   });
 });
 
+describe("objectMetadata", () => {
+  test("reports the object's own identity, type and size", async () => {
+    const adapter = createFirebaseStorageAdapter(CONFIG);
+    mockSdk.getMetadata.mockResolvedValueOnce({
+      size: 42,
+      contentType: "image/png",
+      customMetadata: { assetId: AID, workspaceId: WID, assetKind: "editor-image" },
+    });
+    expect(await adapter.objectMetadata(WID, AID)).toEqual({
+      exists: true,
+      path: OBJECT_PATH,
+      size: 42,
+      contentType: "image/png",
+      metadata: { assetId: AID, workspaceId: WID, assetKind: "editor-image" },
+    });
+  });
+
+  test("an object with no custom metadata reports an empty map, not undefined", async () => {
+    const adapter = createFirebaseStorageAdapter(CONFIG);
+    mockSdk.getMetadata.mockResolvedValueOnce({ size: "7", contentType: "application/pdf" });
+    const head = await adapter.objectMetadata(WID, AID);
+    expect(head).toMatchObject({ exists: true, size: 7, metadata: {} });
+  });
+
+  test("absence is an answer, and every other failure is raised", async () => {
+    const adapter = createFirebaseStorageAdapter(CONFIG);
+    mockSdk.getMetadata.mockRejectedValueOnce(assetStorageError(ASSET_STORAGE_ERROR.NOT_FOUND));
+    expect(await adapter.objectMetadata(WID, AID)).toEqual({ exists: false, path: OBJECT_PATH });
+
+    mockSdk.getMetadata.mockRejectedValueOnce(assetStorageError(ASSET_STORAGE_ERROR.UNAUTHORIZED));
+    await expect(adapter.objectMetadata(WID, AID)).rejects.toMatchObject({
+      code: ASSET_STORAGE_ERROR.UNAUTHORIZED,
+    });
+  });
+
+  test("it never mints a download URL", () => {
+    const source = fs.readFileSync(path.join(__dirname, "firebaseStorageAdapter.js"), "utf8");
+    expect(source).not.toMatch(/getDownloadURL/);
+  });
+});
+
+describe("upload progress", () => {
+  function resumableTask(snapshots, final) {
+    const task = {
+      snapshot: final,
+      on(_event, onProgress, onError, onComplete) {
+        for (const snapshot of snapshots) onProgress(snapshot);
+        onComplete();
+      },
+    };
+    return task;
+  }
+
+  test("without a listener it stays the single-request upload it has always been", async () => {
+    const adapter = createFirebaseStorageAdapter(CONFIG);
+    mockSdk.uploadBytes.mockResolvedValue({ metadata: { size: 3, contentType: "image/png" } });
+    await adapter.uploadAsset(WID, AID, new Blob(["abc"], { type: "image/png" }));
+    expect(mockSdk.uploadBytesResumable).not.toHaveBeenCalled();
+  });
+
+  test("with a listener it uses the resumable upload and forwards the SDK's OWN counters", async () => {
+    const adapter = createFirebaseStorageAdapter(CONFIG);
+    mockSdk.uploadBytesResumable.mockImplementation(() =>
+      resumableTask(
+        [
+          { bytesTransferred: 0, totalBytes: 300 },
+          { bytesTransferred: 120, totalBytes: 300 },
+          { bytesTransferred: 300, totalBytes: 300 },
+        ],
+        { metadata: { size: 300, contentType: "application/pdf" } }
+      )
+    );
+    const seen = [];
+    const result = await adapter.uploadAsset(WID, AID, new Blob(["x"], { type: "application/pdf" }), {
+      onProgress: (p) => seen.push(p),
+    });
+
+    expect(mockSdk.uploadBytes).not.toHaveBeenCalled();
+    expect(seen).toEqual([
+      { bytesTransferred: 0, totalBytes: 300 },
+      { bytesTransferred: 120, totalBytes: 300 },
+      { bytesTransferred: 300, totalBytes: 300 },
+    ]);
+    expect(result).toEqual({ path: OBJECT_PATH, size: 300, contentType: "application/pdf" });
+  });
+
+  test("a tiny file simply completes — no percentage is invented", async () => {
+    const adapter = createFirebaseStorageAdapter(CONFIG);
+    mockSdk.uploadBytesResumable.mockImplementation(() =>
+      resumableTask([{ bytesTransferred: 4, totalBytes: 4 }], { metadata: { size: 4, contentType: "text/plain" } })
+    );
+    const seen = [];
+    await adapter.uploadAsset(WID, AID, new Blob(["abcd"], { type: "text/plain" }), {
+      onProgress: (p) => seen.push(p),
+    });
+    expect(seen).toEqual([{ bytesTransferred: 4, totalBytes: 4 }]);
+  });
+
+  test("a listener that throws never breaks the upload", async () => {
+    const adapter = createFirebaseStorageAdapter(CONFIG);
+    mockSdk.uploadBytesResumable.mockImplementation(() =>
+      resumableTask([{ bytesTransferred: 1, totalBytes: 2 }], { metadata: { size: 2, contentType: "text/plain" } })
+    );
+    const result = await adapter.uploadAsset(WID, AID, new Blob(["ab"], { type: "text/plain" }), {
+      onProgress: () => {
+        throw new Error("listener exploded");
+      },
+    });
+    expect(result.size).toBe(2);
+  });
+
+  test("a resumable upload that fails surfaces its code", async () => {
+    const adapter = createFirebaseStorageAdapter(CONFIG);
+    mockSdk.uploadBytesResumable.mockImplementation(() => ({
+      snapshot: null,
+      on(_event, _onProgress, onError) {
+        onError(assetStorageError(ASSET_STORAGE_ERROR.UNAUTHORIZED));
+      },
+    }));
+    await expect(
+      adapter.uploadAsset(WID, AID, new Blob(["x"], { type: "text/plain" }), { onProgress: () => {} })
+    ).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+  });
+});
+
 describe("uploadAsset", () => {
   test("it writes the bytes with an explicit content type and reports what was stored", async () => {
     const adapter = createFirebaseStorageAdapter(CONFIG);
@@ -236,6 +363,7 @@ describe("downloadAsset", () => {
       "deleteAsset",
       "downloadAsset",
       "objectExists",
+      "objectMetadata",
       "objectPath",
       "uploadAsset",
     ]);

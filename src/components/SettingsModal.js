@@ -3,6 +3,8 @@ import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useOptionalDataScope } from "../context/DataScopeContext";
 import { SYNC_STATUS, syncFailureMessage } from "../lib/cloud/cloudSync";
+import { ASSET_SYNC_STATUS, assetSyncFailureMessage } from "../lib/cloud/assetUploadSync";
+import { useAssetUploadStatus } from "./AssetUploadStatus";
 import { LOCAL_MIGRATION_STATUS, removeLocalOriginals } from "../lib/cloud/localMigration";
 import { SESSION_MODE } from "../lib/cloud/workspaceSession";
 
@@ -12,6 +14,7 @@ export const SIGN_OUT_NOTE =
 export const REMOVE_LOCAL_COPY_LABEL = "Remove the old copy from this browser";
 export const MIGRATE_LOCAL_LABEL = "Move browser notes into my workspace";
 export const RETRY_SYNC_LABEL = "Retry now";
+export const RETRY_UPLOADS_LABEL = "Retry";
 
 export function syncStatusLine(status) {
   if (!status) return "";
@@ -28,6 +31,46 @@ export function syncStatusLine(status) {
     default:
       return pending > 0 ? `${pending} ${pending === 1 ? "change is" : "changes are"} waiting to be saved.` : "Everything is saved to your account.";
   }
+}
+
+/**
+ * The workspace's FILE state, in one sentence (Production Readiness Phase
+ * 7.4). Deliberately about files only: notes, templates and PDF entries have
+ * their own line above it, and merging the two would make either one vague.
+ *
+ * It never says "uploading" for a queue that is merely waiting — offline, or
+ * with no bucket configured — because that would tell the user their files
+ * are on their way when nothing is moving.
+ */
+export function assetSyncStatusLine(status) {
+  if (!status) return "";
+  const pending = Number(status.pending) || 0;
+  const failed = Number(status.failed) || 0;
+  const waiting = Math.max(0, pending - failed);
+  const files = (n) => `${n} ${n === 1 ? "file" : "files"}`;
+  switch (status.status) {
+    case ASSET_SYNC_STATUS.UNCONFIGURED:
+      return "Files stay on this device — uploading files to your account is not switched on in this version.";
+    case ASSET_SYNC_STATUS.OFFLINE:
+      return waiting > 0
+        ? `Offline — ${files(waiting)} waiting to upload.`
+        : "Offline — no files are waiting to upload.";
+    case ASSET_SYNC_STATUS.UPLOADING:
+      return `Uploading ${files(Math.max(1, Number(status.active) || waiting || 1))}…`;
+    case ASSET_SYNC_STATUS.WAITING:
+      return waiting > 0 ? `${files(waiting)} waiting to upload` : "Files synced";
+    case ASSET_SYNC_STATUS.FAILED:
+      return waiting > 0 ? `${files(waiting)} waiting to upload` : "Files synced";
+    default:
+      return waiting > 0 ? `${files(waiting)} waiting to upload` : "Files synced";
+  }
+}
+
+/** "1 file needs attention", or "" when none does. */
+export function assetSyncAttentionLine(status) {
+  const failed = status ? Number(status.failed) || 0 : 0;
+  if (failed <= 0) return "";
+  return `${failed} ${failed === 1 ? "file needs" : "files need"} attention`;
 }
 
 function useSyncStatus(sync) {
@@ -47,6 +90,7 @@ export default function SettingsModal({ open, onClose }) {
   const { user, signOut, resendVerification } = useAuth();
   const scope = useOptionalDataScope();
   const syncStatus = useSyncStatus(scope ? scope.sync : null);
+  const assetStatus = useAssetUploadStatus(scope ? scope.assetSync : null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const [localNotice, setLocalNotice] = useState(null);
@@ -58,11 +102,15 @@ export default function SettingsModal({ open, onClose }) {
     setBusy(true);
     try {
       // Flush what this browser still holds for the account before the
-      // session ends; an offline sign-out simply keeps the queue.
-      if (scope) await scope.prepareSignOut();
+      // session ends; an offline sign-out simply keeps the queue. The file
+      // uploads get a bounded chance to finish and then SAY what is left —
+      // the queue and its bytes stay on this device either way.
+      const prepared = scope ? await scope.prepareSignOut() : null;
+      const unfinished = prepared && prepared.assets ? prepared.assets.message : null;
+      if (unfinished) setNotice(unfinished);
       const result = await signOut();
       // Success unmounts the application through the auth gate.
-      if (!result.ok) setNotice(result.message);
+      if (!result.ok) setNotice(unfinished ? `${unfinished} ${result.message}` : result.message);
     } finally {
       setBusy(false);
     }
@@ -197,9 +245,40 @@ export default function SettingsModal({ open, onClose }) {
                 {RETRY_SYNC_LABEL}
               </button>
             )}
+            {/* Files — a compact line, not a dashboard. It is separate from
+                the line above because the two can legitimately disagree: the
+                notes can be fully saved while a photo is still on its way. */}
+            {assetStatus && (
+              <div className="mt-3">
+                <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Files</div>
+                <div className="text-xs text-gray-700 dark:text-gray-300" role="status" aria-live="polite">
+                  {assetSyncStatusLine(assetStatus)}
+                </div>
+                {assetSyncAttentionLine(assetStatus) && (
+                  <div className="text-xs text-amber-700 dark:text-amber-300 mt-1">
+                    {assetSyncAttentionLine(assetStatus)}
+                    {" · "}
+                    <button
+                      type="button"
+                      onClick={() => scope.assetSync.retryNow()}
+                      disabled={busy}
+                      className="underline"
+                    >
+                      {RETRY_UPLOADS_LABEL}
+                    </button>
+                  </div>
+                )}
+                {assetStatus.error && assetStatus.status === ASSET_SYNC_STATUS.FAILED && (
+                  <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 leading-snug">
+                    {assetSyncFailureMessage(assetStatus.error)}
+                  </p>
+                )}
+              </div>
+            )}
             <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-2 leading-snug">
-              Notes, templates and PDF entries are saved to your account. Images, PDF files and attachments stay on
-              the device they were added on until file sync arrives in a later update.
+              Notes, templates and PDF entries are saved to your account. Images, PDF files and attachments are
+              uploaded to it as well; anything that has not finished stays on this device and is sent the next time
+              you sign in here.
             </p>
           </section>
         )}
