@@ -24,9 +24,17 @@
 //
 // The asset kind and the MIME are both checked, and the MIME is read from the
 // retrieved Blob itself — never from the note, the filename or the reference.
+//
+// CROSS-DEVICE (Production Readiness Phase 7.5). The read goes through the
+// shared boundary, so an image whose bytes live only in the workspace's cloud
+// copy is DOWNLOADED and cached before the export continues. What is refused
+// is unchanged — a required image that cannot be produced still aborts the
+// export whole — but the refusal now SAYS WHICH, because "gone", "you are
+// offline" and "the device that added it has not finished uploading" call for
+// three completely different responses from the person exporting.
 
 import { ASSET_KIND_EDITOR_IMAGE } from "./assetStorage";
-import { loadAsset as readAssetBytes } from "./assetReader";
+import { ASSET_READ_STATE, readAssetWithState, readerFromLoadAsset } from "./assetReader";
 import { isAllowedImageMimeType, normalizeMimeType } from "./imageProcessing";
 import {
   EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR,
@@ -51,6 +59,15 @@ export const EXPORT_MISSING_ASSET_MESSAGE = `This note could not be exported: on
 export const EXPORT_UNREADABLE_ASSET_MESSAGE = `This note could not be exported: one of its images could not be read from storage. ${UNCHANGED_SUFFIX}`;
 export const EXPORT_UNSUPPORTED_ASSET_MESSAGE = `This note could not be exported: one of its stored images is not a JPEG, PNG or WebP image. ${UNCHANGED_SUFFIX}`;
 export const EXPORT_BLOB_URL_MESSAGE = `This note could not be exported: it contains a temporary image reference that is no longer valid. ${UNCHANGED_SUFFIX}`;
+export const EXPORT_OFFLINE_ASSET_MESSAGE = `This note could not be exported: one of its images has not been downloaded to this device yet and you appear to be offline. ${UNCHANGED_SUFFIX}`;
+export const EXPORT_PENDING_ASSET_MESSAGE = `This note could not be exported: one of its images has not finished syncing from the device it was added on. Try again shortly. ${UNCHANGED_SUFFIX}`;
+
+/** The refusal for a read that did not produce bytes. */
+export function exportImageRefusalMessage(state) {
+  if (state === ASSET_READ_STATE.OFFLINE) return EXPORT_OFFLINE_ASSET_MESSAGE;
+  if (state === ASSET_READ_STATE.PENDING) return EXPORT_PENDING_ASSET_MESSAGE;
+  return EXPORT_MISSING_ASSET_MESSAGE;
+}
 
 function defaultBlobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
@@ -124,7 +141,11 @@ function buildImagePlaceholder(doc, altText) {
  */
 export async function resolveExportImageHtml(html, deps = {}) {
   const {
-    loadAsset = readAssetBytes,
+    // An injected `loadAsset` keeps its Phase 7.2 shape and is adapted to the
+    // state-reporting read, so a caller that only knows "record or nothing"
+    // still gets exactly the behaviour it had.
+    loadAsset = null,
+    readAsset = loadAsset ? readerFromLoadAsset(loadAsset) : readAssetWithState,
     blobToDataUrl = defaultBlobToDataUrl,
     parseHtml = defaultParseHtml,
     onMissing = EXPORT_MISSING_IMAGE.ABORT,
@@ -163,16 +184,17 @@ export async function resolveExportImageHtml(html, deps = {}) {
   const resolved = new Map();
   const failed = new Set();
   for (const id of ids) {
-    let asset;
+    let read;
     try {
-      asset = await loadAsset(id);
+      read = await readAsset(id);
     } catch {
       refuse(EXPORT_UNREADABLE_ASSET_MESSAGE);
       failed.add(id);
       continue;
     }
+    const asset = read && read.state === ASSET_READ_STATE.READY ? read.record : null;
     if (!asset || !asset.blob) {
-      refuse(EXPORT_MISSING_ASSET_MESSAGE);
+      refuse(exportImageRefusalMessage(read ? read.state : ASSET_READ_STATE.MISSING));
       failed.add(id);
       continue;
     }

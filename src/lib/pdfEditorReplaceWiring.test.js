@@ -24,10 +24,14 @@ describe("PdfEditorTab", () => {
     expect(TAB).toMatch(/const sourceId = registryDoc \? pdfSourceId\(registryDoc\) : docId;/);
     // Production Readiness Phase 7.2: the byte read moved behind the shared
     // asset read boundary, which routes `pdf-source` to the SAME pdfDocBytes
-    // store. Still the source id, still the document id for annotations.
-    expect(TAB).toMatch(/loadAsset\(loadSourceId, \{ kind: ASSET_KIND_PDF_SOURCE \}\)/);
+    // store. Phase 7.5: the same boundary, now reporting HOW the read went so
+    // a temporarily unreachable file is not treated as a missing one. Still
+    // the source id, still the document id for annotations.
+    expect(TAB).toMatch(/readAssetWithState\(loadSourceId, \{\s*kind: ASSET_KIND_PDF_SOURCE,/);
     expect(TAB).toMatch(/loadAnnotations\(docId\)/);
-    expect(TAB).toMatch(/import \{ loadAsset \} from "\.\.\/\.\.\/lib\/assetReader"/);
+    expect(TAB).toMatch(
+      /import \{ ASSET_READ_STATE, readAssetWithState \} from "\.\.\/\.\.\/lib\/assetReader"/
+    );
     expect(TAB).toMatch(/setPdfBytesCache\(loadSourceId, rec\.bytes\)/);
     expect(TAB).toMatch(/getPdfBytesCache\(loadSourceId\)/);
   });
@@ -50,8 +54,25 @@ describe("PdfEditorTab", () => {
   test("a document whose file is not in this browser gets an explicit state, not the first-run help", () => {
     expect(TAB).toMatch(/data-pdf-source-missing="true"/);
     expect(TAB).toMatch(/\{!pdfDoc && sourceMissing && \(/);
-    expect(TAB).toMatch(/\{!pdfDoc && !sourceMissing && \(/);
-    expect(TAB).toMatch(/setSourceMissing\(true\)/);
+    expect(TAB).toMatch(
+      /\{!pdfDoc && !sourceMissing && !sourcePendingRemote && !sourceUnreadable && \(/
+    );
+    expect(TAB).toMatch(/const sourceMissing = sourceRead\.status === ASSET_READ_STATE\.MISSING;/);
+  });
+
+  test("a file that is merely UNREACHABLE gets its own state and may not be replaced (7.5)", () => {
+    // Downloading, waiting on another device's upload, or offline. All three
+    // describe a file that still exists, so neither the first-run helper nor
+    // the "supply it again" helper may appear, and Open PDF — which REPLACES
+    // the document's source — is refused.
+    expect(TAB).toMatch(/const sourcePendingRemote = isRecoverableAssetRead\(sourceRead\.status\);/);
+    expect(TAB).toMatch(/const canReplaceSource = !sourcePendingRemote;/);
+    expect(TAB).toMatch(/disabled=\{!canReplaceSource\}/);
+    expect(TAB).toMatch(/\{!pdfDoc && sourcePendingRemote && \(/);
+    expect(TAB).toMatch(/data-pdf-source-state=\{sourceRead\.status\}/);
+    // Retry is offered only where trying again can change the answer.
+    expect(TAB).toMatch(/isRetryableAssetRead\(sourceRead\.status\)/);
+    expect(TAB).toMatch(/setSourceAttempt\(\(n\) => n \+ 1\)/);
   });
 });
 

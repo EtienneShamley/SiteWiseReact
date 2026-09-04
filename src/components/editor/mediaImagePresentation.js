@@ -26,15 +26,29 @@
 // always used, and "is this src safe to render" is the SAME serializer
 // authority (isPersistableImageSrc, editorImageAssets.js) it has always used.
 //
+// CROSS-DEVICE STATES (Production Readiness Phase 7.5). An image whose bytes
+// are not on this device is no longer one undifferentiated "unavailable": it
+// may be downloading, it may be waiting on another device's upload, or the
+// connection may simply be gone. The placeholder therefore says which — in
+// the shared wording (src/lib/assetReadPresentation.js), so the note image,
+// the Template photo and the attachment card cannot describe the same
+// situation three different ways — and offers Retry exactly where trying
+// again could change the answer. A LOCAL HIT renders precisely as before.
+//
 // Pure apart from the one shared hook call — no storage, no persistence.
 
 import React from "react";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
+import { EDITOR_IMAGE_UNAVAILABLE_TEXT, isPersistableImageSrc } from "../../lib/editorImageAssets";
+import { ASSET_READ_STATE } from "../../lib/assetReader";
 import {
-  EDITOR_IMAGE_LOADING_TEXT,
-  EDITOR_IMAGE_UNAVAILABLE_TEXT,
-  isPersistableImageSrc,
-} from "../../lib/editorImageAssets";
+  ASSET_READ_SURFACE,
+  RETRY_ASSET_READ_LABEL,
+  assetReadMessage,
+  isBusyAssetRead,
+  isRecoverableAssetRead,
+  isRetryableAssetRead,
+} from "../../lib/assetReadPresentation";
 import { MEDIA_CLASS, mediaLayoutClassNames } from "../../lib/editorMediaLayout";
 
 /**
@@ -113,7 +127,7 @@ export function useMediaImagePresentation({
   // The hook is called unconditionally (rules of hooks) and no-ops for a
   // non-asset image — the same behaviour the live NodeView has always relied
   // on to keep asset-backed, legacy and remote images on one component.
-  const { url, status } = useAssetObjectUrl(assetId || null);
+  const { url, status, code, retry } = useAssetObjectUrl(assetId || null);
 
   const label = alt || "Image";
   const dimensionProps = {};
@@ -136,23 +150,50 @@ export function useMediaImagePresentation({
   let renderable = false;
 
   if (assetId) {
-    if (status === "loading") {
-      body = (
-        <span className="note-image-placeholder" role="status" onClick={onImageClick}>
-          {EDITOR_IMAGE_LOADING_TEXT}
-        </span>
-      );
-    } else if (status === "ready" && url) {
+    if (status === ASSET_READ_STATE.READY && url) {
       renderable = true;
       body = <img src={url} alt={label} {...imgProps} />;
+    } else if (isBusyAssetRead(status)) {
+      body = (
+        <span className="note-image-placeholder" role="status" onClick={onImageClick}>
+          {assetReadMessage({ state: status, code, surface: ASSET_READ_SURFACE.IMAGE })}
+        </span>
+      );
     } else {
+      // Everything that is not here yet. `missing` keeps the exact words it
+      // has always had; the cross-device states get their own, and a Retry
+      // only where one can help.
+      const message =
+        assetReadMessage({ state: status, code, surface: ASSET_READ_SURFACE.IMAGE }) ||
+        EDITOR_IMAGE_UNAVAILABLE_TEXT;
       body = (
         <span
-          className="note-image-placeholder note-image-placeholder--missing"
+          className={`note-image-placeholder ${
+            isRecoverableAssetRead(status)
+              ? "note-image-placeholder--pending"
+              : "note-image-placeholder--missing"
+          }`}
           onClick={onImageClick}
         >
-          {EDITOR_IMAGE_UNAVAILABLE_TEXT}
+          {message}
           {alt ? ` (${alt})` : ""}
+          {isRetryableAssetRead(status) && (
+            <button
+              type="button"
+              className="note-image-placeholder__retry"
+              // The placeholder sits inside an atomic node on the live
+              // surface; the click is the button's alone and must not also
+              // select or drag the image.
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                event.preventDefault();
+                retry();
+              }}
+            >
+              {RETRY_ASSET_READ_LABEL}
+            </button>
+          )}
         </span>
       );
     }

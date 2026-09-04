@@ -2,31 +2,42 @@
 //
 // THE read boundary for binary assets. Every surface that shows, opens,
 // exports or renders stored bytes comes through here, so there is one place
-// that answers "give me this asset" and one place a later phase has to change
-// to make that answer reach the workspace's cloud copy.
+// that answers "give me this asset".
 //
-// WHAT IT DOES TODAY (Production Readiness Phase 7.2)
+// WHAT IT DOES (Production Readiness Phase 7.5)
 //
 //   1. ask this browser's local cache (src/lib/localAssetCache.js), which
 //      routes general assets to the asset store and PDF source bytes to the
 //      PDF store;
 //   2. on a local hit, return it — the behaviour every reader has always had,
-//      at the same cost;
-//   3. on a local miss, call a remote loader ONLY IF the caller injected one.
+//      at the same cost, with no cloud call of any kind;
+//   3. on a local miss, ask the REMOTE READER REGISTERED FOR THIS WORKSPACE
+//      (src/lib/cloud/assetRemoteRead.js), which resolves the workspace's
+//      cloud metadata and, when the object is genuinely stored, downloads it
+//      through the authenticated Storage SDK and caches it locally.
 //
-// There is no default remote loader, and this module does not import, name or
-// construct the Firebase Storage adapter. Nothing in the product injects one
-// yet either: a local miss resolves to null, exactly as a missing asset always
-// has, and no surface says or implies that a cloud copy is being fetched.
-// Wiring the adapter in is Phase 7.5.
+// This module still does not import, name or construct the Firebase Storage
+// adapter or the Firestore store. It holds ONE SLOT for a remote reader that
+// the workspace session fills when it opens and empties when it closes
+// (src/context/DataScopeContext.js), and it hands a read to that reader only
+// when the reader's OWN workspace id equals the workspace the read is being
+// made under. A reader is never "the current one" by virtue of being the last
+// one registered: it is matched by identity, so a request made under
+// workspace B can never be served by workspace A's reader, and a session that
+// has closed serves nothing at all.
+//
+// The slot also keeps non-React callers — the export loaders, the annotator —
+// on the same path as the components, without any of them acquiring a
+// dependency on React context or on Firebase.
 //
 // IN-FLIGHT DEDUPLICATION
 //
 // One note can reference the same photo in five places, and a Section can be
 // rendered by its editor and its static view at once. Without deduplication
-// each of those is a separate IndexedDB read — and, once remote reads exist, a
+// each of those is a separate IndexedDB read — and, for a remote read, a
 // separate download of the same bytes. Concurrent requests for the same asset
-// therefore SHARE one promise.
+// therefore SHARE one resolution: one metadata read, one download, one cache
+// write, every caller served.
 //
 // The key is (workspace, kind, asset), and the workspace is in it for a reason
 // that is not performance: two accounts can use one browser, and a result
@@ -37,7 +48,11 @@
 //
 // Entries are removed when the promise SETTLES, success or failure. A failed
 // read must leave nothing behind, or a Retry would be served the failure it is
-// retrying.
+// retrying — which is also why Retry needs no flag of its own here. Reading
+// again IS a fresh attempt: a remote read always resolves the workspace's
+// CURRENT asset document (src/lib/cloud/assetRemoteRead.js), because this
+// browser's remote index is a discovery cache and never authoritative
+// lifecycle state.
 
 import { ASSET_KIND_PDF_SOURCE, readLocalAsset } from "./localAssetCache";
 import { activeAssetWorkspaceId } from "./assetStorage";
@@ -46,25 +61,114 @@ import { isQueueableWorkspaceId } from "./assetUploadQueue";
 /**
  * The vocabulary a reading surface may report.
  *
- * `DOWNLOADING` and `OFFLINE` exist so the presentation layer has one agreed
- * name for the two states cross-device reads will introduce (Phase 7.5) — a
- * download in progress, and a copy that exists but cannot be reached now. THIS
- * PHASE NEVER PRODUCES EITHER. No local read can be "downloading", and telling
- * a user something is downloading when nothing is would be a lie about where
- * their data is.
+ *   IDLE         nothing was asked for
+ *   LOADING      this browser is being asked
+ *   DOWNLOADING  the workspace's cloud copy is being fetched right now
+ *   READY        the bytes are here
+ *   PENDING      the reference is real and the bytes are RECOVERABLE but not
+ *                obtainable yet — the originating device may not have
+ *                finished uploading, or the object is not readable at this
+ *                moment. It is never presented as data loss.
+ *   MISSING      confirmed absent: nothing here, and nothing the workspace
+ *                describes
+ *   OFFLINE      a cloud copy may exist and cannot be reached now
+ *   ERROR        the read failed in a way waiting will not resolve
+ *   CONFLICT     what the cloud (or this browser) holds under this id
+ *                contradicts what this asset is. Nothing is cached, nothing
+ *                is overwritten.
  */
 export const ASSET_READ_STATE = Object.freeze({
   IDLE: "idle",
   LOADING: "loading",
   DOWNLOADING: "downloading",
   READY: "ready",
+  PENDING: "pending",
   MISSING: "missing",
   OFFLINE: "offline",
   ERROR: "error",
+  CONFLICT: "conflict",
 });
 
-// key → the shared in-flight promise
+/**
+ * WHY a read ended where it did. These are NoteWise's own codes — no Firebase
+ * error code ever reaches this vocabulary, and none is ever shown to a user
+ * (src/lib/assetReadPresentation.js turns a state and a code into the one
+ * sentence a surface may display).
+ */
+export const ASSET_READ_CODE = Object.freeze({
+  /** This build has no Storage bucket, so no cloud read is possible. */
+  UNCONFIGURED: "unconfigured",
+  /** No workspace session is open for the workspace this read named. */
+  NO_SESSION: "no-session",
+  /** The workspace does not describe this asset — it may still be uploading. */
+  NOT_YET_UPLOADED: "not-yet-uploaded",
+  /** The workspace describes it as stored; the object was not there. */
+  REMOTE_OBJECT_MISSING: "remote-object-missing",
+  /** The workspace's record of it is tombstoned. */
+  TOMBSTONED: "tombstoned",
+  /** The workspace's record of it could not be read as an asset. */
+  MALFORMED_CLOUD_RECORD: "malformed-cloud-record",
+  /** The object on the path is not this asset. */
+  IDENTITY_CONFLICT: "identity-conflict",
+  /** The bytes that arrived are not the bytes the record describes. */
+  CONTENT_CONFLICT: "content-conflict",
+  /** This browser already holds something else under this id. */
+  LOCAL_CONFLICT: "local-conflict",
+  OFFLINE: "offline",
+  UNAUTHORIZED: "unauthorized",
+  UNKNOWN: "unknown",
+});
+
+/** The shape every read resolves to. */
+function result(state, record = null, code = null) {
+  return { state, record, code };
+}
+
+// key -> { promise, phase, listeners }
 const inFlight = new Map();
+
+/* ----------------------- the workspace's remote reader -------------------- */
+
+// ONE slot, filled by the open workspace session. It is not a cache of
+// readers and not a stack: a browser has one signed-in workspace at a time,
+// and a second registration replaces the first — which is exactly what an
+// account switch is.
+let registeredReader = null;
+
+/**
+ * Register the remote reader of the workspace whose session just opened.
+ * Replaces whatever was registered before.
+ */
+export function setAssetRemoteReader(reader) {
+  registeredReader = reader && reader.workspaceId ? reader : null;
+  return registeredReader;
+}
+
+/**
+ * Unregister a reader. The reader is NAMED so a late cleanup — the closing
+ * session's effect running after the next session has already registered its
+ * own — cannot unregister the new one.
+ */
+export function clearAssetRemoteReader(reader = null) {
+  if (reader && registeredReader !== reader) return;
+  registeredReader = null;
+}
+
+/**
+ * The reader that may serve a read made under `workspaceId`, or null.
+ *
+ * Identity, never ambience: the reader must NAME the same workspace and must
+ * still be active. A reader whose session has closed, or one belonging to
+ * another workspace, is not "the current reader" — it is not a reader for
+ * this read at all.
+ */
+export function assetRemoteReaderFor(workspaceId) {
+  const reader = registeredReader;
+  if (!reader || !workspaceId) return null;
+  if (reader.workspaceId !== workspaceId) return null;
+  if (typeof reader.isActive === "function" && !reader.isActive()) return null;
+  return reader;
+}
 
 /** The deduplication key. Exported so its composition is directly testable. */
 export function assetReadKey(assetId, { workspaceId = null, kind = null } = {}) {
@@ -112,12 +216,37 @@ function forCaller(record) {
   return { ...record, bytes: record.bytes.slice(0) };
 }
 
-async function resolveAsset(assetId, { workspaceId, kind, remoteLoader }) {
+function resultForCaller(value) {
+  return { ...value, record: forCaller(value.record) };
+}
+
+async function resolveAsset(assetId, { workspaceId, kind, remoteLoader, setPhase }) {
   const local = await readLocalAsset(assetId, { kind });
-  if (local && isAssetReadableInWorkspace(local, workspaceId)) return local;
-  if (typeof remoteLoader !== "function") return null;
-  const remote = await remoteLoader({ assetId, workspaceId, kind });
-  return remote || null;
+  if (local && isAssetReadableInWorkspace(local, workspaceId)) {
+    return result(ASSET_READ_STATE.READY, local);
+  }
+
+  // An explicitly injected loader keeps the Phase 7.2 contract exactly: it is
+  // handed the read and its answer is a record or nothing.
+  if (typeof remoteLoader === "function") {
+    setPhase(ASSET_READ_STATE.DOWNLOADING);
+    const remote = await remoteLoader({ assetId, workspaceId, kind });
+    return remote ? result(ASSET_READ_STATE.READY, remote) : result(ASSET_READ_STATE.MISSING);
+  }
+
+  const reader = assetRemoteReaderFor(workspaceId);
+  // No session, no workspace, or a reader belonging to a different workspace:
+  // a local miss is a miss, exactly as it has always been. Nothing here
+  // implies a download that is not happening.
+  if (!reader) return result(ASSET_READ_STATE.MISSING);
+
+  const remote = await reader.read({
+    assetId,
+    kind,
+    onDownloadStart: () => setPhase(ASSET_READ_STATE.DOWNLOADING),
+  });
+  if (!remote || typeof remote.state !== "string") return result(ASSET_READ_STATE.MISSING);
+  return result(remote.state, remote.record || null, remote.code || null);
 }
 
 /**
@@ -138,35 +267,106 @@ export function resolveReadWorkspaceId(requested) {
 }
 
 /**
- * Read one asset. Resolves to the record (see readLocalAsset for the two
- * shapes) or null when it cannot be found.
+ * Read one asset and report HOW it went.
  *
  * @param {string} assetId
  * @param {{
  *   workspaceId?: string|null,   a VALID id reads under that workspace;
  *                                anything else uses the active durable scope
  *   kind?: string|null,          routes the read; see localAssetCache
- *   remoteLoader?: Function|null ({ assetId, workspaceId, kind }) => record|null,
- *                                called ONLY on a local miss. There is no
- *                                default: production reads stay local in 7.2.
+ *   remoteLoader?: Function|null ({ assetId, workspaceId, kind }) => record|null.
+ *                                An explicit override; when absent the
+ *                                workspace's registered remote reader answers.
+ *   onState?: (state) => void,   called when the read ENTERS a longer-running
+ *                                phase — today only `downloading`, and only
+ *                                when a download genuinely starts. A caller
+ *                                that joins an in-flight download is told
+ *                                immediately.
  * }} [options]
+ * @returns {Promise<{ state: string, record: object|null, code: string|null }>}
  */
-export function loadAsset(assetId, options = {}) {
-  if (!assetId) return Promise.resolve(null);
-  const { kind = null, remoteLoader = null } = options;
+export function readAssetWithState(assetId, options = {}) {
+  if (!assetId) return Promise.resolve(result(ASSET_READ_STATE.IDLE));
+  const { kind = null, remoteLoader = null, onState = null } = options;
   const workspaceId = resolveReadWorkspaceId(options.workspaceId);
   const key = assetReadKey(assetId, { workspaceId, kind });
 
-  const existing = inFlight.get(key);
-  if (existing) return existing.then(forCaller);
+  let entry = inFlight.get(key);
+  if (!entry) {
+    const created = { promise: null, phase: ASSET_READ_STATE.LOADING, listeners: new Set() };
+    const setPhase = (phase) => {
+      if (created.phase === phase) return;
+      created.phase = phase;
+      for (const listener of Array.from(created.listeners)) {
+        try {
+          listener(phase);
+        } catch {
+          // A presentation callback must never break a read in flight.
+        }
+      }
+    };
+    created.promise = resolveAsset(assetId, { workspaceId, kind, remoteLoader, setPhase });
+    inFlight.set(key, created);
+    const settle = () => {
+      created.listeners.clear();
+      if (inFlight.get(key) === created) inFlight.delete(key);
+    };
+    created.promise.then(settle, settle);
+    entry = created;
+  }
 
-  const pending = resolveAsset(assetId, { workspaceId, kind, remoteLoader });
-  inFlight.set(key, pending);
-  const settle = () => {
-    if (inFlight.get(key) === pending) inFlight.delete(key);
+  if (typeof onState === "function") {
+    // A joiner is told the phase the shared read is ALREADY in, so a second
+    // image of the same photo shows "Downloading…" rather than "Loading…".
+    if (entry.phase !== ASSET_READ_STATE.LOADING) {
+      try {
+        onState(entry.phase);
+      } catch {
+        // as above
+      }
+    }
+    entry.listeners.add(onState);
+  }
+
+  const joined = entry;
+  return joined.promise.then(
+    (value) => {
+      if (typeof onState === "function") joined.listeners.delete(onState);
+      return resultForCaller(value);
+    },
+    (error) => {
+      if (typeof onState === "function") joined.listeners.delete(onState);
+      throw error;
+    }
+  );
+}
+
+/**
+ * Read one asset. Resolves to the record (see readLocalAsset for the two
+ * shapes) or null when it cannot be produced.
+ *
+ * The signature and the resolution are unchanged from Phase 7.2, so every
+ * existing reader keeps working exactly as it did; a surface that wants to
+ * tell "not here yet" from "gone" uses `readAssetWithState` above.
+ */
+export function loadAsset(assetId, options = {}) {
+  return readAssetWithState(assetId, options).then((value) => value.record || null);
+}
+
+/**
+ * Adapt a Phase 7.2-shaped `loadAsset` into a state-reporting read.
+ *
+ * The export loaders accept an injected `loadAsset` for testing. Rather than
+ * making every one of them carry two code paths, an injected loader is
+ * wrapped here: a record is READY, nothing is MISSING, a throw propagates.
+ * That is exactly what those callers meant before, stated in the new
+ * vocabulary.
+ */
+export function readerFromLoadAsset(load) {
+  return async (assetId, options = {}) => {
+    const record = await load(assetId, options);
+    return record ? result(ASSET_READ_STATE.READY, record) : result(ASSET_READ_STATE.MISSING);
   };
-  pending.then(settle, settle);
-  return pending.then(forCaller);
 }
 
 /** How many reads are in flight. A test assertion, not a product signal. */
@@ -176,9 +376,10 @@ export function inFlightAssetReadCount() {
 
 /**
  * Drop every in-flight entry. Reads already awaited still resolve; nothing
- * new joins them. Used between tests, and available to a session teardown
- * that wants no read of a closed session to be joined by the next one.
+ * new joins them. Used between tests, and by a session teardown so no read of
+ * a closed session can be joined by the session that replaces it.
  */
 export function resetAssetReader() {
+  for (const entry of inFlight.values()) entry.listeners.clear();
   inFlight.clear();
 }

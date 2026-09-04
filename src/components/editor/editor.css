@@ -408,6 +408,50 @@
   color: #fca5a5;
 }
 
+/* RECOVERABLE, not lost (Production Readiness Phase 7.5). An image whose bytes
+   have not reached this device yet — still uploading from another device, or
+   simply offline — is not an error and must not be dressed as one: it keeps
+   the neutral placeholder treatment and carries a Retry. Only a genuinely
+   missing, unreadable or contradicting asset stays red. */
+.nw-doc-root .note-image-placeholder--pending,
+.nw-editor-root .note-image-placeholder--pending {
+  border-style: dashed;
+  border-color: #d1d5db;
+  background: #f9fafb;
+  color: #6b7280;
+}
+.dark .note-editor .note-image-placeholder--pending {
+  border-color: #4b5563;
+  background: #1f2937;
+  color: #9ca3af;
+}
+.nw-doc-root .note-image-placeholder__retry,
+.nw-editor-root .note-image-placeholder__retry {
+  margin-left: 0.5rem;
+  border: 1px solid currentColor;
+  border-radius: 0.25rem;
+  padding: 0.0625rem 0.375rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.nw-doc-root .note-image-placeholder__retry:hover,
+.nw-editor-root .note-image-placeholder__retry:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+.dark .note-editor .note-image-placeholder__retry:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+/* A placeholder is never part of what a printed or exported page shows as an
+   action. */
+@media print {
+  .note-image-placeholder__retry {
+    display: none !important;
+  }
+}
+
 /* An attached file: a compact document card carrying a reference, never the
    file itself. Its states are distinguished by border, background AND text —
    never by colour alone, so the unavailable and selected states are readable

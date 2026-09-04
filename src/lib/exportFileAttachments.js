@@ -28,9 +28,10 @@
 // rewritten — only the export copy.
 
 import { ASSET_KIND_EDITOR_FILE } from "./assetStorage";
-import { loadAsset as readAssetBytes } from "./assetReader";
+import { ASSET_READ_STATE, readAssetWithState, readerFromLoadAsset } from "./assetReader";
 import {
   EXPORT_ATTACHMENT_NOTE,
+  EXPORT_ATTACHMENT_NOT_ON_DEVICE_NOTE,
   EXPORT_ATTACHMENT_UNAVAILABLE_NOTE,
   FILE_ATTACHMENT_ASSET_ATTR,
   FILE_ATTACHMENT_NAME_ATTR,
@@ -62,7 +63,13 @@ function defaultParseHtml(html) {
  * @returns {Promise<string>} export-only HTML
  */
 export async function resolveExportFileAttachmentHtml(html, deps = {}) {
-  const { loadAsset = readAssetBytes, parseHtml = defaultParseHtml } = deps;
+  const {
+    // An injected `loadAsset` keeps its Phase 7.2 shape and is adapted, so a
+    // caller that only knows "record or nothing" behaves exactly as before.
+    loadAsset = null,
+    readAsset = loadAsset ? readerFromLoadAsset(loadAsset) : readAssetWithState,
+    parseHtml = defaultParseHtml,
+  } = deps;
 
   if (typeof html !== "string" || !html) return "";
   const hasAttachments = html.includes(FILE_ATTACHMENT_ASSET_ATTR);
@@ -101,13 +108,24 @@ export async function resolveExportFileAttachmentHtml(html, deps = {}) {
   }
 
   const resolved = new Map();
+  // Assets whose bytes exist but have not reached this device. A tolerant
+  // export still omits them — it never embeds a binary — but it must not tell
+  // the reader the file is unavailable when it is merely elsewhere.
+  const notOnDevice = new Set();
   for (const id of ids) {
-    let asset = null;
+    let read = null;
     try {
-      asset = await loadAsset(id);
+      read = await readAsset(id);
     } catch {
-      asset = null;
+      read = null;
     }
+    if (
+      read &&
+      (read.state === ASSET_READ_STATE.PENDING || read.state === ASSET_READ_STATE.OFFLINE)
+    ) {
+      notOnDevice.add(id);
+    }
+    const asset = read && read.state === ASSET_READ_STATE.READY ? read.record : null;
     // The kind is checked here too: an export must not describe a Template-form
     // File or an editor image as though it were this note's attachment.
     if (
@@ -149,9 +167,10 @@ export async function resolveExportFileAttachmentHtml(html, deps = {}) {
     block.appendChild(strong);
 
     const meta = doc.createElement("span");
+    const pendingElsewhere = stored.assetId ? notOnDevice.has(stored.assetId) : false;
     const metaText = available
       ? ` — ${fileAttachmentMetaText(mimeType, name, size)} — ${EXPORT_ATTACHMENT_NOTE}`
-      : ` — ${EXPORT_ATTACHMENT_UNAVAILABLE_NOTE}`;
+      : ` — ${pendingElsewhere ? EXPORT_ATTACHMENT_NOT_ON_DEVICE_NOTE : EXPORT_ATTACHMENT_UNAVAILABLE_NOTE}`;
     meta.textContent = metaText;
     block.appendChild(meta);
 

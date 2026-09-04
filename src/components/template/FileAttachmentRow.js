@@ -22,6 +22,14 @@
 // Office formats (DOC/DOCX/XLS/XLSX) are Download-only — NoteWise does not
 // preview Office content.
 //
+// CROSS-DEVICE (Production Readiness Phase 7.5). The bytes may live only in
+// the workspace's cloud copy; the shared read boundary downloads and caches
+// them on demand through the same call this row has always made. The row now
+// distinguishes downloading / not-yet-available / offline from "gone", offers
+// Retry where one can help, and refuses Open and Download until the bytes are
+// actually here — the open policy is decided from the Blob retrieved, and
+// there is no Blob to decide from before then.
+//
 // Messages here are FIXED and restrained: they never carry an exception
 // message, a storage detail or an object URL. Raw exception text is not
 // something a user can act on, and showing it only describes how the
@@ -29,7 +37,15 @@
 // safeDownloadFilename helper, so Template-form evidence and Free-form note
 // attachments cannot hold different ideas of what a safe filename is.
 import React, { useEffect, useRef, useState } from "react";
-import { loadAsset } from "../../lib/assetReader";
+import { ASSET_READ_STATE, loadAsset, readAssetWithState } from "../../lib/assetReader";
+import {
+  ASSET_READ_SURFACE,
+  RETRY_ASSET_READ_LABEL,
+  assetReadMessage,
+  isBusyAssetRead,
+  isRecoverableAssetRead,
+  isRetryableAssetRead,
+} from "../../lib/assetReadPresentation";
 import { formatFileSize, fileKindLabel } from "../../lib/noteAttachments";
 import {
   RENDER_MODE,
@@ -61,9 +77,13 @@ export default function FileAttachmentRow({
   onRemove,
   onError, // (message) => void
 }) {
-  // available: null = still checking, true/false once resolved.
+  // status: the SHARED read state (src/lib/assetReader.js); `ready` is the
+  // only one that permits an action.
   // policy: derived from the stored Blob's own MIME type (never the filename).
-  const [state, setState] = useState({ available: null, policy: null });
+  const [state, setState] = useState({ status: ASSET_READ_STATE.LOADING, code: null, policy: null });
+  // Bumped by Retry; re-runs the read as a genuinely fresh attempt (nothing
+  // is cached between reads, and remote metadata is always current).
+  const [attempt, setAttempt] = useState(0);
   // Active controlled preview: { kind: "image", url, revoke } | { kind: "text", blob }
   const [preview, setPreview] = useState(null);
 
@@ -71,25 +91,36 @@ export default function FileAttachmentRow({
 
   useEffect(() => {
     let cancelled = false;
-    loadAsset(attachment.assetId)
-      .then((asset) => {
+    setState({ status: ASSET_READ_STATE.LOADING, code: null, policy: null });
+    readAssetWithState(attachment.assetId, {
+      onState: (phase) => {
         if (cancelled) return;
-        if (!asset || !asset.blob) {
-          setState({ available: false, policy: null });
+        setState((prev) => (prev.policy ? prev : { ...prev, status: phase }));
+      },
+    })
+      .then(({ state: status, code, record }) => {
+        if (cancelled) return;
+        if (status !== ASSET_READ_STATE.READY || !record || !record.blob) {
+          setState({
+            status: status === ASSET_READ_STATE.READY ? ASSET_READ_STATE.MISSING : status,
+            code: code || null,
+            policy: null,
+          });
           return;
         }
         setState({
-          available: true,
-          policy: resolveOpenPolicy(asset.blob.type, attachment.mimeType),
+          status: ASSET_READ_STATE.READY,
+          code: null,
+          policy: resolveOpenPolicy(record.blob.type, attachment.mimeType),
         });
       })
       .catch(() => {
-        if (!cancelled) setState({ available: false, policy: null });
+        if (!cancelled) setState({ status: ASSET_READ_STATE.ERROR, code: null, policy: null });
       });
     return () => {
       cancelled = true;
     };
-  }, [attachment.assetId, attachment.mimeType]);
+  }, [attachment.assetId, attachment.mimeType, attempt]);
 
   // Object-URL ownership: revoked explicitly on close, and on unmount via a ref
   // so an open preview can never leak. Keyed on nothing, so re-running effects
@@ -136,14 +167,14 @@ export default function FileAttachmentRow({
       },
     });
 
-    if (result.policy) setState({ available: true, policy: result.policy });
+    if (result.policy) setState({ status: ASSET_READ_STATE.READY, code: null, policy: result.policy });
 
     switch (result.status) {
       case OPEN_RESULT.READ_ERROR:
         onError && onError(ATTACHMENT_OPEN_FAILED_MESSAGE);
         return;
       case OPEN_RESULT.MISSING:
-        setState({ available: false, policy: null });
+        setState({ status: ASSET_READ_STATE.MISSING, code: null, policy: null });
         onError && onError(ATTACHMENT_UNAVAILABLE_MESSAGE);
         return;
       case OPEN_RESULT.DENIED:
@@ -176,7 +207,7 @@ export default function FileAttachmentRow({
       return;
     }
     if (!asset || !asset.blob) {
-      setState({ available: false, policy: null });
+      setState({ status: ASSET_READ_STATE.MISSING, code: null, policy: null });
       onError && onError(ATTACHMENT_UNAVAILABLE_MESSAGE);
       return;
     }
@@ -199,13 +230,24 @@ export default function FileAttachmentRow({
     }
   }
 
-  const unavailable = state.available === false;
-  const canOpen = isInlineRenderable(state.policy);
+  const ready = state.status === ASSET_READ_STATE.READY;
+  const busy = isBusyAssetRead(state.status);
+  // Recoverable is not available: the bytes may yet arrive, and until they do
+  // no action may be offered — but the row must not claim the file is gone.
+  const pendingRemote = !ready && isRecoverableAssetRead(state.status);
+  const unavailable = !ready && !busy && !pendingRemote;
+  const stateMessage = ready
+    ? null
+    : assetReadMessage({ state: state.status, code: state.code, surface: ASSET_READ_SURFACE.FILE });
+  const canOpen = ready && isInlineRenderable(state.policy);
   // Label the action for what it actually does.
   const openLabel = state.policy?.mode === RENDER_MODE.PDF ? "Open" : "Preview";
 
   return (
-    <div className={`file-att-row ${unavailable ? "file-att-row--missing" : ""}`}>
+    <div
+      className={`file-att-row ${unavailable ? "file-att-row--missing" : ""}`}
+      data-attachment-state={state.status}
+    >
       <span className="file-att-name" title={name}>
         {name}
       </span>
@@ -214,9 +256,10 @@ export default function FileAttachmentRow({
         {fileKindLabel(attachment.mimeType, attachment.name)}
         {attachment.size > 0 ? ` · ${formatFileSize(attachment.size)}` : ""}
         {unavailable ? " · unavailable — its stored file could not be found" : ""}
+        {!ready && !unavailable && stateMessage ? ` · ${stateMessage}` : ""}
       </span>
       <span className="file-att-actions">
-        {canOpen && !unavailable && (
+        {canOpen && (
           <button
             type="button"
             className="file-att-btn"
@@ -231,10 +274,20 @@ export default function FileAttachmentRow({
           className="file-att-btn"
           aria-label={`Download ${name}`}
           onClick={handleDownload}
-          disabled={unavailable}
+          disabled={!ready}
         >
           Download
         </button>
+        {isRetryableAssetRead(state.status) && (
+          <button
+            type="button"
+            className="file-att-btn"
+            aria-label={`${RETRY_ASSET_READ_LABEL} loading ${name}`}
+            onClick={() => setAttempt((n) => n + 1)}
+          >
+            {RETRY_ASSET_READ_LABEL}
+          </button>
+        )}
         {onRemove && (
           <button
             type="button"

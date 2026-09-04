@@ -432,7 +432,24 @@ describe("the asset upload engine's session binding (source)", () => {
   test("it is stopped synchronously when the session closes or the account changes", () => {
     expect(SCOPE).toMatch(/if \(uploads\) uploads\.stop\(\);/);
     expect(SCOPE).toMatch(/assetSyncRef\.current = null;/);
-    expect(SCOPE).toMatch(/\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, sessionOptions\]/);
+    expect(SCOPE).toMatch(
+      /\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions\]/
+    );
+  });
+
+  test("the workspace's remote READER is bound, registered and torn down with the session (7.5)", () => {
+    // Created after the workspace resolves, bound to THAT workspace id, and
+    // handed to the shared read boundary rather than to any component — so no
+    // component acquires a Firebase dependency and no read made under another
+    // account can reach this reader.
+    expect(SCOPE).toMatch(/const reader = createAssetRemoteReader\(\{\s*workspaceId: opened\.workspace\.id,/);
+    expect(SCOPE).toMatch(/setAssetRemoteReader\(reader\);/);
+    expect(SCOPE).toMatch(/reader\.hydrateIndex\(\)\.catch\(\(\) => null\);/);
+    // Torn down synchronously, and the clear NAMES the reader so a late
+    // cleanup cannot unregister its successor.
+    expect(SCOPE).toMatch(/reader\.stop\(\);/);
+    expect(SCOPE).toMatch(/clearAssetRemoteReader\(reader\);/);
+    expect(SCOPE).toMatch(/resetAssetReader\(\);/);
   });
 
   test("a missing bucket yields no store rather than an error, and no second cloud path", () => {

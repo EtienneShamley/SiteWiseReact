@@ -413,6 +413,88 @@ export async function deleteAsset(id, { workspaceId } = {}) {
   });
 }
 
+/** Why a downloaded asset was not written. */
+export const DOWNLOADED_ASSET_REASON = Object.freeze({
+  ALREADY_PRESENT: "already-present",
+  FOREIGN_WORKSPACE: "foreign-workspace",
+  LOCAL_CONFLICT: "local-conflict",
+});
+
+/**
+ * Whether a stored record and a downloaded one are the SAME asset.
+ *
+ * Kind and byte length only. A name is display metadata and may legitimately
+ * differ between devices; the bytes and what the asset IS may not. Pure, so
+ * the rule is testable without IndexedDB.
+ */
+export function describesSameAsset(existing, incoming) {
+  if (!existing || !incoming) return false;
+  if ((existing.kind || null) !== (incoming.kind || null)) return false;
+  const a = typeof existing.size === "number" ? existing.size : existing.blob ? existing.blob.size : null;
+  const b = typeof incoming.size === "number" ? incoming.size : incoming.blob ? incoming.blob.size : null;
+  return a !== null && b !== null && a === b;
+}
+
+/**
+ * Store bytes DOWNLOADED from the workspace's cloud copy (Production
+ * Readiness Phase 7.5) — the one local write that is not a local creation.
+ *
+ * It differs from `saveNewAsset` in the two ways that matter:
+ *
+ *   NO QUEUE ENTRY   the workspace already holds these bytes; that is where
+ *                    they came from. Queueing them would upload the account's
+ *                    own object back to itself, and the create-only rule
+ *                    would refuse it.
+ *   NEVER OVERWRITES a record already standing under this id is inspected,
+ *                    never replaced. Three outcomes, decided inside ONE
+ *                    transaction so no concurrent write can land between the
+ *                    look and the decision:
+ *                      foreign-workspace  the record belongs to another
+ *                                         workspace — refused outright
+ *                      local-conflict     the record is this workspace's (or
+ *                                         legacy) but describes something
+ *                                         else — refused, nothing changed
+ *                      already-present    it is the same asset; the download
+ *                                         is redundant and the write is a
+ *                                         no-op, which is what makes a
+ *                                         concurrent download idempotent
+ *
+ * A LEGACY record (no workspace) that matches is left exactly as it is: it is
+ * not re-tagged with a workspace here, because associating pre-Phase-7.2
+ * assets with an account is an explicit, user-facing migration (Phase 7.6).
+ *
+ * @returns {Promise<{ stored: boolean, reason: string|null }>}
+ */
+export async function saveDownloadedAsset(record) {
+  if (!record || !record.id) throw new Error("Cannot save an asset without an id");
+  if (!isQueueableWorkspaceId(record.workspaceId)) {
+    throw new Error("A downloaded asset must name the workspace it was downloaded for");
+  }
+  return assetDbTransaction(STORE, "readwrite", (stores) => {
+    const store = stores[STORE];
+    let outcome = { stored: false, reason: DOWNLOADED_ASSET_REASON.LOCAL_CONFLICT };
+    const read = store.get(record.id);
+    read.onsuccess = () => {
+      const existing = read.result;
+      if (!existing) {
+        store.put(record);
+        outcome = { stored: true, reason: null };
+        return;
+      }
+      const owner =
+        existing && isQueueableWorkspaceId(existing.workspaceId) ? existing.workspaceId : null;
+      if (owner && owner !== record.workspaceId) {
+        outcome = { stored: false, reason: DOWNLOADED_ASSET_REASON.FOREIGN_WORKSPACE };
+        return;
+      }
+      outcome = describesSameAsset(existing, record)
+        ? { stored: false, reason: DOWNLOADED_ASSET_REASON.ALREADY_PRESENT }
+        : { stored: false, reason: DOWNLOADED_ASSET_REASON.LOCAL_CONFLICT };
+    };
+    return () => outcome;
+  });
+}
+
 export async function assetExists(id) {
   if (!id) return false;
   const count = await txRequest("readonly", (store) => store.count(id));

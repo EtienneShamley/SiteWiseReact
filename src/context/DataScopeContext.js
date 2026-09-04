@@ -33,6 +33,15 @@
 //                                         finish, before the session ends
 //   }
 //
+// It also owns the workspace's ASSET REMOTE READER (Production Readiness
+// Phase 7.5). That one is deliberately NOT on the context value: every
+// binary read in the product already goes through the shared read boundary
+// (src/lib/assetReader.js), including the ones that are not React at all —
+// the export loaders and the annotator — so the reader is registered THERE,
+// matched by workspace identity, and unregistered and stopped when this
+// session closes. No component acquires a Firebase dependency, and a read
+// made under one account can never be served by another's reader.
+//
 // What it deliberately never does: fall back to the pre-account local
 // records when the workspace cannot be resolved (there is a plain error
 // screen instead — a workspace id is never guessed), upload this browser's
@@ -50,6 +59,8 @@ import { recordAccountSession } from "../lib/localDataBinding";
 import { readFirebaseClientConfigFromEnv, resolveFirebaseStorageConfig } from "../lib/firebaseClientConfig";
 import { SESSION_MODE, openWorkspaceSession } from "../lib/cloud/workspaceSession";
 import { createAssetUploadSync } from "../lib/cloud/assetUploadSync";
+import { createAssetRemoteReader } from "../lib/cloud/assetRemoteRead";
+import { clearAssetRemoteReader, resetAssetReader, setAssetRemoteReader } from "../lib/assetReader";
 import { detectLocalData, readLocalMigrationState, runLocalMigration, shouldOfferLocalMigration } from "../lib/cloud/localMigration";
 import { MALFORMED_CLOUD_RECORD_MESSAGE } from "../lib/cloud/workspaceHydration";
 import { reportPersistenceIssue } from "../lib/durableStorage";
@@ -105,6 +116,7 @@ export function DataScopeProvider({
   store: injectedStore = null,
   assetStore: injectedAssetStore = undefined,
   uploadOptions = null,
+  readOptions = null,
   sessionOptions = null,
   children,
 }) {
@@ -125,6 +137,10 @@ export function DataScopeProvider({
   // One per session, bound to that session's workspace, stopped with it.
   const assetSyncRef = useRef(null);
   const [assetSync, setAssetSync] = useState(null);
+  // The workspace's asset REMOTE READER (Production Readiness Phase 7.5).
+  // One per session, bound to that session's workspace, unregistered and
+  // stopped with it.
+  const remoteReaderRef = useRef(null);
 
   // Record the account on the local-data binding (a hint for the migration,
   // never a claim on the data) — unchanged from Phase 5.
@@ -187,6 +203,37 @@ export function DataScopeProvider({
         }).start();
         assetSyncRef.current = uploads;
         setAssetSync(uploads);
+
+        // The READ-THROUGH side of the same workspace (Production Readiness
+        // Phase 7.5), bound to the same workspace id and the same two cloud
+        // boundaries, and registered with the shared read boundary so every
+        // existing reader — components, export helpers, the annotator —
+        // reaches it without importing Firebase or React context. It is
+        // matched by workspace IDENTITY there, so a read made under another
+        // account can never be served by this one.
+        const reader = createAssetRemoteReader({
+          workspaceId: opened.workspace.id,
+          assetStore,
+          workspaceStore: store,
+          onMalformed: () =>
+            reportPersistenceIssue({
+              kind: "malformed-cloud-record",
+              key: null,
+              message: MALFORMED_CLOUD_RECORD_MESSAGE,
+            }),
+          ...(readOptions || {}),
+        });
+        remoteReaderRef.current = reader;
+        // Nothing in flight from the previous session may be joined by this
+        // one: the key names the workspace, and this drops even that.
+        resetAssetReader();
+        setAssetRemoteReader(reader);
+        // The workspace's asset METADATA index, hydrated in the background.
+        // It is a cache of knowledge that makes the first cross-device read
+        // cheaper; a read that arrives before it lands resolves the one
+        // document it needs directly, so nothing waits on it and a failure
+        // costs nothing but a Firestore read later.
+        reader.hydrateIndex().catch(() => null);
         const detected = detectLocalData(uid);
         setLocalData(detected);
         setMigrationState(readLocalMigrationState());
@@ -209,19 +256,29 @@ export function DataScopeProvider({
       cancelled = true;
       const opened = sessionRef.current;
       const uploads = assetSyncRef.current;
+      const reader = remoteReaderRef.current;
       sessionRef.current = null;
       assetSyncRef.current = null;
+      remoteReaderRef.current = null;
       // Stopped SYNCHRONOUSLY, before anything else unwinds: from this moment
-      // no in-flight upload of the closing session may write to the queue or
-      // the remote index, whichever account signs in next.
+      // no in-flight upload or download of the closing session may write to
+      // the queue, the remote index or this browser's asset cache, whichever
+      // account signs in next.
       if (uploads) uploads.stop();
+      if (reader) {
+        reader.stop();
+        // Named, so a cleanup that runs after the next session has already
+        // registered its own reader cannot unregister that one.
+        clearAssetRemoteReader(reader);
+      }
+      resetAssetReader();
       if (opened) {
         setTimeout(() => {
           opened.close();
         }, 0);
       }
     };
-  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, sessionOptions]);
+  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 

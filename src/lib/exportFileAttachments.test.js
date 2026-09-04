@@ -12,10 +12,12 @@ import {
   resolveExportFileAttachmentHtml,
 } from "./exportFileAttachments";
 import {
+  EXPORT_ATTACHMENT_NOT_ON_DEVICE_NOTE,
   EXPORT_ATTACHMENT_NOTE,
   EXPORT_ATTACHMENT_UNAVAILABLE_NOTE,
   FILE_ATTACHMENT_ASSET_ATTR,
 } from "./editorFileAttachments";
+import { ASSET_READ_STATE } from "./assetReader";
 import { ASSET_KIND_EDITOR_FILE, ASSET_KIND_EDITOR_IMAGE } from "./assetStorage";
 
 const ASSET_ID = "3f9a1c02-7b41-4a55-9f2e-11c0de4a77bd";
@@ -236,5 +238,52 @@ describe("the input is never mutated and the common case is cheap", () => {
       loadAsset: loader({ [ASSET_ID]: asset() }),
     });
     expect(html).toBe(before);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Production Readiness Phase 7.5 — an attachment that lives only in the cloud
+ * ------------------------------------------------------------------------ */
+
+describe("cross-device exports stay tolerant, and stay honest", () => {
+  const reader = (outcomes) => (id) =>
+    Promise.resolve(outcomes[id] || { state: ASSET_READ_STATE.MISSING, record: null });
+
+  test("a remote-only attachment is fetched through the shared read and described in full", async () => {
+    const out = await resolveExportFileAttachmentHtml(attachmentHtml(), {
+      readAsset: reader({ [ASSET_ID]: { state: ASSET_READ_STATE.READY, record: asset() } }),
+    });
+    expect(out).toContain("180 KB");
+    expect(out).toContain(EXPORT_ATTACHMENT_NOTE);
+  });
+
+  test("a file that has not reached this device is NOT described as unavailable", async () => {
+    for (const state of [ASSET_READ_STATE.PENDING, ASSET_READ_STATE.OFFLINE]) {
+      const out = await resolveExportFileAttachmentHtml(attachmentHtml(), {
+        readAsset: reader({ [ASSET_ID]: { state, record: null } }),
+      });
+      // Still tolerant — the export is produced, and the binary was never
+      // going to be embedded — but it says which situation this is.
+      expect(out).toContain(EXPORT_ATTACHMENT_NOT_ON_DEVICE_NOTE);
+      expect(out).not.toContain(EXPORT_ATTACHMENT_UNAVAILABLE_NOTE);
+      expect(out).toContain("Q3 Report.docx");
+    }
+  });
+
+  test("a genuinely missing file keeps the wording it has always had", async () => {
+    const out = await resolveExportFileAttachmentHtml(attachmentHtml(), {
+      readAsset: reader({}),
+    });
+    expect(out).toContain(EXPORT_ATTACHMENT_UNAVAILABLE_NOTE);
+    expect(out).not.toContain(EXPORT_ATTACHMENT_NOT_ON_DEVICE_NOTE);
+  });
+
+  test("an injected Phase 7.2 loadAsset still behaves exactly as it did", async () => {
+    const out = await resolveExportFileAttachmentHtml(attachmentHtml(), {
+      loadAsset: loader({ [ASSET_ID]: asset() }),
+    });
+    expect(out).toContain(EXPORT_ATTACHMENT_NOTE);
+    const gone = await resolveExportFileAttachmentHtml(attachmentHtml(), { loadAsset: loader({}) });
+    expect(gone).toContain(EXPORT_ATTACHMENT_UNAVAILABLE_NOTE);
   });
 });

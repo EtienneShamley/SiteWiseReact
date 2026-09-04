@@ -49,7 +49,14 @@ import {
   canStartExport,
 } from "../../lib/pdfUtils";
 import { saveAnnotations, loadAnnotations } from "../../lib/pdfStorage";
-import { loadAsset } from "../../lib/assetReader";
+import { ASSET_READ_STATE, readAssetWithState } from "../../lib/assetReader";
+import {
+  ASSET_READ_SURFACE,
+  RETRY_ASSET_READ_LABEL,
+  assetReadMessage,
+  isRecoverableAssetRead,
+  isRetryableAssetRead,
+} from "../../lib/assetReadPresentation";
 import { ASSET_KIND_PDF_SOURCE } from "../../lib/localAssetCache";
 import { pdfSourceId } from "../../lib/pdfDocuments";
 import { extractPageIndex, findMatchesInDocument } from "../../lib/pdfSearch";
@@ -212,14 +219,46 @@ export default function PdfEditorTab({
   const [exportMessage, setExportMessage] = useState("");
   const [panning, setPanning] = useState(false);
   const [storageError, setStorageError] = useState(null);
-  // True when the registry knows this document but its file is not in this
-  // browser's storage (nor the session cache) — an explicit state, never the
-  // first-run help text.
-  const [sourceMissing, setSourceMissing] = useState(false);
+  // HOW the document's source bytes resolved (Production Readiness Phase 7.5).
+  //
+  // "Not in this browser's storage" used to be one answer; with a cloud copy
+  // it is several, and the difference decides what the editor may do:
+  //
+  //   ready       the bytes are here (local, or downloaded and cached now)
+  //   downloading the workspace's copy is being fetched
+  //   pending     the workspace has not got them yet — another device may
+  //               still be uploading — or the object is not readable yet
+  //   offline     they exist and this device cannot reach them right now
+  //   missing     the registry knows this document and NOTHING has its file
+  //   error/conflict  unreadable or contradicting
+  //
+  // Every state but `missing` describes a file that still exists somewhere,
+  // so `Open PDF` — which REPLACES the document's source with a new version —
+  // is refused in all of them. Rebinding a document because its bytes were
+  // temporarily unreachable is how a user loses the original.
+  const [sourceRead, setSourceRead] = useState({ status: ASSET_READ_STATE.IDLE, code: null });
+  // Bumped by Retry; re-runs the source load as a genuinely fresh attempt
+  // (nothing is cached between reads, and remote metadata is always current).
+  const [sourceAttempt, setSourceAttempt] = useState(0);
   const [initialAnnotations, setInitialAnnotations] = useState(null); // null = not loaded yet
   const [pageEls, setPageEls] = useState({});
   const [histState, setHistState] = useState({ canUndo: false, canRedo: false });
   const hasSelection = selection.ids.length > 0;
+  // The source states, derived once (Production Readiness Phase 7.5).
+  const sourceMissing = sourceRead.status === ASSET_READ_STATE.MISSING;
+  // Not here yet, but recoverable: downloading, waiting on another device, or
+  // offline. The file still exists; nothing may replace it.
+  const sourcePendingRemote = isRecoverableAssetRead(sourceRead.status);
+  const sourceUnreadable =
+    sourceRead.status === ASSET_READ_STATE.ERROR || sourceRead.status === ASSET_READ_STATE.CONFLICT;
+  const sourceStateMessage = assetReadMessage({
+    state: sourceRead.status,
+    code: sourceRead.code,
+    surface: ASSET_READ_SURFACE.PDF,
+  });
+  // Replacing is a deliberate, user-initiated act on a document whose current
+  // file is either open in front of them or provably gone.
+  const canReplaceSource = !sourcePendingRemote;
   // Short, self-clearing editor notices (e.g. a partial paste). Not errors.
   const notice = useTransientMessage();
 
@@ -265,7 +304,7 @@ export default function PdfEditorTab({
     latestItemsRef.current = [];
     annotatorRef.current?.load([]);
     setStorageError(null);
-    setSourceMissing(false);
+    setSourceRead({ status: ASSET_READ_STATE.READY, code: null });
   }, []);
 
   // Replaces the document's file through the confirmed application path. A
@@ -314,34 +353,46 @@ export default function PdfEditorTab({
         return;
       }
       const loadSourceId = sourceIdRef.current;
-      let rec = null;
+      let read = { state: ASSET_READ_STATE.ERROR, record: null, code: null };
       let anns = [];
+      setSourceRead({ status: ASSET_READ_STATE.LOADING, code: null });
       try {
         // The shared read boundary routes `pdf-source` to the PDF byte store
-        // (src/lib/localAssetCache.js); the bytes are this caller's own copy,
-        // as they have always been — pdf.js detaches the buffer it renders.
-        [rec, anns] = await Promise.all([
-          loadAsset(loadSourceId, { kind: ASSET_KIND_PDF_SOURCE }),
+        // (src/lib/localAssetCache.js) and, on a miss, to the workspace's
+        // cloud copy — which it caches into that same store before answering.
+        // The bytes are this caller's own copy, as they have always been —
+        // pdf.js detaches the buffer it renders.
+        [read, anns] = await Promise.all([
+          readAssetWithState(loadSourceId, {
+            kind: ASSET_KIND_PDF_SOURCE,
+            onState: (phase) => {
+              if (!cancelled) setSourceRead({ status: phase, code: null });
+            },
+          }),
           loadAnnotations(docId),
         ]);
       } catch (err) {
         if (!cancelled) reportStorageError("Could not read this PDF from browser storage", err);
       }
       if (cancelled) return;
+      const rec = read && read.record;
       if (rec) {
         setSourceBytes(rec.bytes);
         setRenderBytes(rec.bytes.slice(0));
         setPdfBytesCache(loadSourceId, rec.bytes);
-        setSourceMissing(false);
+        setSourceRead({ status: ASSET_READ_STATE.READY, code: null });
       } else {
         // Fall back to the in-memory session cache (e.g. storage unavailable).
         const cached = getPdfBytesCache(loadSourceId);
         if (cached) {
           setSourceBytes(cached);
           setRenderBytes(cached.slice(0));
-          setSourceMissing(false);
+          setSourceRead({ status: ASSET_READ_STATE.READY, code: null });
         } else {
-          setSourceMissing(true);
+          setSourceRead({
+            status: read && read.state ? read.state : ASSET_READ_STATE.MISSING,
+            code: (read && read.code) || null,
+          });
         }
       }
       // Stored records pass the whitelist before they can reach the renderer,
@@ -354,7 +405,7 @@ export default function PdfEditorTab({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docId, initialFile]);
+  }, [docId, initialFile, sourceAttempt]);
 
   const onPick = async (e) => {
     const f = e.target.files?.[0];
@@ -839,7 +890,18 @@ export default function PdfEditorTab({
           onChange={onPick}
           className="hidden"
         />
-        <ToolButton icon={<FaFolderOpen />} label="Open PDF" onClick={() => fileInputRef.current?.click()} />
+        {/* Open PDF REPLACES this document's source with a new version. It is
+            refused while the existing source is merely unreachable — pending,
+            downloading or offline — because rebinding a document whose file is
+            temporarily out of reach destroys the version that already exists.
+            A document whose file is genuinely missing, and one that is open
+            and readable, both keep the control. */}
+        <ToolButton
+          icon={<FaFolderOpen />}
+          label={canReplaceSource ? "Open PDF" : "Open PDF (unavailable while this file is still loading)"}
+          disabled={!canReplaceSource}
+          onClick={() => fileInputRef.current?.click()}
+        />
 
         <ToolbarDivider />
 
@@ -1018,7 +1080,34 @@ export default function PdfEditorTab({
           </div>
         )}
 
-        {!pdfDoc && !sourceMissing && (
+        {/* The bytes exist somewhere and are not here YET. This is deliberately
+            NOT the first-run helper and deliberately NOT the missing-file
+            helper: neither "load a PDF" nor "supply it again" is the right
+            thing to do to a document whose file is downloading, waiting on
+            another device, or merely unreachable while offline — doing either
+            would replace it. */}
+        {!pdfDoc && sourcePendingRemote && (
+          <div className="text-sm p-4" role="status" data-pdf-source-state={sourceRead.status}>
+            {sourceStateMessage}
+            {isRetryableAssetRead(sourceRead.status) && (
+              <button
+                type="button"
+                className="ml-2 underline"
+                onClick={() => setSourceAttempt((n) => n + 1)}
+              >
+                {RETRY_ASSET_READ_LABEL}
+              </button>
+            )}
+          </div>
+        )}
+
+        {!pdfDoc && sourceUnreadable && (
+          <div className="text-sm p-4" role="status" data-pdf-source-state={sourceRead.status}>
+            {sourceStateMessage}
+          </div>
+        )}
+
+        {!pdfDoc && !sourceMissing && !sourcePendingRemote && !sourceUnreadable && (
           <div className="text-sm opacity-70 p-4">
             Load a PDF. Pick a tool, then click/drag on the page — or select text with the
             Highlight/Underline/Strikethrough tools to mark it up. Text, Callout and Sticky note

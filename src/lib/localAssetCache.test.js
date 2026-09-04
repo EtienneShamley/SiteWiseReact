@@ -18,18 +18,22 @@ import {
   isPdfSourceKind,
   localAssetExists,
   readLocalAsset,
+  writeDownloadedAsset,
 } from "./localAssetCache";
 import {
   ASSET_KIND_EDITOR_FILE,
   ASSET_KIND_EDITOR_IMAGE,
   ASSET_KIND_NOTE_FILE,
   ASSET_KIND_NOTE_PHOTO,
+  DOWNLOADED_ASSET_REASON,
   createEditorImageAsset,
+  getAsset,
   listAssetIds,
   makeAssetRecord,
   saveAsset,
 } from "./assetStorage";
-import { removePdfBytes, savePdfBytes } from "./pdfStorage";
+import { listPendingAssetUploads } from "./assetUploadQueue";
+import { loadPdfBytes, removePdfBytes, savePdfBytes } from "./pdfStorage";
 import { deleteAssetDb, installStructuredCloneShim, testBlob } from "./assetDbTestHarness";
 import { DURABLE_SCOPE_KIND, setDurableScope } from "./durableStorage";
 
@@ -170,5 +174,173 @@ describe("kind mismatch cannot reach the wrong store's object", () => {
     );
     const asset = await readLocalAsset("kind-1", { kind: ASSET_KIND_EDITOR_FILE });
     expect(asset.kind).toBe(ASSET_KIND_NOTE_FILE);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Production Readiness Phase 7.5 — caching a DOWNLOADED asset
+ * ------------------------------------------------------------------------ */
+
+const WS_A = "ws-11111111-1111-4111-8111-111111111111";
+const WS_B = "ws-22222222-2222-4222-8222-222222222222";
+const DOWNLOAD_ID = "dl-11111111-1111-4111-8111-111111111111";
+
+function download(overrides = {}) {
+  const blob = overrides.blob || testBlob("REMOTE", "image/png");
+  return {
+    workspaceId: WS_A,
+    assetId: DOWNLOAD_ID,
+    assetKind: ASSET_KIND_EDITOR_IMAGE,
+    blob,
+    mimeType: "image/png",
+    size: blob.size,
+    name: "remote.png",
+    metadata: { fromCloud: true },
+    createdAt: 1700000000000,
+    ...overrides,
+  };
+}
+
+describe("writeDownloadedAsset — a general asset", () => {
+  test("it is stored as a WORKSPACE-OWNED record carrying the cloud's own facts", async () => {
+    expect(await writeDownloadedAsset(download())).toEqual({ ok: true, reused: false });
+    const stored = await getAsset(DOWNLOAD_ID);
+    expect(stored).toMatchObject({
+      id: DOWNLOAD_ID,
+      kind: ASSET_KIND_EDITOR_IMAGE,
+      name: "remote.png",
+      mimeType: "image/png",
+      workspaceId: WS_A,
+      createdAt: 1700000000000,
+      metadata: { fromCloud: true },
+    });
+    expect(await stored.blob.text()).toBe("REMOTE");
+  });
+
+  test("it NEVER enqueues an upload — the bytes came from the account", async () => {
+    await writeDownloadedAsset(download());
+    expect(await listPendingAssetUploads(WS_A)).toEqual([]);
+  });
+
+  test("it preserves the cloud identity chain of a derived asset", async () => {
+    await writeDownloadedAsset(download({ sourceAssetId: "src-a" }));
+    expect((await getAsset(DOWNLOAD_ID)).sourceAssetId).toBe("src-a");
+  });
+
+  test("the same asset arriving twice is idempotent and rewrites nothing", async () => {
+    await writeDownloadedAsset(download());
+    const first = await getAsset(DOWNLOAD_ID);
+    expect(await writeDownloadedAsset(download({ name: "renamed.png" }))).toEqual({
+      ok: true,
+      reused: true,
+    });
+    const second = await getAsset(DOWNLOAD_ID);
+    expect(second.name).toBe(first.name);
+    expect(second.updatedAt).toBe(first.updatedAt);
+  });
+
+  test("it refuses to overwrite a record ANOTHER workspace owns", async () => {
+    await saveAsset(
+      makeAssetRecord({
+        id: DOWNLOAD_ID,
+        kind: ASSET_KIND_EDITOR_IMAGE,
+        blob: testBlob("REMOTE", "image/png"),
+        workspaceId: WS_B,
+      })
+    );
+    expect(await writeDownloadedAsset(download())).toEqual({
+      ok: false,
+      reason: DOWNLOADED_ASSET_REASON.FOREIGN_WORKSPACE,
+    });
+    expect(await (await getAsset(DOWNLOAD_ID)).blob.text()).toBe("REMOTE");
+    expect((await getAsset(DOWNLOAD_ID)).workspaceId).toBe(WS_B);
+  });
+
+  test("it refuses to replace a CONTRADICTING local record and changes nothing", async () => {
+    await saveAsset(
+      makeAssetRecord({
+        id: DOWNLOAD_ID,
+        kind: ASSET_KIND_NOTE_FILE,
+        blob: testBlob("SOMETHING ELSE", "text/plain"),
+        workspaceId: WS_A,
+      })
+    );
+    expect(await writeDownloadedAsset(download())).toEqual({
+      ok: false,
+      reason: DOWNLOADED_ASSET_REASON.LOCAL_CONFLICT,
+    });
+    expect((await getAsset(DOWNLOAD_ID)).kind).toBe(ASSET_KIND_NOTE_FILE);
+  });
+
+  test("a matching LEGACY record is left untagged — re-tagging is the 7.6 migration", async () => {
+    await saveAsset(
+      makeAssetRecord({
+        id: DOWNLOAD_ID,
+        kind: ASSET_KIND_EDITOR_IMAGE,
+        blob: testBlob("REMOTE", "image/png"),
+      })
+    );
+    expect(await writeDownloadedAsset(download())).toEqual({ ok: true, reused: true });
+    expect((await getAsset(DOWNLOAD_ID)).workspaceId).toBeNull();
+  });
+
+  test("bytes that contradict the size the workspace recorded are refused", async () => {
+    expect(await writeDownloadedAsset(download({ size: 999 }))).toEqual({
+      ok: false,
+      reason: DOWNLOADED_ASSET_REASON.LOCAL_CONFLICT,
+    });
+    expect(await getAsset(DOWNLOAD_ID)).toBeNull();
+  });
+
+  test("an invalid workspace or asset id is refused rather than stored unowned", async () => {
+    expect(await writeDownloadedAsset(download({ workspaceId: "not a workspace" }))).toEqual({
+      ok: false,
+      reason: DOWNLOADED_ASSET_REASON.LOCAL_CONFLICT,
+    });
+    expect(await writeDownloadedAsset(download({ assetId: "../escape" }))).toEqual({
+      ok: false,
+      reason: DOWNLOADED_ASSET_REASON.LOCAL_CONFLICT,
+    });
+    expect(await listAssetIds()).toEqual([]);
+  });
+});
+
+describe("writeDownloadedAsset — pdf-source", () => {
+  const bytes = new Uint8Array([37, 80, 68, 70, 45]);
+
+  function pdfDownload(overrides = {}) {
+    const blob = testBlob("%PDF-", "application/pdf");
+    return download({
+      assetId: PDF_SOURCE_ID,
+      assetKind: ASSET_KIND_PDF_SOURCE,
+      blob,
+      mimeType: "application/pdf",
+      size: blob.size,
+      name: "plans.pdf",
+      ...overrides,
+    });
+  }
+
+  test("it is routed to the PDF byte store, never into the asset store", async () => {
+    expect(await writeDownloadedAsset(pdfDownload())).toEqual({ ok: true, reused: false });
+    const rec = await loadPdfBytes(PDF_SOURCE_ID);
+    expect(rec.bytes.byteLength).toBe(5);
+    expect(rec.name).toBe("plans.pdf");
+    expect(await listAssetIds()).toEqual([]);
+    expect(await listPendingAssetUploads(WS_A)).toEqual([]);
+  });
+
+  test("the same source already here is idempotent", async () => {
+    await savePdfBytes(PDF_SOURCE_ID, bytes, "plans.pdf");
+    expect(await writeDownloadedAsset(pdfDownload())).toEqual({ ok: true, reused: true });
+  });
+
+  test("a DIFFERENT file under the same immutable source id is refused", async () => {
+    await savePdfBytes(PDF_SOURCE_ID, new Uint8Array([1, 2, 3]), "other.pdf");
+    expect(await writeDownloadedAsset(pdfDownload())).toEqual({
+      ok: false,
+      reason: DOWNLOADED_ASSET_REASON.LOCAL_CONFLICT,
+    });
+    expect((await loadPdfBytes(PDF_SOURCE_ID)).name).toBe("other.pdf");
   });
 });

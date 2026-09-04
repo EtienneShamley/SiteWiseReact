@@ -138,3 +138,31 @@ describe("workspace isolation", () => {
     await expect(putRemoteAssetEntry({ assetId: ASSET })).rejects.toThrow(/workspace id/);
   });
 });
+
+/* ------------------------------------------------------------------------ *
+ * Production Readiness Phase 7.5 — tombstoned is its own answer
+ * ------------------------------------------------------------------------ */
+
+describe("the tombstoned state", () => {
+  test("it is a state of its own, distinct from missing", () => {
+    expect(REMOTE_ASSET_STATE.TOMBSTONED).toBe("tombstoned");
+    expect(REMOTE_ASSET_STATE.TOMBSTONED).not.toBe(REMOTE_ASSET_STATE.MISSING);
+    expect(Object.values(REMOTE_ASSET_STATE)).toEqual([
+      "unknown",
+      "pending",
+      "stored",
+      "missing",
+      "tombstoned",
+    ]);
+  });
+
+  test("an entry may record it, and reads back as itself", async () => {
+    await putRemoteAssetEntry({
+      workspaceId: WS_A,
+      assetId: "a-1",
+      kind: "editor-image",
+      state: REMOTE_ASSET_STATE.TOMBSTONED,
+    });
+    expect((await getRemoteAssetEntry(WS_A, "a-1")).state).toBe(REMOTE_ASSET_STATE.TOMBSTONED);
+  });
+});

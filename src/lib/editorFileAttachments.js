@@ -219,6 +219,11 @@ export const FILE_ATTACHMENT_UNAVAILABLE_TEXT =
 export const EXPORT_ATTACHMENT_NOTE = "Attached file, not included in this export.";
 export const EXPORT_ATTACHMENT_UNAVAILABLE_NOTE =
   "Attached file unavailable and not included in this export.";
+// The bytes exist in the account and have not reached the exporting device.
+// Saying "unavailable" here would be false: the file is not lost, and the
+// export can be repeated once it arrives (Production Readiness Phase 7.5).
+export const EXPORT_ATTACHMENT_NOT_ON_DEVICE_NOTE =
+  "Attached file not yet downloaded to this device and not included in this export.";
 export const PRINT_ATTACHMENT_NOTE =
   "Attached file, not included in this printout.";
 export const LEGACY_LINK_UNAVAILABLE_SUFFIX = " (attached file unavailable)";

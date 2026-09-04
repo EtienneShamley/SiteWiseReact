@@ -43,9 +43,27 @@
 //     shows the right action) and again against the freshly retrieved Blob at
 //     click time, which is the authoritative check;
 //   - no URL is ever taken from stored HTML and navigated to.
+//
+// CROSS-DEVICE (Production Readiness Phase 7.5). The bytes may live only in
+// the workspace's cloud copy, in which case the shared read boundary
+// downloads and caches them on demand — through exactly the same call this
+// card has always made. What changes here is honesty about the wait: the card
+// reports downloading / not-yet-available / offline separately from "gone",
+// offers Retry where one can help, and REFUSES Open and Download until the
+// bytes are genuinely here. Refusing is the safe default: the open policy is
+// decided from the Blob actually retrieved, and there is no Blob to decide
+// from until the download lands.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { loadAsset } from "../../lib/assetReader";
+import { ASSET_READ_STATE, readAssetWithState } from "../../lib/assetReader";
+import {
+  ASSET_READ_SURFACE,
+  RETRY_ASSET_READ_LABEL,
+  assetReadMessage,
+  isBusyAssetRead,
+  isRecoverableAssetRead,
+  isRetryableAssetRead,
+} from "../../lib/assetReadPresentation";
 import useTransientMessage from "../../hooks/useTransientMessage";
 import {
   DEFAULT_FILE_ATTACHMENT_ASSET_KINDS,
@@ -74,27 +92,45 @@ import {
 } from "../../lib/safeAttachmentOpen";
 import TextPreviewDialog from "../template/TextPreviewDialog";
 
-const STATUS = { LOADING: "loading", READY: "ready", MISSING: "missing" };
-
 /**
- * Retrieve the asset and confirm it is genuinely a file attachment THIS CARD is
- * configured to open. Returns null for a missing asset, an unreadable one, or
- * one of a kind this card was not configured to accept — all three present
- * identically to the user, because in every case this surface cannot open this
- * file.
+ * Retrieve the asset, report HOW the read went, and confirm the result is
+ * genuinely a file attachment THIS CARD is configured to open.
+ *
+ * A missing asset, an unreadable one and one of a kind this card was not
+ * configured to accept all present identically — in every case this surface
+ * cannot open this file — but a file that is merely still ARRIVING is now a
+ * distinct answer, because telling a user their document is gone while it is
+ * downloading would be false.
+ *
+ * @returns {Promise<{ state: string, code: string|null, asset: object|null }>}
  */
-export async function loadFileAttachmentAsset(assetId, acceptedKinds) {
-  if (!assetId) return null;
-  let asset;
+export async function readFileAttachmentAsset(assetId, acceptedKinds, options = {}) {
+  if (!assetId) return { state: ASSET_READ_STATE.MISSING, code: null, asset: null };
+  let outcome;
   try {
     // The shared read boundary (src/lib/assetReader.js). The KIND POLICY below
     // is unchanged and still decides from the record's own stored kind.
-    asset = await loadAsset(assetId);
+    outcome = await readAssetWithState(assetId, options);
   } catch {
-    return null;
+    return { state: ASSET_READ_STATE.ERROR, code: null, asset: null };
   }
-  if (!asset || !asset.blob) return null;
-  if (!isAcceptedFileAssetKind(asset.kind, acceptedKinds)) return null;
+  if (outcome.state !== ASSET_READ_STATE.READY) {
+    return { state: outcome.state, code: outcome.code || null, asset: null };
+  }
+  const asset = outcome.record;
+  if (!asset || !asset.blob) return { state: ASSET_READ_STATE.MISSING, code: null, asset: null };
+  if (!isAcceptedFileAssetKind(asset.kind, acceptedKinds)) {
+    return { state: ASSET_READ_STATE.MISSING, code: null, asset: null };
+  }
+  return { state: ASSET_READ_STATE.READY, code: null, asset };
+}
+
+/**
+ * The Phase 7.2 shape — the asset or null — kept because the safe-open path
+ * asks only "are there bytes I may open right now".
+ */
+export async function loadFileAttachmentAsset(assetId, acceptedKinds) {
+  const { asset } = await readFileAttachmentAsset(assetId, acceptedKinds);
   return asset;
 }
 
@@ -141,13 +177,18 @@ export function useFileAttachmentCard({
   // arrives, and to label the unavailable state if it never does.
   const fallbackName = safeDownloadFilename(name);
 
-  // { status, policy, meta } where meta is the AUTHORITATIVE metadata read back
-  // from the asset record once it resolves.
+  // { status, policy, meta } where `status` is the SHARED read state
+  // (src/lib/assetReader.js) and `meta` is the AUTHORITATIVE metadata read
+  // back from the asset record once it resolves.
   const [state, setState] = useState({
-    status: assetId ? STATUS.LOADING : STATUS.MISSING,
+    status: assetId ? ASSET_READ_STATE.LOADING : ASSET_READ_STATE.MISSING,
+    code: null,
     policy: null,
     meta: null,
   });
+  // Bumped by Retry; re-runs the read effect as a genuinely fresh attempt
+  // (nothing is cached between reads, and remote metadata is always current).
+  const [attempt, setAttempt] = useState(0);
   const [preview, setPreview] = useState(null);
   const notice = useTransientMessage();
   const { showError: showNoticeError, clear: clearNotice } = notice;
@@ -187,20 +228,31 @@ export function useFileAttachmentCard({
   useEffect(() => {
     let cancelled = false;
     setState({
-      status: assetId ? STATUS.LOADING : STATUS.MISSING,
+      status: assetId ? ASSET_READ_STATE.LOADING : ASSET_READ_STATE.MISSING,
+      code: null,
       policy: null,
       meta: null,
     });
     if (!assetId) return undefined;
 
-    loadFileAttachmentAsset(assetId, acceptedAssetKinds).then((asset) => {
+    readFileAttachmentAsset(assetId, acceptedAssetKinds, {
+      // Reported the moment a download genuinely starts, so a card waiting on
+      // the workspace's copy says so instead of sitting on "Loading…".
+      onState: (phase) => {
+        if (cancelled) return;
+        setState((prev) =>
+          prev.status === ASSET_READ_STATE.READY ? prev : { ...prev, status: phase }
+        );
+      },
+    }).then(({ state: status, code, asset }) => {
       if (cancelled) return;
       if (!asset) {
-        setState({ status: STATUS.MISSING, policy: null, meta: null });
+        setState({ status, code, policy: null, meta: null });
         return;
       }
       setState({
-        status: STATUS.READY,
+        status: ASSET_READ_STATE.READY,
+        code: null,
         // Decided from the Blob's own type; the reference's type is a
         // consistency check only, exactly as for Template-form File evidence.
         policy: resolveOpenPolicy(asset.blob.type, mimeType),
@@ -219,16 +271,27 @@ export function useFileAttachmentCard({
     // extension's own resolved `.configure()` options, set at editor-construction
     // time, or from a module constant), so it is listed but never actually
     // changes the effect's cadence.
-  }, [assetId, mimeType, name, acceptedAssetKinds]);
+  }, [assetId, mimeType, name, acceptedAssetKinds, attempt]);
 
   const displayName = state.meta?.name || fallbackName;
   const displayMime = state.meta ? state.meta.mimeType : mimeType;
   const displaySize = state.meta ? state.meta.size : size;
-  const missing = state.status === STATUS.MISSING;
-  const loading = state.status === STATUS.LOADING;
+  const ready = state.status === ASSET_READ_STATE.READY;
+  const loading = isBusyAssetRead(state.status);
+  // "Recoverable" is not "available": the bytes may yet arrive, but they are
+  // not here now, so the card must not offer to open or download them.
+  const pendingRemote = isRecoverableAssetRead(state.status) && !ready;
+  const missing = !ready && !pendingRemote;
+  const stateMessage = ready
+    ? null
+    : assetReadMessage({
+        state: state.status,
+        code: state.code,
+        surface: ASSET_READ_SURFACE.FILE,
+      });
   const typeLabel = fileAttachmentLabel(displayMime, displayName);
   const metaText = fileAttachmentMetaText(displayMime, displayName, displaySize);
-  const canOpen = !missing && !loading && isInlineRenderable(state.policy);
+  const canOpen = ready && isInlineRenderable(state.policy);
   const openLabel = state.policy?.mode === RENDER_MODE.PDF ? "Open" : "Preview";
 
   function beginAction() {
@@ -276,12 +339,12 @@ export function useFileAttachmentCard({
     });
 
     if (result.policy) {
-      setState((prev) => ({ ...prev, status: STATUS.READY, policy: result.policy }));
+      setState((prev) => ({ ...prev, status: ASSET_READ_STATE.READY, policy: result.policy }));
     }
 
     switch (result.status) {
       case OPEN_RESULT.MISSING:
-        setState({ status: STATUS.MISSING, policy: null, meta: null });
+        setState({ status: ASSET_READ_STATE.MISSING, code: null, policy: null, meta: null });
         showNoticeError(ATTACHMENT_UNAVAILABLE_MESSAGE);
         return;
       case OPEN_RESULT.READ_ERROR:
@@ -312,9 +375,9 @@ export function useFileAttachmentCard({
   async function handleDownload() {
     if (!beginAction()) return;
     try {
-      const asset = await loadFileAttachmentAsset(assetId, acceptedAssetKinds);
+      const { state: status, code, asset } = await readFileAttachmentAsset(assetId, acceptedAssetKinds);
       if (!asset) {
-        setState({ status: STATUS.MISSING, policy: null, meta: null });
+        setState({ status, code, policy: null, meta: null });
         showNoticeError(ATTACHMENT_UNAVAILABLE_MESSAGE);
         return;
       }
@@ -336,9 +399,9 @@ export function useFileAttachmentCard({
     }
   }
 
-  const ariaLabel = missing
-    ? `Attached file ${displayName}. ${FILE_ATTACHMENT_UNAVAILABLE_TEXT}`
-    : `Attached file ${displayName}. ${typeLabel}. ${metaText}.`;
+  const ariaLabel = ready
+    ? `Attached file ${displayName}. ${typeLabel}. ${metaText}.`
+    : `Attached file ${displayName}. ${stateMessage || FILE_ATTACHMENT_UNAVAILABLE_TEXT}`;
 
   const content = (
     <>
@@ -347,11 +410,24 @@ export function useFileAttachmentCard({
           {displayName}
         </span>
         <span className={`${FILE_ATTACHMENT_CLASS}__meta`}>
-          {loading ? FILE_ATTACHMENT_LOADING_TEXT : metaText}
+          {loading ? stateMessage || FILE_ATTACHMENT_LOADING_TEXT : metaText}
         </span>
-        {missing && (
-          <span className={`${FILE_ATTACHMENT_CLASS}__unavailable`}>
-            {FILE_ATTACHMENT_UNAVAILABLE_TEXT}
+        {!ready && !loading && (
+          <span
+            className={`${FILE_ATTACHMENT_CLASS}__unavailable`}
+            data-attachment-state={state.status}
+          >
+            {stateMessage || FILE_ATTACHMENT_UNAVAILABLE_TEXT}
+            {isRetryableAssetRead(state.status) && (
+              <button
+                type="button"
+                className={`${FILE_ATTACHMENT_CLASS}__btn`}
+                onClick={() => setAttempt((n) => n + 1)}
+                aria-label={`${RETRY_ASSET_READ_LABEL} loading ${displayName}`}
+              >
+                {RETRY_ASSET_READ_LABEL}
+              </button>
+            )}
           </span>
         )}
         {/* Print only: an exported or printed page cannot carry the binary, and
@@ -378,7 +454,7 @@ export function useFileAttachmentCard({
           type="button"
           className={`${FILE_ATTACHMENT_CLASS}__btn`}
           onClick={handleDownload}
-          disabled={busy || missing || loading}
+          disabled={busy || !ready}
           title={`Download ${displayName}`}
           aria-label={`Download ${displayName}`}
         >
@@ -422,6 +498,9 @@ export function useFileAttachmentCard({
     displayName,
     missing,
     loading,
+    /** Not here yet, but recoverable — never presented as a lost file. */
+    pendingRemote,
+    status: state.status,
     content,
   };
 }

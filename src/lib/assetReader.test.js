@@ -6,10 +6,10 @@
 //
 //   LOCAL FIRST      a local hit never reaches for anything else, so nothing
 //                    a user already has on this device depends on a network;
-//   NO REMOTE YET    with no loader injected — which is the whole product
-//                    today — a local miss is simply a miss. This phase does
-//                    not connect to Firebase Storage, and nothing here can
-//                    imply that it does;
+//   NO REMOTE UNLESS  with no reader registered and no loader injected, a
+//   THE SESSION SAYS  local miss is simply a miss. A registered reader serves
+//                     a read ONLY when it names the same workspace and is
+//                     still active (Production Readiness Phase 7.5);
 //   DEDUPLICATION    concurrent readers of one asset share one read, and the
 //                    entry is released when it SETTLES so a Retry is a real
 //                    retry rather than the cached failure;
@@ -20,13 +20,19 @@ import "fake-indexeddb/auto";
 import fs from "fs";
 import path from "path";
 import {
+  ASSET_READ_CODE,
   ASSET_READ_STATE,
   assetReadKey,
+  assetRemoteReaderFor,
+  clearAssetRemoteReader,
   inFlightAssetReadCount,
   isAssetReadableInWorkspace,
   loadAsset,
+  readAssetWithState,
+  readerFromLoadAsset,
   resetAssetReader,
   resolveReadWorkspaceId,
+  setAssetRemoteReader,
 } from "./assetReader";
 import { ASSET_KIND_PDF_SOURCE } from "./localAssetCache";
 import { createEditorImageAsset, makeAssetRecord, saveAsset } from "./assetStorage";
@@ -67,8 +73,27 @@ beforeEach(async () => {
 
 afterEach(() => {
   resetAssetReader();
+  clearAssetRemoteReader();
   signOut();
 });
+
+/** A remote reader double with the production reader's exact surface. */
+function fakeReader(workspaceId, read = async () => ({ state: ASSET_READ_STATE.MISSING, record: null, code: null })) {
+  let active = true;
+  const calls = [];
+  return {
+    workspaceId,
+    calls,
+    isActive: () => active,
+    close: () => {
+      active = false;
+    },
+    read: (request) => {
+      calls.push(request);
+      return read(request);
+    },
+  };
+}
 
 describe("the read-state vocabulary", () => {
   test("it names every state a reading surface may eventually report", () => {
@@ -77,9 +102,11 @@ describe("the read-state vocabulary", () => {
       LOADING: "loading",
       DOWNLOADING: "downloading",
       READY: "ready",
+      PENDING: "pending",
       MISSING: "missing",
       OFFLINE: "offline",
       ERROR: "error",
+      CONFLICT: "conflict",
     });
   });
 
@@ -328,5 +355,235 @@ describe("PDF source bytes", () => {
     expect(a.bytes).not.toBe(b.bytes);
     expect(a.bytes.buffer).not.toBe(b.bytes.buffer);
     expect(Array.from(a.bytes)).toEqual(Array.from(b.bytes));
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Production Readiness Phase 7.5 — the registered remote reader
+ * ------------------------------------------------------------------------ */
+
+describe("the workspace's registered remote reader", () => {
+  test("a local HIT never reaches the reader", async () => {
+    signInTo(WS_A);
+    const id = await createEditorImageAsset(testBlob("LOCAL", "image/png"), { name: "i.png" });
+    const reader = fakeReader(WS_A);
+    setAssetRemoteReader(reader);
+    const asset = await loadAsset(id);
+    expect(await asset.blob.text()).toBe("LOCAL");
+    expect(reader.calls).toHaveLength(0);
+  });
+
+  test("a local MISS reaches the reader of the SAME workspace, with the read's identity", async () => {
+    signInTo(WS_A);
+    const record = { id: "remote-1", kind: "logo", blob: testBlob("R"), workspaceId: WS_A };
+    const reader = fakeReader(WS_A, async () => ({ state: ASSET_READ_STATE.READY, record, code: null }));
+    setAssetRemoteReader(reader);
+    const result = await readAssetWithState("remote-1", { kind: "logo" });
+    expect(result.state).toBe(ASSET_READ_STATE.READY);
+    expect(await result.record.blob.text()).toBe("R");
+    expect(reader.calls[0]).toMatchObject({ assetId: "remote-1", kind: "logo" });
+  });
+
+  test("a reader belonging to ANOTHER workspace is never consulted", async () => {
+    signInTo(WS_A);
+    const reader = fakeReader(WS_B);
+    setAssetRemoteReader(reader);
+    expect(assetRemoteReaderFor(WS_A)).toBeNull();
+    expect(await loadAsset("cross-1")).toBeNull();
+    expect(reader.calls).toHaveLength(0);
+  });
+
+  test("a reader whose session has CLOSED is never consulted", async () => {
+    signInTo(WS_A);
+    const reader = fakeReader(WS_A, async () => ({
+      state: ASSET_READ_STATE.READY,
+      record: { id: "x", kind: "logo", blob: testBlob("X") },
+      code: null,
+    }));
+    setAssetRemoteReader(reader);
+    reader.close();
+    expect(assetRemoteReaderFor(WS_A)).toBeNull();
+    expect(await loadAsset("x")).toBeNull();
+    expect(reader.calls).toHaveLength(0);
+  });
+
+  test("clearing names the reader, so a late cleanup cannot unregister its successor", () => {
+    const first = fakeReader(WS_A);
+    const second = fakeReader(WS_B);
+    setAssetRemoteReader(first);
+    setAssetRemoteReader(second);
+    clearAssetRemoteReader(first); // the closing session's late cleanup
+    expect(assetRemoteReaderFor(WS_B)).toBe(second);
+    clearAssetRemoteReader(second);
+    expect(assetRemoteReaderFor(WS_B)).toBeNull();
+  });
+
+  test("an injected remoteLoader still wins, and keeps its record-or-null contract", async () => {
+    signInTo(WS_A);
+    const reader = fakeReader(WS_A);
+    setAssetRemoteReader(reader);
+    const record = { id: "inj-1", kind: "logo", blob: testBlob("I") };
+    const asset = await loadAsset("inj-1", { remoteLoader: async () => record });
+    expect(asset).toBe(record);
+    expect(reader.calls).toHaveLength(0);
+  });
+
+  test("a Retry is simply another read, and reaches the reader again", async () => {
+    // There is no "refresh" flag to pass and none is needed: an in-flight
+    // entry is released when it settles, so nothing cached can be served, and
+    // the reader itself always resolves the workspace's CURRENT metadata.
+    signInTo(WS_A);
+    const reader = fakeReader(WS_A, async () => ({
+      state: ASSET_READ_STATE.PENDING,
+      record: null,
+      code: ASSET_READ_CODE.NOT_YET_UPLOADED,
+    }));
+    setAssetRemoteReader(reader);
+    await readAssetWithState("later-1", {});
+    await readAssetWithState("later-1", {});
+    expect(reader.calls).toHaveLength(2);
+    expect(reader.calls.every((c) => !("refresh" in c))).toBe(true);
+  });
+});
+
+describe("read states reaching the caller", () => {
+  test("a pending remote read is PENDING with its code, and produces no record", async () => {
+    signInTo(WS_A);
+    setAssetRemoteReader(
+      fakeReader(WS_A, async () => ({
+        state: ASSET_READ_STATE.PENDING,
+        record: null,
+        code: ASSET_READ_CODE.NOT_YET_UPLOADED,
+      }))
+    );
+    const result = await readAssetWithState("pending-1", {});
+    expect(result).toEqual({
+      state: ASSET_READ_STATE.PENDING,
+      record: null,
+      code: ASSET_READ_CODE.NOT_YET_UPLOADED,
+    });
+    // The Phase 7.2 shape is unchanged for every existing caller.
+    expect(await loadAsset("pending-1")).toBeNull();
+  });
+
+  test("offline, conflict and error all reach the caller as themselves", async () => {
+    signInTo(WS_A);
+    for (const [state, code] of [
+      [ASSET_READ_STATE.OFFLINE, ASSET_READ_CODE.OFFLINE],
+      [ASSET_READ_STATE.CONFLICT, ASSET_READ_CODE.IDENTITY_CONFLICT],
+      [ASSET_READ_STATE.ERROR, ASSET_READ_CODE.MALFORMED_CLOUD_RECORD],
+    ]) {
+      resetAssetReader();
+      setAssetRemoteReader(fakeReader(WS_A, async () => ({ state, record: null, code })));
+      expect(await readAssetWithState("s-1", {})).toEqual({ state, record: null, code });
+    }
+  });
+
+  test("no asset id is IDLE, not MISSING", async () => {
+    expect(await readAssetWithState(null)).toEqual({
+      state: ASSET_READ_STATE.IDLE,
+      record: null,
+      code: null,
+    });
+  });
+
+  test("a local hit is READY with no code, exactly as before", async () => {
+    const id = await createEditorImageAsset(testBlob("H", "image/png"), { name: "h.png" });
+    expect(await readAssetWithState(id)).toMatchObject({
+      state: ASSET_READ_STATE.READY,
+      code: null,
+    });
+  });
+});
+
+describe("the downloading phase reaches every joined caller", () => {
+  test("a caller that starts the read is told when the download begins", async () => {
+    signInTo(WS_A);
+    const gate = deferred();
+    setAssetRemoteReader(
+      fakeReader(WS_A, async ({ onDownloadStart }) => {
+        onDownloadStart();
+        return gate.promise;
+      })
+    );
+    const seen = [];
+    const read = readAssetWithState("dl-1", { onState: (s) => seen.push(s) });
+    await Promise.resolve();
+    gate.resolve({ state: ASSET_READ_STATE.MISSING, record: null, code: null });
+    await read;
+    expect(seen).toEqual([ASSET_READ_STATE.DOWNLOADING]);
+  });
+
+  test("a caller that JOINS a download already in flight is told immediately", async () => {
+    signInTo(WS_A);
+    const gate = deferred();
+    let started = null;
+    setAssetRemoteReader(
+      fakeReader(WS_A, async ({ onDownloadStart }) => {
+        started = onDownloadStart;
+        return gate.promise;
+      })
+    );
+    const first = readAssetWithState("dl-2", { onState: () => {} });
+    // The local store is asked first; the reader is only reached after it
+    // answers, which is several microtasks away.
+    while (!started) await new Promise((resolve) => setTimeout(resolve, 0));
+    started();
+    const joinedStates = [];
+    const second = readAssetWithState("dl-2", { onState: (s) => joinedStates.push(s) });
+    expect(inFlightAssetReadCount()).toBe(1);
+    expect(joinedStates).toEqual([ASSET_READ_STATE.DOWNLOADING]);
+    gate.resolve({ state: ASSET_READ_STATE.MISSING, record: null, code: null });
+    await Promise.all([first, second]);
+  });
+
+  test("concurrent readers of one remote asset share ONE reader call", async () => {
+    signInTo(WS_A);
+    const gate = deferred();
+    const reader = fakeReader(WS_A, () => gate.promise);
+    setAssetRemoteReader(reader);
+    const reads = [readAssetWithState("one-1"), readAssetWithState("one-1"), readAssetWithState("one-1")];
+    expect(inFlightAssetReadCount()).toBe(1);
+    gate.resolve({
+      state: ASSET_READ_STATE.READY,
+      record: { id: "one-1", kind: "logo", blob: testBlob("ONCE") },
+      code: null,
+    });
+    const results = await Promise.all(reads);
+    expect(reader.calls).toHaveLength(1);
+    expect(results.every((r) => r.state === ASSET_READ_STATE.READY)).toBe(true);
+  });
+
+  test("the same asset id in a DIFFERENT workspace never shares the work", async () => {
+    const gate = deferred();
+    const readerA = fakeReader(WS_A, () => gate.promise);
+    setAssetRemoteReader(readerA);
+    signInTo(WS_A);
+    const a = readAssetWithState("dup-1");
+    signInTo(WS_B);
+    const b = readAssetWithState("dup-1");
+    expect(inFlightAssetReadCount()).toBe(2);
+    gate.resolve({ state: ASSET_READ_STATE.MISSING, record: null, code: null });
+    const [ra, rb] = await Promise.all([a, b]);
+    // B has no reader of its own, so it never reached one.
+    expect(readerA.calls).toHaveLength(1);
+    expect(ra.state).toBe(ASSET_READ_STATE.MISSING);
+    expect(rb.state).toBe(ASSET_READ_STATE.MISSING);
+  });
+});
+
+describe("readerFromLoadAsset", () => {
+  test("a record is READY and nothing is MISSING", async () => {
+    const record = { id: "r-1", kind: "logo", blob: testBlob("R") };
+    const read = readerFromLoadAsset(async (id) => (id === "r-1" ? record : null));
+    expect(await read("r-1")).toEqual({ state: ASSET_READ_STATE.READY, record, code: null });
+    expect(await read("nope")).toEqual({ state: ASSET_READ_STATE.MISSING, record: null, code: null });
+  });
+
+  test("a throw propagates, so an injected loader's failure still fails the caller", async () => {
+    const read = readerFromLoadAsset(async () => {
+      throw new Error("boom");
+    });
+    await expect(read("x")).rejects.toThrow("boom");
   });
 });

@@ -13,10 +13,13 @@ import {
   EXPORT_BLOB_URL_MESSAGE,
   EXPORT_MISSING_IMAGE,
   EXPORT_MISSING_ASSET_MESSAGE,
+  EXPORT_OFFLINE_ASSET_MESSAGE,
+  EXPORT_PENDING_ASSET_MESSAGE,
   EXPORT_UNREADABLE_ASSET_MESSAGE,
   EXPORT_UNSUPPORTED_ASSET_MESSAGE,
   resolveExportImageHtml,
 } from "./exportImageAssets";
+import { ASSET_READ_STATE } from "./assetReader";
 import { ASSET_KIND_EDITOR_IMAGE, ASSET_KIND_NOTE_PHOTO } from "./assetStorage";
 import {
   EDITOR_IMAGE_ASSET_ATTR,
@@ -420,5 +423,87 @@ describe("P4. an annotated photo exports as its rendition", () => {
     expect(out).not.toContain(EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR);
     expect(out).not.toContain("orig");
     expect(out).toContain('alt="Wall"');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Production Readiness Phase 7.5 — an image that lives only in the cloud
+ * ------------------------------------------------------------------------ */
+
+describe("cross-device exports", () => {
+  /** A state-reporting read, the shape the shared boundary now returns. */
+  function reads(outcomes) {
+    const seen = [];
+    return {
+      seen,
+      readAsset: (id) => {
+        seen.push(id);
+        return Promise.resolve(outcomes[id] || { state: ASSET_READ_STATE.MISSING, record: null });
+      },
+    };
+  }
+
+  test("a remote-only image is fetched through the shared read and embedded", async () => {
+    // The reader downloads and caches it; the export sees an ordinary READY
+    // record and never knows the difference.
+    const r = reads({
+      a: { state: ASSET_READ_STATE.READY, record: asset("image/png") },
+    });
+    const out = await resolveExportImageHtml(`<p>${imgRef("a")}${imgRef("a")}</p>`, {
+      readAsset: r.readAsset,
+      blobToDataUrl,
+    });
+    expect(out).toContain("data:image/png;base64,QUJD");
+    // Still exactly one read for a twice-referenced asset — which, remotely,
+    // is one download rather than two.
+    expect(r.seen).toEqual(["a"]);
+  });
+
+  test("an OFFLINE image aborts the export, and says so in its own words", async () => {
+    const r = reads({ a: { state: ASSET_READ_STATE.OFFLINE, record: null } });
+    await expect(
+      resolveExportImageHtml(imgRef("a"), { readAsset: r.readAsset, blobToDataUrl })
+    ).rejects.toThrow(EXPORT_OFFLINE_ASSET_MESSAGE);
+  });
+
+  test("an image still syncing from another device aborts with a WAIT, not a loss", async () => {
+    const r = reads({ a: { state: ASSET_READ_STATE.PENDING, record: null } });
+    await expect(
+      resolveExportImageHtml(imgRef("a"), { readAsset: r.readAsset, blobToDataUrl })
+    ).rejects.toThrow(EXPORT_PENDING_ASSET_MESSAGE);
+  });
+
+  test("a genuinely missing image keeps the message it has always had", async () => {
+    const r = reads({ a: { state: ASSET_READ_STATE.MISSING, record: null } });
+    await expect(
+      resolveExportImageHtml(imgRef("a"), { readAsset: r.readAsset, blobToDataUrl })
+    ).rejects.toThrow(EXPORT_MISSING_ASSET_MESSAGE);
+  });
+
+  test("no refusal names a provider, a code or a path", () => {
+    for (const message of [EXPORT_OFFLINE_ASSET_MESSAGE, EXPORT_PENDING_ASSET_MESSAGE]) {
+      expect(message).not.toMatch(/storage\/|firestore\/|workspaces\//);
+      expect(message).toContain("Nothing was downloaded");
+    }
+  });
+
+  test("PLACEHOLDER mode still degrades rather than aborting", async () => {
+    const r = reads({ a: { state: ASSET_READ_STATE.OFFLINE, record: null } });
+    const out = await resolveExportImageHtml(imgRef("a"), {
+      readAsset: r.readAsset,
+      blobToDataUrl,
+      onMissing: EXPORT_MISSING_IMAGE.PLACEHOLDER,
+    });
+    expect(out).toContain(EXPORT_IMAGE_PLACEHOLDER_CLASS);
+    expect(out).toContain(EXPORT_IMAGE_UNAVAILABLE_TEXT);
+  });
+
+  test("an injected Phase 7.2 loadAsset still behaves exactly as it did", async () => {
+    const s = store({ a: asset("image/png") });
+    const out = await resolveExportImageHtml(imgRef("a"), { loadAsset: s.loadAsset, blobToDataUrl });
+    expect(out).toContain("data:image/png;base64,QUJD");
+    await expect(
+      resolveExportImageHtml(imgRef("gone"), { loadAsset: s.loadAsset, blobToDataUrl })
+    ).rejects.toThrow(EXPORT_MISSING_ASSET_MESSAGE);
   });
 });

@@ -49,15 +49,37 @@ function inThisRealm(value) {
   return out;
 }
 
+/**
+ * Whether a value is a Blob of ANY realm.
+ *
+ * `instanceof NodeBlob` is not enough. A record on its way into storage can
+ * carry a Node Blob (the fixtures here), a jsdom Blob (what the in-memory
+ * asset store hands a downloaded asset), or a File. None of the three is
+ * V8-serializable, and all three must cross by reference — a browser does the
+ * same with the underlying bytes. Structural detection is the only
+ * cross-realm-safe test.
+ */
+function isBlobLike(value) {
+  if (value instanceof NodeBlob) return true;
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      typeof value.size === "number" &&
+      typeof value.type === "string" &&
+      typeof value.slice === "function"
+  );
+}
+
 /** Installs the structuredClone shim once per test process. */
 export function installStructuredCloneShim() {
   if (typeof globalThis.structuredClone === "function") return;
   globalThis.structuredClone = (value) => {
+    if (isBlobLike(value)) return value;
     if (value && typeof value === "object" && !Array.isArray(value)) {
       const blobs = {};
       const rest = {};
       for (const [k, v] of Object.entries(value)) {
-        if (v instanceof NodeBlob) blobs[k] = v;
+        if (isBlobLike(v)) blobs[k] = v;
         else rest[k] = v;
       }
       return { ...inThisRealm(deserialize(serialize(rest))), ...blobs };
