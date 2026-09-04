@@ -20,11 +20,11 @@
 // No network access: nothing is fetched, and a remote URL is never resolved.
 
 import {
-  getAsset,
   ALLOWED_LOGO_MIME_TYPES,
   ASSET_KIND_NOTE_FILE,
   ASSET_KIND_NOTE_PHOTO,
 } from "./assetStorage";
+import { loadAsset as readAssetBytes } from "./assetReader";
 import { isAllowedImageMimeType, normalizeMimeType } from "./imageProcessing";
 import { isSafeImageDataUrl } from "./templateExportModel";
 
@@ -91,7 +91,7 @@ export async function resolveExportLogo(
   { logoAssetId, legacyLogoSrc } = {},
   deps = {}
 ) {
-  const { loadAsset = getAsset, blobToDataUrl = defaultBlobToDataUrl } = deps;
+  const { loadAsset = readAssetBytes, blobToDataUrl = defaultBlobToDataUrl } = deps;
 
   if (logoAssetId) {
     const asset = await readAsset(loadAsset, logoAssetId, ASSET_KIND_LOGO);
@@ -115,7 +115,7 @@ export async function resolveExportLogo(
  * "Photo unavailable." placeholder.
  */
 export async function resolveExportPhotos(assetIds = [], deps = {}) {
-  const { loadAsset = getAsset, blobToDataUrl = defaultBlobToDataUrl } = deps;
+  const { loadAsset = readAssetBytes, blobToDataUrl = defaultBlobToDataUrl } = deps;
   const out = new Map();
   for (const id of assetIds) {
     if (out.has(id)) continue;
@@ -131,7 +131,7 @@ export async function resolveExportPhotos(assetIds = [], deps = {}) {
  * what it actually is.
  */
 export async function resolveExportFiles(assetIds = [], deps = {}) {
-  const { loadAsset = getAsset } = deps;
+  const { loadAsset = readAssetBytes } = deps;
   const out = new Map();
   for (const id of assetIds) {
     if (out.has(id)) continue;

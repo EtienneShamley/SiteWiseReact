@@ -45,7 +45,7 @@
 //   - no URL is ever taken from stored HTML and navigated to.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { getAsset } from "../../lib/assetStorage";
+import { loadAsset } from "../../lib/assetReader";
 import useTransientMessage from "../../hooks/useTransientMessage";
 import {
   DEFAULT_FILE_ATTACHMENT_ASSET_KINDS,
@@ -87,7 +87,9 @@ export async function loadFileAttachmentAsset(assetId, acceptedKinds) {
   if (!assetId) return null;
   let asset;
   try {
-    asset = await getAsset(assetId);
+    // The shared read boundary (src/lib/assetReader.js). The KIND POLICY below
+    // is unchanged and still decides from the record's own stored kind.
+    asset = await loadAsset(assetId);
   } catch {
     return null;
   }

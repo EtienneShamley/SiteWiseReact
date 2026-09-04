@@ -29,7 +29,7 @@
 // safeDownloadFilename helper, so Template-form evidence and Free-form note
 // attachments cannot hold different ideas of what a safe filename is.
 import React, { useEffect, useRef, useState } from "react";
-import { getAsset } from "../../lib/assetStorage";
+import { loadAsset } from "../../lib/assetReader";
 import { formatFileSize, fileKindLabel } from "../../lib/noteAttachments";
 import {
   RENDER_MODE,
@@ -71,7 +71,7 @@ export default function FileAttachmentRow({
 
   useEffect(() => {
     let cancelled = false;
-    getAsset(attachment.assetId)
+    loadAsset(attachment.assetId)
       .then((asset) => {
         if (cancelled) return;
         if (!asset || !asset.blob) {
@@ -131,7 +131,7 @@ export default function FileAttachmentRow({
       reservedTab,
       metadataMimeType: attachment.mimeType,
       getBlob: async () => {
-        const asset = await getAsset(attachment.assetId);
+        const asset = await loadAsset(attachment.assetId);
         return asset?.blob || null;
       },
     });
@@ -170,7 +170,7 @@ export default function FileAttachmentRow({
   async function handleDownload() {
     let asset;
     try {
-      asset = await getAsset(attachment.assetId);
+      asset = await loadAsset(attachment.assetId);
     } catch {
       onError && onError(ATTACHMENT_DOWNLOAD_FAILED_MESSAGE);
       return;

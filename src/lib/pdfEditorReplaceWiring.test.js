@@ -22,7 +22,12 @@ describe("PdfEditorTab", () => {
   test("reads the bytes through the document's SOURCE id, annotations through the document id", () => {
     expect(TAB).toMatch(/import \{ pdfSourceId \} from "\.\.\/\.\.\/lib\/pdfDocuments"/);
     expect(TAB).toMatch(/const sourceId = registryDoc \? pdfSourceId\(registryDoc\) : docId;/);
-    expect(TAB).toMatch(/loadPdfBytes\(loadSourceId\), loadAnnotations\(docId\)/);
+    // Production Readiness Phase 7.2: the byte read moved behind the shared
+    // asset read boundary, which routes `pdf-source` to the SAME pdfDocBytes
+    // store. Still the source id, still the document id for annotations.
+    expect(TAB).toMatch(/loadAsset\(loadSourceId, \{ kind: ASSET_KIND_PDF_SOURCE \}\)/);
+    expect(TAB).toMatch(/loadAnnotations\(docId\)/);
+    expect(TAB).toMatch(/import \{ loadAsset \} from "\.\.\/\.\.\/lib\/assetReader"/);
     expect(TAB).toMatch(/setPdfBytesCache\(loadSourceId, rec\.bytes\)/);
     expect(TAB).toMatch(/getPdfBytesCache\(loadSourceId\)/);
   });

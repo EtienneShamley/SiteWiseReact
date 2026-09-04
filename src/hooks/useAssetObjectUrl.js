@@ -11,37 +11,45 @@
 //
 // Shared by the Template Builder and the note renderer, which need identical
 // behavior. blob: URLs are transient and are never persisted anywhere.
+//
+// The read itself goes through the shared asset read boundary
+// (src/lib/assetReader.js), so the several images of one note that reference
+// the same photo share one read instead of each making its own, and so the
+// cross-device read added in a later phase arrives here without this hook
+// changing. The reported statuses are the shared vocabulary's — the same four
+// strings this hook has always returned; nothing here can report
+// "downloading", because in this phase nothing downloads.
 import { useEffect, useState } from "react";
-import { getAsset } from "../lib/assetStorage";
+import { ASSET_READ_STATE, loadAsset } from "../lib/assetReader";
 
 export default function useAssetObjectUrl(assetId) {
   const [state, setState] = useState(() => ({
     url: null,
-    status: assetId ? "loading" : "idle",
+    status: assetId ? ASSET_READ_STATE.LOADING : ASSET_READ_STATE.IDLE,
   }));
 
   useEffect(() => {
     if (!assetId) {
-      setState({ url: null, status: "idle" });
+      setState({ url: null, status: ASSET_READ_STATE.IDLE });
       return undefined;
     }
 
     let cancelled = false;
     let objectUrl = null;
-    setState({ url: null, status: "loading" });
+    setState({ url: null, status: ASSET_READ_STATE.LOADING });
 
-    getAsset(assetId)
+    loadAsset(assetId)
       .then((asset) => {
         if (cancelled) return;
         if (!asset || !asset.blob) {
-          setState({ url: null, status: "missing" });
+          setState({ url: null, status: ASSET_READ_STATE.MISSING });
           return;
         }
         objectUrl = URL.createObjectURL(asset.blob);
-        setState({ url: objectUrl, status: "ready" });
+        setState({ url: objectUrl, status: ASSET_READ_STATE.READY });
       })
       .catch(() => {
-        if (!cancelled) setState({ url: null, status: "error" });
+        if (!cancelled) setState({ url: null, status: ASSET_READ_STATE.ERROR });
       });
 
     return () => {

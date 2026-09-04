@@ -11,8 +11,31 @@
 // REJECT on open/read/write failure so callers can surface errors visibly, and
 // pure record/validation helpers exported separately so they are unit-testable
 // without a real IndexedDB (jsdom has none).
+//
+// WORKSPACE TAGGING (Production Readiness Phase 7.2). An asset created while a
+// workspace is the active durable scope (src/lib/durableStorage.js) records
+// that workspace on the record and, in the SAME IndexedDB transaction, the
+// upload-queue identity the cloud is owed (src/lib/assetUploadQueue.js). An
+// asset created in the local scope records no workspace and is queued for
+// nobody — exactly the behaviour this module has always had.
+//
+// Records written BEFORE that phase carry no `workspaceId`. They are legacy,
+// not orphaned: they stay readable in every scope, are never rewritten, and
+// are never reassigned to whichever account happens to sign in. Associating
+// them with a workspace is an explicit, user-facing migration (Phase 7.6) and
+// deliberately does not happen here.
+//
+// The database connection and its schema live in src/lib/assetDb.js, which the
+// upload queue and the remote index share — one opener, one version.
 
 import { newId } from "./id";
+import {
+  ASSET_STORE,
+  ASSET_UPLOAD_QUEUE_STORE,
+  assetDbTransaction,
+} from "./assetDb";
+import { DURABLE_SCOPE_KIND, getDurableScope } from "./durableStorage";
+import { isQueueableWorkspaceId, makeAssetUploadEntry } from "./assetUploadQueue";
 import {
   ALLOWED_IMAGE_MIME_TYPES,
   IMAGE_OVERSIZED_MESSAGE,
@@ -21,9 +44,7 @@ import {
   isAllowedImageMimeType,
 } from "./imageProcessing";
 
-const DB_NAME = "notewise-assets";
-const DB_VERSION = 1;
-const STORE = "assets";
+const STORE = ASSET_STORE;
 
 // Logo upload constraints. SVG is intentionally excluded. The logo is a small
 // brand asset with its own smaller limit and is deliberately NOT governed by
@@ -89,58 +110,23 @@ export const ASSET_KIND_EDITOR_IMAGE = "editor-image";
 // the kind is checked before a stored Blob is ever opened or downloaded.
 export const ASSET_KIND_EDITOR_FILE = "editor-file";
 
-let dbPromise = null;
-
-function openDb() {
-  if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
-    if (typeof indexedDB === "undefined") {
-      reject(new Error("IndexedDB is not available in this browser"));
-      return;
-    }
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) {
-        db.createObjectStore(STORE, { keyPath: "id" });
-      }
-    };
-    req.onsuccess = () => {
-      const db = req.result;
-      // If another tab upgrades the schema, drop our handle so the next call
-      // reopens cleanly instead of failing forever.
-      db.onversionchange = () => {
-        db.close();
-        dbPromise = null;
-      };
-      resolve(db);
-    };
-    req.onerror = () => {
-      dbPromise = null;
-      reject(req.error || new Error("Failed to open asset storage database"));
-    };
-  });
-  return dbPromise;
+function txRequest(mode, run) {
+  return assetDbTransaction(STORE, mode, (stores) => run(stores[STORE]));
 }
 
-function txRequest(mode, run) {
-  return openDb().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE, mode);
-        const store = tx.objectStore(STORE);
-        let result;
-        const req = run(store);
-        if (req) {
-          req.onsuccess = () => {
-            result = req.result;
-          };
-        }
-        tx.oncomplete = () => resolve(result);
-        tx.onerror = () => reject(tx.error || new Error("Asset storage transaction failed"));
-        tx.onabort = () => reject(tx.error || new Error("Asset storage transaction aborted"));
-      })
-  );
+/**
+ * The workspace a NEW asset belongs to, or null when there is none.
+ *
+ * It is read from the ACTIVE DURABLE SCOPE — the same session boundary every
+ * owner module already resolves its records against (src/lib/durableStorage.js,
+ * set once per session by src/lib/cloud/workspaceSession.js) — rather than from
+ * a second global of this module's own. There is one answer to "whose data is
+ * this", and assets now use it too.
+ */
+export function activeAssetWorkspaceId() {
+  const scope = getDurableScope();
+  if (!scope || scope.kind !== DURABLE_SCOPE_KIND.WORKSPACE) return null;
+  return isQueueableWorkspaceId(scope.id) ? scope.id : null;
 }
 
 /* ------------------------- pure, testable helpers ------------------------ */
@@ -150,7 +136,11 @@ function txRequest(mode, run) {
 // newId() (see createLogoAsset); the legacy migration passes a DETERMINISTIC id
 // derived from the TemplateVersion so a retry can never create a duplicate
 // asset.
-export function makeAssetRecord({ id, kind, name, blob, metadata }) {
+//
+// `workspaceId` is the workspace that OWNS the asset, or null for a local-only
+// asset. It is written, never inferred later: a record with no workspace is a
+// record that belongs to this browser alone until a user explicitly migrates it.
+export function makeAssetRecord({ id, kind, name, blob, metadata, workspaceId }) {
   if (!id) throw new Error("An asset id is required");
   if (!blob || typeof blob.size !== "number") {
     throw new Error("A Blob is required to store an asset");
@@ -167,6 +157,7 @@ export function makeAssetRecord({ id, kind, name, blob, metadata }) {
     createdAt: now,
     updatedAt: now,
     metadata: metadata || {},
+    workspaceId: isQueueableWorkspaceId(workspaceId) ? workspaceId : null,
   };
 }
 
@@ -294,6 +285,76 @@ export async function saveAsset(record) {
   return record.id;
 }
 
+/**
+ * The ATOMIC creation of a workspace-owned asset: the local record and the
+ * upload identity the cloud is owed, written in ONE IndexedDB transaction.
+ *
+ * The invariant it exists for, in both directions:
+ *
+ *   resolved  the local asset exists AND its queue identity exists
+ *   rejected  NEITHER exists — no asset the cloud will never hear about, and
+ *             no queue entry naming bytes that were never stored
+ *
+ * An asynchronous failure (quota, a refused write) is rolled back by
+ * IndexedDB itself; a synchronous one (a value the structured clone refuses)
+ * aborts the transaction explicitly in src/lib/assetDb.js. Neither can leave
+ * half of the pair behind.
+ *
+ * A record with NO workspace is written exactly as it always was — one put
+ * into `assets`, no queue entry, no second store touched — so the local-only
+ * path keeps its current behaviour and cost.
+ *
+ * The resolved promise remains the LOCAL WRITE CONFIRMATION every insertion
+ * path depends on: callers still must not put a reference into a document
+ * until it resolves.
+ */
+export async function saveNewAsset(record) {
+  if (!record || !record.id) throw new Error("Cannot save an asset without an id");
+  const workspaceId = record.workspaceId;
+  if (workspaceId === null || workspaceId === undefined) {
+    await txRequest("readwrite", (store) => store.put(record));
+    return record.id;
+  }
+  // A record CLAIMING a workspace that could never be addressed as a Storage
+  // path is refused rather than stored: it would be owed to a workspace no
+  // upload could name. `makeAssetRecord` normalises such a value to null, so
+  // this is a fail-closed guard, not a path the product can reach.
+  if (!isQueueableWorkspaceId(workspaceId)) {
+    throw new Error("An asset cannot be owned by an invalid workspace id");
+  }
+  // Built BEFORE the transaction opens: a rejected entry must never be the
+  // reason a transaction aborts halfway.
+  const entry = makeAssetUploadEntry({
+    workspaceId,
+    assetId: record.id,
+    kind: record.kind,
+    at: record.createdAt,
+  });
+  await assetDbTransaction([STORE, ASSET_UPLOAD_QUEUE_STORE], "readwrite", (stores) => {
+    stores[STORE].put(record);
+    stores[ASSET_UPLOAD_QUEUE_STORE].put(entry);
+  });
+  return record.id;
+}
+
+/**
+ * Build and persist one NEW asset under the ACTIVE workspace scope.
+ * The single place every `create…Asset` below goes through, so none of them
+ * can grow its own idea of tagging, queueing or ordering.
+ */
+async function createScopedAsset({ kind, name, blob, metadata }) {
+  const record = makeAssetRecord({
+    id: newId(),
+    kind,
+    name,
+    blob,
+    metadata,
+    workspaceId: activeAssetWorkspaceId(),
+  });
+  await saveNewAsset(record);
+  return record.id;
+}
+
 /** Resolves to the asset record ({ id, kind, ..., blob }) or null when absent. */
 export async function getAsset(id) {
   if (!id) return null;
@@ -301,9 +362,55 @@ export async function getAsset(id) {
   return rec || null;
 }
 
-export async function deleteAsset(id) {
+/**
+ * Remove one asset AND the upload identity it may still owe the cloud, in ONE
+ * transaction.
+ *
+ * This is the rollback path of every insertion sequence (editorImageInsert,
+ * editorFileInsert, photoAnnotationSave, the Template attachment flows): when
+ * the reference could not be made, the bytes are provably unreferenced and are
+ * deleted. A pending queue entry left behind would name bytes that no longer
+ * exist and would be uploaded — or retried forever — for nothing, so it goes
+ * with them.
+ *
+ * WHICH WORKSPACE'S QUEUE ENTRY IS REMOVED IS NEVER INFERRED FROM THE SESSION.
+ * It comes from the RECORD being deleted, read inside the same transaction —
+ * the asset's own statement of who owns it. A caller that must delete a queue
+ * entry whose record is already gone passes the originating workspace
+ * EXPLICITLY (`{ workspaceId }`); with neither, no queue entry is touched.
+ *
+ * The ambient alternative — falling back to whichever workspace happens to be
+ * active — is what this deliberately does not do. A rollback is asynchronous:
+ * it can land after a sign-out and a sign-in as another account, and an
+ * ambient owner would then aim the delete at the NEW workspace's queue. The
+ * rollback paths never need it, because they run while the record they created
+ * still exists and therefore still names its own workspace.
+ *
+ * This function does NOT delete anything in the cloud. Cloud collection is the
+ * approved mark-and-sweep, and it is not this phase's work.
+ *
+ * @param {string} id
+ * @param {{ workspaceId?: string }} [options] the ORIGINATING workspace, for
+ *        the caller that knows it and whose record may already be gone.
+ */
+export async function deleteAsset(id, { workspaceId } = {}) {
   if (!id) return;
-  await txRequest("readwrite", (store) => store.delete(id));
+  const declaredOwner = isQueueableWorkspaceId(workspaceId) ? workspaceId : null;
+  await assetDbTransaction([STORE, ASSET_UPLOAD_QUEUE_STORE], "readwrite", (stores) => {
+    const store = stores[STORE];
+    const queue = stores[ASSET_UPLOAD_QUEUE_STORE];
+    const read = store.get(id);
+    read.onsuccess = () => {
+      const existing = read.result;
+      const recordOwner =
+        existing && isQueueableWorkspaceId(existing.workspaceId) ? existing.workspaceId : null;
+      // The record's own owner wins; the caller's declaration is the fallback
+      // for a record that is already gone. Never the active session.
+      const owner = recordOwner || declaredOwner;
+      if (owner) queue.delete([owner, id]);
+      store.delete(id);
+    };
+  });
 }
 
 export async function assetExists(id) {
@@ -338,14 +445,7 @@ export async function listAssetIds() {
 export async function createLogoAsset(file) {
   const check = validateLogoFile(file);
   if (!check.ok) throw new Error(check.error);
-  const record = makeAssetRecord({
-    id: newId(),
-    kind: "logo",
-    name: file.name || null,
-    blob: file,
-  });
-  await saveAsset(record);
-  return record.id;
+  return createScopedAsset({ kind: "logo", name: file.name || null, blob: file });
 }
 
 // Creates and persists a NEW note-Photo asset (validation is the caller's
@@ -357,30 +457,24 @@ export async function createLogoAsset(file) {
 // src/lib/imageProcessing.js), which is why `name` can be supplied separately —
 // a Blob produced by re-encoding has no filename of its own.
 export async function createPhotoAsset(blob, metadata, name) {
-  const record = makeAssetRecord({
-    id: newId(),
+  return createScopedAsset({
     kind: ASSET_KIND_NOTE_PHOTO,
     name: name || blob.name || null,
     blob,
     metadata,
   });
-  await saveAsset(record);
-  return record.id;
 }
 
 // Creates and persists a NEW Free-form editor-image asset. Same contract as
 // createPhotoAsset: the resolved promise IS the write confirmation, and the
 // caller must not insert an editor node until it resolves.
 export async function createEditorImageAsset(blob, { name, metadata } = {}) {
-  const record = makeAssetRecord({
-    id: newId(),
+  return createScopedAsset({
     kind: ASSET_KIND_EDITOR_IMAGE,
     name: name || blob.name || null,
     blob,
     metadata,
   });
-  await saveAsset(record);
-  return record.id;
 }
 
 // Creates and persists a NEW Free-form file-attachment asset. Same contract as
@@ -393,26 +487,20 @@ export async function createEditorImageAsset(blob, { name, metadata } = {}) {
 // The record's mimeType comes from the Blob, so the stored type is always the
 // one the safe-open policy will later read.
 export async function createEditorFileAsset(blob, { name, metadata } = {}) {
-  const record = makeAssetRecord({
-    id: newId(),
+  return createScopedAsset({
     kind: ASSET_KIND_EDITOR_FILE,
     name: name || blob.name || null,
     blob,
     metadata,
   });
-  await saveAsset(record);
-  return record.id;
 }
 
 // Creates and persists a NEW note-File asset. Same contract as createPhotoAsset.
 export async function createNoteFileAsset(file, metadata) {
-  const record = makeAssetRecord({
-    id: newId(),
+  return createScopedAsset({
     kind: ASSET_KIND_NOTE_FILE,
     name: file.name || null,
     blob: file,
     metadata,
   });
-  await saveAsset(record);
-  return record.id;
 }

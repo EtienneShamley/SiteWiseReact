@@ -48,7 +48,9 @@ import {
   EXPORT_STATE,
   canStartExport,
 } from "../../lib/pdfUtils";
-import { loadPdfBytes, saveAnnotations, loadAnnotations } from "../../lib/pdfStorage";
+import { saveAnnotations, loadAnnotations } from "../../lib/pdfStorage";
+import { loadAsset } from "../../lib/assetReader";
+import { ASSET_KIND_PDF_SOURCE } from "../../lib/localAssetCache";
 import { pdfSourceId } from "../../lib/pdfDocuments";
 import { extractPageIndex, findMatchesInDocument } from "../../lib/pdfSearch";
 import { buildTextRuns, describeFont } from "../../lib/pdfTextRuns";
@@ -315,7 +317,13 @@ export default function PdfEditorTab({
       let rec = null;
       let anns = [];
       try {
-        [rec, anns] = await Promise.all([loadPdfBytes(loadSourceId), loadAnnotations(docId)]);
+        // The shared read boundary routes `pdf-source` to the PDF byte store
+        // (src/lib/localAssetCache.js); the bytes are this caller's own copy,
+        // as they have always been — pdf.js detaches the buffer it renders.
+        [rec, anns] = await Promise.all([
+          loadAsset(loadSourceId, { kind: ASSET_KIND_PDF_SOURCE }),
+          loadAnnotations(docId),
+        ]);
       } catch (err) {
         if (!cancelled) reportStorageError("Could not read this PDF from browser storage", err);
       }

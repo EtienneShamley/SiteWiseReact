@@ -27,7 +27,8 @@
 // `blob:` URL must never reach an exported file. The stored note is not
 // rewritten — only the export copy.
 
-import { getAsset, ASSET_KIND_EDITOR_FILE } from "./assetStorage";
+import { ASSET_KIND_EDITOR_FILE } from "./assetStorage";
+import { loadAsset as readAssetBytes } from "./assetReader";
 import {
   EXPORT_ATTACHMENT_NOTE,
   EXPORT_ATTACHMENT_UNAVAILABLE_NOTE,
@@ -61,7 +62,7 @@ function defaultParseHtml(html) {
  * @returns {Promise<string>} export-only HTML
  */
 export async function resolveExportFileAttachmentHtml(html, deps = {}) {
-  const { loadAsset = getAsset, parseHtml = defaultParseHtml } = deps;
+  const { loadAsset = readAssetBytes, parseHtml = defaultParseHtml } = deps;
 
   if (typeof html !== "string" || !html) return "";
   const hasAttachments = html.includes(FILE_ATTACHMENT_ASSET_ATTR);

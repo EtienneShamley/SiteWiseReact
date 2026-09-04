@@ -209,8 +209,11 @@ describe("Template-form File attachments are hardened, not redesigned", () => {
 
   test("its storage model, limit and layout are untouched", () => {
     // Still the same attachment model, the same asset store and the same
-    // Open / Download / Remove row.
-    expect(row).toMatch(/getAsset/);
+    // Open / Download / Remove row. The READ now goes through the shared asset
+    // read boundary (src/lib/assetReader.js, Production Readiness Phase 7.2) —
+    // the store beneath it and the policy above it are unchanged.
+    expect(row).toMatch(/loadAsset\(attachment\.assetId\)/);
+    expect(row).toMatch(/from "\.\.\/\.\.\/lib\/assetReader"/);
     expect(row).toMatch(/resolveOpenPolicy/);
     expect(row).toMatch(/file-att-row/);
     expect(row).toMatch(/onRemove/);

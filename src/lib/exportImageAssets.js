@@ -25,7 +25,8 @@
 // The asset kind and the MIME are both checked, and the MIME is read from the
 // retrieved Blob itself — never from the note, the filename or the reference.
 
-import { getAsset, ASSET_KIND_EDITOR_IMAGE } from "./assetStorage";
+import { ASSET_KIND_EDITOR_IMAGE } from "./assetStorage";
+import { loadAsset as readAssetBytes } from "./assetReader";
 import { isAllowedImageMimeType, normalizeMimeType } from "./imageProcessing";
 import {
   EDITOR_IMAGE_ANNOTATION_SOURCE_ATTR,
@@ -123,7 +124,7 @@ function buildImagePlaceholder(doc, altText) {
  */
 export async function resolveExportImageHtml(html, deps = {}) {
   const {
-    loadAsset = getAsset,
+    loadAsset = readAssetBytes,
     blobToDataUrl = defaultBlobToDataUrl,
     parseHtml = defaultParseHtml,
     onMissing = EXPORT_MISSING_IMAGE.ABORT,

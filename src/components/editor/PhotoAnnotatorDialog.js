@@ -29,7 +29,7 @@
 // receive Delete or Escape meant for it.
 import React, { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FaUndo, FaRedo, FaTrashAlt, FaObjectGroup, FaSearchMinus, FaSearchPlus, FaExpand } from "react-icons/fa";
-import { getAsset } from "../../lib/assetStorage";
+import { loadAsset as readAssetBytes } from "../../lib/assetReader";
 import { decodeImageSource } from "../../lib/imageProcessing";
 import { renderAnnotatedImage } from "../../lib/imageAnnotationRaster";
 import {
@@ -78,7 +78,7 @@ const IMAGE_TOOL_GROUPS = toolGroupsForSurface(ANNOTATION_SURFACE.IMAGE);
  * @param deps     injectable platform calls (tests): loadAsset, decode, render
  */
 export default function PhotoAnnotatorDialog({ request, onCancel, onSave, deps = {} }) {
-  const { loadAsset = getAsset, decode = decodeImageSource, render = renderAnnotatedImage } = deps;
+  const { loadAsset = readAssetBytes, decode = decodeImageSource, render = renderAnnotatedImage } = deps;
 
   const [status, setStatus] = useState("loading"); // loading | ready | error
   const [loadError, setLoadError] = useState(null);
