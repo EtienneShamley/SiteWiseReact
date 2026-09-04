@@ -13,21 +13,24 @@
 //   setDocument(path, data)
 //   readAssetIndex(workspaceId)       every asset metadata document
 //   readAssetDocument(wid, assetId)   one asset metadata document
+//   writeAssetDocument(wid, assetId, fields)  create / rewrite one (server-stamped)
 //   deleteAssetDocument(wid, assetId) remove one asset metadata document
 //   close()
 //
 // ASSET METADATA (Production Readiness Phase 7). `workspaces/{wid}/assets/
 // {assetId}` is the Firestore record of an asset whose BYTES live in
 // Firebase Storage at the same path (src/lib/cloud/firebaseStorageAdapter.js;
-// the shared path convention is src/lib/cloud/assetPaths.js). The three
-// operations above are the reads a later phase's reconciliation and the
-// reference-driven sweep need, and the delete that sweep performs; the
-// documents themselves are written through `commitBatch` like every other
-// entity. `readWorkspace` does NOT include them — they are not part of the
-// workspace mirror the owner modules read. The metadata FIELD MODEL, and the
-// Firestore rules that admit the collection at all, arrive with the asset
-// cloud model; until then these operations are refused by `firestore.rules`,
-// which has no `assets` match.
+// the shared path convention is src/lib/cloud/assetPaths.js). The field
+// model is src/lib/cloud/assetCloudModel.js; `firestore.rules` admits the
+// collection since Phase 7.3 — members read, create and tombstone / restore
+// a document, and ONLY the workspace owner deletes one. The reads are what a
+// later phase's reconciliation and the reference-driven sweep need; the
+// write is the upload processor's and the lifecycle's; the delete is the
+// sweep's, and it is refused by the rules for anybody but the owner. Every
+// write here adds `updatedAt: serverTimestamp()` because the rules require
+// it, and a tombstone's `tombstonedAt` must be `timestamp()` too (the rules
+// refuse a client clock). `readWorkspace` does NOT include the collection —
+// it is not part of the workspace mirror the owner modules read.
 //
 // CACHE DECISION (Production Readiness Phase 6). The SDK's persistent
 // IndexedDB cache is deliberately NOT enabled: NoteWise keeps its own
@@ -140,7 +143,12 @@ export function createFirestoreWorkspaceStore(config) {
       return snapshot.exists() ? { exists: true, fields: snapshot.data() } : { exists: false, fields: null };
     },
 
-    /** Remove one asset metadata document (the sweep's own write). */
+    /** Create or rewrite one asset metadata document, server-stamped. */
+    async writeAssetDocument(workspaceId, assetId, fields) {
+      await setDoc(ref(assetDocumentPath(workspaceId, assetId)), { ...fields, updatedAt: serverTimestamp() });
+    },
+
+    /** Remove one asset metadata document (the sweep's own write; owner-only by the rules). */
     async deleteAssetDocument(workspaceId, assetId) {
       await deleteDoc(ref(assetDocumentPath(workspaceId, assetId)));
     },

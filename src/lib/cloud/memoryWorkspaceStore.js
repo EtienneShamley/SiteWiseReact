@@ -17,18 +17,26 @@
 // `setOffline(false)`.
 //
 // ASSET METADATA (Production Readiness Phase 7): `readAssetIndex`,
-// `readAssetDocument` and `deleteAssetDocument` mirror the Firestore store's
-// operations over `workspaces/{wid}/assets/{assetId}` and are gated on
-// membership like every other workspace read/write. They take the existing
-// `read` / `commit` failure kinds. `readWorkspace` excludes the collection:
-// asset metadata is not part of the workspace mirror the owner modules read,
-// exactly as in the Firestore store. NOTE that `firestore.rules` does not
-// admit the `assets` collection yet — the rules for it arrive with the asset
-// cloud model — so these operations succeed here before they succeed against
-// the real service.
+// `readAssetDocument`, `writeAssetDocument` and `deleteAssetDocument` mirror
+// the Firestore store's operations over `workspaces/{wid}/assets/{assetId}`
+// and enforce what `firestore.rules` enforces there since Phase 7.3 (the
+// field model is src/lib/cloud/assetCloudModel.js):
+//   - reads and writes need membership, like every other workspace access;
+//   - a written document must validate against its path identity, be
+//     created `stored` without a tombstone, and on a rewrite change nothing
+//     but state / tombstonedAt / updatedAt — stored → tombstoned only with
+//     the store's own timestamp, tombstoned → stored dropping it, and a
+//     standing tombstone keeping its clock;
+//   - DELETION is the workspace OWNER's alone (workspaces/{wid}.ownerUid):
+//     an ordinary member's delete is refused here exactly as the real rule
+//     refuses it, so no test can rely on a delete the service would deny.
+// They take the existing `read` / `commit` failure kinds. `readWorkspace`
+// excludes the collection: asset metadata is not part of the workspace
+// mirror the owner modules read, exactly as in the Firestore store.
 
 import { MEMBER_ROLE } from "./workspaceBootstrap";
 import { ASSET_COLLECTION, assetCollectionPath, assetDocumentPath } from "./assetPaths";
+import { CLOUD_ASSET_STATE, validateAssetDocument, validateAssetTransition } from "./assetCloudModel";
 
 const TIMESTAMP = Object.freeze({ __serverTimestamp: true });
 
@@ -58,6 +66,13 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
   function isMember(workspaceId, uid) {
     const member = docs.get(pathOf(["workspaces", workspaceId, "members", uid]));
     return Boolean(member);
+  }
+
+  // The one enforceable owner: workspaces/{wid}.ownerUid (firestore.rules
+  // `isOwner`). A membership document's role is never consulted for this.
+  function isOwner(workspaceId, uid) {
+    const workspace = docs.get(pathOf(["workspaces", workspaceId]));
+    return Boolean(workspace) && workspace.ownerUid === uid;
   }
 
   function assertAuthenticated() {
@@ -103,6 +118,41 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
     }
     if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
     if (data && data.workspaceId !== workspaceId) throw firestoreError("permission-denied", "workspaceId mismatch");
+    if (b === ASSET_COLLECTION && path.length === 4) authorizeAssetWrite(workspaceId, c, data, exists);
+  }
+
+  // The asset-document rules of firestore.rules (`match /assets/{assetId}`),
+  // evaluated on the data as it will be STORED (timestamps resolved), plus the
+  // one check that needs the raw write: a fresh tombstone must carry the
+  // store's timestamp, never a client value.
+  function authorizeAssetWrite(workspaceId, assetId, data, exists) {
+    if (!data) throw firestoreError("permission-denied", "assets: delete is not a set");
+    const resolved = resolveTimestamps(data, now());
+    const check = validateAssetDocument({ workspaceId, id: assetId, fields: resolved });
+    if (!check.ok) throw firestoreError("permission-denied", `assets: ${check.reason}`);
+    if (!exists) {
+      if (resolved.state !== CLOUD_ASSET_STATE.STORED || "tombstonedAt" in resolved) {
+        throw firestoreError("permission-denied", "assets: create must be stored without a tombstone");
+      }
+      return;
+    }
+    const previous = docs.get(pathOf(assetDocumentPath(workspaceId, assetId)));
+    const transition = validateAssetTransition(previous, resolved);
+    if (!transition.ok) throw firestoreError("permission-denied", `assets: ${transition.reason}`);
+    const tombstoning =
+      resolved.state === CLOUD_ASSET_STATE.TOMBSTONED && previous.state !== CLOUD_ASSET_STATE.TOMBSTONED;
+    if (tombstoning && data.tombstonedAt !== TIMESTAMP) {
+      throw firestoreError("permission-denied", "assets: tombstonedAt must be the server timestamp");
+    }
+  }
+
+  // A delete in the assets collection is the owner's alone; every other
+  // entity delete is a member's.
+  function authorizeDelete(workspaceId, relativePath) {
+    if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
+    if (relativePath[0] === ASSET_COLLECTION && relativePath.length === 2 && !isOwner(workspaceId, currentUid)) {
+      throw firestoreError("permission-denied", "assets: delete is owner-only");
+    }
   }
 
   // Within a transaction, a workspace being created in the same transaction
@@ -210,7 +260,7 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
             for (const op of ops) {
               const full = ["workspaces", workspaceId, ...op.path];
               if (op.type === "set") authorizeWrite(full, op.fields, docs.has(pathOf(full)));
-              else if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
+              else authorizeDelete(workspaceId, op.path);
             }
             const stamp = now();
             for (const op of ops) {
@@ -256,12 +306,22 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
       return value ? { exists: true, fields: { ...value } } : { exists: false, fields: null };
     },
 
+    async writeAssetDocument(workspaceId, assetId, fields) {
+      assertAuthenticated();
+      take("commit");
+      const full = assetDocumentPath(workspaceId, assetId);
+      calls.commits.push([{ type: "set", path: `${ASSET_COLLECTION}/${assetId}` }]);
+      authorizeWrite(full, fields, docs.has(pathOf(full)));
+      const stamp = now();
+      docs.set(pathOf(full), { ...resolveTimestamps(fields, stamp), updatedAt: stamp });
+    },
+
     async deleteAssetDocument(workspaceId, assetId) {
       assertAuthenticated();
       take("commit");
       const path = pathOf(assetDocumentPath(workspaceId, assetId));
       calls.commits.push([{ type: "delete", path: `${ASSET_COLLECTION}/${assetId}` }]);
-      if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
+      authorizeDelete(workspaceId, [ASSET_COLLECTION, assetId]);
       const existed = docs.delete(path);
       return { deleted: existed };
     },

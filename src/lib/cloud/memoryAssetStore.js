@@ -17,12 +17,25 @@
 //   - the content-type rule: the caller's explicit type or the Blob's own,
 //     never a filename.
 //
-// What it deliberately does NOT reproduce: the Storage Security Rules. They
-// are deny-all in Phase 7.1 and are tested against the real emulator
-// (test/rules/storage.rules.test.js); the membership-based rules arrive in
-// Phase 7.3, and this double will enforce their equivalent then — the way
-// src/lib/cloud/memoryWorkspaceStore.js enforces the Firestore rules today.
-// Until then a test that needs a refusal injects one with `failNext`.
+// THE STORAGE RULES (Phase 7.3). The real rules decide membership and
+// ownership by reading FIRESTORE cross-service (storage.rules →
+// `firestore.exists` / `firestore.get`). This double does the same thing
+// against the in-memory WORKSPACE store when one is attached —
+// `createMemoryAssetStore({ workspaceStore })` — reading the caller from
+// `workspaceStore.getUser()` and the membership / owner documents it holds:
+//   - get / upload need membership of the path's workspace;
+//   - an upload must be 1 byte … 50 MB, carry a content type on the canonical
+//     cloud list, and name its identity (assetId, workspaceId, assetKind) in
+//     custom metadata matching the path (src/lib/cloud/assetCloudModel.js);
+//   - DELETE is the workspace OWNER's alone (workspaces/{wid}.ownerUid), so
+//     no test can rely on a delete the real rule denies;
+//   - a signed-out caller gets `storage/unauthenticated`, any other refusal
+//     `storage/unauthorized` — the SDK's own codes.
+// WITHOUT a workspace store the double runs RULES-BYPASSED — the equivalent
+// of the emulator's `withSecurityRulesDisabled` — for tests of the byte
+// contract alone; the create-only rule and the path/type checks apply in
+// both modes. The rules themselves are tested against the real emulators
+// (test/rules/storage.rules.test.js).
 //
 // Failure injection: `failNext(operation, code)` makes the next
 // exists/upload/download/delete reject with a Storage-shaped `{ code }`
@@ -30,6 +43,7 @@
 // production interface.
 
 import { ASSET_STORAGE_ERROR, assetObjectPath, assetPrefix, assetStorageError } from "./assetPaths";
+import { MAX_CLOUD_ASSET_BYTES, isCloudAssetKind, isCloudAssetMimeType } from "./assetCloudModel";
 
 const OPERATIONS = ["exists", "upload", "download", "delete"];
 
@@ -56,9 +70,12 @@ function contentTypeOf(data, contentType) {
 }
 
 /**
- * @param {{ bucket?: string, now?: () => number }} [options]
+ * @param {{ bucket?: string, now?: () => number, workspaceStore?: object|null }} [options]
+ *        `workspaceStore` — a memory workspace store (src/lib/cloud/
+ *        memoryWorkspaceStore.js); when given, the Storage rules are enforced
+ *        from its user and membership documents. Omitted = rules bypassed.
  */
-export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => Date.now() } = {}) {
+export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => Date.now(), workspaceStore = null } = {}) {
   // canonical object path → { bytes, size, contentType, metadata, createdAt }
   const objects = new Map();
   const failures = { exists: null, upload: null, download: null, delete: null };
@@ -68,6 +85,41 @@ export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => D
     const failure = failures[operation];
     failures[operation] = null;
     if (failure) throw assetStorageError(failure);
+  }
+
+  // storage.rules, evaluated against the attached workspace store: `get` and
+  // `create` for a member, `delete` for the owner. Nothing when no store is
+  // attached (rules bypassed).
+  function authorize(operation, workspaceId) {
+    if (!workspaceStore) return;
+    const uid = workspaceStore.getUser();
+    if (!uid) throw assetStorageError(ASSET_STORAGE_ERROR.UNAUTHENTICATED, "No signed-in user");
+    if (operation === "delete") {
+      const workspace = workspaceStore.get(["workspaces", workspaceId]);
+      if (!workspace || workspace.ownerUid !== uid) {
+        throw assetStorageError(ASSET_STORAGE_ERROR.UNAUTHORIZED, "Only the workspace owner may delete an asset object");
+      }
+      return;
+    }
+    if (!workspaceStore.get(["workspaces", workspaceId, "members", uid])) {
+      throw assetStorageError(ASSET_STORAGE_ERROR.UNAUTHORIZED, "Not a member of this workspace");
+    }
+  }
+
+  // The create rule's object invariants (size, content type, identity metadata).
+  function authorizeCreate(workspaceId, assetId, size, contentType, metadata) {
+    if (!workspaceStore) return;
+    const refuse = (message) => {
+      throw assetStorageError(ASSET_STORAGE_ERROR.UNAUTHORIZED, message);
+    };
+    if (!(size > 0) || size > MAX_CLOUD_ASSET_BYTES) refuse("An asset object must be 1 byte to 50 MB");
+    if (contentType !== contentType.toLowerCase().trim() || !isCloudAssetMimeType(contentType)) {
+      refuse("That content type is not accepted for a cloud asset");
+    }
+    const meta = metadata && typeof metadata === "object" ? metadata : null;
+    if (!meta || meta.assetId !== assetId || meta.workspaceId !== workspaceId || !isCloudAssetKind(meta.assetKind)) {
+      refuse("An asset object must name its own workspace, asset and kind");
+    }
   }
 
   const objectPath = (workspaceId, assetId) => assetObjectPath(workspaceId, assetId);
@@ -118,6 +170,7 @@ export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => D
       const path = objectPath(workspaceId, assetId);
       take("exists");
       calls.exists += 1;
+      authorize("get", workspaceId);
       return objects.has(path);
     },
 
@@ -131,12 +184,14 @@ export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => D
       if (!contentType) {
         throw assetStorageError(ASSET_STORAGE_ERROR.INVALID_ARGUMENT, "An asset upload needs a content type");
       }
+      authorize("create", workspaceId);
       if (objects.has(path)) {
         // The create-only rule's refusal: an object is never rewritten.
         throw assetStorageError(ASSET_STORAGE_ERROR.UNAUTHORIZED, "An asset object is immutable once written");
       }
       const bytes = await toBytes(data);
       const size = typeof data.size === "number" ? data.size : bytes.length;
+      authorizeCreate(workspaceId, assetId, size, contentType, options.metadata);
       objects.set(path, {
         bytes,
         size,
@@ -152,6 +207,7 @@ export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => D
       const path = objectPath(workspaceId, assetId);
       take("download");
       calls.downloads.push(path);
+      authorize("get", workspaceId);
       const record = objects.get(path);
       if (!record) throw assetStorageError(ASSET_STORAGE_ERROR.NOT_FOUND, `No such object: ${path}`);
       return new Blob([record.bytes], { type: record.contentType });
@@ -161,6 +217,7 @@ export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => D
       const path = objectPath(workspaceId, assetId);
       take("delete");
       calls.deletes.push(path);
+      authorize("delete", workspaceId);
       if (!objects.has(path)) return { deleted: false };
       objects.delete(path);
       return { deleted: true };

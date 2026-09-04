@@ -227,3 +227,235 @@ describe("entity documents", { concurrency: false }, () => {
     await assertSucceeds(deleteDoc(doc(f, "workspaces", "ws-alice", "noteContent", "big", "chunks", "0")));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Asset metadata (Production Readiness Phase 7.3): workspaces/{wid}/assets/
+// {assetId}. Field model: src/lib/cloud/assetCloudModel.js.
+// ---------------------------------------------------------------------------
+
+const ASSET = "asset-1";
+const assetDoc = (wid, id, extra = {}) =>
+  envelope(wid, "assets", id, {
+    assetKind: "editor-image",
+    name: "photo.jpg",
+    mimeType: "image/jpeg",
+    size: 1234,
+    createdAt: 1725000000000,
+    metadata: { width: 640, height: 480 },
+    state: "stored",
+    ...extra,
+  });
+
+/** Seeds an asset document with the rules bypassed. */
+async function seedAsset(wid, id, extra = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const f = ctx.firestore();
+    await setDoc(doc(f, "workspaces", wid, "assets", id), { ...assetDoc(wid, id, extra), updatedAt: new Date() });
+  });
+}
+
+/** Adds an ORDINARY (non-owner) member with the rules bypassed. */
+async function seedMember(wid, uid) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const now = new Date();
+    await setDoc(doc(ctx.firestore(), "workspaces", wid, "members", uid), { uid, role: "member", addedAt: now, addedBy: "alice" });
+  });
+}
+
+describe("asset metadata documents", { concurrency: false }, () => {
+  beforeEach(async () => {
+    await seedWorkspace("alice", "ws-alice");
+    await seedWorkspace("bob", "ws-bob");
+    await seedMember("ws-alice", "mia"); // an ordinary member of alice's workspace
+  });
+
+  test("a member reads one document and the index; a non-member reads neither", async () => {
+    await seedAsset("ws-alice", ASSET);
+    for (const uid of ["alice", "mia"]) {
+      const f = db(uid);
+      const snap = await assertSucceeds(getDoc(doc(f, "workspaces", "ws-alice", "assets", ASSET)));
+      assert.equal(snap.data().assetKind, "editor-image");
+      assert.equal((await assertSucceeds(getDocs(collection(f, "workspaces", "ws-alice", "assets")))).size, 1);
+    }
+    await assertFails(getDoc(doc(db("bob"), "workspaces", "ws-alice", "assets", ASSET)));
+    await assertFails(getDocs(collection(db("bob"), "workspaces", "ws-alice", "assets")));
+    await assertFails(getDoc(doc(anon(), "workspaces", "ws-alice", "assets", ASSET)));
+  });
+
+  test("a valid create is allowed for every kind, with and without a source asset", async () => {
+    const f = db("mia");
+    await assertSucceeds(setDoc(doc(f, "workspaces", "ws-alice", "assets", ASSET), assetDoc("ws-alice", ASSET)));
+    for (const kind of ["logo", "note-photo", "note-file", "editor-image", "editor-file", "pdf-source"]) {
+      const id = `asset-${kind}`;
+      await assertSucceeds(setDoc(doc(f, "workspaces", "ws-alice", "assets", id), assetDoc("ws-alice", id, { assetKind: kind, mimeType: kind === "pdf-source" ? "application/pdf" : "image/png" })));
+    }
+    await assertSucceeds(setDoc(doc(f, "workspaces", "ws-alice", "assets", "rendition-1"), assetDoc("ws-alice", "rendition-1", { sourceAssetId: ASSET, name: null, metadata: {} })));
+    // The same document may be re-written unchanged (an idempotent upsert).
+    await assertSucceeds(setDoc(doc(f, "workspaces", "ws-alice", "assets", ASSET), assetDoc("ws-alice", ASSET)));
+  });
+
+  test("a non-member cannot create, and a member cannot create in another workspace", async () => {
+    await assertFails(setDoc(doc(db("bob"), "workspaces", "ws-alice", "assets", ASSET), assetDoc("ws-alice", ASSET)));
+    await assertFails(setDoc(doc(db("alice"), "workspaces", "ws-bob", "assets", ASSET), assetDoc("ws-bob", ASSET)));
+    await assertFails(setDoc(doc(anon(), "workspaces", "ws-alice", "assets", ASSET), assetDoc("ws-alice", ASSET)));
+  });
+
+  test("a spoofed workspace, id or collection kind is refused", async () => {
+    const ref = doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET);
+    await assertFails(setDoc(ref, assetDoc("ws-bob", ASSET)));
+    await assertFails(setDoc(ref, assetDoc("ws-alice", "asset-other")));
+    await assertFails(setDoc(ref, { ...assetDoc("ws-alice", ASSET), kind: "nodes" }));
+    await assertFails(setDoc(ref, { ...assetDoc("ws-alice", ASSET), updatedAt: new Date(2020, 1, 1) }));
+    // an id that is not a NoteWise id
+    await assertFails(setDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ".hidden"), assetDoc("ws-alice", ".hidden")));
+  });
+
+  test("a bad kind, state, size, schema version, name, MIME type, metadata or source id is refused", async () => {
+    const ref = doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET);
+    const bad = [
+      { assetKind: "avatar" },
+      { assetKind: "asset" },
+      { state: "tombstoned", tombstonedAt: serverTimestamp() }, // must be created stored
+      { state: "pending" },
+      { tombstonedAt: serverTimestamp() }, // a tombstone on a stored asset
+      { size: 0 },
+      { size: -1 },
+      { size: 50 * 1024 * 1024 + 1 },
+      { size: 12.5 },
+      { size: "1234" },
+      { schemaVersion: 2 },
+      { schemaVersion: "1" },
+      { name: "x".repeat(256) },
+      { name: 42 },
+      { mimeType: "image/svg+xml" },
+      { mimeType: "text/html" },
+      { mimeType: "application/octet-stream" },
+      { mimeType: "" },
+      { mimeType: null },
+      { createdAt: 0 },
+      { createdAt: "2026" },
+      { metadata: "x" },
+      { metadata: null },
+      { metadata: Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`k${i}`, i])) },
+      { sourceAssetId: ASSET }, // its own id
+      { sourceAssetId: "../x" },
+      { sourceAssetId: 7 },
+      { ownerUid: "alice" }, // unknown field
+      { downloadUrl: "https://example.test/x" },
+    ];
+    for (const extra of bad) {
+      await assertFails(setDoc(ref, assetDoc("ws-alice", ASSET, extra)));
+    }
+    // a required field missing
+    const { metadata: _m, ...noMetadata } = assetDoc("ws-alice", ASSET);
+    await assertFails(setDoc(ref, noMetadata));
+    const { name: _n, ...noName } = assetDoc("ws-alice", ASSET);
+    await assertFails(setDoc(ref, noName));
+    // exactly the ceiling is fine
+    await assertSucceeds(setDoc(ref, assetDoc("ws-alice", ASSET, { size: 50 * 1024 * 1024 })));
+  });
+
+  test("identity and description are immutable on update", async () => {
+    await seedAsset("ws-alice", ASSET);
+    const ref = doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET);
+    const mutations = [
+      { assetKind: "logo" },
+      { createdAt: 1725000000001 },
+      { name: "renamed.jpg" },
+      { mimeType: "image/png" },
+      { size: 1235 },
+      { metadata: { width: 1 } },
+      { sourceAssetId: "asset-2" },
+    ];
+    for (const extra of mutations) {
+      await assertFails(setDoc(ref, assetDoc("ws-alice", ASSET, extra)));
+    }
+    await assertFails(setDoc(ref, { name: "renamed.jpg", updatedAt: serverTimestamp() }, { merge: true }));
+    await assertFails(setDoc(ref, { workspaceId: "ws-bob", updatedAt: serverTimestamp() }, { merge: true }));
+    await assertFails(setDoc(ref, { schemaVersion: 2, updatedAt: serverTimestamp() }, { merge: true }));
+    const snap = await getDoc(ref);
+    assert.equal(snap.data().name, "photo.jpg");
+  });
+
+  test("stored → tombstoned with the server clock, then back to stored — by any member", async () => {
+    await seedAsset("ws-alice", ASSET);
+    const ref = doc(db("mia"), "workspaces", "ws-alice", "assets", ASSET);
+    // a client clock is refused; the server's is required
+    await assertFails(setDoc(ref, assetDoc("ws-alice", ASSET, { state: "tombstoned", tombstonedAt: new Date() })));
+    await assertFails(setDoc(ref, assetDoc("ws-alice", ASSET, { state: "tombstoned" }))); // no clock at all
+    await assertSucceeds(setDoc(ref, assetDoc("ws-alice", ASSET, { state: "tombstoned", tombstonedAt: serverTimestamp() })));
+    const tombstoned = (await getDoc(ref)).data();
+    assert.equal(tombstoned.state, "tombstoned");
+    assert.ok(tombstoned.tombstonedAt);
+
+    // a standing tombstone keeps its clock: refreshing it is refused, re-sending it is fine
+    await assertFails(setDoc(ref, assetDoc("ws-alice", ASSET, { state: "tombstoned", tombstonedAt: serverTimestamp() })));
+    await assertSucceeds(setDoc(ref, assetDoc("ws-alice", ASSET, { state: "tombstoned", tombstonedAt: tombstoned.tombstonedAt })));
+
+    // resurrection drops the tombstone; keeping it while stored is refused
+    await assertFails(setDoc(ref, assetDoc("ws-alice", ASSET, { state: "stored", tombstonedAt: tombstoned.tombstonedAt })));
+    await assertSucceeds(setDoc(ref, assetDoc("ws-alice", ASSET)));
+    assert.equal((await getDoc(ref)).data().state, "stored");
+    assert.equal("tombstonedAt" in (await getDoc(ref)).data(), false);
+
+    // a non-member cannot tombstone
+    await assertFails(setDoc(doc(db("bob"), "workspaces", "ws-alice", "assets", ASSET), assetDoc("ws-alice", ASSET, { state: "tombstoned", tombstonedAt: serverTimestamp() })));
+  });
+
+  test("delete: the workspace owner only — not an ordinary member, not another workspace's owner", async () => {
+    await seedAsset("ws-alice", ASSET);
+    await assertFails(deleteDoc(doc(db("mia"), "workspaces", "ws-alice", "assets", ASSET)));
+    await assertFails(deleteDoc(doc(db("bob"), "workspaces", "ws-alice", "assets", ASSET)));
+    await assertFails(deleteDoc(doc(anon(), "workspaces", "ws-alice", "assets", ASSET)));
+    assert.equal((await getDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET))).exists(), true);
+    await assertSucceeds(deleteDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET)));
+    assert.equal((await getDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET))).exists(), false);
+  });
+
+  test("a batch mixing a valid asset write with a foreign one fails as a whole", async () => {
+    const f = db("alice");
+    const batch = writeBatch(f);
+    batch.set(doc(f, "workspaces", "ws-alice", "assets", ASSET), assetDoc("ws-alice", ASSET));
+    batch.set(doc(f, "workspaces", "ws-bob", "assets", ASSET), assetDoc("ws-bob", ASSET));
+    await assertFails(batch.commit());
+    assert.equal((await getDoc(doc(f, "workspaces", "ws-alice", "assets", ASSET))).exists(), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pdfAnnotations (Phase 7.3 seam): joins the JSON-string collections so the
+// Phase 7.7 sync has a rule to write against. Nothing syncs yet.
+// ---------------------------------------------------------------------------
+
+describe("pdfAnnotations documents", { concurrency: false }, () => {
+  beforeEach(async () => {
+    await seedWorkspace("alice", "ws-alice");
+    await seedWorkspace("bob", "ws-bob");
+  });
+
+  test("a member writes, reads, chunks and deletes a valid JSON document", async () => {
+    const f = db("alice");
+    const ref = doc(f, "workspaces", "ws-alice", "pdfAnnotations", "pdf1");
+    await assertSucceeds(setDoc(ref, envelope("ws-alice", "pdfAnnotations", "pdf1", { json: "{\"items\":[]}" })));
+    assert.equal((await assertSucceeds(getDoc(ref))).data().kind, "pdfAnnotations");
+    const batch = writeBatch(f);
+    batch.set(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "big"), envelope("ws-alice", "pdfAnnotations", "big", { chunked: true, chunkCount: 1, payloadUnits: 2 }));
+    batch.set(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "big", "chunks", "0"), { workspaceId: "ws-alice", id: "big", kind: "pdfAnnotations", index: 0, text: "{}", updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+    await assertSucceeds(deleteDoc(ref));
+  });
+
+  test("cross-workspace access and an envelope mismatch are refused", async () => {
+    await setDoc(doc(db("alice"), "workspaces", "ws-alice", "pdfAnnotations", "pdf1"), envelope("ws-alice", "pdfAnnotations", "pdf1", { json: "{}" }));
+    const bob = db("bob");
+    await assertFails(getDoc(doc(bob, "workspaces", "ws-alice", "pdfAnnotations", "pdf1")));
+    await assertFails(setDoc(doc(bob, "workspaces", "ws-alice", "pdfAnnotations", "pdf2"), envelope("ws-alice", "pdfAnnotations", "pdf2", { json: "{}" })));
+    await assertFails(deleteDoc(doc(bob, "workspaces", "ws-alice", "pdfAnnotations", "pdf1")));
+    const ref = doc(db("alice"), "workspaces", "ws-alice", "pdfAnnotations", "pdf1");
+    await assertFails(setDoc(ref, envelope("ws-bob", "pdfAnnotations", "pdf1", { json: "{}" })));
+    await assertFails(setDoc(ref, envelope("ws-alice", "pdfDocs", "pdf1", { json: "{}" })));
+    await assertFails(setDoc(ref, envelope("ws-alice", "pdfAnnotations", "other", { json: "{}" })));
+    await assertFails(setDoc(ref, envelope("ws-alice", "pdfAnnotations", "pdf1", { json: 42 })));
+    await assertFails(setDoc(ref, envelope("ws-alice", "pdfAnnotations", "pdf1", { json: "{}", items: [] })));
+  });
+});

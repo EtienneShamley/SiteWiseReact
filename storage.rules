@@ -1,26 +1,120 @@
 rules_version = '2';
 
-// NoteWise — Firebase Storage Security Rules.
+// NoteWise — Firebase Storage Security Rules (Production Readiness Phase 7.3).
 //
-// PHASE 7.1: DENY-ALL, deliberately.
+// These rules ARE the authorization boundary for the bytes of a workspace's
+// assets. The browser talks to Storage directly through the authenticated
+// SDK (src/lib/cloud/firebaseStorageAdapter.js); no download URL is ever
+// minted, and nothing here is optional documentation.
 //
-// The Storage bucket exists in configuration from this phase (the client
-// config, the adapter and the emulator), but NOTHING in the product reads or
-// writes an object yet. Until the asset cloud model is defined and tested,
-// the only correct rule is the closed one: no read, no create, no update, no
-// delete, for anybody, authenticated or not — a bucket is never left open
-// while its access model is still being designed.
+// ONE namespace: workspaces/{workspaceId}/assets/{assetId}. Everything else
+// in the bucket is closed to everybody (the default when no rule matches;
+// stated below all the same).
 //
-// The membership-based rules that replace this — objects under
-// `workspaces/{workspaceId}/assets/{assetId}` readable and creatable by that
-// workspace's members, immutable once written, deletion owner-authorised,
-// with a size ceiling and a content-type allow-list — arrive with the asset
-// cloud model. Until they do, no claim is made here that they exist.
+// Membership comes from FIRESTORE — the same workspaces/{wid}/members/{uid}
+// document firestore.rules trusts — read cross-service with
+// `firestore.exists(...)`; ownership from workspaces/{wid}.ownerUid, the one
+// enforceable owner the current model has. Both look-ups are proven against
+// the paired Firestore + Storage emulators in test/rules/storage.rules.test.js.
 //
-// Tested against the emulator: test/rules/storage.rules.test.js.
+// Invariants enforced:
+//   - every access requires a signed-in Firebase user who is a member of the
+//     workspace named in the path;
+//   - both path segments are NoteWise ids (the same pattern as
+//     src/lib/cloud/assetPaths.js), never free text;
+//   - objects are CREATE-ONLY: an existing object is never overwritten or
+//     re-described (`update` is denied outright);
+//   - a new object is 1 byte … 50 MB, carries one of the content types the
+//     product accepts (src/lib/cloud/assetCloudModel.js — a TRANSPORT check,
+//     not a proof about the bytes; opening a file still decides from the
+//     Blob itself), and names its own identity in custom metadata
+//     (assetId, workspaceId, assetKind) matching the path, so bytes can never
+//     be filed under a different record than the one that describes them;
+//   - listing a prefix is not granted (the asset index lives in Firestore);
+//   - DELETION is the workspace OWNER's alone: destructive cloud garbage
+//     collection is owner-authorised, exactly as the metadata document's
+//     deletion is in firestore.rules.
+//
+// Tested against the emulators: test/rules/storage.rules.test.js.
 
 service firebase.storage {
   match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function memberPath(wid, uid) {
+      return /databases/(default)/documents/workspaces/$(wid)/members/$(uid);
+    }
+
+    function workspacePath(wid) {
+      return /databases/(default)/documents/workspaces/$(wid);
+    }
+
+    function isMember(wid) {
+      return signedIn() && firestore.exists(memberPath(wid, request.auth.uid));
+    }
+
+    function isOwner(wid) {
+      return signedIn()
+        && firestore.exists(workspacePath(wid))
+        && firestore.get(workspacePath(wid)).data.ownerUid == request.auth.uid;
+    }
+
+    function assetSegment(value) {
+      return value.matches('^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$');
+    }
+
+    function assetMimeTypes() {
+      return [
+        'image/png',
+        'image/jpeg',
+        'image/webp',
+        'application/pdf',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-powerpoint',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'text/plain',
+        'text/csv',
+        'application/csv'
+      ];
+    }
+
+    function validNewObject(wid, assetId) {
+      return request.resource.size > 0
+        && request.resource.size <= 52428800
+        && request.resource.contentType in assetMimeTypes()
+        && request.resource.metadata != null
+        && request.resource.metadata.keys().hasAll(['assetId', 'workspaceId', 'assetKind'])
+        && request.resource.metadata.assetId == assetId
+        && request.resource.metadata.workspaceId == wid
+        && request.resource.metadata.assetKind in ['logo', 'note-photo', 'note-file', 'editor-image', 'editor-file', 'pdf-source'];
+    }
+
+    match /workspaces/{workspaceId}/assets/{assetId} {
+      allow get: if isMember(workspaceId)
+        && assetSegment(workspaceId)
+        && assetSegment(assetId);
+
+      allow list: if false;
+
+      allow create: if isMember(workspaceId)
+        && assetSegment(workspaceId)
+        && assetSegment(assetId)
+        && resource == null
+        && validNewObject(workspaceId, assetId);
+
+      allow update: if false;
+
+      allow delete: if isOwner(workspaceId)
+        && assetSegment(workspaceId)
+        && assetSegment(assetId);
+    }
+
     match /{allPaths=**} {
       allow read, write: if false;
     }

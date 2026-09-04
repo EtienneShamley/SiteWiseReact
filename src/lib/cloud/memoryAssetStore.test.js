@@ -163,3 +163,104 @@ describe("createMemoryAssetStore", () => {
     expect(store.objectPath(WID_A, AID)).toBe(`workspaces/${WID_A}/assets/${AID}`);
   });
 });
+
+describe("with a workspace store attached — the Storage rules' equivalent", () => {
+  const { createMemoryWorkspaceStore } = require("./memoryWorkspaceStore");
+
+  function stores() {
+    const workspaceStore = createMemoryWorkspaceStore();
+    workspaceStore.seed(["workspaces", WID_A], { id: WID_A, ownerUid: "alice", schemaVersion: 1 });
+    workspaceStore.seed(["workspaces", WID_A, "members", "alice"], { uid: "alice", role: "owner" });
+    workspaceStore.seed(["workspaces", WID_A, "members", "bob"], { uid: "bob", role: "member" });
+    workspaceStore.seed(["workspaces", WID_B], { id: WID_B, ownerUid: "carol", schemaVersion: 1 });
+    workspaceStore.seed(["workspaces", WID_B, "members", "carol"], { uid: "carol", role: "owner" });
+    const store = createMemoryAssetStore({ workspaceStore });
+    return { store, workspaceStore };
+  }
+
+  const identity = (overrides = {}) => ({ metadata: { assetId: AID, workspaceId: WID_A, assetKind: "editor-image", ...overrides } });
+
+  test("signed out: every operation is unauthenticated", async () => {
+    const { store } = stores();
+    await store.seed(WID_A, AID, bytes(1), { contentType: "image/png" });
+    for (const op of [
+      () => store.objectExists(WID_A, AID),
+      () => store.downloadAsset(WID_A, AID),
+      () => store.uploadAsset(WID_A, "asset-2222-4222-8333-444455556666", blobOf("x", "image/png"), identity({ assetId: "asset-2222-4222-8333-444455556666" })),
+      () => store.deleteAsset(WID_A, AID),
+    ]) {
+      await expect(op()).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHENTICATED });
+    }
+    expect(store.list(WID_A)).toEqual([AID]);
+  });
+
+  test("a member reads and creates in the own workspace; a non-member and a cross-workspace caller get nothing", async () => {
+    const { store, workspaceStore } = stores();
+    workspaceStore.setUser("bob");
+    await store.uploadAsset(WID_A, AID, blobOf("hello", "image/png"), identity());
+    expect(await store.objectExists(WID_A, AID)).toBe(true);
+    expect((await store.downloadAsset(WID_A, AID)).type).toBe("image/png");
+
+    workspaceStore.setUser("carol"); // owner of B, stranger to A
+    await expect(store.objectExists(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    await expect(store.downloadAsset(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    await expect(store.uploadAsset(WID_A, "asset-2222-4222-8333-444455556666", blobOf("x", "image/png"), identity({ assetId: "asset-2222-4222-8333-444455556666" }))).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    await expect(store.deleteAsset(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    // alice cannot create in carol's workspace either
+    workspaceStore.setUser("alice");
+    await expect(store.uploadAsset(WID_B, AID, blobOf("x", "image/png"), { metadata: { assetId: AID, workspaceId: WID_B, assetKind: "logo" } })).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    expect(store.list(WID_B)).toEqual([]);
+  });
+
+  test("the create rule's invariants: identity metadata, kind, content type, size", async () => {
+    const { store, workspaceStore } = stores();
+    workspaceStore.setUser("alice");
+    const refused = async (data, options) => {
+      await expect(store.uploadAsset(WID_A, AID, data, options)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+      expect(await store.objectExists(WID_A, AID)).toBe(false);
+    };
+    await refused(blobOf("x", "image/png")); // no metadata at all
+    await refused(blobOf("x", "image/png"), identity({ assetId: "asset-2222-4222-8333-444455556666" }));
+    await refused(blobOf("x", "image/png"), identity({ workspaceId: WID_B }));
+    await refused(blobOf("x", "image/png"), identity({ assetKind: "asset" }));
+    await refused(blobOf("x", "image/svg+xml"), identity());
+    await refused(blobOf("x", "application/octet-stream"), identity());
+    await refused(blobOf("x", "image/png"), { ...identity(), contentType: "Image/PNG" }); // not normalised (a Blob's own type already is)
+    await refused({ size: 50 * 1024 * 1024 + 1, type: "application/pdf", arrayBuffer: async () => new ArrayBuffer(0) }, identity({ assetKind: "pdf-source" }));
+    // and then the same upload, well-formed, goes through
+    await store.uploadAsset(WID_A, AID, blobOf("x", "image/png"), identity());
+    expect(await store.objectExists(WID_A, AID)).toBe(true);
+  });
+
+  test("delete is the workspace owner's alone; an ordinary member and another workspace's owner are refused", async () => {
+    const { store, workspaceStore } = stores();
+    await store.seed(WID_A, AID, bytes(1), { contentType: "image/png" });
+    workspaceStore.setUser("bob");
+    await expect(store.deleteAsset(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    workspaceStore.setUser("carol");
+    await expect(store.deleteAsset(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    expect(store.list(WID_A)).toEqual([AID]);
+    workspaceStore.setUser("alice");
+    expect(await store.deleteAsset(WID_A, AID)).toEqual({ deleted: true });
+    expect(await store.deleteAsset(WID_A, AID)).toEqual({ deleted: false });
+  });
+
+  test("an owner-role membership document alone does not make an owner — the workspace's ownerUid decides", async () => {
+    const { store, workspaceStore } = stores();
+    workspaceStore.seed(["workspaces", WID_A, "members", "mallory"], { uid: "mallory", role: "owner" });
+    await store.seed(WID_A, AID, bytes(1), { contentType: "image/png" });
+    workspaceStore.setUser("mallory");
+    expect(await store.objectExists(WID_A, AID)).toBe(true); // a member, so may read
+    await expect(store.deleteAsset(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+  });
+
+  test("create-only still holds for a member, and a failure injection still wins", async () => {
+    const { store, workspaceStore } = stores();
+    workspaceStore.setUser("alice");
+    await store.uploadAsset(WID_A, AID, blobOf("original", "text/plain"), identity({ assetKind: "note-file" }));
+    await expect(store.uploadAsset(WID_A, AID, blobOf("replacement", "text/plain"), identity({ assetKind: "note-file" }))).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    store.failNext("download", ASSET_STORAGE_ERROR.RETRY_LIMIT_EXCEEDED);
+    await expect(store.downloadAsset(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.RETRY_LIMIT_EXCEEDED });
+    expect(await textOf(await store.downloadAsset(WID_A, AID))).toBe("original");
+  });
+});

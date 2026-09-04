@@ -22,7 +22,9 @@ rules_version = '2';
 //   - every entity document names its own workspace and id, carries a
 //     server timestamp, and cannot be moved between workspaces;
 //   - nothing is ever deleted at the workspace/user/member level from the
-//     client (account deletion is a later, coordinated workflow).
+//     client (account deletion is a later, coordinated workflow);
+//   - asset metadata (workspaces/{wid}/assets, Phase 7.3) is created and
+//     tombstoned by members but DELETED only by the workspace owner.
 //
 // Tested against the emulator: test/rules/firestore.rules.test.js.
 
@@ -183,27 +185,28 @@ service cloud.firestore {
       }
 
       match /{jsonCollection}/{id} {
-        // templates, templateVersions, templateInstances, pdfDocs: the record
+        // templates, templateVersions, templateInstances, pdfDocs,
+        // pdfAnnotations (Phase 7.3 seam; synced from Phase 7.7): the record
         // travels as one JSON string (or chunks of it).
         allow read: if isMember(wid)
-          && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs'];
+          && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs', 'pdfAnnotations'];
         allow create, update: if isMember(wid)
-          && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs']
+          && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs', 'pdfAnnotations']
           && validEnvelope(jsonCollection, id)
           && request.resource.data.keys().hasOnly(['workspaceId', 'id', 'kind', 'schemaVersion', 'updatedAt', 'json', 'chunked', 'chunkCount', 'payloadUnits'])
           && (('json' in request.resource.data && request.resource.data.json is string) || request.resource.data.chunked == true)
           && validChunkFields();
         allow delete: if isMember(wid)
-          && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs'];
+          && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs', 'pdfAnnotations'];
 
         match /chunks/{n} {
           allow read: if isMember(wid)
-            && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs'];
+            && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs', 'pdfAnnotations'];
           allow create, update: if isMember(wid)
-            && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs']
+            && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs', 'pdfAnnotations']
             && validChunk(jsonCollection, id);
           allow delete: if isMember(wid)
-            && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs'];
+            && jsonCollection in ['templates', 'templateVersions', 'templateInstances', 'pdfDocs', 'pdfAnnotations'];
         }
       }
 
@@ -223,6 +226,89 @@ service cloud.firestore {
           && request.resource.data.keys().hasOnly(['workspaceId', 'id', 'kind', 'schemaVersion', 'updatedAt', 'defaultTemplateId'])
           && (!('defaultTemplateId' in request.resource.data) || request.resource.data.defaultTemplateId is string);
         allow delete: if isMember(wid);
+      }
+
+      // --------------------------------------------- asset metadata (7.3)
+      // workspaces/{wid}/assets/{assetId}: the Firestore record of an asset
+      // whose BYTES live in Firebase Storage at the same path (storage.rules).
+      // Field model: src/lib/cloud/assetCloudModel.js — the MIME list and the
+      // caps below are that module's, asserted equal by its tests.
+      //
+      //   read           member
+      //   create         member; state "stored", no tombstone, every field
+      //                  typed and capped, identity = path, size ≤ 50 MB
+      //   update         member; ONLY state / tombstonedAt / updatedAt may
+      //                  change (the object is immutable, so its description
+      //                  is too); stored → tombstoned stamps tombstonedAt with
+      //                  the server clock; tombstoned → stored drops it;
+      //                  a standing tombstone keeps its original clock
+      //   delete         the workspace OWNER only (destructive cloud GC is
+      //                  owner-authorised — workspaces/{wid}.ownerUid)
+      function assetSegment(value) {
+        return value.matches('^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$');
+      }
+
+      function assetMimeTypes() {
+        return [
+          'image/png',
+          'image/jpeg',
+          'image/webp',
+          'application/pdf',
+          'application/msword',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          'application/vnd.ms-excel',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'application/vnd.ms-powerpoint',
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          'text/plain',
+          'text/csv',
+          'application/csv'
+        ];
+      }
+
+      function validAssetFields(assetId) {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['workspaceId', 'id', 'kind', 'schemaVersion', 'updatedAt', 'assetKind', 'name', 'mimeType', 'size', 'createdAt', 'metadata', 'sourceAssetId', 'state', 'tombstonedAt'])
+          && d.keys().hasAll(['workspaceId', 'id', 'kind', 'schemaVersion', 'updatedAt', 'assetKind', 'name', 'mimeType', 'size', 'createdAt', 'metadata', 'state'])
+          && d.schemaVersion == 1
+          && d.assetKind in ['logo', 'note-photo', 'note-file', 'editor-image', 'editor-file', 'pdf-source']
+          && (d.name == null || (d.name is string && d.name.size() <= 255))
+          && d.mimeType is string
+          && d.mimeType.size() <= 128
+          && d.mimeType in assetMimeTypes()
+          && d.size is int
+          && d.size > 0
+          && d.size <= 52428800
+          && d.createdAt is int
+          && d.createdAt > 0
+          && d.metadata is map
+          && d.metadata.size() <= 64
+          && (!('sourceAssetId' in d) || (d.sourceAssetId is string && assetSegment(d.sourceAssetId) && d.sourceAssetId != assetId))
+          && d.state in ['stored', 'tombstoned'];
+      }
+
+      function validAssetStateChange() {
+        let next = request.resource.data;
+        let prev = resource.data;
+        return (next.state == 'stored' && !('tombstonedAt' in next))
+          || (next.state == 'tombstoned' && prev.state == 'tombstoned' && next.tombstonedAt == prev.tombstonedAt)
+          || (next.state == 'tombstoned' && prev.state != 'tombstoned' && next.tombstonedAt == request.time);
+      }
+
+      match /assets/{assetId} {
+        allow read: if isMember(wid);
+        allow create: if isMember(wid)
+          && assetSegment(assetId)
+          && validEnvelope('assets', assetId)
+          && validAssetFields(assetId)
+          && request.resource.data.state == 'stored'
+          && !('tombstonedAt' in request.resource.data);
+        allow update: if isMember(wid)
+          && validEnvelope('assets', assetId)
+          && validAssetFields(assetId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['state', 'tombstonedAt', 'updatedAt'])
+          && validAssetStateChange();
+        allow delete: if isOwner(wid);
       }
 
       match /migrations/{sourceId} {
