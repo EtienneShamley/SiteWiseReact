@@ -138,3 +138,74 @@ export function liveAssetIds({ notes = [], versions = {}, renditionSources = [] 
   addAll(ids, renditionSources);
   return ids;
 }
+
+/**
+ * The ONE reference universe of a stored record set — the same MARK set the
+ * later reference-driven collector will sweep against, expressed over the
+ * DURABLE RECORDS rather than over an assembled `notes` array.
+ *
+ * `noteContent` is `{ [noteId]: html }`, `templateInstances`
+ * `{ [noteId]: instance }` and `templateVersions` `{ [versionId]: version }`
+ * — exactly the shapes src/lib/durableStorage.js holds for those keys, in
+ * whichever scope the caller read them from. `assets` is the local asset
+ * LISTING (`src/lib/assetStorage.js` → `listAssets`, no Blobs): it is used
+ * for one thing only, the annotated-rendition closure below.
+ *
+ * RENDITION CLOSURE. `liveAssetIds` accepts the sources of stored renditions
+ * as a parameter because it is pure and has no store to ask. Supplied here,
+ * the rule is transitive and reference-anchored: a rendition that is itself
+ * referenced keeps the original it was made from alive, and so does a
+ * rendition of a rendition. An orphaned rendition — one nothing references —
+ * keeps nothing alive, because it is itself unreferenced. That is the same
+ * answer for the collector (an orphan is collectable, and so is its source
+ * once nothing else names it) and for the backfill (an orphan is not adopted,
+ * and neither is its source).
+ *
+ * `pdfSourceIds` — the CURRENT source ids of the workspace's PDF registry —
+ * are unioned in unchanged. They are references like any other, and the
+ * registry is the only authority on which of them are current: bytes of a
+ * superseded source may still sit in this browser and are not live.
+ *
+ * @returns {Set<string>} every referenced asset id, de-duplicated.
+ */
+export function recordedLiveAssetIds({
+  noteContent = {},
+  templateInstances = {},
+  templateVersions = {},
+  assets = [],
+  pdfSourceIds = [],
+} = {}) {
+  const content = noteContent && typeof noteContent === "object" && !Array.isArray(noteContent) ? noteContent : {};
+  const instances =
+    templateInstances && typeof templateInstances === "object" && !Array.isArray(templateInstances)
+      ? templateInstances
+      : {};
+  const noteIds = new Set([...Object.keys(content), ...Object.keys(instances)]);
+  const notes = [];
+  for (const noteId of noteIds) notes.push({ html: content[noteId], instance: instances[noteId] });
+
+  const ids = liveAssetIds({ notes, versions: templateVersions, renditionSources: [] });
+
+  // The rendition closure, run to a fixed point so a chain of annotations
+  // (a rendition annotated again) keeps its whole ancestry.
+  const sourceOf = new Map();
+  for (const record of Array.isArray(assets) ? assets : []) {
+    const source = record?.metadata?.annotation?.sourceAssetId;
+    if (record && typeof record.id === "string" && record.id && typeof source === "string" && source) {
+      sourceOf.set(record.id, source);
+    }
+  }
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [renditionId, sourceId] of sourceOf) {
+      if (ids.has(renditionId) && !ids.has(sourceId)) {
+        ids.add(sourceId);
+        grew = true;
+      }
+    }
+  }
+
+  addAll(ids, pdfSourceIds);
+  return ids;
+}

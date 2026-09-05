@@ -54,7 +54,7 @@ import {
   makeAssetRecord,
   saveDownloadedAsset,
 } from "./assetStorage";
-import { loadPdfBytes, savePdfBytes } from "./pdfStorage";
+import { loadPdfBytes, pdfSourceByteLength, savePdfBytes } from "./pdfStorage";
 import { isValidAssetSegment } from "./cloud/assetPaths";
 
 /**
@@ -227,6 +227,21 @@ export async function writeDownloadedAsset({
   if (outcome.stored) return { ok: true, reused: false };
   if (outcome.reason === DOWNLOADED_ASSET_REASON.ALREADY_PRESENT) return { ok: true, reused: true };
   return { ok: false, reason: outcome.reason };
+}
+
+/**
+ * How many bytes this browser holds for one asset, or 0 when it holds none.
+ * Same routing as the read, and the same reason this module exists: a caller
+ * that needs a SIZE should not have to know which of the two databases the
+ * bytes are in. Nothing is copied and no Blob is opened.
+ */
+export async function localAssetSize(assetId, { kind = null } = {}) {
+  if (!assetId) return 0;
+  if (isPdfSourceKind(kind)) return pdfSourceByteLength(assetId);
+  const asset = await getAsset(assetId);
+  if (!asset) return 0;
+  if (typeof asset.size === "number" && asset.size > 0) return asset.size;
+  return asset.blob && typeof asset.blob.size === "number" ? asset.blob.size : 0;
 }
 
 /**

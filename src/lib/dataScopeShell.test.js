@@ -6,6 +6,7 @@
 // Settings workspace and local-data sections, and the sign-out flush. Plus
 // source-text assertions for the MainArea wiring that settles the autosave
 // status on the account's answer rather than the local write.
+import "fake-indexeddb/auto";
 import React, { useEffect } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -43,12 +44,16 @@ const { __resetApiAuthForTests } = require("./apiAuth");
 const { createMemoryWorkspaceStore } = require("./cloud/memoryWorkspaceStore");
 const { __resetCloudCaptureForTests } = require("./cloud/cloudCapture");
 const { readLocalDataBinding, recordAccountSession } = require("./localDataBinding");
+const { deleteAssetDb, installStructuredCloneShim } = require("./assetDbTestHarness");
+const { BACKFILL_PHASE } = require("./assetBackfill");
+const { REMOVE_LOCAL_COPY_NOTE } = require("../components/SettingsModal");
 const { getNoteContent, saveNoteContent } = require("./noteContentStorage");
 const { loadTree } = require("./treeStorage");
 const { outboxSize } = require("./cloud/cloudOutbox");
 const { SYNC_STATUS } = require("./cloud/cloudSync");
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
+installStructuredCloneShim();
 
 /* ------------------------------ harness --------------------------------- */
 
@@ -203,7 +208,8 @@ function seededValuesUnchanged() {
   for (const [k, v] of Object.entries(SEED)) expect(window.localStorage.getItem(k)).toBe(v);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await deleteAssetDb();
   window.localStorage.clear();
   isOnline = true;
   __resetDurableStorageForTests();
@@ -418,6 +424,110 @@ describe("MainArea autosave wiring (source text)", () => {
 // it, that a build without a bucket still opens a working local-first session,
 // and that sign-out gives the uploads a bounded chance and then says what is
 // left.
+/* ------------------- legacy asset backfill (Phase 7.6) ------------------- */
+
+describe("legacy asset backfill", () => {
+  const { getAsset, makeAssetRecord, saveAsset } = require("./assetStorage");
+  const { listPendingAssetUploads, settleAssetUpload } = require("./assetUploadQueue");
+  const { testBlob } = require("./assetDbTestHarness");
+
+  /** A pre-Phase-7.2 record: no `workspaceId` field at all. */
+  async function seedLegacyAsset(id, kind = "editor-image") {
+    const record = makeAssetRecord({ id, kind, name: `${id}.png`, blob: testBlob("bytes") });
+    delete record.workspaceId;
+    await saveAsset(record);
+  }
+
+  /** IndexedDB work is macrotask-paced; give the pass real turns to land. */
+  async function settleAssets() {
+    for (let i = 0; i < 8; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+  }
+
+  function seedLocalNoteReferencing(assetId) {
+    window.localStorage.setItem(DURABLE_KEYS.tree, SEED[DURABLE_KEYS.tree]);
+    window.localStorage.setItem(
+      DURABLE_KEYS.noteContent,
+      JSON.stringify({ n1: `<p><img data-asset-id="${assetId}"></p>` })
+    );
+  }
+
+  test("the step names the files it would bring, and the move associates exactly those with the workspace", async () => {
+    seedLocalNoteReferencing("legacy-image");
+    await seedLegacyAsset("legacy-image");
+    await seedLegacyAsset("legacy-orphan");
+
+    const adapter = memoryAdapter(USER);
+    const store = storeFollowing(adapter);
+    await render(shell(adapter, store));
+    await settleAssets();
+    // The file line is counted from the PRE-ACCOUNT scope's references.
+    expect(text()).toMatch(/1 image/);
+
+    await click(button(MIGRATE_LABEL));
+    await click(button(MIGRATION_CONTINUE_LABEL));
+    await settleAssets();
+
+    const workspaceId = latestScope.workspace.id;
+    expect((await getAsset("legacy-image")).workspaceId).toBe(workspaceId);
+    const orphan = await getAsset("legacy-orphan");
+    expect(orphan.workspaceId === undefined || orphan.workspaceId === null).toBe(true);
+    expect((await listPendingAssetUploads(workspaceId)).map((e) => e.assetId)).toEqual(["legacy-image"]);
+    expect(latestScope.assetBackfill.phase).toBe(BACKFILL_PHASE.DONE);
+  });
+
+  test("a workspace whose structured migration is ALREADY complete still backfills on the next session", async () => {
+    seedLocalNoteReferencing("legacy-image");
+    await seedLegacyAsset("legacy-image");
+    const adapter = memoryAdapter(USER);
+    const store = storeFollowing(adapter);
+
+    // Session one: move the structured data, but with the asset store gone so
+    // nothing can be associated — the state Etienne's real browser is in.
+    await render(shell(adapter, store));
+    await click(button(MIGRATE_LABEL));
+    await click(button(MIGRATION_CONTINUE_LABEL));
+    const workspaceId = latestScope.workspace.id;
+    await unmount();
+    // Undo what session one's backfill already did — the tag AND the queue
+    // identity — so session two is the only thing that could have associated
+    // and owed the asset.
+    const stranded = await getAsset("legacy-image");
+    delete stranded.workspaceId;
+    await saveAsset(stranded);
+    await settleAssetUpload(workspaceId, "legacy-image");
+
+    // Session two: no migration dialog, and the backfill runs anyway.
+    await render(shell(adapter, store, { settings: true }));
+    await settleAssets();
+    expect(text()).not.toContain(MIGRATION_TITLE);
+    expect((await getAsset("legacy-image")).workspaceId).toBe(workspaceId);
+    expect(latestScope.assetBackfill.result.adopted.concat(latestScope.assetBackfill.result.alreadyOwned)).toContain(
+      "legacy-image"
+    );
+    // Settings reports DISCOVERY on its own line, never as upload progress.
+    expect(text()).toContain("1 file is ready to sync");
+    expect(text()).not.toMatch(/Uploading 1 file/);
+  });
+
+  test("Settings says what removing the old copy does and does NOT remove", async () => {
+    seed();
+    const adapter = memoryAdapter(USER);
+    const store = storeFollowing(adapter);
+    await render(shell(adapter, store));
+    await click(button(MIGRATE_LABEL));
+    await click(button(MIGRATION_CONTINUE_LABEL));
+    await unmount();
+
+    await render(shell(adapter, store, { settings: true }));
+    expect(text()).toContain(REMOVE_LOCAL_COPY_NOTE);
+    expect(REMOVE_LOCAL_COPY_NOTE).toMatch(/are not removed/);
+  });
+});
+
 describe("the asset upload engine's session binding (source)", () => {
   const SCOPE = fs.readFileSync(path.join(__dirname, "..", "context", "DataScopeContext.js"), "utf8");
   const SETTINGS = fs.readFileSync(path.join(__dirname, "..", "components", "SettingsModal.js"), "utf8");
@@ -433,8 +543,11 @@ describe("the asset upload engine's session binding (source)", () => {
     expect(SCOPE).toMatch(/if \(uploads\) uploads\.stop\(\);/);
     expect(SCOPE).toMatch(/assetSyncRef\.current = null;/);
     expect(SCOPE).toMatch(
-      /\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions\]/
+      /\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill\]/
     );
+    // 7.6: the backfill's session guard is dropped in the SAME cleanup, so a
+    // pass in progress stops before the next account's session opens.
+    expect(SCOPE).toMatch(/liveRef\.current = \{ active: false, workspaceId: null \};/);
   });
 
   test("the workspace's remote READER is bound, registered and torn down with the session (7.5)", () => {
@@ -444,7 +557,10 @@ describe("the asset upload engine's session binding (source)", () => {
     // account can reach this reader.
     expect(SCOPE).toMatch(/const reader = createAssetRemoteReader\(\{\s*workspaceId: opened\.workspace\.id,/);
     expect(SCOPE).toMatch(/setAssetRemoteReader\(reader\);/);
-    expect(SCOPE).toMatch(/reader\.hydrateIndex\(\)\.catch\(\(\) => null\);/);
+    // Re-targeted in 7.6: hydration is now the step the legacy backfill is
+    // chained to, so the plan sees the freshest statement of what the account
+    // already holds. Still fire-and-forget; still nothing waits on it.
+    expect(SCOPE).toMatch(/reader\s*\.hydrateIndex\(\)\s*\.catch\(\(\) => null\)/);
     // Torn down synchronously, and the clear NAMES the reader so a late
     // cleanup cannot unregister its successor.
     expect(SCOPE).toMatch(/reader\.stop\(\);/);
@@ -472,6 +588,18 @@ describe("the asset upload engine's session binding (source)", () => {
   test("Settings offers Retry Now for the files that need attention", () => {
     expect(SETTINGS).toMatch(/scope\.assetSync\.retryNow\(\)/);
     expect(SETTINGS).toMatch(/assetSyncAttentionLine\(assetStatus\)/);
+  });
+
+  test("the legacy backfill runs after hydration, again after a completed migration, and never blocks READY (7.6)", () => {
+    expect(SCOPE).toMatch(/\.then\(\(\) => startBackfill\(opened\.workspace\.id, uid\)\)/);
+    expect(SCOPE).toMatch(/if \(result && result\.status === LOCAL_MIGRATION_STATUS\.COMPLETED\) \{\s*startBackfill\(/);
+    // The migration step's file counts come from the PRE-ACCOUNT scope.
+    expect(SCOPE).toMatch(/planAssetBackfill\(\{ workspaceId: opened\.workspace\.id, uid, referenceScope: LOCAL_REFERENCE_SCOPE \}\)/);
+    // Settings shows discovery separately from upload progress, and the
+    // removal is gated on the FILE state before anything is removed.
+    expect(SETTINGS).toMatch(/assetBackfillStatusLine\(backfillStatus\)/);
+    expect(SETTINGS).toMatch(/gate = await planOldCopyRemoval\(\{/);
+    expect(SETTINGS).toMatch(/if \(!gate\.allowed\) \{\s*setLocalNotice\(oldCopyRefusalMessage/);
   });
 
   test("the PDF lifecycle enqueues only after the document is durable, and releases before the bytes go", () => {

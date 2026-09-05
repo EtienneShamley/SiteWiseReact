@@ -280,8 +280,8 @@ export const defaultAssetUploadLocal = Object.freeze({
   settle: (workspaceId, assetId) => settleAssetUpload(workspaceId, assetId),
   settleStored: (entry) => settleAssetUploadAsStored(entry),
   currentPdfSources: (workspaceId) => currentPdfSourceIds(workspaceId),
-  reconcilePdfSources: (workspaceId) =>
-    reconcilePdfSourceUploads({ workspaceId, sources: currentPdfSourceIds(workspaceId) }),
+  reconcilePdfSources: (workspaceId, options) =>
+    reconcilePdfSourceUploads({ workspaceId, sources: currentPdfSourceIds(workspaceId), ...(options || {}) }),
 });
 
 /* ------------------------------- the engine ------------------------------ */
@@ -873,7 +873,19 @@ export function createAssetUploadSync({
     // a valid durable document but whose queue identity never landed is owed
     // from this moment on.
     Promise.resolve()
-      .then(() => ifLive(() => local.reconcilePdfSources(workspaceId)))
+      .then(() =>
+        ifLive(() =>
+          // The reconciler decides "already stored" from each source's
+          // CURRENT cloud document through this engine's own workspace store
+          // (src/lib/cloud/assetCloudState.js) — never from the local index.
+          local.reconcilePdfSources(workspaceId, {
+            readCloudAssetDocument:
+              workspaceStore && typeof workspaceStore.readAssetDocument === "function"
+                ? (wid, assetId) => workspaceStore.readAssetDocument(wid, assetId)
+                : null,
+          })
+        )
+      )
       .catch(() => {
         // A failed reconciliation is not a failed session: it is retried at
         // the next sign-in, and nothing has been lost meanwhile.

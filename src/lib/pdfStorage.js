@@ -144,6 +144,19 @@ export async function loadPdfBytes(documentId) {
   return { bytes: new Uint8Array(rec.bytes), name: rec.name || null, updatedAt: rec.updatedAt };
 }
 
+/**
+ * The byte length of one stored PDF source, or 0 when this browser does not
+ * hold it. It exists so a caller that only needs the SIZE — the legacy asset
+ * backfill's migration summary (src/lib/assetBackfill.js) — does not have to
+ * take the defensive `Uint8Array` copy `loadPdfBytes` owes every reader that
+ * hands its bytes to pdf.js.
+ */
+export async function pdfSourceByteLength(sourceId) {
+  if (!sourceId) return 0;
+  const rec = await txRequest(STORE_BYTES, "readonly", (store) => store.get(sourceId));
+  return rec && rec.bytes && typeof rec.bytes.byteLength === "number" ? rec.bytes.byteLength : 0;
+}
+
 export async function saveAnnotations(documentId, items) {
   const record = makeAnnotationRecord(documentId, items);
   await txRequest(STORE_ANN, "readwrite", (store) => store.put(record));

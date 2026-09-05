@@ -26,8 +26,15 @@
 //                                         while this build has no Storage
 //                                         bucket; the product stays local-first
 //                                         either way.
+//     assetBackfill,                      the LEGACY ASSET BACKFILL's state
+//                                         (Phase 7.6): { phase, result } —
+//                                         which of this browser's pre-account
+//                                         binaries this workspace's own
+//                                         references claimed, and what could
+//                                         not be associated. It is about
+//                                         DISCOVERY, never upload progress.
 //     localData,                          what this browser holds outside any account
-//     migration: { offered, state, run, dismiss },
+//     migration: { offered, state, run, dismiss, assets },
 //     prepareSignOut(),                   flushes queued writes, then gives the
 //                                         file uploads a BOUNDED chance to
 //                                         finish, before the session ends
@@ -61,7 +68,13 @@ import { SESSION_MODE, openWorkspaceSession } from "../lib/cloud/workspaceSessio
 import { createAssetUploadSync } from "../lib/cloud/assetUploadSync";
 import { createAssetRemoteReader } from "../lib/cloud/assetRemoteRead";
 import { clearAssetRemoteReader, resetAssetReader, setAssetRemoteReader } from "../lib/assetReader";
-import { detectLocalData, readLocalMigrationState, runLocalMigration, shouldOfferLocalMigration } from "../lib/cloud/localMigration";
+import { LOCAL_MIGRATION_STATUS, detectLocalData, readLocalMigrationState, runLocalMigration, shouldOfferLocalMigration } from "../lib/cloud/localMigration";
+import {
+  BACKFILL_PHASE,
+  LOCAL_REFERENCE_SCOPE,
+  planAssetBackfill,
+  runAssetBackfill,
+} from "../lib/assetBackfill";
 import { MALFORMED_CLOUD_RECORD_MESSAGE } from "../lib/cloud/workspaceHydration";
 import { reportPersistenceIssue } from "../lib/durableStorage";
 import WorkspaceGate, { FLUSH_PENDING_WRITES_EVENT } from "../components/auth/WorkspaceGate";
@@ -141,12 +154,49 @@ export function DataScopeProvider({
   // One per session, bound to that session's workspace, unregistered and
   // stopped with it.
   const remoteReaderRef = useRef(null);
+  // The LEGACY ASSET BACKFILL (Production Readiness Phase 7.6): what this
+  // session found and associated, never what is uploading — the engine above
+  // owns that. `liveRef` is the session guard every pass checks between
+  // assets, so a sign-out stops it without leaving half-adopted state.
+  const [backfill, setBackfill] = useState({ phase: BACKFILL_PHASE.IDLE, result: null });
+  const [migrationAssets, setMigrationAssets] = useState(null);
+  const liveRef = useRef({ active: false, workspaceId: null });
 
   // Record the account on the local-data binding (a hint for the migration,
   // never a claim on the data) — unchanged from Phase 5.
   useEffect(() => {
     if (uid) recordAccountSession(uid);
   }, [uid]);
+
+  /**
+   * One backfill pass for `workspaceId`, guarded by the session it belongs
+   * to. Never throws into the session, never blocks the application, and is
+   * safe to call again: the pass itself is idempotent and restartable
+   * (src/lib/assetBackfill.js).
+   */
+  const startBackfill = useCallback(async (workspaceId, ownUid) => {
+    const isActive = () => liveRef.current.active && liveRef.current.workspaceId === workspaceId;
+    if (!isActive()) return null;
+    setBackfill({ phase: BACKFILL_PHASE.CHECKING, result: null });
+    // The CURRENT cloud document of each referenced asset is the authority on
+    // whether it still needs uploading — read through the session's own
+    // workspace store, never from the local remote index (a cache). No store
+    // method means the cloud cannot be asked, and the pass queues
+    // conservatively; the Phase 7.4 engine settles anything already there.
+    const store = storeRef.current;
+    const deps =
+      store && typeof store.readAssetDocument === "function"
+        ? { readCloudAssetDocument: (wid, assetId) => store.readAssetDocument(wid, assetId) }
+        : null;
+    try {
+      const result = await runAssetBackfill({ workspaceId, uid: ownUid, isActive, deps });
+      if (isActive()) setBackfill({ phase: BACKFILL_PHASE.DONE, result });
+      return result;
+    } catch {
+      if (isActive()) setBackfill({ phase: BACKFILL_PHASE.ERROR, result: null });
+      return null;
+    }
+  }, []);
 
   // Open one workspace session per (uid, attempt); close it when the uid
   // changes or the provider unmounts. The close is DEFERRED to a macrotask:
@@ -160,6 +210,9 @@ export function DataScopeProvider({
     setSession(null);
     setAssetSync(null);
     setMigrationRun(null);
+    setBackfill({ phase: BACKFILL_PHASE.IDLE, result: null });
+    setMigrationAssets(null);
+    liveRef.current = { active: false, workspaceId: null };
 
     (async () => {
       let store = null;
@@ -233,11 +286,33 @@ export function DataScopeProvider({
         // cheaper; a read that arrives before it lands resolves the one
         // document it needs directly, so nothing waits on it and a failure
         // costs nothing but a Firestore read later.
-        reader.hydrateIndex().catch(() => null);
+        liveRef.current = { active: true, workspaceId: opened.workspace.id };
+        // The LEGACY ASSET BACKFILL (Phase 7.6) runs AFTER hydration, because
+        // the index it just wrote is the freshest statement of what the
+        // account already holds — queueing an asset the cloud has is a wasted
+        // upload attempt. It is chained, not awaited: nothing below waits on
+        // it, and a hydration that failed still lets it run (the plan simply
+        // knows less and the upload engine re-checks every object anyway).
+        reader
+          .hydrateIndex()
+          .catch(() => null)
+          .then(() => startBackfill(opened.workspace.id, uid))
+          .catch(() => null);
         const detected = detectLocalData(uid);
         setLocalData(detected);
         setMigrationState(readLocalMigrationState());
-        setPhase(shouldOfferLocalMigration(uid, opened.workspace.id) ? SCOPE_PHASE.MIGRATION : SCOPE_PHASE.READY);
+        const offerMigration = shouldOfferLocalMigration(uid, opened.workspace.id);
+        setPhase(offerMigration ? SCOPE_PHASE.MIGRATION : SCOPE_PHASE.READY);
+        if (offerMigration) {
+          // What moving this browser's data would bring with it, in files.
+          // Read from the PRE-ACCOUNT scope's references — the data the step
+          // is about — and never written to.
+          planAssetBackfill({ workspaceId: opened.workspace.id, uid, referenceScope: LOCAL_REFERENCE_SCOPE })
+            .then((plan) => {
+              if (liveRef.current.workspaceId === opened.workspace.id) setMigrationAssets(plan.counts);
+            })
+            .catch(() => null);
+        }
       } catch (err) {
         if (cancelled) return;
         setError(err);
@@ -254,6 +329,10 @@ export function DataScopeProvider({
 
     return () => {
       cancelled = true;
+      // The backfill's session guard, flipped BEFORE anything unwinds: a pass
+      // in progress stops between assets, and whatever it already adopted is
+      // durable and correct.
+      liveRef.current = { active: false, workspaceId: null };
       const opened = sessionRef.current;
       const uploads = assetSyncRef.current;
       const reader = remoteReaderRef.current;
@@ -278,7 +357,7 @@ export function DataScopeProvider({
         }, 0);
       }
     };
-  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions]);
+  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
@@ -329,10 +408,18 @@ export function DataScopeProvider({
     setMigrationState(readLocalMigrationState());
     setMigrationRun({ busy: false, phase: null, result });
     setLocalData(detectLocalData(uid));
+    // A COMPLETED structured migration is what gives this workspace the
+    // authority to adopt the binaries its newly-imported notes reference
+    // (src/lib/assetBackfill.js → `resolveAdoptionAuthority`), so the pass is
+    // re-run against the references that now exist. It is not awaited: the
+    // step reports its own result and the user continues from it.
+    if (result && result.status === LOCAL_MIGRATION_STATUS.COMPLETED) {
+      startBackfill(opened.workspace.id, uid).catch(() => null);
+    }
     // The step reports its result (Done / still queued / failed) and the
     // user continues from it; nothing advances on their behalf.
     return result;
-  }, [uid]);
+  }, [uid, startBackfill]);
 
   const dismissMigration = useCallback(() => {
     setPhase(SCOPE_PHASE.READY);
@@ -352,6 +439,10 @@ export function DataScopeProvider({
       mode: session.mode,
       sync: session.sync,
       assetSync,
+      // The legacy asset backfill's own state (Phase 7.6). It says what was
+      // DISCOVERED and ASSOCIATED, never what is uploading — `assetSync`
+      // above owns that, and merging the two would make either one a lie.
+      assetBackfill: backfill,
       localData,
       migration: Object.freeze({
         offered: phase === SCOPE_PHASE.MIGRATION,
@@ -360,6 +451,9 @@ export function DataScopeProvider({
         dismiss: dismissMigration,
         busy: Boolean(migrationRun && migrationRun.busy),
         lastResult: migrationRun ? migrationRun.result : null,
+        // The referenced LOCAL files the step would bring with it, or null
+        // while they are still being counted.
+        assets: migrationAssets,
       }),
       prepareSignOut,
       refreshLocalData: () => {
@@ -367,7 +461,7 @@ export function DataScopeProvider({
         setMigrationState(readLocalMigrationState());
       },
     });
-  }, [uid, emailVerified, session, assetSync, localData, phase, migrationState, migrationRun, runMigration, dismissMigration, prepareSignOut]);
+  }, [uid, emailVerified, session, assetSync, backfill, localData, phase, migrationState, migrationRun, migrationAssets, runMigration, dismissMigration, prepareSignOut]);
 
   if (!uid) return null;
 

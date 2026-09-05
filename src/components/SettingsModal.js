@@ -6,12 +6,30 @@ import { SYNC_STATUS, syncFailureMessage } from "../lib/cloud/cloudSync";
 import { ASSET_SYNC_STATUS, assetSyncFailureMessage } from "../lib/cloud/assetUploadSync";
 import { useAssetUploadStatus } from "./AssetUploadStatus";
 import { LOCAL_MIGRATION_STATUS, removeLocalOriginals } from "../lib/cloud/localMigration";
+import {
+  assetBackfillAttentionLine,
+  assetBackfillStatusLine,
+  oldCopyRefusalMessage,
+  planOldCopyRemoval,
+} from "../lib/assetBackfill";
 import { SESSION_MODE } from "../lib/cloud/workspaceSession";
 
 export const SIGN_OUT_LABEL = "Sign out";
 export const SIGN_OUT_NOTE =
   "Your workspace is saved to your account. Anything still waiting for a connection stays in this browser and is sent when you next sign in here.";
 export const REMOVE_LOCAL_COPY_LABEL = "Remove the old copy from this browser";
+// What that button actually removes, said plainly. "The old copy" is the
+// pre-account NOTES, TEMPLATES and PDF ENTRIES in this browser's storage
+// (src/lib/cloud/localMigration.js -> removeLocalOriginals) and nothing else.
+// The images, PDF files and attachments are NOT a second copy: once they are
+// associated with the workspace, the records in this browser ARE the
+// workspace's own local cache of them — the same bytes an open note is
+// rendering — so removing "the old copy" of a file would mean removing the
+// file. Phase 7.6 therefore removes no binary at all, and says so.
+export const OLD_COPY_UNCHECKED_MESSAGE =
+  "The files on this device could not be checked, so the old copy was kept. Nothing was removed — try again in a moment.";
+export const REMOVE_LOCAL_COPY_NOTE =
+  "This removes the pre-account notes, templates and PDF entries only. Your images, PDF files and attachments are not removed — they are the same files your workspace uses now.";
 export const MIGRATE_LOCAL_LABEL = "Move browser notes into my workspace";
 export const RETRY_SYNC_LABEL = "Retry now";
 export const RETRY_UPLOADS_LABEL = "Retry";
@@ -143,24 +161,55 @@ export default function SettingsModal({ open, onClose }) {
     }
   };
 
-  const handleRemoveLocal = () => {
+  const handleRemoveLocal = async () => {
     if (busy || !scope) return;
     if (
       !window.confirm(
-        "Remove the pre-account copy of your notes from this browser? Your workspace in your account is unaffected. This cannot be undone."
+        `Remove the pre-account copy of your notes from this browser? ${REMOVE_LOCAL_COPY_NOTE} Your workspace in your account is unaffected. This cannot be undone.`
       )
     ) {
       return;
     }
-    const removed = removeLocalOriginals(scope.workspace.id);
-    setLocalNotice(
-      removed
-        ? "The old copy has been removed from this browser."
-        : "The old copy was kept: the move into this workspace has not completed, or changes are still waiting to be saved."
-    );
-    scope.refreshLocalData();
+    setBusy(true);
+    try {
+      // The FILE safety gate (Phase 7.6). Removing the structured originals
+      // tells the user this browser's copy is no longer needed — and that is
+      // false while a file this workspace references has not reached the
+      // account, or belongs to another workspace, or could not be associated.
+      // A build with no bucket is exempt: nothing there can ever be confirmed,
+      // and the Files line has never claimed otherwise.
+      let gate;
+      try {
+        gate = await planOldCopyRemoval({
+          workspaceId: scope.workspace.id,
+          uid: scope.uid,
+          configured: Boolean(assetStatus) && assetStatus.status !== ASSET_SYNC_STATUS.UNCONFIGURED,
+        });
+      } catch {
+        // Not knowing is not permission: the old copy is kept and the user
+        // can try again. Nothing has been removed.
+        setLocalNotice(OLD_COPY_UNCHECKED_MESSAGE);
+        return;
+      }
+      if (!gate.allowed) {
+        setLocalNotice(oldCopyRefusalMessage(gate.reason, gate.blocking));
+        return;
+      }
+      const removed = removeLocalOriginals(scope.workspace.id);
+      setLocalNotice(
+        removed
+          ? `The old copy has been removed from this browser. ${REMOVE_LOCAL_COPY_NOTE}`
+          : "The old copy was kept: the move into this workspace has not completed, or changes are still waiting to be saved."
+      );
+      scope.refreshLocalData();
+    } finally {
+      setBusy(false);
+    }
   };
 
+  const backfillStatus = scope ? scope.assetBackfill : null;
+  const backfillLine = assetBackfillStatusLine(backfillStatus);
+  const backfillAttention = assetBackfillAttentionLine(backfillStatus);
   const migrationState = scope ? scope.migration.state : null;
   const localPresent = Boolean(scope && scope.localData && scope.localData.present);
   const migratedHere =
@@ -273,6 +322,18 @@ export default function SettingsModal({ open, onClose }) {
                     {assetSyncFailureMessage(assetStatus.error)}
                   </p>
                 )}
+                {/* The BACKFILL's own line (Phase 7.6) — finding and
+                    associating this browser's older files, which is a
+                    different thing from uploading them and is never merged
+                    with the line above. */}
+                {backfillLine && (
+                  <div className="text-xs text-gray-700 dark:text-gray-300 mt-1" role="status" aria-live="polite">
+                    {backfillLine}
+                  </div>
+                )}
+                {backfillAttention && (
+                  <div className="text-xs text-amber-700 dark:text-amber-300 mt-1">{backfillAttention}</div>
+                )}
               </div>
             )}
             <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-2 leading-snug">
@@ -311,14 +372,19 @@ export default function SettingsModal({ open, onClose }) {
               </button>
             )}
             {localPresent && migratedHere && (
-              <button
-                type="button"
-                onClick={handleRemoveLocal}
-                disabled={busy}
-                className="w-full mt-3 py-2 rounded border border-gray-300 dark:border-gray-600 text-gray-800 dark:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-60"
-              >
-                {REMOVE_LOCAL_COPY_LABEL}
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={handleRemoveLocal}
+                  disabled={busy}
+                  className="w-full mt-3 py-2 rounded border border-gray-300 dark:border-gray-600 text-gray-800 dark:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-60"
+                >
+                  {REMOVE_LOCAL_COPY_LABEL}
+                </button>
+                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-2 leading-snug">
+                  {REMOVE_LOCAL_COPY_NOTE}
+                </p>
+              </>
             )}
             {localNotice && (
               <p className="text-xs mt-2 text-gray-700 dark:text-gray-300" role="status">

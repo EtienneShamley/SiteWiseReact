@@ -10,8 +10,11 @@
 //   a crash between "the PDF is durable" and "the cloud is owed it" is
 //   repaired by reconciliation, and repairing twice changes nothing;
 //   another workspace's rows are never read or written;
-//   a replaced or deleted source cannot later be uploaded;
-//   an already-uploaded source is never un-queued from under the collector.
+//   a replaced or deleted source cannot later be uploaded — whatever the
+//   local remote index says;
+//   "the cloud already has it" is decided from the source's CURRENT Firestore
+//   document through the shared rule (src/lib/cloud/assetCloudState.js), and
+//   never from `assetRemoteIndex` (corrected 2026-09-05).
 
 import "fake-indexeddb/auto";
 import {
@@ -30,6 +33,8 @@ import { savePdfBytes, removePdfBytes } from "./pdfStorage";
 import { DURABLE_SCOPE_KIND, setDurableScope } from "./durableStorage";
 import { savePdfDocs } from "./pdfDocuments";
 import { deleteAssetDb, installStructuredCloneShim } from "./assetDbTestHarness";
+import { buildAssetDocument, tombstoneAssetDocument } from "./cloud/assetCloudModel";
+import { CLOUD_CONFLICT_REASON } from "./cloud/assetCloudState";
 
 installStructuredCloneShim();
 
@@ -59,6 +64,27 @@ afterEach(() => {
 
 async function seedPdf(sourceId, name = "plan.pdf") {
   await savePdfBytes(sourceId, bytes(`%PDF-1.4 ${sourceId}`), name);
+}
+const SEEDED_SIZE = (sourceId) => `%PDF-1.4 ${sourceId}`.length;
+
+/** The workspace's CURRENT documents as the store returns them. */
+function cloudReader(docs) {
+  return async (workspaceId, assetId) => {
+    const doc = docs[`${workspaceId}|${assetId}`];
+    if (doc === "throw") throw Object.assign(new Error("unavailable"), { code: "unavailable" });
+    return doc || { exists: false, fields: null };
+  };
+}
+function storedPdfDoc(sourceId, { size = SEEDED_SIZE(sourceId), workspaceId = WS_A } = {}) {
+  const built = buildAssetDocument({ workspaceId, id: sourceId, assetKind: "pdf-source", name: "plan.pdf", mimeType: "application/pdf", size, createdAt: 1000 });
+  if (!built.ok) throw new Error(`fixture does not validate: ${built.reason}`);
+  return { exists: true, fields: built.fields };
+}
+function tombstonedPdfDoc(sourceId, options) {
+  return { exists: true, fields: tombstoneAssetDocument(storedPdfDoc(sourceId, options).fields, 2000) };
+}
+function staleIndex(sourceId, state) {
+  return putRemoteAssetEntry({ workspaceId: WS_A, assetId: sourceId, kind: "pdf-source", state, size: 10 });
 }
 
 function registerDoc(sourceId, id = `doc-${sourceId}`) {
@@ -119,17 +145,29 @@ describe("releasePdfSourceUpload", () => {
     expect(await getAssetUpload(WS_A, SOURCE_1)).toBeNull();
   });
 
-  test("leaves an already-uploaded source alone — the collector owns it", async () => {
+  test("an obsolete source's pending identity is released WHATEVER the stale remote index says", async () => {
+    // Re-targeted 2026-09-05: the first cut refused the release when the index
+    // said stored, which let a deleted or replaced PDF upload later from a
+    // leftover row. A queue row is by construction an unsettled upload, so
+    // releasing it can never un-know an object the account holds.
     await enqueuePdfSourceUpload(SOURCE_1);
-    await putRemoteAssetEntry({
-      workspaceId: WS_A,
-      assetId: SOURCE_1,
-      kind: "pdf-source",
-      state: REMOTE_ASSET_STATE.STORED,
-      size: 10,
-    });
-    expect(await releasePdfSourceUpload(SOURCE_1)).toEqual({ released: false, reason: "already-stored" });
-    expect(await getAssetUpload(WS_A, SOURCE_1)).not.toBeNull();
+    await staleIndex(SOURCE_1, REMOTE_ASSET_STATE.STORED);
+    expect(await releasePdfSourceUpload(SOURCE_1)).toEqual({ released: true, reason: null });
+    expect(await getAssetUpload(WS_A, SOURCE_1)).toBeNull();
+  });
+
+  test("a deleted PDF cannot later upload because of a leftover queue entry", async () => {
+    await seedPdf(SOURCE_1);
+    await enqueuePdfSourceUpload(SOURCE_1);
+    await staleIndex(SOURCE_1, REMOTE_ASSET_STATE.STORED);
+    // The delete path: release BEFORE the bytes go (src/context/AppStateContext.js).
+    await releasePdfSourceUpload(SOURCE_1);
+    await removePdfBytes(SOURCE_1);
+    expect(await listPendingAssetUploads(WS_A)).toEqual([]);
+    // …and a later reconciliation does not resurrect it: it is not current.
+    const result = await reconcilePdfSourceUploads({ workspaceId: WS_A, sources: [] });
+    expect(result.enqueued).toEqual([]);
+    expect(await listPendingAssetUploads(WS_A)).toEqual([]);
   });
 
   test("releasing what was never queued is not an error", async () => {
@@ -143,16 +181,11 @@ describe("releasePdfSourceUpload", () => {
   });
 
   test("a release that lands after the upload finished leaves the cloud record intact", async () => {
-    // The engine settled first: the index says stored and the queue row is gone.
-    await putRemoteAssetEntry({
-      workspaceId: WS_A,
-      assetId: SOURCE_1,
-      kind: "pdf-source",
-      state: REMOTE_ASSET_STATE.STORED,
-      size: 10,
-    });
+    // The engine settled first: the index says stored and the queue row is
+    // gone. There is nothing to release, and nothing in the cloud is touched.
+    await staleIndex(SOURCE_1, REMOTE_ASSET_STATE.STORED);
     const result = await releasePdfSourceUpload(SOURCE_1);
-    expect(result.released).toBe(false);
+    expect(result).toEqual({ released: false, reason: "not-queued" });
     expect(await getAssetUpload(WS_A, SOURCE_1)).toBeNull();
   });
 });
@@ -171,22 +204,110 @@ describe("reconcilePdfSourceUploads", () => {
     await seedPdf(SOURCE_1);
     await reconcilePdfSourceUploads({ workspaceId: WS_A, sources: [SOURCE_1] });
     const second = await reconcilePdfSourceUploads({ workspaceId: WS_A, sources: [SOURCE_1] });
-    expect(second).toEqual({ enqueued: [], settled: [] });
+    expect(second).toEqual({ enqueued: [], settled: [], conflicts: [] });
     expect(await listPendingAssetUploads(WS_A)).toHaveLength(1);
   });
 
-  test("does not re-queue a source the cloud is already known to hold", async () => {
+  test("does not re-queue a source whose CURRENT cloud document is stored and matching", async () => {
     await seedPdf(SOURCE_1);
-    await putRemoteAssetEntry({
+    const result = await reconcilePdfSourceUploads({
       workspaceId: WS_A,
-      assetId: SOURCE_1,
-      kind: "pdf-source",
-      state: REMOTE_ASSET_STATE.STORED,
-      size: 10,
+      sources: [SOURCE_1],
+      readCloudAssetDocument: cloudReader({ [`${WS_A}|${SOURCE_1}`]: storedPdfDoc(SOURCE_1) }),
     });
-    const result = await reconcilePdfSourceUploads({ workspaceId: WS_A, sources: [SOURCE_1] });
+    expect(result).toEqual({ enqueued: [], settled: [], conflicts: [] });
+    expect(await getAssetUpload(WS_A, SOURCE_1)).toBeNull();
+  });
+
+  test("remote index stored + Firestore document ABSENT → the current PDF is queued", async () => {
+    await seedPdf(SOURCE_1);
+    await staleIndex(SOURCE_1, REMOTE_ASSET_STATE.STORED);
+    const result = await reconcilePdfSourceUploads({
+      workspaceId: WS_A,
+      sources: [SOURCE_1],
+      readCloudAssetDocument: cloudReader({}),
+    });
+    expect(result.enqueued).toEqual([SOURCE_1]);
+    expect(await getAssetUpload(WS_A, SOURCE_1)).toMatchObject({ kind: "pdf-source" });
+  });
+
+  test("remote index stored + Firestore document TOMBSTONED → queued for the engine's approved restore", async () => {
+    await seedPdf(SOURCE_1);
+    await staleIndex(SOURCE_1, REMOTE_ASSET_STATE.STORED);
+    const result = await reconcilePdfSourceUploads({
+      workspaceId: WS_A,
+      sources: [SOURCE_1],
+      readCloudAssetDocument: cloudReader({ [`${WS_A}|${SOURCE_1}`]: tombstonedPdfDoc(SOURCE_1) }),
+    });
+    expect(result.enqueued).toEqual([SOURCE_1]);
+  });
+
+  test("remote index tombstoned + Firestore document STORED → no unnecessary queue", async () => {
+    await seedPdf(SOURCE_1);
+    await staleIndex(SOURCE_1, REMOTE_ASSET_STATE.TOMBSTONED);
+    const result = await reconcilePdfSourceUploads({
+      workspaceId: WS_A,
+      sources: [SOURCE_1],
+      readCloudAssetDocument: cloudReader({ [`${WS_A}|${SOURCE_1}`]: storedPdfDoc(SOURCE_1) }),
+    });
     expect(result.enqueued).toEqual([]);
     expect(await getAssetUpload(WS_A, SOURCE_1)).toBeNull();
+  });
+
+  test("cloud unavailable — no boundary, or the read refused — → queued conservatively", async () => {
+    await seedPdf(SOURCE_1);
+    await seedPdf(SOURCE_2);
+    await staleIndex(SOURCE_1, REMOTE_ASSET_STATE.STORED);
+    await staleIndex(SOURCE_2, REMOTE_ASSET_STATE.STORED);
+    const noBoundary = await reconcilePdfSourceUploads({ workspaceId: WS_A, sources: [SOURCE_1] });
+    expect(noBoundary.enqueued).toEqual([SOURCE_1]);
+    const refused = await reconcilePdfSourceUploads({
+      workspaceId: WS_A,
+      sources: [SOURCE_2],
+      readCloudAssetDocument: cloudReader({ [`${WS_A}|${SOURCE_2}`]: "throw" }),
+    });
+    expect(refused.enqueued).toEqual([SOURCE_2]);
+  });
+
+  test("a malformed or identity-conflicting CURRENT document is reported, not overwritten, and not queued", async () => {
+    await seedPdf(SOURCE_1);
+    await seedPdf(SOURCE_2);
+    const result = await reconcilePdfSourceUploads({
+      workspaceId: WS_A,
+      sources: [SOURCE_1, SOURCE_2],
+      readCloudAssetDocument: cloudReader({
+        [`${WS_A}|${SOURCE_1}`]: { exists: true, fields: { workspaceId: WS_A, id: SOURCE_1, kind: "assets", nonsense: 1 } },
+        [`${WS_A}|${SOURCE_2}`]: storedPdfDoc(SOURCE_2, { size: 999999 }),
+      }),
+    });
+    expect(result.enqueued).toEqual([]);
+    expect(result.conflicts).toEqual([
+      { assetId: SOURCE_1, reason: CLOUD_CONFLICT_REASON.malformed },
+      { assetId: SOURCE_2, reason: CLOUD_CONFLICT_REASON.conflict },
+    ]);
+    expect(await listPendingAssetUploads(WS_A)).toEqual([]);
+  });
+
+  test("a replaced source's queue entry is released and the new one owed, regardless of a stale index", async () => {
+    await seedPdf(SOURCE_1);
+    await enqueuePdfSourceUpload(SOURCE_1);
+    await staleIndex(SOURCE_1, REMOTE_ASSET_STATE.STORED);
+    // The replace path: release the superseded identity, owe the new one.
+    expect((await releasePdfSourceUpload(SOURCE_1)).released).toBe(true);
+    await seedPdf(SOURCE_2);
+    await enqueuePdfSourceUpload(SOURCE_2);
+    expect((await listPendingAssetUploads(WS_A)).map((e) => e.assetId)).toEqual([SOURCE_2]);
+  });
+
+  test("repeated reconciliation with the cloud boundary is idempotent", async () => {
+    await seedPdf(SOURCE_1);
+    await seedPdf(SOURCE_2);
+    const reader = cloudReader({ [`${WS_A}|${SOURCE_2}`]: tombstonedPdfDoc(SOURCE_2) });
+    const first = await reconcilePdfSourceUploads({ workspaceId: WS_A, sources: [SOURCE_1, SOURCE_2], readCloudAssetDocument: reader });
+    expect(first.enqueued.sort()).toEqual([SOURCE_1, SOURCE_2].sort());
+    const second = await reconcilePdfSourceUploads({ workspaceId: WS_A, sources: [SOURCE_1, SOURCE_2], readCloudAssetDocument: reader });
+    expect(second).toEqual({ enqueued: [], settled: [], conflicts: [] });
+    expect(await listPendingAssetUploads(WS_A)).toHaveLength(2);
   });
 
   test("does not queue a source whose bytes are not on this device", async () => {
@@ -239,8 +360,9 @@ describe("reconcilePdfSourceUploads", () => {
     expect(await reconcilePdfSourceUploads({ workspaceId: null, sources: [SOURCE_1] })).toEqual({
       enqueued: [],
       settled: [],
+      conflicts: [],
     });
-    expect(await reconcilePdfSourceUploads({})).toEqual({ enqueued: [], settled: [] });
+    expect(await reconcilePdfSourceUploads({})).toEqual({ enqueued: [], settled: [], conflicts: [] });
   });
 });
 

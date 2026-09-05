@@ -233,6 +233,28 @@ describe("ordering and concurrency", () => {
     expect(order).toEqual(["first", "second", "third"]);
   });
 
+  test("start hands the PDF reconciler this engine's OWN workspace-store document reader — the cloud, not the local index, decides (2026-09-05)", async () => {
+    const seen = [];
+    const engine = makeEngine({
+      local: {
+        ...defaultAssetUploadLocal,
+        currentPdfSources: () => [],
+        reconcilePdfSources: async (workspaceId, options) => {
+          seen.push({ workspaceId, reader: options && options.readCloudAssetDocument });
+          return { enqueued: [], settled: [], conflicts: [] };
+        },
+      },
+    });
+    engine.start();
+    await engine.flush();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].workspaceId).toBe(WS_A);
+    expect(typeof seen[0].reader).toBe("function");
+    // and it really is this store's boundary: an absent document reads as absent here
+    await expect(seen[0].reader(WS_A, "no-such-source")).resolves.toEqual({ exists: false, fields: null });
+    engine.stop();
+  });
+
   test("never runs more than the configured number of uploads at once", async () => {
     for (let i = 0; i < 6; i++) await createAsset({ id: `many-${i}` });
     let active = 0;

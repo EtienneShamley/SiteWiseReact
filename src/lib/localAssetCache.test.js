@@ -17,6 +17,7 @@ import {
   GENERAL_ASSET_KINDS,
   isPdfSourceKind,
   localAssetExists,
+  localAssetSize,
   readLocalAsset,
   writeDownloadedAsset,
 } from "./localAssetCache";
@@ -111,6 +112,13 @@ describe("general asset kinds route to the asset store", () => {
     expect(await localAssetExists("no-such-asset")).toBe(false);
     expect(await localAssetExists(null)).toBe(false);
   });
+
+  test("localAssetSize reports the stored size without opening the Blob (7.6)", async () => {
+    const id = await createEditorImageAsset(testBlob("twelve bytes"));
+    expect(await localAssetSize(id)).toBe(12);
+    expect(await localAssetSize("no-such-asset")).toBe(0);
+    expect(await localAssetSize(null)).toBe(0);
+  });
 });
 
 describe("pdf-source routes to the PDF byte store", () => {
@@ -141,6 +149,14 @@ describe("pdf-source routes to the PDF byte store", () => {
     expect(await localAssetExists(PDF_SOURCE_ID, { kind: ASSET_KIND_PDF_SOURCE })).toBe(true);
     await removePdfBytes(PDF_SOURCE_ID);
     expect(await localAssetExists(PDF_SOURCE_ID, { kind: ASSET_KIND_PDF_SOURCE })).toBe(false);
+  });
+
+  test("localAssetSize routes to the PDF store too, and is 0 once the bytes are gone (7.6)", async () => {
+    expect(await localAssetSize(PDF_SOURCE_ID, { kind: ASSET_KIND_PDF_SOURCE })).toBe(4);
+    // The same id asked for as a GENERAL asset finds nothing: the kind routes.
+    expect(await localAssetSize(PDF_SOURCE_ID)).toBe(0);
+    await removePdfBytes(PDF_SOURCE_ID);
+    expect(await localAssetSize(PDF_SOURCE_ID, { kind: ASSET_KIND_PDF_SOURCE })).toBe(0);
   });
 
   test("a missing PDF source is null, not an error", async () => {

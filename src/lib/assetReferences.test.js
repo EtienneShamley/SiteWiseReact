@@ -7,6 +7,7 @@ import {
   instanceAssetIds,
   liveAssetIds,
   noteAssetManifest,
+  recordedLiveAssetIds,
   templateVersionAssetIds,
 } from "./assetReferences";
 
@@ -80,4 +81,48 @@ test("the live set (mark set) unions notes, versions and rendition sources", () 
   });
   expect(shared.has("s")).toBe(true);
   expect(shared.size).toBe(1);
+});
+
+/* ------------- the record-shaped entry point (Phase 7.6 / GC) ------------- */
+
+test("recordedLiveAssetIds is the SAME universe, expressed over the durable records", () => {
+  const noteContent = { n1: '<img data-asset-id="a">', n2: '<a data-file-asset-id="b"></a>' };
+  const templateInstances = { n2: { attachments: { r: [{ assetId: "c" }] } }, n3: { evidence: { r: [{ assetId: "d" }] } } };
+  const templateVersions = { v: { logoAssetId: "logo" } };
+
+  const fromRecords = recordedLiveAssetIds({ noteContent, templateInstances, templateVersions });
+  const fromCollector = liveAssetIds({
+    notes: [
+      { html: noteContent.n1 },
+      { html: noteContent.n2, instance: templateInstances.n2 },
+      { instance: templateInstances.n3 },
+    ],
+    versions: templateVersions,
+  });
+  expect([...fromRecords].sort()).toEqual([...fromCollector].sort());
+  expect([...fromRecords].sort()).toEqual(["a", "b", "c", "d", "logo"]);
+});
+
+test("a note with BOTH free-form content and a template instance is collected once, from both", () => {
+  const ids = recordedLiveAssetIds({
+    noteContent: { n1: '<img data-asset-id="shared">' },
+    templateInstances: { n1: { attachments: { r: [{ assetId: "shared" }, { assetId: "extra" }] } } },
+  });
+  expect([...ids].sort()).toEqual(["extra", "shared"]);
+});
+
+test("a referenced rendition keeps its source alive transitively; an orphaned one keeps nothing", () => {
+  const assets = [
+    { id: "r2", metadata: { annotation: { sourceAssetId: "r1" } } },
+    { id: "r1", metadata: { annotation: { sourceAssetId: "orig" } } },
+    { id: "orphan", metadata: { annotation: { sourceAssetId: "orphan-orig" } } },
+  ];
+  const ids = recordedLiveAssetIds({ noteContent: { n: '<img data-asset-id="r2">' }, assets });
+  expect([...ids].sort()).toEqual(["orig", "r1", "r2"]);
+});
+
+test("current PDF source ids join the set unchanged; malformed input is tolerated", () => {
+  expect([...recordedLiveAssetIds({ pdfSourceIds: ["src-1", "", null] })]).toEqual(["src-1"]);
+  expect([...recordedLiveAssetIds()].length).toBe(0);
+  expect([...recordedLiveAssetIds({ noteContent: [], templateInstances: 7, assets: null })].length).toBe(0);
 });

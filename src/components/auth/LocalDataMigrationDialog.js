@@ -21,6 +21,8 @@
 import React, { useState } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { LOCAL_MIGRATION_STATUS } from "../../lib/cloud/localMigration";
+import { migrationAssetSummary } from "../../lib/assetBackfill";
+import { formatUploadBytes } from "../AssetUploadStatus";
 
 export const MIGRATION_TITLE = "Notes found in this browser";
 export const MIGRATE_LABEL = "Move into my workspace";
@@ -49,6 +51,19 @@ export function ambiguityMessage(otherAccountCount) {
   return `On this browser, ${who} also signed in while these notes were here. Only move them into this workspace if they are yours. Nothing is moved until you choose, and the copy in this browser is kept either way.`;
 }
 
+/**
+ * The FILE line: "23 images, 4 files, 2 PDF files (48 MB)".
+ *
+ * It counts only what moving this browser's data would actually bring — the
+ * files its own notes and templates REFERENCE and that are here now. An
+ * orphaned blob left behind by a deleted note, a file another workspace on
+ * this browser owns, and a file that exists only in the account are all
+ * absent, because none of them is this browser's copy to move.
+ */
+export function assetSummary(counts) {
+  return migrationAssetSummary(counts, { formatBytes: formatUploadBytes });
+}
+
 export function pendingMessage(pending) {
   const n = Number(pending) || 0;
   return `${n} ${n === 1 ? "item is" : "items are"} saved in this browser and waiting for a connection to reach your account. Nothing is lost — retry when you are back online, or continue and NoteWise will keep trying.`;
@@ -60,6 +75,9 @@ export default function LocalDataMigrationDialog({ detection, migration, workspa
   const busy = Boolean(migration && migration.busy);
   const result = migration ? migration.lastResult : null;
   const counts = detection ? detection.counts : null;
+  // Null while the files are still being counted (an IndexedDB read the step
+  // never waits on) — the sentence simply omits them until it is known.
+  const assetFiles = assetSummary(migration ? migration.assets : null);
   const ambiguous = Boolean(detection && detection.seenByOtherAccounts);
   const completed = result && result.status === LOCAL_MIGRATION_STATUS.COMPLETED;
   const stalled = result && result.status === LOCAL_MIGRATION_STATUS.IN_PROGRESS;
@@ -91,8 +109,16 @@ export default function LocalDataMigrationDialog({ detection, migration, workspa
             {user?.email ? ` (${user.email})` : ""}.
           </p>
           <p>
-            You can move them into your workspace now. Images, PDF files and attachments stay on this device for
-            the moment: their text and structure move, and file sync arrives in a later update.
+            You can move them into your workspace now.
+            {assetFiles ? (
+              <>
+                {" "}
+                The <strong>{assetFiles}</strong> they use are on this device and are associated with your workspace
+                and uploaded after the move.
+              </>
+            ) : (
+              " Their text and structure move; any files they use stay on this device until they can be uploaded."
+            )}
           </p>
           {resumable && !result && (
             <p className="text-amber-700 dark:text-amber-300">
