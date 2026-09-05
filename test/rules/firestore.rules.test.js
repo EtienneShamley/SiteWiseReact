@@ -423,8 +423,11 @@ describe("asset metadata documents", { concurrency: false }, () => {
 });
 
 // ---------------------------------------------------------------------------
-// pdfAnnotations (Phase 7.3 seam): joins the JSON-string collections so the
-// Phase 7.7 sync has a rule to write against. Nothing syncs yet.
+// pdfAnnotations (Phase 7.3 seam, synced since Phase 7.7): joins the
+// JSON-string collections. The product writes `{ items: [...] }` as the
+// `json` string (chunked past the inline budget) and deletes the document —
+// and its chunks — with the PDF, under the ordinary member delete policy of
+// every JSON entity (NOT the owner-only policy of `assets`).
 // ---------------------------------------------------------------------------
 
 describe("pdfAnnotations documents", { concurrency: false }, () => {
@@ -457,5 +460,47 @@ describe("pdfAnnotations documents", { concurrency: false }, () => {
     await assertFails(setDoc(ref, envelope("ws-alice", "pdfAnnotations", "other", { json: "{}" })));
     await assertFails(setDoc(ref, envelope("ws-alice", "pdfAnnotations", "pdf1", { json: 42 })));
     await assertFails(setDoc(ref, envelope("ws-alice", "pdfAnnotations", "pdf1", { json: "{}", items: [] })));
+  });
+
+  test("7.7: an unauthenticated caller can neither read, write nor delete", async () => {
+    await setDoc(doc(db("alice"), "workspaces", "ws-alice", "pdfAnnotations", "pdf1"), envelope("ws-alice", "pdfAnnotations", "pdf1", { json: "{\"items\":[]}" }));
+    const a = anon();
+    await assertFails(getDoc(doc(a, "workspaces", "ws-alice", "pdfAnnotations", "pdf1")));
+    await assertFails(setDoc(doc(a, "workspaces", "ws-alice", "pdfAnnotations", "pdf9"), envelope("ws-alice", "pdfAnnotations", "pdf9", { json: "{}" })));
+    await assertFails(deleteDoc(doc(a, "workspaces", "ws-alice", "pdfAnnotations", "pdf1")));
+    await assertFails(getDoc(doc(a, "workspaces", "ws-alice", "pdfAnnotations", "pdf1", "chunks", "0")));
+  });
+
+  test("7.7: an ORDINARY member may delete the document and its chunks — the JSON-entity policy, unlike assets", async () => {
+    await seedMember("ws-alice", "carol");
+    const f = db("alice");
+    const batch = writeBatch(f);
+    batch.set(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "big"), envelope("ws-alice", "pdfAnnotations", "big", { chunked: true, chunkCount: 2, payloadUnits: 4 }));
+    batch.set(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "big", "chunks", "0"), { workspaceId: "ws-alice", id: "big", kind: "pdfAnnotations", index: 0, text: "{\"i", updatedAt: serverTimestamp() });
+    batch.set(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "big", "chunks", "1"), { workspaceId: "ws-alice", id: "big", kind: "pdfAnnotations", index: 1, text: "\":1}", updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+    const carol = db("carol");
+    // The member reads it (and its chunks) …
+    assert.equal((await assertSucceeds(getDoc(doc(carol, "workspaces", "ws-alice", "pdfAnnotations", "big")))).data().chunkCount, 2);
+    // … writes a newer version …
+    await assertSucceeds(setDoc(doc(carol, "workspaces", "ws-alice", "pdfAnnotations", "pdf2"), envelope("ws-alice", "pdfAnnotations", "pdf2", { json: "{\"items\":[]}" })));
+    // … and deletes the document with its chunks in one batch, as the engine does.
+    const del = writeBatch(carol);
+    del.delete(doc(carol, "workspaces", "ws-alice", "pdfAnnotations", "big"));
+    del.delete(doc(carol, "workspaces", "ws-alice", "pdfAnnotations", "big", "chunks", "0"));
+    del.delete(doc(carol, "workspaces", "ws-alice", "pdfAnnotations", "big", "chunks", "1"));
+    await assertSucceeds(del.commit());
+    assert.equal((await getDoc(doc(db("alice"), "workspaces", "ws-alice", "pdfAnnotations", "big"))).exists(), false);
+    // Nobody outside the workspace may, even with a valid envelope.
+    await assertFails(deleteDoc(doc(db("bob"), "workspaces", "ws-alice", "pdfAnnotations", "pdf2")));
+  });
+
+  test("7.7: the chunk cap and the chunk envelope hold for annotation documents", async () => {
+    const f = db("alice");
+    await assertFails(setDoc(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "huge"), envelope("ws-alice", "pdfAnnotations", "huge", { chunked: true, chunkCount: 65, payloadUnits: 1 })));
+    await assertFails(setDoc(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "huge"), envelope("ws-alice", "pdfAnnotations", "huge", { chunked: true, chunkCount: 0, payloadUnits: 1 })));
+    await assertFails(setDoc(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "pdf1", "chunks", "0"), { workspaceId: "ws-alice", id: "other", kind: "pdfAnnotations", index: 0, text: "{}", updatedAt: serverTimestamp() }));
+    await assertFails(setDoc(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "pdf1", "chunks", "0"), { workspaceId: "ws-alice", id: "pdf1", kind: "pdfDocs", index: 0, text: "{}", updatedAt: serverTimestamp() }));
+    await assertFails(setDoc(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "pdf1", "chunks", "0"), { workspaceId: "ws-alice", id: "pdf1", kind: "pdfAnnotations", index: 0, text: 5, updatedAt: serverTimestamp() }));
   });
 });

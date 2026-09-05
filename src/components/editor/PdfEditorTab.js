@@ -48,7 +48,12 @@ import {
   EXPORT_STATE,
   canStartExport,
 } from "../../lib/pdfUtils";
-import { saveAnnotations, loadAnnotations } from "../../lib/pdfStorage";
+import { loadAnnotations } from "../../lib/pdfStorage";
+// Annotation WRITES go through the writer (Production Readiness Phase 7.7):
+// coalesced with a bounded maximum wait, flushed on hide / unload / unmount,
+// bound to the workspace captured at the moment of each change.
+import { createPdfAnnotationWriter } from "../../lib/pdfAnnotationWriter";
+import { activeAssetWorkspaceId } from "../../lib/assetStorage";
 import { ASSET_READ_STATE, readAssetWithState } from "../../lib/assetReader";
 import {
   ASSET_READ_SURFACE,
@@ -277,7 +282,7 @@ export default function PdfEditorTab({
   const fileInputRef = useRef(null);
   const scrollRef = useRef(null);
   const latestItemsRef = useRef(null);
-  const saveTimer = useRef(null);
+  const annotationWriterRef = useRef(null);
   const zoomTimer = useRef(null);
   const zoomLabelRef = useRef(1.1);
   const appliedScaleRef = useRef(1.1);
@@ -323,7 +328,13 @@ export default function PdfEditorTab({
         return;
       }
       adoptNewSource(result.bytes);
-      if (result.warning) setStorageError(result.warning);
+      if (result.warning) {
+        setStorageError(result.warning);
+        // The stored reset could not be written by the application path;
+        // the editor's own writer replaces the stale record with the empty
+        // list at its next flush (see AppStateContext.replacePdfSource).
+        annotationWriterRef.current?.change([]);
+      }
     },
     [docId, replacePdfSource, adoptNewSource]
   );
@@ -369,7 +380,10 @@ export default function PdfEditorTab({
               if (!cancelled) setSourceRead({ status: phase, code: null });
             },
           }),
-          loadAnnotations(docId),
+          // The workspace's OWN record, hydrated from the account at session
+          // start (src/lib/pdfAnnotationSync.js); outside a workspace, the
+          // local record as before.
+          loadAnnotations(docId, { workspaceId: activeAssetWorkspaceId() }),
         ]);
       } catch (err) {
         if (!cancelled) reportStorageError("Could not read this PDF from browser storage", err);
@@ -464,6 +478,22 @@ export default function PdfEditorTab({
 
   /* --------------------------- Annotation persistence ---------------------- */
 
+  // One writer per open document: ~600 ms trailing, ~2 s maximum wait,
+  // immediate on hide / unload / sign-out flush, and on unmount (dispose
+  // flushes first). Its listeners are removed with it.
+  useEffect(() => {
+    if (!docId) return undefined;
+    const writer = createPdfAnnotationWriter({
+      documentId: docId,
+      onError: (err) => reportStorageError("Could not save annotations to browser storage", err),
+    });
+    annotationWriterRef.current = writer;
+    return () => {
+      if (annotationWriterRef.current === writer) annotationWriterRef.current = null;
+      writer.dispose();
+    };
+  }, [docId, reportStorageError]);
+
   // Everything written to storage passes the whitelist first, so transient
   // editor state (editing flags, drag state, open bubbles) can never persist.
   const handleItemsChange = useCallback(
@@ -471,27 +501,10 @@ export default function PdfEditorTab({
       const record = serializeAnnotations(items);
       latestItemsRef.current = record;
       if (!docId) return;
-      window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => {
-        saveAnnotations(docId, record).catch((err) =>
-          reportStorageError("Could not save annotations to browser storage", err)
-        );
-      }, 600);
+      annotationWriterRef.current?.change(record);
     },
-    [docId, reportStorageError]
+    [docId]
   );
-
-  // Flush pending annotation writes when leaving the note/tab.
-  useEffect(() => {
-    return () => {
-      window.clearTimeout(saveTimer.current);
-      if (docId && latestItemsRef.current) {
-        saveAnnotations(docId, serializeAnnotations(latestItemsRef.current)).catch((err) =>
-          console.error("Final annotation save failed", err)
-        );
-      }
-    };
-  }, [docId]);
 
   // Object URLs are session-only and never persisted; any still outstanding
   // when the editor closes is revoked immediately.

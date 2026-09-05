@@ -9,6 +9,8 @@
 //   timestamp()                       a server-timestamp sentinel
 //   runTransaction(fn)                fn({ get(path), set(path, data) })
 //   readWorkspace(workspaceId)        every entity document + its chunks
+//                                     (the mirror collections AND pdfAnnotations,
+//                                     whose local copy is IndexedDB — Phase 7.7)
 //   commitBatch(workspaceId, ops)     [{ type: "set"|"delete", path, fields }]
 //   setDocument(path, data)
 //   readAssetIndex(workspaceId)       every asset metadata document
@@ -60,7 +62,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { ensureFirebaseApp } from "../firebaseApp";
-import { ENTITY_COLLECTIONS } from "./cloudModel";
+import { WORKSPACE_COLLECTIONS } from "./cloudModel";
 import { assetCollectionPath, assetDocumentPath } from "./assetPaths";
 
 /**
@@ -96,7 +98,7 @@ export function createFirestoreWorkspaceStore(config) {
 
     async readWorkspace(workspaceId) {
       const documents = [];
-      for (const name of ENTITY_COLLECTIONS) {
+      for (const name of WORKSPACE_COLLECTIONS) {
         const snapshot = await getDocs(collectionRef(db, "workspaces", workspaceId, name));
         for (const d of snapshot.docs) {
           const fields = d.data();

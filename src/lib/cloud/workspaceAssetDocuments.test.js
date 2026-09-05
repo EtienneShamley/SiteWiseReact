@@ -259,7 +259,8 @@ describe("the Firestore adapter carries the same operations", () => {
     expect(assetDocumentPath(WID, A1)).toEqual(["workspaces", WID, "assets", A1]);
   });
 
-  test("the workspace read still covers only the entity collections", () => {
-    expect(source).toMatch(/for \(const name of ENTITY_COLLECTIONS\)/);
+  test("the workspace read covers the entity collections plus pdfAnnotations (Phase 7.7), never assets", () => {
+    expect(source).toMatch(/for \(const name of WORKSPACE_COLLECTIONS\)/);
+    expect(source).not.toMatch(/for \(const name of ENTITY_COLLECTIONS\)/);
   });
 });

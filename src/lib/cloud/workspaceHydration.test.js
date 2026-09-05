@@ -121,3 +121,41 @@ test("a permission failure on read rejects and leaves the mirror untouched", asy
   await expect(hydrateWorkspaceMirror({ workspaceId: WS, store })).rejects.toMatchObject({ code: "permission-denied" });
   expect(loadTree().projectData).toEqual([]);
 });
+
+/* ---------------------- async collections (Phase 7.7) --------------------- */
+
+describe("pdfAnnotations documents are validated here and DEFERRED, never placed in the mirror", () => {
+  test("valid inline and chunked documents come back as deferred payloads; the mirror counts and keys are unchanged", async () => {
+    const store = seededStore();
+    const put = (id, payload) => {
+      const built = buildEntityDocument({ workspaceId: WS, collection: "pdfAnnotations", id, payload });
+      store.seed(["workspaces", WS, "pdfAnnotations", id], built.fields);
+      built.chunks.forEach((text, i) => store.seed(["workspaces", WS, "pdfAnnotations", id, "chunks", String(i)], { workspaceId: WS, id, kind: "pdfAnnotations", index: i, text }));
+    };
+    put("pdf1", { items: [{ id: "a", type: "rect" }] });
+    put("big", { items: [{ id: "b", type: "ink", points: "p".repeat(MAX_INLINE_PAYLOAD_UNITS + 5) }] });
+    const result = await hydrateWorkspaceMirror({ workspaceId: WS, store });
+    expect(result.malformed).toEqual([]);
+    expect(Object.keys(result.counts).sort()).toEqual(["nodes", "noteContent", "notePdfRefs", "pdfDocs", "settings", "templateInstances", "templateVersions", "templates"]);
+    expect(Object.keys(result.deferred)).toEqual(["pdfAnnotations"]);
+    expect(result.deferred.pdfAnnotations.pdf1).toEqual({ items: [{ id: "a", type: "rect" }] });
+    expect(result.deferred.pdfAnnotations.big.items[0].points.length).toBe(MAX_INLINE_PAYLOAD_UNITS + 5);
+    expect(Object.keys(localStorage).some((k) => k.includes("pdfAnnotations"))).toBe(false);
+    expect(outboxSize(WS)).toBe(0);
+  });
+
+  test("a malformed pdfAnnotations document — envelope, JSON, or items shape — is reported and excluded like any other", async () => {
+    const store = seededStore();
+    const malformed = [];
+    store.seed(["workspaces", WS, "pdfAnnotations", "wrongWs"], { workspaceId: "ws-other", id: "wrongWs", kind: "pdfAnnotations", schemaVersion: 1, json: '{"items":[]}' });
+    store.seed(["workspaces", WS, "pdfAnnotations", "badJson"], { workspaceId: WS, id: "badJson", kind: "pdfAnnotations", schemaVersion: 1, json: "{" });
+    store.seed(["workspaces", WS, "pdfAnnotations", "noItems"], { workspaceId: WS, id: "noItems", kind: "pdfAnnotations", schemaVersion: 1, json: "{}" });
+    store.seed(["workspaces", WS, "pdfAnnotations", "badItem"], { workspaceId: WS, id: "badItem", kind: "pdfAnnotations", schemaVersion: 1, json: '{"items":[1]}' });
+    store.seed(["workspaces", WS, "pdfAnnotations", "ok"], { workspaceId: WS, id: "ok", kind: "pdfAnnotations", schemaVersion: 1, json: '{"items":[]}' });
+    const result = await hydrateWorkspaceMirror({ workspaceId: WS, store, onMalformed: (e) => malformed.push(e) });
+    const reasons = Object.fromEntries(result.malformed.map((m) => [m.id, m.reason]));
+    expect(reasons).toEqual({ wrongWs: "workspace-mismatch", badJson: "bad-json", noItems: "bad-annotation-items", badItem: "bad-annotation-item" });
+    expect(malformed).toHaveLength(4);
+    expect(Object.keys(result.deferred.pdfAnnotations)).toEqual(["ok"]);
+  });
+});

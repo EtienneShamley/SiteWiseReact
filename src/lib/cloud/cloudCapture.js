@@ -27,6 +27,13 @@
 // Never throws into the owner module: the local write has already been
 // confirmed by the time this runs, and a refused outbox write is reported as
 // a persistence issue and remembered in memory for the next enqueue.
+//
+// EXTERNAL CHANGES (Production Readiness Phase 7.7). A record whose local
+// copy is not in the durable-storage boundary — the PDF annotation record in
+// IndexedDB — cannot be captured from a write it never makes there. Its
+// owner reports the change itself through `captureExternalChanges`, which
+// takes the SAME path from there on: the same outbox, the same carry of a
+// refused enqueue, the same notification the sync engine listens for.
 
 import {
   DURABLE_KEYS,
@@ -130,11 +137,43 @@ export function createCloudCapture({ storage, now } = {}) {
 }
 
 let installed = false;
+// The storage/clock the installed capture writes the outbox with, so an
+// external change lands in the same outbox (tests inject both).
+let installedOptions = {};
 
 /** Installs the capture on the durable-storage boundary (idempotent). */
 export function installCloudCapture(options) {
+  installedOptions = options || {};
   setDurableWriteCapture(createCloudCapture(options));
   installed = true;
+}
+
+/**
+ * Records entity changes `[{ collection, id, op, chunks? }]` of ONE named
+ * workspace that no durable-storage write produced (Phase 7.7 — IndexedDB-
+ * backed pdfAnnotations), and tells the sync engine of that workspace. The
+ * workspace is explicit: it is whatever the caller captured when the change
+ * was made, never the scope at the time this runs. Returns true when the
+ * outbox accepted the entries; false when storage refused (reported, carried
+ * to the next enqueue — and the owner's own durable marker lets a session
+ * start re-derive it).
+ */
+export function captureExternalChanges(workspaceId, changes) {
+  if (typeof workspaceId !== "string" || !workspaceId) return false;
+  const valid = (changes || []).filter((c) => c && typeof c.collection === "string" && typeof c.id === "string" && c.id);
+  const carried = unsavedChanges.get(workspaceId) || [];
+  const all = carried.concat(valid);
+  if (all.length === 0) return true;
+  try {
+    enqueueOutbox(workspaceId, all, { storage: installedOptions.storage, now: installedOptions.now });
+    unsavedChanges.delete(workspaceId);
+  } catch {
+    unsavedChanges.set(workspaceId, all);
+    reportPersistenceIssue({ kind: "cloud-outbox-write-failed", key: null, message: OUTBOX_WRITE_FAILED_MESSAGE });
+    return false;
+  }
+  notify({ workspaceId, changes: valid });
+  return true;
 }
 
 export function isCloudCaptureInstalled() {
@@ -159,6 +198,7 @@ export function forgetCaptureSnapshots(workspaceId = null) {
 export function __resetCloudCaptureForTests() {
   setDurableWriteCapture(null);
   installed = false;
+  installedOptions = {};
   listeners.clear();
   snapshots.clear();
   unsavedChanges.clear();

@@ -5,8 +5,13 @@
 // of oversized payloads, and the read-back validation that keeps a malformed
 // cloud document from becoming authoritative empty data.
 import {
+  ASYNC_ENTITY_COLLECTIONS,
   CLOUD_COLLECTION,
+  ENTITY_COLLECTIONS,
   MAX_INLINE_PAYLOAD_UNITS,
+  WORKSPACE_COLLECTIONS,
+  usesJsonPayload,
+  validatePdfAnnotationPayload,
   NODE_KIND,
   buildEntityDocument,
   chunkPayload,
@@ -196,5 +201,42 @@ describe("readEntityDocument — validation on the way back", () => {
     expect(ok(CLOUD_COLLECTION.NOTE_CONTENT, "n1", fields, ["abc", "defg"]).reason).toBe("chunk-length-mismatch");
     expect(ok(CLOUD_COLLECTION.NOTE_CONTENT, "n1", fields, ["abc", "def"])).toEqual({ ok: true, payload: { html: "abcdef" } });
     expect(ok(CLOUD_COLLECTION.NOTE_CONTENT, "n1", { ...fields, chunkCount: 0 }, []).reason).toBe("bad-chunk-count");
+  });
+});
+
+/* --------------------- pdfAnnotations vocabulary (7.7) -------------------- */
+
+describe("pdfAnnotations — a JSON entity whose local copy is NOT a durable record", () => {
+  test("is a cloud collection, a workspace-read collection and a JSON payload, but never a mirror entity collection", () => {
+    expect(CLOUD_COLLECTION.PDF_ANNOTATIONS).toBe("pdfAnnotations");
+    expect(ENTITY_COLLECTIONS).not.toContain("pdfAnnotations");
+    expect(ASYNC_ENTITY_COLLECTIONS).toEqual(["pdfAnnotations"]);
+    expect(WORKSPACE_COLLECTIONS).toEqual([...ENTITY_COLLECTIONS, "pdfAnnotations"]);
+    expect(usesJsonPayload("pdfAnnotations")).toBe(true);
+    // Not an entity record: there is nothing to flatten from the mirror.
+    expect(entitiesOfRecord("pdfAnnotations", { pdf1: { items: [] } })).toBeNull();
+  });
+
+  test("round-trips { items } through the envelope, inline and chunked", () => {
+    const small = buildEntityDocument({ workspaceId: "w", collection: "pdfAnnotations", id: "pdf1", payload: { items: [{ id: "a" }] } });
+    expect(small.fields).toEqual({ workspaceId: "w", id: "pdf1", kind: "pdfAnnotations", schemaVersion: 1, json: '{"items":[{"id":"a"}]}' });
+    expect(readEntityDocument({ workspaceId: "w", collection: "pdfAnnotations", id: "pdf1", fields: small.fields })).toEqual({ ok: true, payload: { items: [{ id: "a" }] } });
+    const big = buildEntityDocument({ workspaceId: "w", collection: "pdfAnnotations", id: "pdf1", payload: { items: [{ id: "a", points: "p".repeat(MAX_INLINE_PAYLOAD_UNITS + 1) }] } });
+    expect(big.fields.chunked).toBe(true);
+    const back = readEntityDocument({ workspaceId: "w", collection: "pdfAnnotations", id: "pdf1", fields: big.fields, chunks: big.chunks });
+    expect(back.ok).toBe(true);
+    expect(back.payload.items[0].points.length).toBe(MAX_INLINE_PAYLOAD_UNITS + 1);
+  });
+
+  test("validatePdfAnnotationPayload accepts an item array and refuses everything else", () => {
+    expect(validatePdfAnnotationPayload({ items: [] })).toEqual({ ok: true, items: [] });
+    expect(validatePdfAnnotationPayload({ items: [{ id: "a" }], extra: 1 })).toEqual({ ok: true, items: [{ id: "a" }] });
+    expect(validatePdfAnnotationPayload(null)).toEqual({ ok: false, reason: "bad-json-shape" });
+    expect(validatePdfAnnotationPayload([])).toEqual({ ok: false, reason: "bad-json-shape" });
+    expect(validatePdfAnnotationPayload({})).toEqual({ ok: false, reason: "bad-annotation-items" });
+    expect(validatePdfAnnotationPayload({ items: "x" })).toEqual({ ok: false, reason: "bad-annotation-items" });
+    expect(validatePdfAnnotationPayload({ items: [null] })).toEqual({ ok: false, reason: "bad-annotation-item" });
+    expect(validatePdfAnnotationPayload({ items: [[]] })).toEqual({ ok: false, reason: "bad-annotation-item" });
+    expect(validatePdfAnnotationPayload({ items: [1] })).toEqual({ ok: false, reason: "bad-annotation-item" });
   });
 });

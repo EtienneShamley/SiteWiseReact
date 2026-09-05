@@ -18,6 +18,9 @@
 //   workspaces/{wid}/templateVersions/{vid}    one immutable version each
 //   workspaces/{wid}/templateInstances/{noteId}
 //   workspaces/{wid}/pdfDocs/{pdfId}           PDF registry metadata (bytes are Phase 7)
+//   workspaces/{wid}/pdfAnnotations/{pdfId}    { items: [...] } — the document's whole
+//                                              annotation array (Phase 7.7; the local
+//                                              copy is IndexedDB, not the mirror)
 //   workspaces/{wid}/notePdfRefs/{noteId}      { pdfId }
 //   workspaces/{wid}/settings/{id}             workspace-level pointers (the default template)
 //   workspaces/{wid}/migrations/{sourceId}     the local→cloud migration record of one browser
@@ -56,9 +59,29 @@ export const CLOUD_COLLECTION = Object.freeze({
   PDF_DOCS: "pdfDocs",
   NOTE_PDF_REFS: "notePdfRefs",
   SETTINGS: "settings",
+  PDF_ANNOTATIONS: "pdfAnnotations",
 });
 
-export const ENTITY_COLLECTIONS = Object.freeze(Object.values(CLOUD_COLLECTION));
+/**
+ * Collections whose local copy is a durable-storage record — the workspace
+ * MIRROR the synchronous owner modules read (src/lib/durableStorage.js). The
+ * capture, the mirror hydration and the local migration iterate exactly
+ * these; a collection whose local copy lives elsewhere is NOT one of them.
+ */
+export const ENTITY_COLLECTIONS = Object.freeze(
+  Object.values(CLOUD_COLLECTION).filter((c) => c !== CLOUD_COLLECTION.PDF_ANNOTATIONS)
+);
+
+/**
+ * Collections whose local copy is IndexedDB and whose payload is therefore
+ * read ASYNCHRONOUSLY at sync time (src/lib/cloud/cloudSync.js →
+ * `payloadProviders`) and hydrated by their own module (pdfAnnotations:
+ * src/lib/pdfAnnotationSync.js). Never a durable-storage record.
+ */
+export const ASYNC_ENTITY_COLLECTIONS = Object.freeze([CLOUD_COLLECTION.PDF_ANNOTATIONS]);
+
+/** Every entity collection a workspace read fetches. */
+export const WORKSPACE_COLLECTIONS = Object.freeze([...ENTITY_COLLECTIONS, ...ASYNC_ENTITY_COLLECTIONS]);
 
 export const NODE_KIND = Object.freeze({ PROJECT: "project", FOLDER: "folder", NOTE: "note" });
 
@@ -71,6 +94,7 @@ const JSON_PAYLOAD_COLLECTIONS = new Set([
   CLOUD_COLLECTION.TEMPLATE_VERSIONS,
   CLOUD_COLLECTION.TEMPLATE_INSTANCES,
   CLOUD_COLLECTION.PDF_DOCS,
+  CLOUD_COLLECTION.PDF_ANNOTATIONS,
 ]);
 
 export function usesJsonPayload(collection) {
@@ -449,6 +473,23 @@ function validateNativePayload(collection, payload) {
     default:
       return { ok: false, reason: "unknown-collection" };
   }
+}
+
+/**
+ * The shape of a `pdfAnnotations` payload, in both directions: `{ items }`
+ * where `items` is the document's annotation array. Item-level validation is
+ * the annotation model's (src/lib/pdfAnnotationModel.js →
+ * `normalizeAnnotationList`) at render time, as it is for the local record;
+ * this guards the envelope so a malformed cloud document is excluded rather
+ * than hydrated as "no annotations".
+ */
+export function validatePdfAnnotationPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return { ok: false, reason: "bad-json-shape" };
+  if (!Array.isArray(payload.items)) return { ok: false, reason: "bad-annotation-items" };
+  if (payload.items.some((item) => !item || typeof item !== "object" || Array.isArray(item))) {
+    return { ok: false, reason: "bad-annotation-item" };
+  }
+  return { ok: true, items: payload.items };
 }
 
 /** Adds the node's own id back so a node payload is a full node. */

@@ -28,7 +28,12 @@ describe("PdfEditorTab", () => {
     // a temporarily unreachable file is not treated as a missing one. Still
     // the source id, still the document id for annotations.
     expect(TAB).toMatch(/readAssetWithState\(loadSourceId, \{\s*kind: ASSET_KIND_PDF_SOURCE,/);
-    expect(TAB).toMatch(/loadAnnotations\(docId\)/);
+    // Phase 7.7: the workspace's OWN annotation record, the workspace named
+    // at read time; writes go through the annotation writer, never a bare
+    // timer or a direct pdfStorage save.
+    expect(TAB).toMatch(/loadAnnotations\(docId, \{ workspaceId: activeAssetWorkspaceId\(\) \}\)/);
+    expect(TAB).not.toMatch(/saveAnnotations/);
+    expect(TAB).toMatch(/createPdfAnnotationWriter\(\{\s*documentId: docId,/);
     expect(TAB).toMatch(
       /import \{ ASSET_READ_STATE, readAssetWithState \} from "\.\.\/\.\.\/lib\/assetReader"/
     );
@@ -93,10 +98,10 @@ describe("AppStateContext", () => {
     expect(replace).toMatch(/const nextSourceId = newId\(\);/);
     expect(replace).toMatch(/withReplacedPdfSource\(doc, \{ sourceAssetId: nextSourceId, name: input\.name \}\)/);
     expect(replace.indexOf("await savePdfBytes(nextSourceId")).toBeLessThan(replace.indexOf("savePdfDocs("));
-    expect(replace.indexOf("savePdfDocs(")).toBeLessThan(replace.indexOf("await saveAnnotations(pdfId, [])"));
+    expect(replace.indexOf("savePdfDocs(")).toBeLessThan(replace.indexOf("await persistPdfAnnotations(pdfId, [], { workspaceId })"));
     // The annotation reset is a durable step of the replacement: refused →
     // the registry goes back and the new bytes go — BEFORE state moves.
-    expect(replace.indexOf("await saveAnnotations(pdfId, [])")).toBeLessThan(replace.indexOf("setPdfDocs("));
+    expect(replace.indexOf("await persistPdfAnnotations(pdfId, [], { workspaceId })")).toBeLessThan(replace.indexOf("setPdfDocs("));
     expect(replace).toMatch(/savePdfDocs\(previousDocs\);/);
     expect(replace.indexOf("setPdfDocs(")).toBeLessThan(replace.indexOf("await removePdfBytes(previousSourceId)"));
 

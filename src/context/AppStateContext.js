@@ -1,11 +1,18 @@
 // src/context/AppStateContext.js
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
+import { savePdfBytes, removePdfBytes } from "../lib/pdfStorage";
+// Annotation persistence goes through the Phase 7.7 sync boundary: the same
+// local IndexedDB write as before, plus — under a workspace — the account's
+// outbox obligation (src/lib/pdfAnnotationSync.js). The workspace is
+// captured at the START of each operation, never read mid-way.
 import {
-  savePdfBytes,
-  saveAnnotations,
-  removeAnnotations,
-  removePdfBytes,
-} from "../lib/pdfStorage";
+  drainPdfAnnotationWriters,
+  persistPdfAnnotations,
+  removePdfAnnotations,
+  resetPdfAnnotationWriters,
+  retirePdfAnnotationWriters,
+} from "../lib/pdfAnnotationSync";
+import { activeAssetWorkspaceId } from "../lib/assetStorage";
 import {
   makePdfDoc,
   getPdfDocs,
@@ -319,6 +326,7 @@ export function AppStateProvider({ children }) {
   // registry entry that names them. Resolves null when the input was refused
   // (the banner says why); rejects when storage refused (also reported).
   async function createGlobalPdf(file) {
+    const workspaceId = activeAssetWorkspaceId();
     const { name, bytes } = await readPdfInput(file);
     const check = validatePdfSource(bytes);
     if (!check.ok) {
@@ -334,7 +342,7 @@ export function AppStateProvider({ children }) {
       throw err;
     }
     try {
-      await saveAnnotations(doc.id, []);
+      await persistPdfAnnotations(doc.id, [], { workspaceId });
       savePdfDocs({ ...pdfDocsRef.current, [doc.id]: doc });
     } catch (err) {
       // Compensation: nothing written so far is named by any record, so it
@@ -342,7 +350,7 @@ export function AppStateProvider({ children }) {
       // unreferenced record, never a document.
       const leftovers = [];
       await removePdfBytes(sourceId).catch(() => leftovers.push("file"));
-      await removeAnnotations(doc.id).catch(() => leftovers.push("annotations"));
+      await removePdfAnnotations(doc.id, { workspaceId }).catch(() => leftovers.push("annotations"));
       setPersistenceError(
         "Could not save the PDF to browser storage: " +
           errorText(err) +
@@ -370,6 +378,10 @@ export function AppStateProvider({ children }) {
   // they were drawn against the previous file.
   //
   // Durable order: new bytes → registry (new source id) → annotations reset.
+  // The reset is captured for the account (Phase 7.7) ONLY once it has landed
+  // locally with the registry on the new source, so a compensated replacement
+  // never queues a false reset and a remote device never hydrates the
+  // previous file's annotations onto the replacement.
   // The replacement is complete only when ALL THREE landed; a refusal at any
   // step compensates the steps before it, so the durable model is either
   //   A. registry → new source, annotations empty, or
@@ -385,9 +397,17 @@ export function AppStateProvider({ children }) {
   // the next opportunity; no user data is at stake because those
   // annotations were the ones the replacement removes.
   //
+  // The open editor's annotation WRITER (Phase 7.7) is brought to a defined
+  // point around this, so a pending edit can neither be lost by an attempt
+  // that fails nor outlive a reset that succeeds: it is DRAINED (flushed and
+  // awaited — durable, and ordered before the reset's own save) before the
+  // first durable step, and RESET (pending dropped, new generation) the
+  // moment the reset has landed. A drain that fails refuses the replacement.
+  //
   // Resolves { ok: true, doc, bytes, warning } or { ok: false, error } —
   // never rejects; the caller (the editor tab) shows the sentence.
   async function replacePdfSource(pdfId, file) {
+    const workspaceId = activeAssetWorkspaceId();
     const doc = pdfDocsRef.current[pdfId];
     if (!doc) return { ok: false, error: "That PDF no longer exists." };
     let input;
@@ -398,6 +418,10 @@ export function AppStateProvider({ children }) {
     }
     const check = validatePdfSource(input.bytes);
     if (!check.ok) return { ok: false, error: check.error };
+    const drained = await drainPdfAnnotationWriters(pdfId);
+    if (!drained.ok) {
+      return { ok: false, error: "Could not save the current annotations, so the PDF was not replaced: " + errorText(drained.error) };
+    }
 
     const previousSourceId = pdfSourceId(doc);
     const nextSourceId = newId();
@@ -416,7 +440,9 @@ export function AppStateProvider({ children }) {
     }
     const warnings = [];
     try {
-      await saveAnnotations(pdfId, []);
+      await persistPdfAnnotations(pdfId, [], { workspaceId });
+      // Committed: nothing scheduled before this point may write again.
+      resetPdfAnnotationWriters(pdfId);
     } catch (err) {
       // Compensation: put the registry back on the previous source and drop
       // the new bytes. The previous annotations were never touched.
@@ -487,9 +513,18 @@ export function AppStateProvider({ children }) {
   // hidden, and can leave only an unreferenced record.
   // Resolves true when the document was removed from the registry.
   async function deletePdf(pdfId) {
+    const workspaceId = activeAssetWorkspaceId();
     const doc = pdfDocsRef.current[pdfId];
     if (!doc) return false;
     if (!window.confirm(`Delete "${doc.name}"? This permanently removes the PDF and its annotations.`)) {
+      return false;
+    }
+    // The open editor's writer first (Phase 7.7): a pending edit is made
+    // durable before anything is removed, so a refused deletion keeps it, and
+    // no pre-deletion write is left to run after the record is gone.
+    const drained = await drainPdfAnnotationWriters(pdfId);
+    if (!drained.ok) {
+      setPersistenceError("Could not save the current annotations, so the PDF was not deleted: " + errorText(drained.error));
       return false;
     }
     const previousDocs = pdfDocsRef.current;
@@ -528,6 +563,11 @@ export function AppStateProvider({ children }) {
       }
       return false;
     }
+    // The commit point. From here the document does not exist: its writer is
+    // retired synchronously, before any state update can unmount the editor
+    // (whose unmount flush would otherwise recreate the record and turn the
+    // cloud delete back into an update).
+    retirePdfAnnotationWriters(pdfId);
     pdfDocsRef.current = nextDocs;
     notePdfRefsRef.current = nextRefs;
     setPdfDocs((prev) => {
@@ -550,8 +590,11 @@ export function AppStateProvider({ children }) {
     } catch (err) {
       problems.push("its file: " + errorText(err));
     }
+    // The account's annotation document is owed a delete as well (Phase 7.7):
+    // captured through the outbox whether or not the local removal is
+    // refused, so a deleted PDF's annotations can never rehydrate.
     try {
-      await removeAnnotations(pdfId);
+      await removePdfAnnotations(pdfId, { workspaceId });
     } catch (err) {
       problems.push("its annotations: " + errorText(err));
     }

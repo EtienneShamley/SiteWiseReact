@@ -18,7 +18,7 @@ import { saveNoteContent, deleteNoteContent, loadNoteContentMap } from "../noteC
 import { saveTree } from "../treeStorage";
 import { createTemplate, publishTemplateVersion, renameTemplate, deleteTemplate } from "../templateModel";
 import { __resetNoteTombstonesForTests } from "../noteTombstones";
-import { __resetCloudCaptureForTests, installCloudCapture, subscribeCapturedChanges, OUTBOX_WRITE_FAILED_MESSAGE } from "./cloudCapture";
+import { __resetCloudCaptureForTests, captureExternalChanges, installCloudCapture, subscribeCapturedChanges, OUTBOX_WRITE_FAILED_MESSAGE } from "./cloudCapture";
 import { listOutboxEntries, outboxSize } from "./cloudOutbox";
 
 const WS = { kind: DURABLE_SCOPE_KIND.WORKSPACE, id: "ws-1" };
@@ -164,4 +164,43 @@ test("two workspaces on one browser keep separate records and separate outboxes"
   expect(listOutboxEntries("ws-2").map((e) => e.id)).toEqual(["n9"]);
   setDurableScope(WS);
   expect(loadNoteContentMap()).toEqual({ n1: "<p>A's</p>" });
+});
+
+/* ------------------------ external changes (Phase 7.7) -------------------- */
+
+describe("captureExternalChanges — a change no durable-storage write produced", () => {
+  test("lands in the NAMED workspace's outbox and notifies for it, whatever the ambient scope is", () => {
+    setDurableScope({ kind: DURABLE_SCOPE_KIND.WORKSPACE, id: "ws-other" });
+    const seen = [];
+    subscribeCapturedChanges((e) => seen.push(e));
+    expect(captureExternalChanges("ws-1", [{ collection: "pdfAnnotations", id: "pdf1", op: "upsert" }, { collection: "pdfAnnotations", id: "", op: "upsert" }])).toBe(true);
+    expect(entries()).toEqual([{ collection: "pdfAnnotations", id: "pdf1", op: "upsert" }]);
+    expect(outboxSize("ws-other")).toBe(0);
+    expect(seen).toEqual([{ workspaceId: "ws-1", changes: [{ collection: "pdfAnnotations", id: "pdf1", op: "upsert" }] }]);
+    // A delete replaces the upsert and keeps its chunk count.
+    captureExternalChanges("ws-1", [{ collection: "pdfAnnotations", id: "pdf1", op: "delete", chunks: 3 }]);
+    expect(listOutboxEntries("ws-1")).toEqual([expect.objectContaining({ id: "pdf1", op: "delete", chunks: 3 })]);
+  });
+
+  test("an empty or unnamed change set is a no-op", () => {
+    const seen = [];
+    subscribeCapturedChanges((e) => seen.push(e));
+    expect(captureExternalChanges("ws-1", [])).toBe(true);
+    expect(captureExternalChanges("", [{ collection: "pdfAnnotations", id: "pdf1", op: "upsert" }])).toBe(false);
+    expect(outboxSize("ws-1")).toBe(0);
+    expect(seen).toEqual([]);
+  });
+
+  test("a refused outbox write is reported, returns false, and is carried into the next successful capture", () => {
+    const issues = [];
+    subscribePersistenceIssues((i) => issues.push(i));
+    const refusing = { getItem: () => null, setItem: () => { throw new Error("QuotaExceededError"); }, removeItem: () => {} };
+    installCloudCapture({ storage: refusing });
+    expect(captureExternalChanges("ws-1", [{ collection: "pdfAnnotations", id: "pdf1", op: "upsert" }])).toBe(false);
+    expect(issues.map((i) => i.kind)).toEqual(["cloud-outbox-write-failed"]);
+    expect(issues[0].message).toBe(OUTBOX_WRITE_FAILED_MESSAGE);
+    installCloudCapture(); // storage recovered
+    expect(captureExternalChanges("ws-1", [{ collection: "pdfAnnotations", id: "pdf2", op: "upsert" }])).toBe(true);
+    expect(entries().map((e) => e.id)).toEqual(["pdf1", "pdf2"]);
+  });
 });

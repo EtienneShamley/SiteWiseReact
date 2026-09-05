@@ -8,9 +8,9 @@ import { DURABLE_KEYS, DURABLE_SCOPE_KIND, __resetDurableStorageForTests, setDur
 import { saveNoteContent, deleteNoteContent } from "../noteContentStorage";
 import { saveTree } from "../treeStorage";
 import { __resetNoteTombstonesForTests } from "../noteTombstones";
-import { __resetCloudCaptureForTests, installCloudCapture } from "./cloudCapture";
+import { __resetCloudCaptureForTests, captureExternalChanges, installCloudCapture } from "./cloudCapture";
 import { MAX_INLINE_PAYLOAD_UNITS } from "./cloudModel";
-import { outboxSize } from "./cloudOutbox";
+import { OUTBOX_OP, listOutboxEntries, outboxSize } from "./cloudOutbox";
 import { SYNC_OUTCOME, SYNC_STATUS, classifySyncError, createCloudSync, syncFailureMessage } from "./cloudSync";
 import { createMemoryWorkspaceStore } from "./memoryWorkspaceStore";
 
@@ -51,7 +51,7 @@ const flushPromises = async () => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 };
 
-function setup({ online = true } = {}) {
+function setup({ online = true, payloadProviders } = {}) {
   const store = createMemoryWorkspaceStore();
   store.setUser("alice");
   store.seed(["workspaces", WS], { id: WS, ownerUid: "alice" });
@@ -68,6 +68,7 @@ function setup({ online = true } = {}) {
     isOnline: () => isOnline,
     addOnlineListener: () => () => {},
     commitTimeoutMs: 1000,
+    ...(payloadProviders ? { payloadProviders } : {}),
   });
   sync.subscribe((e) => events.push(e));
   sync.start();
@@ -248,4 +249,150 @@ test("a stopped engine schedules nothing and a concurrent flush shares one run",
   saveNoteContent("n2", "<p>b</p>");
   await clock.advance(10000);
   expect(store.calls.commits).toHaveLength(1);
+});
+
+/* ------------------- async payload providers (Phase 7.7) ------------------ */
+
+describe("payload providers — an entity whose local copy is not in the mirror", () => {
+  const PA = "pdfAnnotations";
+  const queue = (id, op = OUTBOX_OP.UPSERT) => captureExternalChanges(WS, [{ collection: PA, id, op }]);
+
+  function provider(records) {
+    const settled = [];
+    return {
+      settled,
+      provider: {
+        load: async (workspaceId, id) => {
+          const rec = records[id];
+          if (rec === undefined) return undefined;
+          if (rec instanceof Error) throw rec;
+          return { payload: { items: rec.items }, token: rec.revision };
+        },
+        settle: async (workspaceId, id, token) => {
+          settled.push(`${workspaceId}/${id}@${token}`);
+        },
+      },
+    };
+  }
+
+  test("the payload is read asynchronously at flush time and the provider is settled with the token it sent", async () => {
+    const records = { pdf1: { items: [{ id: "x" }], revision: 1 } };
+    const { provider: p, settled } = provider(records);
+    const { store, clock, events } = setup({ payloadProviders: { [PA]: p } });
+    queue("pdf1");
+    records.pdf1 = { items: [{ id: "x" }, { id: "y" }], revision: 2 }; // a later local save before the flush
+    await clock.advance(1500);
+    const doc = store.get(["workspaces", WS, PA, "pdf1"]);
+    expect(JSON.parse(doc.json)).toEqual({ items: [{ id: "x" }, { id: "y" }] });
+    expect(doc.kind).toBe(PA);
+    expect(settled).toEqual([`${WS}/pdf1@2`]);
+    expect(outcomes(events)).toEqual([`${PA}/pdf1:synced`]);
+    expect(outboxSize(WS)).toBe(0);
+  });
+
+  test("mirror collections are planned exactly as before, in the same batch as provider-backed entries", async () => {
+    const { provider: p } = provider({ pdf1: { items: [], revision: 1 } });
+    const { store, clock, events } = setup({ payloadProviders: { [PA]: p } });
+    saveNoteContent("n1", "<p>a</p>");
+    queue("pdf1");
+    await clock.advance(1500);
+    expect(store.calls.commits).toHaveLength(1);
+    expect(store.calls.commits[0].map((op) => op.path).sort()).toEqual(["noteContent/n1", `${PA}/pdf1`]);
+    expect(outcomes(events).sort()).toEqual(["noteContent/n1:synced", `${PA}/pdf1:synced`]);
+  });
+
+  test("a provider that has no record for a queued upsert skips it: settled, nothing written", async () => {
+    const { provider: p } = provider({});
+    const { store, clock, events } = setup({ payloadProviders: { [PA]: p } });
+    queue("pdf1");
+    await clock.advance(1500);
+    expect(store.calls.commits).toHaveLength(0);
+    expect(outboxSize(WS)).toBe(0);
+    expect(outcomes(events)).toEqual([]);
+  });
+
+  test("a rejected read fails only that entity, with its code; the rest of the flush lands; the entry stays for a retry", async () => {
+    const { provider: p, settled } = provider({
+      bad: Object.assign(new Error("unreadable"), { code: "local-payload-malformed" }),
+      worse: new Error("no code"),
+      good: { items: [{ id: "g" }], revision: 3 },
+    });
+    const { store, clock, events, sync } = setup({ payloadProviders: { [PA]: p } });
+    queue("bad");
+    queue("worse");
+    queue("good");
+    saveNoteContent("n1", "<p>a</p>");
+    await clock.advance(1500);
+    expect(store.get(["workspaces", WS, PA, "good"])).toBeTruthy();
+    expect(store.get(["workspaces", WS, "noteContent", "n1"])).toBeTruthy();
+    expect(store.get(["workspaces", WS, PA, "bad"])).toBeNull();
+    expect(outcomes(events).sort()).toEqual(
+      [`${PA}/bad:failed`, `${PA}/worse:failed`, `${PA}/good:synced`, "noteContent/n1:synced"].sort()
+    );
+    const codes = events.filter((e) => e.type === "outcome").flatMap((e) => e.results).filter((r) => r.outcome === "failed").map((r) => r.code).sort();
+    expect(codes).toEqual(["local-payload-malformed", "local-payload-unreadable"]);
+    expect(settled).toEqual([`${WS}/good@3`]);
+    expect(listOutboxEntries(WS).map((e) => e.id).sort()).toEqual(["bad", "worse"]);
+    expect(sync.getStatus()).toEqual({ status: SYNC_STATUS.ERROR, pending: 2, error: "local-payload-malformed" });
+    // No automatic retry loop: nothing is armed until the next change or an explicit retry.
+    expect(store.calls.commits).toHaveLength(1);
+    await clock.advance(60000);
+    expect(store.calls.commits).toHaveLength(1);
+  });
+
+  test("a delete of a provider-backed entity never asks the provider and removes the chunks it names", async () => {
+    let loads = 0;
+    const p = { load: async () => (loads += 1, undefined), settle: async () => {} };
+    const { store, clock } = setup({ payloadProviders: { [PA]: p } });
+    store.seed(["workspaces", WS, PA, "pdf1"], { workspaceId: WS, id: "pdf1", kind: PA, schemaVersion: 1, chunked: true, chunkCount: 2 });
+    store.seed(["workspaces", WS, PA, "pdf1", "chunks", "0"], { text: "a" });
+    store.seed(["workspaces", WS, PA, "pdf1", "chunks", "1"], { text: "b" });
+    captureExternalChanges(WS, [{ collection: PA, id: "pdf1", op: OUTBOX_OP.DELETE, chunks: 2 }]);
+    await clock.advance(1500);
+    expect(loads).toBe(0);
+    expect(store.get(["workspaces", WS, PA, "pdf1"])).toBeNull();
+    expect(store.get(["workspaces", WS, PA, "pdf1", "chunks", "1"])).toBeNull();
+  });
+
+  test("batch limits still apply: two oversized provider payloads travel in two commits, each with its chunks", async () => {
+    const huge = "h".repeat(1600000);
+    const { provider: p, settled } = provider({ a: { items: [{ t: huge }], revision: 1 }, b: { items: [{ t: huge }], revision: 1 } });
+    const { store, clock } = setup({ payloadProviders: { [PA]: p } });
+    queue("a");
+    queue("b");
+    await clock.advance(1500);
+    expect(store.calls.commits).toHaveLength(2);
+    expect(store.get(["workspaces", WS, PA, "a"]).chunked).toBe(true);
+    expect(store.get(["workspaces", WS, PA, "b"]).chunked).toBe(true);
+    expect(settled.sort()).toEqual([`${WS}/a@1`, `${WS}/b@1`]);
+    expect(outboxSize(WS)).toBe(0);
+  });
+
+  test("offline, provider-backed entries queue like every other and the provider is not consulted", async () => {
+    let loads = 0;
+    const p = { load: async () => (loads += 1, { payload: { items: [] }, token: 1 }), settle: async () => {} };
+    const { clock, events, setOnline, sync } = setup({ online: false, payloadProviders: { [PA]: p } });
+    queue("pdf1");
+    await clock.advance(1500);
+    expect(loads).toBe(0);
+    expect(outcomes(events)).toEqual([`${PA}/pdf1:queued`]);
+    setOnline(true);
+    await sync.retry();
+    expect(loads).toBe(1);
+    expect(outboxSize(WS)).toBe(0);
+  });
+
+  test("a refused settle leaves the outbox settled and the engine idle (the owner's marker repairs it later)", async () => {
+    const p = {
+      load: async () => ({ payload: { items: [] }, token: 1 }),
+      settle: async () => {
+        throw new Error("settle refused");
+      },
+    };
+    const { clock, events, sync } = setup({ payloadProviders: { [PA]: p } });
+    queue("pdf1");
+    await clock.advance(1500);
+    expect(outcomes(events)).toEqual([`${PA}/pdf1:synced`]);
+    expect(sync.getStatus().status).toBe(SYNC_STATUS.IDLE);
+  });
 });

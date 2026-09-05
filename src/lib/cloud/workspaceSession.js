@@ -12,6 +12,14 @@
 //                   still holds from an earlier session (offline edits);
 //   4. hydrate      place the cloud's current state into the mirror, keeping
 //                   anything still queued;
+//   4b. annotations (Production Readiness Phase 7.7) with the registry now
+//                   current: associate this browser's legacy annotation
+//                   records with the workspace where the registry and the
+//                   adoption authority allow it, repair any dirty record
+//                   whose outbox identity was lost, then place the account's
+//                   annotation documents into IndexedDB by the precedence in
+//                   src/lib/pdfAnnotationSync.js. Local work; a browser
+//                   without IndexedDB skips it and the session still opens;
 //   5. ready        hand back the session.
 //
 // OFFLINE START. When the bootstrap cannot reach Firestore and this browser
@@ -34,7 +42,14 @@ import {
   scopedStorageKey,
   setDurableScope,
 } from "../durableStorage";
+import {
+  associateLegacyPdfAnnotations,
+  hydratePdfAnnotations,
+  pdfAnnotationPayloadProvider,
+  reconcilePdfAnnotationOutbox,
+} from "../pdfAnnotationSync";
 import { forgetCaptureSnapshots, installCloudCapture, isCloudCaptureInstalled } from "./cloudCapture";
+import { CLOUD_COLLECTION } from "./cloudModel";
 import { outboxSize, pendingOutboxKeys } from "./cloudOutbox";
 import { createCloudSync } from "./cloudSync";
 import { bootstrapWorkspace } from "./workspaceBootstrap";
@@ -132,8 +147,21 @@ export async function openWorkspaceSession({
   setDurableScope({ kind: DURABLE_SCOPE_KIND.WORKSPACE, id: workspace.id });
 
   // 3. replay
-  const sync = createCloudSync({ workspaceId: workspace.id, store, storage, now, setTimer, clearTimer, ...syncOptions }).start();
+  const sync = createCloudSync({
+    workspaceId: workspace.id,
+    store,
+    storage,
+    now,
+    setTimer,
+    clearTimer,
+    payloadProviders: { [CLOUD_COLLECTION.PDF_ANNOTATIONS]: pdfAnnotationPayloadProvider },
+    ...syncOptions,
+  }).start();
   let hydration = { counts: null, malformed: [], done: false };
+  const reportMalformed = (entry) => {
+    sync.markQuarantined(entry.collection, entry.id);
+    if (onMalformed) onMalformed(entry);
+  };
   if (mode === SESSION_MODE.ONLINE) {
     if (outboxSize(workspace.id, storage) > 0) await sync.flush();
     // 4. hydrate
@@ -143,10 +171,7 @@ export async function openWorkspaceSession({
         store,
         storage,
         pendingKeys: pendingOutboxKeys(workspace.id, storage),
-        onMalformed: (entry) => {
-          sync.markQuarantined(entry.collection, entry.id);
-          if (onMalformed) onMalformed(entry);
-        },
+        onMalformed: reportMalformed,
       });
       hydration = { ...result, done: true };
     } catch (error) {
@@ -157,6 +182,32 @@ export async function openWorkspaceSession({
       mode = SESSION_MODE.OFFLINE;
     }
   }
+
+  // 4b. annotations (see the header). Never fatal: the structured session is
+  // already open, and a browser without IndexedDB has no annotations to place.
+  const cloudAnnotations = hydration.done && hydration.deferred ? hydration.deferred[CLOUD_COLLECTION.PDF_ANNOTATIONS] || {} : null;
+  let annotations = { associated: null, reconciled: null, hydrated: null, error: null };
+  try {
+    annotations.associated = await associateLegacyPdfAnnotations({
+      workspaceId: workspace.id,
+      uid,
+      storage,
+      cloudIds: cloudAnnotations ? new Set(Object.keys(cloudAnnotations)) : null,
+    });
+    annotations.reconciled = await reconcilePdfAnnotationOutbox({ workspaceId: workspace.id, storage });
+    if (cloudAnnotations) {
+      annotations.hydrated = await hydratePdfAnnotations({
+        workspaceId: workspace.id,
+        entities: cloudAnnotations,
+        storage,
+        pendingKeys: pendingOutboxKeys(workspace.id, storage),
+        onMalformed: reportMalformed,
+      });
+    }
+  } catch (error) {
+    annotations = { ...annotations, error };
+  }
+  hydration = { ...hydration, annotations };
 
   let closed = false;
   async function close() {

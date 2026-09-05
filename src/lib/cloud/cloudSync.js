@@ -37,6 +37,26 @@
 // Deletes and upserts from one local operation travel in the same batch
 // wherever the size limits allow, so a note deletion (node + content +
 // instance + refs) lands atomically or not at all.
+//
+// ASYNC PAYLOADS (Production Readiness Phase 7.7). An entity whose local
+// copy is NOT in the workspace mirror — pdfAnnotations, kept in IndexedDB —
+// registers a PAYLOAD PROVIDER for its collection:
+//   load(workspaceId, id)      → Promise<{ payload, token } | undefined>
+//                                 undefined = nothing to write (the record is
+//                                 gone); a rejection = the local record could
+//                                 not be read → that ONE entity fails with the
+//                                 rejection's `code` (or "local-payload-
+//                                 unreadable"), stays queued, and the rest of
+//                                 the flush proceeds untouched
+//   settle(workspaceId, id, token) → called after Firestore ACCEPTED the write
+//                                 that carried `token`, so the owner can clear
+//                                 its own durable "owed" marker — and only if
+//                                 its record still IS that token (a newer
+//                                 local save keeps its marker and its newer
+//                                 outbox stamp)
+// Every collection without a provider is read from the mirror synchronously,
+// exactly as before; the outbox, the batching and the settle stamps are the
+// same for both.
 
 import { readDurableRecord } from "../durableStorage";
 import { DURABLE_KEY_BY_COLLECTION, subscribeCapturedChanges } from "./cloudCapture";
@@ -79,6 +99,8 @@ export const SYNC_FAILURE_MESSAGE = Object.freeze({
   "resource-exhausted": "The cloud storage quota is exhausted right now. Your changes stay on this device and will be retried.",
   "invalid-argument": "A record could not be stored in the cloud in its current form. Your change stays on this device.",
   "malformed-cloud-record": "This record is unreadable in the cloud and was not overwritten. Your change stays on this device.",
+  "local-payload-unreadable": "A record on this device could not be read for upload. It stays on this device; the next change will retry.",
+  "local-payload-malformed": "A record on this device is not in a form that can be uploaded. It stays on this device.",
   unknown: "Your latest changes could not be saved to your account. They stay on this device and will be retried.",
 });
 
@@ -106,12 +128,14 @@ function withTimeout(promise, ms, setTimer, clearTimer) {
  *   delayMs?: number, maxWaitMs?: number, commitTimeoutMs?: number,
  *   setTimer?: Function, clearTimer?: Function, now?: () => number,
  *   addOnlineListener?: (fn: Function) => (() => void),
+ *   payloadProviders?: { [collection]: { load: Function, settle: Function } },
  * }} options
  */
 export function createCloudSync({
   workspaceId,
   store,
   storage,
+  payloadProviders = {},
   isOnline = () => (typeof navigator === "undefined" || navigator.onLine !== false),
   delayMs = DEFAULT_SYNC_DELAY_MS,
   maxWaitMs = DEFAULT_SYNC_MAX_WAIT_MS,
@@ -217,17 +241,51 @@ export function createCloudSync({
     return entities[entry.id];
   }
 
-  function opsFor(entry) {
+  function providerFor(entry) {
+    if (entry.op === OUTBOX_OP.DELETE) return null;
+    const provider = payloadProviders && payloadProviders[entry.collection];
+    return provider && typeof provider.load === "function" ? provider : null;
+  }
+
+  /**
+   * Resolves the payload of every live entry: provider-backed ones are read
+   * asynchronously, one at a time, and a failed read is turned into that
+   * entry's own FAILED result — never into a batch that carries an undefined
+   * document. Everything else is planned from the mirror as before.
+   */
+  async function prepareEntries(entries, results) {
+    const prepared = [];
+    const failures = [];
+    for (const entry of entries) {
+      const provider = providerFor(entry);
+      if (!provider) {
+        prepared.push({ entry, provided: false, loaded: undefined });
+        continue;
+      }
+      try {
+        const loaded = await provider.load(workspaceId, entry.id);
+        prepared.push({ entry, provided: true, loaded: loaded === undefined || loaded === null ? undefined : loaded });
+      } catch (error) {
+        const code = error && typeof error.code === "string" && error.code ? error.code : "local-payload-unreadable";
+        failures.push(code);
+        results.push({ collection: entry.collection, id: entry.id, outcome: SYNC_OUTCOME.FAILED, code });
+      }
+    }
+    return { prepared, failures };
+  }
+
+  function opsFor(entry, { provided = false, loaded = undefined } = {}) {
     const base = [entry.collection, entry.id];
     if (entry.op === OUTBOX_OP.DELETE) {
       const ops = [{ type: "delete", path: base, units: 0 }];
       for (let i = 0; i < entry.chunks; i++) ops.push({ type: "delete", path: [...base, "chunks", String(i)], units: 0 });
       return ops;
     }
-    const payload = payloadFor(entry);
+    const payload = provided ? (loaded ? loaded.payload : undefined) : payloadFor(entry);
     if (payload === undefined) {
-      // Removed from the mirror since it was queued (a later delete replaced
-      // this entry, or the record was reset): nothing to write.
+      // Removed from the mirror (or the provider's store) since it was
+      // queued — a later delete replaced this entry, or the record was
+      // reset: nothing to write.
       return null;
     }
     const built = buildEntityDocument({ workspaceId, collection: entry.collection, id: entry.id, payload });
@@ -243,17 +301,19 @@ export function createCloudSync({
     return ops;
   }
 
-  /** Groups entries into batches that respect the op and size caps. Every
-   *  entry's ops stay together in one batch. */
-  function planBatches(entries) {
+  /** Groups prepared entries into batches that respect the op and size caps.
+   *  Every entry's ops stay together in one batch. A provider-backed entry
+   *  remembers the token it was planned with, for its settle. */
+  function planBatches(prepared) {
     const batches = [];
     let current = { entries: [], ops: [], units: 0 };
     const push = () => {
       if (current.entries.length > 0) batches.push(current);
       current = { entries: [], ops: [], units: 0 };
     };
-    for (const entry of entries) {
-      const ops = opsFor(entry);
+    for (const item of prepared) {
+      const entry = item.entry;
+      const ops = opsFor(entry, item);
       if (ops === null) {
         current.entries.push({ ...entry, skipped: true });
         continue;
@@ -262,7 +322,7 @@ export function createCloudSync({
       if (current.ops.length > 0 && (current.ops.length + ops.length > MAX_BATCH_OPS || current.units + units > MAX_BATCH_UNITS)) {
         push();
       }
-      current.entries.push(entry);
+      current.entries.push(item.provided ? { ...entry, provided: true, token: item.loaded ? item.loaded.token : undefined } : entry);
       current.ops.push(...ops.map(({ units: _u, ...op }) => op));
       current.units += units;
     }
@@ -299,8 +359,9 @@ export function createCloudSync({
     }
 
     setStatus(SYNC_STATUS.SYNCING);
+    const { prepared, failures: providerFailures } = await prepareEntries(live, results);
     let failure = null;
-    for (const batch of planBatches(live)) {
+    for (const batch of planBatches(prepared)) {
       const written = batch.entries.filter((e) => !e.skipped);
       const skipped = batch.entries.filter((e) => e.skipped);
       try {
@@ -309,6 +370,19 @@ export function createCloudSync({
         }
         settleOutbox(workspaceId, [...written, ...skipped], storage);
         for (const entry of written) results.push({ collection: entry.collection, id: entry.id, outcome: SYNC_OUTCOME.SYNCED, code: null });
+        // The owners of provider-backed records learn that THIS token landed.
+        // A refused settle leaves the owner's marker set; the next session
+        // start re-derives the obligation from it (idempotent sets).
+        for (const entry of written) {
+          if (!entry.provided || entry.token === undefined) continue;
+          const provider = payloadProviders[entry.collection];
+          if (!provider || typeof provider.settle !== "function") continue;
+          try {
+            await provider.settle(workspaceId, entry.id, entry.token);
+          } catch {
+            // see above
+          }
+        }
       } catch (error) {
         const classified = classifySyncError(error);
         failure = { ...classified, error };
@@ -318,7 +392,14 @@ export function createCloudSync({
       }
     }
 
-    if (!failure) {
+    if (!failure && providerFailures.length > 0) {
+      // Every batch that could be built landed; the entries whose local
+      // payload could not be read stay queued and are retried on the next
+      // change or an explicit retry — like any other "failed" outcome.
+      firstPendingAt = null;
+      retryAttempt = 0;
+      setStatus(SYNC_STATUS.ERROR, providerFailures[0]);
+    } else if (!failure) {
       firstPendingAt = null;
       retryAttempt = 0;
       setStatus(pendingCount() === 0 ? SYNC_STATUS.IDLE : SYNC_STATUS.SYNCING);
