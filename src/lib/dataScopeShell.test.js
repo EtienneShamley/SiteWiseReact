@@ -543,7 +543,7 @@ describe("the asset upload engine's session binding (source)", () => {
     expect(SCOPE).toMatch(/if \(uploads\) uploads\.stop\(\);/);
     expect(SCOPE).toMatch(/assetSyncRef\.current = null;/);
     expect(SCOPE).toMatch(
-      /\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass, startGcMarkPass\]/
+      /\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass, startGcPass, retryGcPass\]/
     );
     // 7.6: the backfill's session guard is dropped in the SAME cleanup, so a
     // pass in progress stops before the next account's session opens.
@@ -602,17 +602,17 @@ describe("the asset upload engine's session binding (source)", () => {
     expect(SETTINGS).toMatch(/if \(!gate\.allowed\) \{\s*setLocalNotice\(oldCopyRefusalMessage/);
   });
 
-  test("the GC MARK pass runs LAST in the session chain, on the steps' own results (7.9A)", () => {
+  test("the GC pass runs LAST in the session chain, on the steps' own results (7.9A)", () => {
     // Chained after the privacy pass, which is chained after the backfill,
     // which is chained after hydration. Each step's RESULT is threaded through
     // rather than read back from React state, which may not have committed.
     expect(SCOPE).toMatch(
       /startPrivacyPass\(opened\.workspace\.id\)\.then\(\(privacyResult\) => \(\{ backfillResult, privacyResult \}\)\)/
     );
-    expect(SCOPE).toMatch(/\.then\(\(results\) => startGcMarkPass\(opened, results \|\| \{\}\)\)/);
+    expect(SCOPE).toMatch(/\.then\(\(results\) => startGcPass\(opened, results \|\| \{\}\)\)/);
     // Still fire-and-forget: nothing below it waits, and a failure cannot
     // reach the session.
-    expect(SCOPE).toMatch(/\.then\(\(results\) => startGcMarkPass\(opened, results \|\| \{\}\)\)\s*\.catch\(\(\) => null\);/);
+    expect(SCOPE).toMatch(/\.then\(\(results\) => startGcPass\(opened, results \|\| \{\}\)\)\s*\.catch\(\(\) => null\);/);
   });
 
   test("the mark pass is given the session's OWN facts and the store's own three methods (7.9A)", () => {
@@ -626,9 +626,65 @@ describe("the asset upload engine's session binding (source)", () => {
     expect(SCOPE).toMatch(/liveRef\.current\.active && liveRef\.current\.workspaceId === workspaceId/);
   });
 
-  test("nothing in the wiring sweeps, tombstones or deletes (7.9A)", () => {
+  test("the SWEEP follows the mark stage, owner-gated by the session's own role (7.9B)", () => {
+    // Re-targeted from 7.9A's "nothing sweeps": the sweep exists now. What
+    // still must not exist is any DELETE — of a Storage object, of a Firestore
+    // asset document, or of a local asset record — and the wiring holds none.
     expect(SCOPE).toMatch(/runAssetGcMarkPass/);
-    expect(SCOPE).not.toMatch(/tombstoneAssetDocument|deleteAssetDocument|runAssetGcSweep/);
+    expect(SCOPE).toMatch(/runAssetGcSweep\(\{/);
+    // It runs only when the mark stage itself was fully gated, and it is given
+    // THIS session's workspace role — never an assumed or remembered one.
+    expect(SCOPE).toMatch(/const sweep = result\.gate\.ok/);
+    expect(SCOPE).toMatch(/role: opened\.workspace\.role,/);
+    // The tombstone clock is the STORE's server timestamp, handed in as a dep.
+    expect(SCOPE).toMatch(/timestamp: \(\) => store\.timestamp\(\),/);
+    expect(SCOPE).toMatch(/typeof store\.timestamp === "function"/);
+    expect(SCOPE).not.toMatch(/tombstoneAssetDocument|deleteAssetDocument|deleteAsset\b/);
+  });
+
+  test("the ONE re-attempt is event-driven: no timer, no poll, no React trigger (7.9B)", () => {
+    // Driven by the two engines' own status events AND by the browser's
+    // connectivity — the third source exists because an idle engine publishes
+    // nothing when a connection returns, which is exactly when an OFFLINE
+    // skip becomes runnable.
+    expect(SCOPE).toMatch(/const controller = createGcRetryController\(\{/);
+    expect(SCOPE).toMatch(/onRetry: \(\) => retryGcPass\(\),/);
+    expect(SCOPE).toMatch(/opened\.sync\.subscribe\(\(event\) => \{/);
+    expect(SCOPE).toMatch(/uploads\.subscribe\(\(event\) => \{/);
+    expect(SCOPE).toMatch(/if \(!event \|\| event\.type !== "status"\) return;/);
+    expect(SCOPE).toMatch(/controller\.observe\(\{ uploadsPending: Number\(event\.pending\) \|\| 0 \}\);/);
+    expect(SCOPE).toMatch(/addGcConnectivityListener\(\(online\) => controller\.observe\(\{ online \}\)\)/);
+    // The controller is SEEDED from the session's current facts, so the first
+    // edge is a real transition rather than an artefact of starting empty.
+    expect(SCOPE).toMatch(/online: typeof navigator === "undefined" \|\| navigator\.onLine !== false,/);
+    expect(SCOPE).toMatch(/uploadsPending: Number\(seedUploads\.pending\) \|\| 0,/);
+    // The pass reports its own start and outcome, and the outcome is reported
+    // LAST — the transition it waited on may land while it runs.
+    expect(SCOPE).toMatch(/if \(retry\.controller\) retry\.controller\.passStarted\(\);/);
+    expect(SCOPE).toMatch(/if \(retry\.controller\) retry\.controller\.passSettled\(\{ skipped \}\);/);
+    expect(SCOPE).toMatch(/if \(retry\.controller\) retry\.controller\.passSettled\(\{ errored: true \}\);/);
+    // No timer of any kind belongs to the GC path: the provider's single
+    // setTimeout is the Phase 6 deferred session close.
+    expect(SCOPE).not.toMatch(/setInterval/);
+    expect(SCOPE.match(/setTimeout/g)).toHaveLength(1);
+    expect(SCOPE).toMatch(/setTimeout\(\(\) => \{\s*opened\.close\(\);\s*\}, 0\);/);
+    // And the sources die with the session that opened them — the controller
+    // is CLOSED first, so an event already in flight finds it closed.
+    expect(SCOPE).toMatch(/if \(gcRetryRef\.current\.controller\) gcRetryRef\.current\.controller\.close\(\);/);
+    expect(SCOPE).toMatch(/for \(const unsubscribe of gcSettledRef\.current\) \{/);
+    expect(SCOPE).toMatch(/gcSettledRef\.current = \[\];/);
+  });
+
+  test("Settings reports unused files without ever claiming a deletion (7.9B)", () => {
+    expect(SETTINGS).toMatch(/assetGcStatusLine\(gcStatus\)/);
+    expect(SETTINGS).toMatch(/assetGcAttentionLine\(gcStatus\)/);
+    expect(SETTINGS).toMatch(/const gcStatus = scope \? scope\.assetGc : null;/);
+    // The GC lines live inside the Files block, beside upload, backfill and
+    // privacy — not in a section of their own.
+    const files = SETTINGS.slice(SETTINGS.indexOf('aria-label="Workspace"'));
+    expect(files.indexOf("gcLine")).toBeGreaterThan(files.indexOf("privacyLine"));
+    // No delete button, no purge, no retention control.
+    expect(SETTINGS).not.toMatch(/Delete unused|Purge|Clean up now|Free up space/i);
   });
 
   test("the Template Builder declares its unsaved draft logo as protected, bound to ONE workspace (7.9A)", () => {

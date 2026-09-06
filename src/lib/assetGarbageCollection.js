@@ -6,11 +6,14 @@
 // it, RESURRECTION.
 //
 // NOTHING HERE TOMBSTONES AND NOTHING HERE DELETES. The sweep that acts on a
-// matured observation is Phase 7.9B; physical deletion is 7.9C and is not
-// approved. The only cloud write this module ever makes is the already-approved
-// `tombstoned -> stored` transition for an asset the workspace REFERENCES —
-// which is a restoration, not a destruction, and which the Security Rules
-// already permit any member to make (`firestore.rules`, asset update).
+// matured observation is Phase 7.9B and lives in its own module
+// (src/lib/assetGcSweep.js), which reuses this one's planner and its
+// `collectProtectedAssetIds` rather than measuring the workspace a second way;
+// physical deletion is 7.9C and is not approved. The only cloud write this
+// module ever makes is the already-approved `tombstoned -> stored` transition
+// for an asset the workspace REFERENCES — which is a restoration, not a
+// destruction, and which the Security Rules already permit any member to make
+// (`firestore.rules`, asset update).
 //
 // WHY RESURRECTION LIVES HERE. Phase 7.5 decided, correctly, that a READ must
 // not restore a tombstoned document: a read has no reference facts and would
@@ -170,7 +173,13 @@ export const GC_MARK_PHASE = Object.freeze({
 
 const REFUSAL_CODES = new Set(["permission-denied", "unauthenticated", "unauthorized"]);
 
-function isRefusal(error) {
+/**
+ * A REFUSAL — the service said this session may not make that write — rather
+ * than a transient failure. Exported because the sweep (Phase 7.9B) must
+ * classify exactly the same codes exactly the same way: a refusal is
+ * authoritative and is never retried in a loop.
+ */
+export function isRefusal(error) {
   const raw = error && typeof error.code === "string" ? error.code : "";
   const code = raw.replace(/^firestore\//, "").replace(/^storage\//, "");
   return REFUSAL_CODES.has(raw) || REFUSAL_CODES.has(code);
@@ -233,6 +242,221 @@ export function evaluateGcGates({
   return { ok: true, reason: GC_GATE.OK };
 }
 
+/* ------------------------- the ONE re-attempt rule ------------------------ */
+
+/**
+ * The gates a session may legitimately CLEAR while it is still open
+ * (Production Readiness Phase 7.9B).
+ *
+ * Every other refusal is either permanent for this session (no workspace, no
+ * store, an offline-mode session, hydration that already finished badly, a
+ * quarantined record) or is not a local-work fact at all, and re-attempting on
+ * it would be a guess dressed up as a retry. These three are different: they
+ * say "this browser still owes work", and that work finishing is an EVENT the
+ * two sync engines already publish.
+ */
+export const GC_RETRYABLE_GATES = Object.freeze([
+  GC_GATE.OFFLINE,
+  GC_GATE.OUTBOX_PENDING,
+  GC_GATE.UPLOADS_PENDING,
+]);
+
+const RETRYABLE_GATE_SET = new Set(GC_RETRYABLE_GATES);
+
+/** True when a skipped pass may become runnable without a new session. */
+export function isRetryableGcSkip(reason) {
+  return typeof reason === "string" && RETRYABLE_GATE_SET.has(reason);
+}
+
+/**
+ * The CIRCUIT BREAKERS. Neither is the lifecycle control — the eligibility
+ * EDGE below is — and that distinction is the whole point of them:
+ *
+ *   budget   a session may re-attempt this many times. Legitimate settling
+ *            costs ONE, however many gates clear in sequence, because the
+ *            intermediate events produce no edge at all: going online while
+ *            the outbox is pending, and the outbox clearing while uploads are
+ *            pending, are both still UNSAFE and trigger nothing. The budget
+ *            therefore bounds a pathologically flapping session and can never
+ *            stand between a workspace and its first safe moment.
+ *   errors   consecutive passes that THREW. Two is enough to distinguish a
+ *            transient failure from a fault that will keep throwing, and
+ *            tripping it ends re-attempts for the session rather than
+ *            retrying into the same fault.
+ */
+export const GC_RETRY_BUDGET_PER_SESSION = 8;
+export const GC_RETRY_ERROR_LIMIT = 2;
+
+/**
+ * Is the local work a retryable gate was waiting on FINISHED? Pure over the
+ * two engines' own published counts and the browser's connectivity, so the
+ * trigger is testable without React, a timer or a browser — and so the pass
+ * itself still re-reads every fact for real before it concludes anything.
+ *
+ * ALL of the currently-known retryable gates, together: a session that is
+ * online but still owes the account changes is not eligible, and neither is
+ * one whose changes have landed while its files have not. That is what makes
+ * gates settling in sequence produce ONE attempt at the end rather than one
+ * attempt each.
+ */
+export function isGcRetrySettled({ online = true, syncPending = 0, uploadsPending = 0 } = {}) {
+  if (!online) return false;
+  return (Number(syncPending) || 0) === 0 && (Number(uploadsPending) || 0) === 0;
+}
+
+/**
+ * The two connectivity events, as one subscription.
+ *
+ * WHY IT EXISTS. A GC pass skipped because the browser was OFFLINE may become
+ * runnable the moment connectivity returns — and if both sync engines are
+ * already idle, NEITHER of them emits a status event when that happens: they
+ * publish on their own work changing, and they have no work. There is no
+ * product-level connectivity signal to subscribe to either; `cloudSync` and
+ * `assetUploadSync` each register their own private `window` listener for
+ * exactly this reason (`addOnlineListener`), and this is the same idiom, for
+ * the same reason, at the third place that needs it.
+ *
+ * `offline` is listened for as well as `online`: eligibility has to be able to
+ * become UNSAFE, or the transition back to safe is not a transition and the
+ * edge the re-attempt fires on would never occur.
+ *
+ * @returns {() => void} the unsubscribe, which removes exactly these two.
+ */
+export function addGcConnectivityListener(listener) {
+  if (typeof listener !== "function") return () => {};
+  if (typeof window === "undefined" || !window.addEventListener) return () => {};
+  const onOnline = () => listener(true);
+  const onOffline = () => listener(false);
+  window.addEventListener("online", onOnline);
+  window.addEventListener("offline", onOffline);
+  return () => {
+    window.removeEventListener("online", onOnline);
+    window.removeEventListener("offline", onOffline);
+  };
+}
+
+/**
+ * THE RE-ATTEMPT STATE MACHINE, as one object with no React, no timer and no
+ * knowledge of what a GC pass is (Production Readiness Phase 7.9B).
+ *
+ * "One attempt per session" is NOT the invariant: a session can fail a gate at
+ * sign-in and be perfectly safe two minutes later. Nor is "retry on every
+ * event": the engines publish constantly, and a full pass per status event
+ * would be a storm. The rule between the two is an EDGE:
+ *
+ *   ARMED        the last pass skipped for a gate a live session can clear
+ *                (`GC_RETRYABLE_GATES`). Nothing else arms — a degraded,
+ *                quarantined, unconfigured, cadence or non-owner skip is not
+ *                a waiting state and is never retried.
+ *   ELIGIBLE     ALL of the currently-known retryable gates are clear at once
+ *                (`isGcRetrySettled`). Gates clearing one after another are
+ *                each still ineligible, so a sequence of them causes ONE
+ *                attempt at the end and no premature ones in between.
+ *   THE EDGE     eligibility became safe AFTER the pass that armed us STARTED.
+ *                Not "is eligible", which would fire on every event of a
+ *                healthy session and re-fire immediately when a pass's own
+ *                gate read disagrees with an engine's published count; and not
+ *                "changed since we armed", which would drop a transition that
+ *                landed WHILE the pass was running — a real race, since the
+ *                pass takes a network round trip and the engine finishing is
+ *                exactly what it was waiting for. Recording the generation at
+ *                pass START, and testing it when the pass settles as well as
+ *                on every event, covers both.
+ *
+ * A fire DISARMS. Re-arming is the settled pass's own decision, made from its
+ * own fresh gate read — so a genuinely still-transient state may arm again,
+ * and it then waits for a genuinely NEW transition.
+ *
+ * @param {{
+ *   online?: boolean, syncPending?: number, uploadsPending?: number,
+ *   budget?: number, errorLimit?: number,
+ *   onRetry?: () => void,
+ * }} options  the three counts SEED the machine from the session's current
+ *             facts, so the first edge is a real one rather than an artefact
+ *             of starting from nothing.
+ */
+export function createGcRetryController({
+  online = true,
+  syncPending = 0,
+  uploadsPending = 0,
+  budget = GC_RETRY_BUDGET_PER_SESSION,
+  errorLimit = GC_RETRY_ERROR_LIMIT,
+  onRetry = () => {},
+} = {}) {
+  const facts = {
+    online: Boolean(online),
+    syncPending: Number(syncPending) || 0,
+    uploadsPending: Number(uploadsPending) || 0,
+  };
+  let eligible = isGcRetrySettled(facts);
+  // Bumped on every UNSAFE -> SAFE transition. The pass records the value it
+  // started at; a strictly higher one is the edge.
+  let generation = 0;
+  let passStartGeneration = 0;
+  let armed = false;
+  let running = false;
+  let closed = false;
+  let tripped = false;
+  let retries = 0;
+  let consecutiveErrors = 0;
+
+  function maybeFire() {
+    if (closed || tripped || !armed || running) return;
+    if (retries >= budget) return;
+    if (!eligible || generation <= passStartGeneration) return;
+    armed = false;
+    retries += 1;
+    onRetry();
+  }
+
+  return Object.freeze({
+    /**
+     * One engine's or the browser's own report. Partial: an event says only
+     * what it knows, and everything else keeps its last known value.
+     */
+    observe(next = {}) {
+      if (closed) return;
+      if (next.online !== undefined) facts.online = Boolean(next.online);
+      if (next.syncPending !== undefined) facts.syncPending = Number(next.syncPending) || 0;
+      if (next.uploadsPending !== undefined) facts.uploadsPending = Number(next.uploadsPending) || 0;
+      const nowEligible = isGcRetrySettled(facts);
+      if (nowEligible && !eligible) generation += 1;
+      eligible = nowEligible;
+      maybeFire();
+    },
+    /** A pass is starting. Its edge baseline is the eligibility as of NOW. */
+    passStarted() {
+      if (closed) return;
+      running = true;
+      passStartGeneration = generation;
+    },
+    /**
+     * A pass finished. `skipped` is the gate reason it skipped for, or null;
+     * `errored` says it threw. The fire condition is tested again here,
+     * because the transition it was waiting for may have landed while it ran.
+     */
+    passSettled({ skipped = null, errored = false } = {}) {
+      if (closed) return;
+      running = false;
+      consecutiveErrors = errored ? consecutiveErrors + 1 : 0;
+      if (consecutiveErrors >= errorLimit) {
+        tripped = true;
+        armed = false;
+        return;
+      }
+      armed = !errored && isRetryableGcSkip(skipped);
+      maybeFire();
+    },
+    /** The session is over. Nothing it armed may ever fire again. */
+    close() {
+      closed = true;
+      armed = false;
+    },
+    /** For the tests and for reasoning about a live session. */
+    snapshot: () => ({ ...facts, eligible, armed, running, closed, tripped, retries, generation }),
+  });
+}
+
 /** True when a backfill result had nothing it could not settle. */
 export function isCleanBackfill(result) {
   if (!result) return false;
@@ -271,12 +495,57 @@ function withDeps(deps) {
   return deps ? { ...defaultAssetGcDeps, ...deps } : defaultAssetGcDeps;
 }
 
+/**
+ * THE PROTECTED SET, measured NOW: the durable reference universe (with the
+ * cloud's rendition edges folded into the same closure), plus the upload queue
+ * and the live-draft register.
+ *
+ * Exported because the sweep (Phase 7.9B) re-confirms it immediately before
+ * every tombstone write, and a second implementation of "what is protected"
+ * would be a second answer to the only question that matters here. The cloud
+ * rendition edges are passed IN rather than re-listed: they come from the
+ * listing the caller already holds, and re-reading a whole collection per
+ * candidate would be a Firestore read for no new fact.
+ *
+ * @returns {Promise<{ marked: Set<string>, uploadsPending: number, states: object }>}
+ */
+export async function collectProtectedAssetIds({
+  workspaceId,
+  derivedFrom = [],
+  storage = undefined,
+  deps = null,
+} = {}) {
+  const d = withDeps(deps);
+  const [assets, pending] = await Promise.all([
+    Promise.resolve(d.listAssets()).catch(() => []),
+    Promise.resolve(d.listPendingUploads(workspaceId)).catch(() => []),
+  ]);
+  // (1) + (2): the durable reference universe, with the cloud's own rendition
+  // edges folded into the same closure.
+  const references = collectScopeReferences({
+    scope: WORKSPACE_SCOPE(workspaceId),
+    storage,
+    assets: assets || [],
+    derivedFrom,
+  });
+  // (3) + (4): work in flight, and what a live surface is still holding.
+  const marked = new Set(references.all);
+  for (const entry of pending || []) {
+    if (entry && isValidAssetSegment(entry.assetId)) marked.add(entry.assetId);
+  }
+  for (const id of d.protectedAssetIds(workspaceId) || []) {
+    if (isValidAssetSegment(id)) marked.add(id);
+  }
+  return { marked, uploadsPending: (pending || []).length, states: references.states };
+}
+
 function emptyPlan(workspaceId, gate, degraded = null) {
   return {
     workspaceId: workspaceId || null,
     gate,
     degraded,
     marked: [],
+    derivedFrom: [],
     listing: { total: 0, malformed: [] },
     classes: {
       referencedStored: [],
@@ -357,41 +626,27 @@ export async function planAssetGarbageCollection({
     }
   }
 
-  const [assets, pending, observations] = await Promise.all([
-    Promise.resolve(d.listAssets()).catch(() => []),
-    Promise.resolve(d.listPendingUploads(workspaceId)).catch(() => []),
+  const [protectedSet, observations] = await Promise.all([
+    collectProtectedAssetIds({ workspaceId, derivedFrom, storage, deps }),
     Promise.resolve(d.listObservations(workspaceId)).catch(() => []),
   ]);
   if (!isActive()) return emptyPlan(workspaceId, { ok: false, reason: GC_GATE.NO_SESSION });
 
-  // (1) + (2): the durable reference universe, with the cloud's own rendition
-  // edges folded into the same closure.
-  const references = collectScopeReferences({
-    scope: WORKSPACE_SCOPE(workspaceId),
-    storage,
-    assets: assets || [],
-    derivedFrom,
-  });
-
   const gate = evaluateGcGates({
     ...baseFacts,
     active: isActive(),
-    uploadsPending: (pending || []).length,
-    referenceStates: references.states,
+    uploadsPending: protectedSet.uploadsPending,
+    referenceStates: protectedSet.states,
   });
   if (!gate.ok) return emptyPlan(workspaceId, gate);
 
-  // (3) + (4): work in flight, and what a live surface is still holding.
-  const marked = new Set(references.all);
-  for (const entry of pending || []) {
-    if (entry && isValidAssetSegment(entry.assetId)) marked.add(entry.assetId);
-  }
-  for (const id of d.protectedAssetIds(workspaceId) || []) {
-    if (isValidAssetSegment(id)) marked.add(id);
-  }
+  const marked = protectedSet.marked;
 
   const plan = emptyPlan(workspaceId, gate, malformed.length > 0 ? GC_DEGRADED.MALFORMED_ASSET_DOCUMENT : null);
   plan.marked = Array.from(marked);
+  // The rendition edges this listing stated, so a caller that re-confirms the
+  // protected set later re-confirms it against the SAME cloud facts.
+  plan.derivedFrom = derivedFrom;
   plan.listing = { total: documents.length + malformed.length, malformed };
   plan.classes.malformed = malformed.map((entry) => entry.id);
 

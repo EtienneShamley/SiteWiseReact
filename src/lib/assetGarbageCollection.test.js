@@ -16,8 +16,15 @@ import path from "path";
 import {
   GC_DEGRADED,
   GC_GATE,
+  GC_RETRYABLE_GATES,
+  GC_RETRY_BUDGET_PER_SESSION,
+  addGcConnectivityListener,
+  collectProtectedAssetIds,
+  createGcRetryController,
   evaluateGcGates,
   isCleanBackfill,
+  isGcRetrySettled,
+  isRetryableGcSkip,
   planAssetGarbageCollection,
   runAssetGcMarkPass,
 } from "./assetGarbageCollection";
@@ -799,5 +806,334 @@ describe("the pass as a whole", () => {
     });
     expect(result.gate.ok).toBe(true);
     expect(result.observations).toEqual({ created: [], carried: [], forgotten: [] });
+  });
+});
+
+/* -------------------- the protected set, as one function ------------------ */
+
+describe("collectProtectedAssetIds is the ONE definition of protected (7.9B)", () => {
+  test("it unions the durable references, the cloud rendition edges, the queue and the drafts", async () => {
+    seedScope({ [DURABLE_KEYS.noteContent]: { "note-1": '<p><img data-asset-id="img-1"></p>' } });
+    const release = protectAsset(WS, "draft-1");
+    const result = await collectProtectedAssetIds({
+      workspaceId: WS,
+      derivedFrom: [{ id: "img-1", sourceAssetId: "original-1" }],
+      deps: {
+        listAssets: async () => [],
+        listPendingUploads: async () => [{ workspaceId: WS, assetId: "queued-1", kind: "editor-image" }],
+      },
+    });
+
+    expect(result.marked.has("img-1")).toBe(true);
+    // The cloud's own rendition edge keeps an original this device has never
+    // downloaded alive.
+    expect(result.marked.has("original-1")).toBe(true);
+    expect(result.marked.has("queued-1")).toBe(true);
+    expect(result.marked.has("draft-1")).toBe(true);
+    expect(result.marked.has("orphan-1")).toBe(false);
+    // The two facts the caller needs to re-check a gate with.
+    expect(result.uploadsPending).toBe(1);
+    expect(result.states[DURABLE_KEYS.noteContent]).toBe("ok");
+    release();
+  });
+
+  test("it reports a QUARANTINED reference record rather than an empty workspace", async () => {
+    window.localStorage.setItem(scopedStorageKey(DURABLE_KEYS.noteContent, SCOPE), "{not json");
+    const result = await collectProtectedAssetIds({
+      workspaceId: WS,
+      deps: { listAssets: async () => [], listPendingUploads: async () => [] },
+    });
+    expect(result.states[DURABLE_KEYS.noteContent]).toBe("corrupt");
+  });
+
+  test("the planner's own marked set is exactly what it returns", async () => {
+    seedScope({ [DURABLE_KEYS.noteContent]: { "note-1": '<p><img data-asset-id="img-1"></p>' } });
+    const store = fakeStore([storedDoc("img-1"), storedDoc("orphan-1")]);
+    const local = localDeps();
+    const plan = await planAssetGarbageCollection({ workspaceId: WS, facts: GOOD_FACTS, deps: deps(store, local) });
+    const direct = await collectProtectedAssetIds({
+      workspaceId: WS,
+      derivedFrom: plan.derivedFrom,
+      deps: deps(store, local),
+    });
+    expect(new Set(plan.marked)).toEqual(direct.marked);
+  });
+});
+
+/* --------------------------- the ONE re-attempt --------------------------- */
+
+describe("the event-driven re-attempt (7.9B)", () => {
+  test("only the gates a live session can clear are retryable", () => {
+    expect(GC_RETRYABLE_GATES).toEqual([GC_GATE.OFFLINE, GC_GATE.OUTBOX_PENDING, GC_GATE.UPLOADS_PENDING]);
+    for (const reason of GC_RETRYABLE_GATES) expect(isRetryableGcSkip(reason)).toBe(true);
+  });
+
+  test("nothing else is — a permanent or unreadable condition is not retried at all", () => {
+    for (const reason of [
+      GC_GATE.OK,
+      GC_GATE.NO_WORKSPACE,
+      GC_GATE.UNCONFIGURED,
+      GC_GATE.NO_SESSION,
+      GC_GATE.HYDRATION_INCOMPLETE,
+      GC_GATE.HYDRATION_MALFORMED,
+      GC_GATE.CORRUPT_REFERENCES,
+      GC_GATE.BACKFILL_INCOMPLETE,
+      GC_GATE.PRIVACY_INCOMPLETE,
+      GC_GATE.LISTING_UNAVAILABLE,
+      "cadence",
+      "not-owner",
+      "degraded",
+      null,
+      undefined,
+    ]) {
+      expect(isRetryableGcSkip(reason)).toBe(false);
+    }
+  });
+
+  test("ELIGIBLE means every retryable gate is clear AT ONCE, never one of them", () => {
+    expect(isGcRetrySettled({ online: true, syncPending: 0, uploadsPending: 0 })).toBe(true);
+    expect(isGcRetrySettled({})).toBe(true);
+    // Each of these is a state a gate has cleared in — and none of them is
+    // eligible, which is what stops a premature pass mid-sequence.
+    expect(isGcRetrySettled({ online: true, syncPending: 1, uploadsPending: 0 })).toBe(false);
+    expect(isGcRetrySettled({ online: true, syncPending: 0, uploadsPending: 3 })).toBe(false);
+    expect(isGcRetrySettled({ online: false, syncPending: 0, uploadsPending: 0 })).toBe(false);
+  });
+});
+
+/* ---------------------- the re-attempt state machine ---------------------- */
+
+describe("the GC retry controller (7.9B)", () => {
+  /** A controller with a recording `onRetry`, seeded from one session's facts. */
+  function controllerWith(seed = {}) {
+    const fired = [];
+    const controller = createGcRetryController({ ...seed, onRetry: () => fired.push(controller.snapshot()) });
+    return { controller, fired };
+  }
+
+  /** The initial pass of a session, skipping for `reason`. */
+  function initialPass(controller, reason) {
+    controller.passStarted();
+    controller.passSettled({ skipped: reason });
+  }
+
+  test("1. OFFLINE with both engines idle: the online event ALONE causes one retry", () => {
+    // The case neither engine can report: they publish on their own work
+    // changing, and an idle engine has no work.
+    const { controller, fired } = controllerWith({ online: false, syncPending: 0, uploadsPending: 0 });
+    initialPass(controller, GC_GATE.OFFLINE);
+    expect(fired).toHaveLength(0);
+    expect(controller.snapshot().armed).toBe(true);
+
+    controller.observe({ online: true });
+    expect(fired).toHaveLength(1);
+    // The attempt disarmed itself.
+    expect(controller.snapshot().armed).toBe(false);
+  });
+
+  test("2. offline -> online while the OUTBOX is still pending: no premature retry", () => {
+    const { controller, fired } = controllerWith({ online: false, syncPending: 2, uploadsPending: 1 });
+    initialPass(controller, GC_GATE.OFFLINE);
+
+    controller.observe({ online: true });
+    expect(fired).toEqual([]);
+    // Still armed, still waiting: connectivity is one gate of three.
+    expect(controller.snapshot()).toMatchObject({ armed: true, eligible: false });
+  });
+
+  test("3. the outbox settles while UPLOADS are still pending: no premature retry", () => {
+    const { controller, fired } = controllerWith({ online: false, syncPending: 2, uploadsPending: 1 });
+    initialPass(controller, GC_GATE.OFFLINE);
+    controller.observe({ online: true });
+    controller.observe({ syncPending: 0 });
+
+    expect(fired).toEqual([]);
+    expect(controller.snapshot()).toMatchObject({ armed: true, eligible: false });
+  });
+
+  test("4. the uploads then settle: EXACTLY ONE retry, at the end of the sequence", () => {
+    const { controller, fired } = controllerWith({ online: false, syncPending: 2, uploadsPending: 1 });
+    initialPass(controller, GC_GATE.OFFLINE);
+    controller.observe({ online: true });
+    controller.observe({ syncPending: 0 });
+    expect(fired).toEqual([]);
+
+    controller.observe({ uploadsPending: 0 });
+    expect(fired).toHaveLength(1);
+    // THREE gates cleared in sequence cost ONE retry, not three — which is
+    // why a session bound can never stand between a workspace and its first
+    // safe moment.
+    expect(controller.snapshot().retries).toBe(1);
+    expect(controller.snapshot().armed).toBe(false);
+  });
+
+  test("5. duplicate sync, upload and connectivity events while eligible: no duplicate passes", () => {
+    const { controller, fired } = controllerWith({ online: false, syncPending: 1, uploadsPending: 1 });
+    initialPass(controller, GC_GATE.OFFLINE);
+    controller.observe({ online: true });
+    controller.observe({ syncPending: 0 });
+    controller.observe({ uploadsPending: 0 });
+    expect(fired).toHaveLength(1);
+
+    // The retried pass is running, and everything reports itself again.
+    controller.passStarted();
+    for (let i = 0; i < 20; i += 1) {
+      controller.observe({ syncPending: 0 });
+      controller.observe({ uploadsPending: 0 });
+      controller.observe({ online: true });
+    }
+    expect(fired).toHaveLength(1);
+
+    // It settles, still transient, and re-arms — but there has been no NEW
+    // transition, so the same events still start nothing.
+    controller.passSettled({ skipped: GC_GATE.UPLOADS_PENDING });
+    expect(controller.snapshot().armed).toBe(true);
+    for (let i = 0; i < 20; i += 1) {
+      controller.observe({ uploadsPending: 0 });
+      controller.observe({ online: true });
+    }
+    expect(fired).toHaveLength(1);
+
+    // A GENUINELY new transition does run it again: work appeared and finished.
+    controller.observe({ uploadsPending: 4 });
+    controller.observe({ uploadsPending: 0 });
+    expect(fired).toHaveLength(2);
+  });
+
+  test("a transition that lands WHILE the pass is running is not lost", () => {
+    // The real race: the pass takes a network round trip, and the engine
+    // finishing is exactly what it was waiting for.
+    const { controller, fired } = controllerWith({ online: true, syncPending: 0, uploadsPending: 3 });
+    controller.passStarted();
+    controller.observe({ uploadsPending: 0 }); // the uploads finish mid-pass
+    expect(fired).toEqual([]);
+    controller.passSettled({ skipped: GC_GATE.UPLOADS_PENDING });
+    expect(fired).toHaveLength(1);
+  });
+
+  test("6. a session that closed before the event cannot retry", () => {
+    const { controller, fired } = controllerWith({ online: false });
+    initialPass(controller, GC_GATE.OFFLINE);
+    controller.close();
+
+    controller.observe({ online: true });
+    controller.observe({ syncPending: 0 });
+    controller.passSettled({ skipped: GC_GATE.OFFLINE });
+    expect(fired).toEqual([]);
+    expect(controller.snapshot()).toMatchObject({ closed: true, armed: false });
+  });
+
+  test("7. a SUCCESSFUL pass disarms, so later eligibility events start nothing", () => {
+    const { controller, fired } = controllerWith({ online: false });
+    initialPass(controller, GC_GATE.OFFLINE);
+    controller.observe({ online: true });
+    expect(fired).toHaveLength(1);
+
+    // The retried pass runs and its gate is OK — the sweep either swept or
+    // was held by its own ~24-hour cadence, and neither is a waiting state.
+    controller.passStarted();
+    controller.passSettled({ skipped: null });
+    expect(controller.snapshot().armed).toBe(false);
+    controller.observe({ online: false });
+    controller.observe({ online: true });
+    controller.observe({ uploadsPending: 2 });
+    controller.observe({ uploadsPending: 0 });
+    expect(fired).toHaveLength(1);
+  });
+
+  test("a cadence or non-owner skip is not a waiting state and never arms", () => {
+    for (const reason of ["cadence", "not-owner", "degraded", GC_GATE.CORRUPT_REFERENCES]) {
+      const { controller, fired } = controllerWith({ online: false });
+      initialPass(controller, reason);
+      controller.observe({ online: true });
+      expect(fired).toEqual([]);
+      expect(controller.snapshot().armed).toBe(false);
+    }
+  });
+
+  test("the budget is a circuit breaker, not the lifecycle control", () => {
+    expect(GC_RETRY_BUDGET_PER_SESSION).toBeGreaterThanOrEqual(5);
+    const { controller, fired } = controllerWith({ online: true, budget: 2 });
+    // Each cycle needs a REAL unsafe -> safe transition, which is why a
+    // flapping session is what this bounds and a settling one is not.
+    for (let i = 0; i < 6; i += 1) {
+      controller.passStarted();
+      controller.passSettled({ skipped: GC_GATE.UPLOADS_PENDING });
+      controller.observe({ uploadsPending: 1 });
+      controller.observe({ uploadsPending: 0 });
+    }
+    expect(fired).toHaveLength(2);
+  });
+
+  test("consecutive THROWN passes trip the breaker and end re-attempts for the session", () => {
+    const { controller, fired } = controllerWith({ online: true, errorLimit: 2 });
+    controller.passStarted();
+    controller.passSettled({ errored: true });
+    expect(controller.snapshot().tripped).toBe(false);
+    controller.passStarted();
+    controller.passSettled({ errored: true });
+    expect(controller.snapshot().tripped).toBe(true);
+
+    controller.observe({ uploadsPending: 1 });
+    controller.observe({ uploadsPending: 0 });
+    expect(fired).toEqual([]);
+  });
+
+  test("a pass that throws once and then skips retryably still recovers", () => {
+    const { controller, fired } = controllerWith({ online: true });
+    controller.passStarted();
+    controller.passSettled({ errored: true });
+    controller.passStarted();
+    controller.passSettled({ skipped: GC_GATE.UPLOADS_PENDING });
+    expect(controller.snapshot().tripped).toBe(false);
+    controller.observe({ uploadsPending: 2 });
+    controller.observe({ uploadsPending: 0 });
+    expect(fired).toHaveLength(1);
+  });
+});
+
+/* --------------------- 8. the connectivity source itself ------------------ */
+
+describe("the connectivity listener (7.9B)", () => {
+  test("the browser's own online/offline events drive it, and nothing polls", () => {
+    const seen = [];
+    const stop = addGcConnectivityListener((online) => seen.push(online));
+    window.dispatchEvent(new Event("offline"));
+    window.dispatchEvent(new Event("online"));
+    expect(seen).toEqual([false, true]);
+
+    // And it is removable: an event after the session closed reaches nothing.
+    stop();
+    window.dispatchEvent(new Event("online"));
+    expect(seen).toEqual([false, true]);
+  });
+
+  test("an OFFLINE session comes back through a real window event, end to end", () => {
+    const fired = [];
+    const controller = createGcRetryController({
+      online: false,
+      onRetry: () => fired.push(true),
+    });
+    const stop = addGcConnectivityListener((online) => controller.observe({ online }));
+    controller.passStarted();
+    controller.passSettled({ skipped: GC_GATE.OFFLINE });
+
+    window.dispatchEvent(new Event("online"));
+    expect(fired).toEqual([true]);
+    stop();
+  });
+
+  test("nothing in the retry path uses a timer, an interval or a poll", () => {
+    const SOURCE = fs.readFileSync(path.join(__dirname, "assetGarbageCollection.js"), "utf8");
+    const SCOPE = fs.readFileSync(path.join(__dirname, "..", "context", "DataScopeContext.js"), "utf8");
+    for (const source of [SOURCE, SCOPE]) {
+      expect(source).not.toMatch(/setInterval/);
+      expect(source).not.toMatch(/requestAnimationFrame/);
+    }
+    expect(SOURCE).not.toMatch(/setTimeout/);
+    // The provider's one setTimeout is the Phase 6 deferred session close,
+    // and it is not on the GC path.
+    expect(SCOPE.match(/setTimeout/g)).toHaveLength(1);
+    expect(SCOPE).toMatch(/setTimeout\(\(\) => \{\s*opened\.close\(\);\s*\}, 0\);/);
   });
 });

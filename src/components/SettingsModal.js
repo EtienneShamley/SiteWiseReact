@@ -16,6 +16,7 @@ import {
   imagePrivacyAttentionLine,
   imagePrivacyStatusLine,
 } from "../lib/assetPrivacyNormalization";
+import { assetGcAttentionLine, assetGcStatusLine } from "../lib/assetGcSweep";
 import { SESSION_MODE } from "../lib/cloud/workspaceSession";
 
 export const SIGN_OUT_LABEL = "Sign out";
@@ -219,6 +220,14 @@ export default function SettingsModal({ open, onClose }) {
   const privacyStatus = scope ? scope.assetPrivacy : null;
   const privacyLine = imagePrivacyStatusLine(privacyStatus);
   const privacyAttention = imagePrivacyAttentionLine(privacyStatus);
+  // Files the workspace no longer uses (Phases 7.9A/7.9B) — one restrained
+  // line, and one attention line for the single condition that must not stay
+  // invisible: a workspace that could not be read in full, where cleanup is
+  // held back indefinitely. Nothing here reports a deletion, because nothing
+  // is deleted; nothing here is a percentage or a progress bar.
+  const gcStatus = scope ? scope.assetGc : null;
+  const gcLine = assetGcStatusLine(gcStatus);
+  const gcAttention = assetGcAttentionLine(gcStatus);
   const migrationState = scope ? scope.migration.state : null;
   const localPresent = Boolean(scope && scope.localData && scope.localData.present);
   const migratedHere =
@@ -353,6 +362,18 @@ export default function SettingsModal({ open, onClose }) {
                 )}
                 {privacyAttention && (
                   <div className="text-xs text-amber-700 dark:text-amber-300 mt-1">{privacyAttention}</div>
+                )}
+                {/* UNUSED FILES (Phases 7.9A/7.9B): what the workspace no
+                    longer uses. A file marked here keeps its bytes and comes
+                    back if it is used again, so the line never says removed
+                    or deleted. */}
+                {gcLine && (
+                  <div className="text-xs text-gray-700 dark:text-gray-300 mt-1" role="status" aria-live="polite">
+                    {gcLine}
+                  </div>
+                )}
+                {gcAttention && (
+                  <div className="text-xs text-amber-700 dark:text-amber-300 mt-1">{gcAttention}</div>
                 )}
               </div>
             )}

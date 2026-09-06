@@ -40,6 +40,14 @@
 //                                         source EXIF/GPS removed before they
 //                                         may be uploaded. Real item counts,
 //                                         never a percentage.
+//     assetGc,                            the cloud asset GARBAGE-COLLECTION
+//                                         pass's state (Phases 7.9A/7.9B):
+//                                         { phase, result, sweep } — what the
+//                                         mark stage restored, and what the
+//                                         OWNER-only sweep marked as no longer
+//                                         used. Nothing is deleted in either
+//                                         stage, and the Settings line never
+//                                         says otherwise.
 //     localData,                          what this browser holds outside any account
 //     migration: { offered, state, run, dismiss, assets },
 //     prepareSignOut(),                   flushes queued writes, then gives the
@@ -88,9 +96,12 @@ import {
 } from "../lib/assetBackfill";
 import {
   GC_MARK_PHASE,
+  addGcConnectivityListener,
+  createGcRetryController,
   isCleanBackfill,
   runAssetGcMarkPass,
 } from "../lib/assetGarbageCollection";
+import { runAssetGcSweep } from "../lib/assetGcSweep";
 import { outboxSize } from "../lib/cloud/cloudOutbox";
 import { MALFORMED_CLOUD_RECORD_MESSAGE } from "../lib/cloud/workspaceHydration";
 import { reportPersistenceIssue } from "../lib/durableStorage";
@@ -171,6 +182,9 @@ export function DataScopeProvider({
   // One per session, bound to that session's workspace, unregistered and
   // stopped with it.
   const remoteReaderRef = useRef(null);
+  // The two engine subscriptions the GC re-attempt listens on, dropped with
+  // the session that opened them.
+  const gcSettledRef = useRef([]);
   // The LEGACY ASSET BACKFILL (Production Readiness Phase 7.6): what this
   // session found and associated, never what is uploading — the engine above
   // owns that. `liveRef` is the session guard every pass checks between
@@ -183,14 +197,28 @@ export function DataScopeProvider({
   // invariant — the upload engine enforces the same rule per asset, so this
   // pass only decides WHEN the work happens.
   const [privacy, setPrivacy] = useState({ phase: PRIVACY_PHASE.IDLE, total: 0, done: 0, result: null });
-  // The cloud asset GARBAGE-COLLECTION MARK PASS (Production Readiness Phase
-  // 7.9A). It tombstones nothing and deletes nothing: it restores assets the
-  // workspace still references but whose cloud record was tombstoned (the
-  // cross-device seam Phase 7.5 left open), and records which cloud assets are
-  // currently unreferenced so a later phase's grace period can accumulate.
-  const [gc, setGc] = useState({ phase: GC_MARK_PHASE.IDLE, result: null });
+  // The cloud asset GARBAGE-COLLECTION PASS. Two stages, in one session step:
+  //
+  //   MARK  (Phase 7.9A) restores assets the workspace still references but
+  //         whose cloud record was tombstoned (the cross-device seam Phase 7.5
+  //         left open), and records which cloud assets are currently
+  //         unreferenced so the grace period can accumulate.
+  //   SWEEP (Phase 7.9B) tombstones the matured ones — OWNER only, at most one
+  //         successful sweep per workspace per ~24 hours. It deletes nothing:
+  //         a tombstone keeps the bytes and the document, and the mark stage
+  //         restores it the moment a reference reappears.
+  const [gc, setGc] = useState({ phase: GC_MARK_PHASE.IDLE, result: null, sweep: null });
   const [migrationAssets, setMigrationAssets] = useState(null);
   const liveRef = useRef({ active: false, workspaceId: null });
+  // The ONE event-driven re-attempt (Phase 7.9B). A pass that skipped ONLY
+  // because this browser still owed local work — or was offline — may run once
+  // ALL of that has settled, and the two sync engines and the browser's own
+  // connectivity events are what say so. There is no timer, no poll and no
+  // background loop. The state machine is `src/lib/assetGarbageCollection.js`
+  // -> `createGcRetryController`; this ref holds only the session it would run
+  // for. Gates that settle one after another produce ONE attempt at the end,
+  // because each intermediate state is still ineligible.
+  const gcRetryRef = useRef({ controller: null, opened: null, results: null });
 
   // Record the account on the local-data binding (a hint for the migration,
   // never a claim on the data) — unchanged from Phase 5.
@@ -258,8 +286,8 @@ export function DataScopeProvider({
   }, []);
 
   /**
-   * One garbage-collection MARK pass for `workspaceId` (Production Readiness
-   * Phase 7.9A), guarded by the session it belongs to.
+   * One garbage-collection pass for `workspaceId` — MARK (Phase 7.9A) and then
+   * SWEEP (Phase 7.9B) — guarded by the session it belongs to.
    *
    * It runs LAST in the session chain because every gate it applies is about
    * the steps before it having finished: hydration placed the cloud's
@@ -270,9 +298,12 @@ export function DataScopeProvider({
    * — and says which gate refused it.
    *
    * The facts are read HERE, from the session that owns them, and handed in:
-   * the pass itself takes no ambient state and reaches no React context.
+   * neither stage takes ambient state or reaches a React context. The sweep
+   * additionally takes this session's own workspace ROLE, because tombstoning
+   * is owner-only by client policy; nothing else about it differs from the
+   * mark stage's boundary.
    */
-  const startGcMarkPass = useCallback(async (opened, { backfillResult, privacyResult }) => {
+  const startGcPass = useCallback(async (opened, { backfillResult, privacyResult } = {}) => {
     const workspaceId = opened && opened.workspace ? opened.workspace.id : null;
     const isActive = () => liveRef.current.active && liveRef.current.workspaceId === workspaceId;
     if (!workspaceId || !isActive()) return null;
@@ -281,7 +312,8 @@ export function DataScopeProvider({
       store &&
         typeof store.readAssetIndex === "function" &&
         typeof store.readAssetDocument === "function" &&
-        typeof store.writeAssetDocument === "function"
+        typeof store.writeAssetDocument === "function" &&
+        typeof store.timestamp === "function"
     );
     const syncStatus = typeof opened.sync?.getStatus === "function" ? opened.sync.getStatus() : null;
     const facts = {
@@ -299,20 +331,64 @@ export function DataScopeProvider({
           readAssetIndex: (wid) => store.readAssetIndex(wid),
           readAssetDocument: (wid, assetId) => store.readAssetDocument(wid, assetId),
           writeAssetDocument: (wid, assetId, fields) => store.writeAssetDocument(wid, assetId, fields),
+          // The SERVER-timestamp sentinel. `tombstonedAt` is never a client
+          // clock, so no device can back-date a tombstone.
+          timestamp: () => store.timestamp(),
         }
       : null;
-    setGc({ phase: GC_MARK_PHASE.RUNNING, result: null });
+    const retry = gcRetryRef.current;
+    retry.opened = opened;
+    retry.results = { backfillResult, privacyResult };
+    if (retry.controller) retry.controller.passStarted();
+    setGc({ phase: GC_MARK_PHASE.RUNNING, result: null, sweep: null });
     try {
       const result = await runAssetGcMarkPass({ workspaceId, facts, deps, isActive });
+      // The SWEEP follows the mark stage in the same pass and only when the
+      // mark stage itself was fully gated — it is measured against the same
+      // reference universe, and it re-establishes every fact for itself before
+      // it writes. The session's OWN role decides whether it may tombstone at
+      // all; a member session stops at the first gate having read nothing.
+      const sweep = result.gate.ok
+        ? await runAssetGcSweep({
+            workspaceId,
+            facts,
+            role: opened.workspace.role,
+            deps,
+            isActive,
+          })
+        : null;
+      const skipped = !result.gate.ok
+        ? result.gate.reason
+        : sweep && !sweep.gate.ok
+          ? sweep.gate.reason
+          : null;
       if (isActive()) {
-        setGc({ phase: result.gate.ok ? GC_MARK_PHASE.DONE : GC_MARK_PHASE.SKIPPED, result });
+        setGc({ phase: result.gate.ok ? GC_MARK_PHASE.DONE : GC_MARK_PHASE.SKIPPED, result, sweep });
       }
-      return result;
+      // Settled LAST, because it may fire the next attempt: the transition
+      // this pass was waiting for can land while the pass is running, and
+      // that is exactly the race the controller's edge is measured against.
+      if (retry.controller) retry.controller.passSettled({ skipped });
+      return { result, sweep };
     } catch {
-      if (isActive()) setGc({ phase: GC_MARK_PHASE.ERROR, result: null });
+      if (isActive()) setGc({ phase: GC_MARK_PHASE.ERROR, result: null, sweep: null });
+      if (retry.controller) retry.controller.passSettled({ errored: true });
       return null;
     }
   }, []);
+
+  /**
+   * What the controller does when its edge fires (Production Readiness Phase
+   * 7.9B). It is reached from the two engines' status events and the browser's
+   * connectivity events, and from nowhere else: no React render can trigger a
+   * pass, and the pass it starts re-reads every fact for itself rather than
+   * trusting the counts that triggered it.
+   */
+  const retryGcPass = useCallback(() => {
+    const retry = gcRetryRef.current;
+    if (!retry.opened) return;
+    startGcPass(retry.opened, retry.results || {}).catch(() => null);
+  }, [startGcPass]);
 
   // Open one workspace session per (uid, attempt); close it when the uid
   // changes or the provider unmounts. The close is DEFERRED to a macrotask:
@@ -328,9 +404,12 @@ export function DataScopeProvider({
     setMigrationRun(null);
     setBackfill({ phase: BACKFILL_PHASE.IDLE, result: null });
     setPrivacy({ phase: PRIVACY_PHASE.IDLE, total: 0, done: 0, result: null });
-    setGc({ phase: GC_MARK_PHASE.IDLE, result: null });
+    setGc({ phase: GC_MARK_PHASE.IDLE, result: null, sweep: null });
     setMigrationAssets(null);
     liveRef.current = { active: false, workspaceId: null };
+    // Nothing the previous session armed may fire for this one.
+    if (gcRetryRef.current.controller) gcRetryRef.current.controller.close();
+    gcRetryRef.current = { controller: null, opened: null, results: null };
 
     (async () => {
       let store = null;
@@ -374,6 +453,41 @@ export function DataScopeProvider({
         }).start();
         assetSyncRef.current = uploads;
         setAssetSync(uploads);
+
+        // The GC re-attempt's ONLY inputs (Phase 7.9B): the two engines'
+        // published pending counts and the browser's own connectivity. A pass
+        // that skipped because this browser was offline or still owed work
+        // runs again once ALL of it has settled — no timer, no poll, and no
+        // listener a React render can reach. The controller is SEEDED from the
+        // current facts, so a queue that is already empty is not mistaken for
+        // one that never reported and the first edge is a real transition.
+        const seedSync = typeof opened.sync?.getStatus === "function" ? opened.sync.getStatus() : null;
+        const seedUploads = uploads.getStatus();
+        const controller = createGcRetryController({
+          online: typeof navigator === "undefined" || navigator.onLine !== false,
+          syncPending: seedSync ? Number(seedSync.pending) || 0 : 0,
+          uploadsPending: Number(seedUploads.pending) || 0,
+          onRetry: () => retryGcPass(),
+        });
+        gcRetryRef.current.controller = controller;
+        gcSettledRef.current = [
+          opened.sync.subscribe((event) => {
+            if (!event || event.type !== "status") return;
+            controller.observe({ syncPending: Number(event.pending) || 0 });
+          }),
+          uploads.subscribe((event) => {
+            if (!event || event.type !== "status") return;
+            controller.observe({ uploadsPending: Number(event.pending) || 0 });
+          }),
+          // Connectivity returning is the ONE transition neither engine
+          // reports: an idle engine has nothing to publish, and a pass that
+          // skipped as OFFLINE would otherwise wait for a session that never
+          // comes. `cloudSync` and `assetUploadSync` each register their own
+          // window listener for the same reason; this is the third, and it is
+          // registered with THIS session and removed with it, so an event
+          // arriving after a workspace change reaches a closed controller.
+          addGcConnectivityListener((online) => controller.observe({ online })),
+        ];
 
         // The READ-THROUGH side of the same workspace (Production Readiness
         // Phase 7.5), bound to the same workspace id and the same two cloud
@@ -422,12 +536,12 @@ export function DataScopeProvider({
           .then((backfillResult) =>
             startPrivacyPass(opened.workspace.id).then((privacyResult) => ({ backfillResult, privacyResult }))
           )
-          // And the GC mark pass follows both, for the same reason again: its
-          // whole job is to measure the reference universe, and it must not do
-          // that while the steps that complete it are still running. Each
-          // step's own RESULT is threaded through rather than read back from
-          // React state, which may not have committed yet.
-          .then((results) => startGcMarkPass(opened, results || {}))
+          // And the GC pass follows both, for the same reason again: its whole
+          // job is to measure the reference universe, and it must not do that
+          // while the steps that complete it are still running. Each step's
+          // own RESULT is threaded through rather than read back from React
+          // state, which may not have committed yet.
+          .then((results) => startGcPass(opened, results || {}))
           .catch(() => null);
         const detected = detectLocalData(uid);
         setLocalData(detected);
@@ -464,6 +578,15 @@ export function DataScopeProvider({
       // in progress stops between assets, and whatever it already adopted is
       // durable and correct.
       liveRef.current = { active: false, workspaceId: null };
+      // No engine or connectivity event of the closing session may start a GC
+      // pass for it — the controller is closed BEFORE its sources are removed,
+      // so an event already in flight finds it closed.
+      if (gcRetryRef.current.controller) gcRetryRef.current.controller.close();
+      gcRetryRef.current.opened = null;
+      for (const unsubscribe of gcSettledRef.current) {
+        if (typeof unsubscribe === "function") unsubscribe();
+      }
+      gcSettledRef.current = [];
       const opened = sessionRef.current;
       const uploads = assetSyncRef.current;
       const reader = remoteReaderRef.current;
@@ -488,7 +611,7 @@ export function DataScopeProvider({
         }, 0);
       }
     };
-  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass, startGcMarkPass]);
+  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass, startGcPass, retryGcPass]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
@@ -578,9 +701,11 @@ export function DataScopeProvider({
       // browser's older images so they may be uploaded at all. Separate from
       // both lines above, because it is neither discovery nor upload.
       assetPrivacy: privacy,
-      // The cloud asset GC MARK pass's own state (Phase 7.9A): what it
-      // restored, and which gate refused it when it did not run. It is not a
-      // sweep and never reports one — nothing tombstones or deletes yet.
+      // The cloud asset GC pass's own state: what the MARK stage restored
+      // (Phase 7.9A), what the OWNER-only SWEEP marked as no longer used
+      // (Phase 7.9B), and which gate refused either when it did not run.
+      // Nothing here deletes: a tombstone keeps the bytes and the document,
+      // and a reference reappearing restores the asset.
       assetGc: gc,
       localData,
       migration: Object.freeze({
