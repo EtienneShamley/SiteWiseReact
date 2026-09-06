@@ -448,10 +448,12 @@ describe("IMAGES — the toolbar's local picker inserts a TEMPLATE photo into a 
     expect(TOOLBAR).toContain("imagePolicy={imagePolicy}");
   });
 
-  test("image-by-URL in a Section IMPORTS the picture into an asset — never a remote src", () => {
+  test("image-by-URL IMPORTS the picture into an asset on BOTH surfaces — never a remote src", () => {
     expect(SECTION_TOOLBAR_IMAGE_POLICY.importFromUrl).toBe(true);
-    expect(CONTROLS).toContain("if (!imagePolicy?.importFromUrl) {");
-    expect(CONTROLS).toContain("report(insertImageFromUrl(editor, url));");
+    // Phase 7.8 made importing the DEFAULT: the Free-form note reaches this
+    // control with no policy at all, so only an explicit opt-out can bring
+    // back the historical remote-`src` insertion.
+    expect(CONTROLS).toContain("if (imagePolicy?.importFromUrl === false) {");
     expect(CONTROLS).toContain("importImageFromUrl({");
     expect(CONTROLS).toContain("insertDeps: imagePolicy?.insertDeps || undefined,");
     // A control ALWAYS enabled by capability: the Section schema has the image node.

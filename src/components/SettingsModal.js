@@ -12,6 +12,10 @@ import {
   oldCopyRefusalMessage,
   planOldCopyRemoval,
 } from "../lib/assetBackfill";
+import {
+  imagePrivacyAttentionLine,
+  imagePrivacyStatusLine,
+} from "../lib/assetPrivacyNormalization";
 import { SESSION_MODE } from "../lib/cloud/workspaceSession";
 
 export const SIGN_OUT_LABEL = "Sign out";
@@ -210,6 +214,11 @@ export default function SettingsModal({ open, onClose }) {
   const backfillStatus = scope ? scope.assetBackfill : null;
   const backfillLine = assetBackfillStatusLine(backfillStatus);
   const backfillAttention = assetBackfillAttentionLine(backfillStatus);
+  // Preparing this browser's older images so they may be uploaded at all
+  // (Phase 7.8) — its own line, because it is neither discovery nor upload.
+  const privacyStatus = scope ? scope.assetPrivacy : null;
+  const privacyLine = imagePrivacyStatusLine(privacyStatus);
+  const privacyAttention = imagePrivacyAttentionLine(privacyStatus);
   const migrationState = scope ? scope.migration.state : null;
   const localPresent = Boolean(scope && scope.localData && scope.localData.present);
   const migratedHere =
@@ -333,6 +342,17 @@ export default function SettingsModal({ open, onClose }) {
                 )}
                 {backfillAttention && (
                   <div className="text-xs text-amber-700 dark:text-amber-300 mt-1">{backfillAttention}</div>
+                )}
+                {/* The IMAGE PRIVACY pass (Phase 7.8): hidden camera
+                    information being removed from this browser's older images
+                    before they may be uploaded. Real item counts only. */}
+                {privacyLine && (
+                  <div className="text-xs text-gray-700 dark:text-gray-300 mt-1" role="status" aria-live="polite">
+                    {privacyLine}
+                  </div>
+                )}
+                {privacyAttention && (
+                  <div className="text-xs text-amber-700 dark:text-amber-300 mt-1">{privacyAttention}</div>
                 )}
               </div>
             )}

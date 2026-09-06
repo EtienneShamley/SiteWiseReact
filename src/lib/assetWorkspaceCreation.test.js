@@ -38,8 +38,19 @@ import {
   listPendingAssetUploads,
 } from "./assetUploadQueue";
 import { DURABLE_SCOPE_KIND, setDurableScope } from "./durableStorage";
+import { PRIVACY_METHOD, privacyNormalizationMark } from "./imagePrivacy";
 
 installStructuredCloneShim();
+
+/** The privacy pipeline's contract, without a canvas: bytes through, marked. */
+const passThroughNormalize = async (blob) => ({
+  blob,
+  width: 10,
+  height: 10,
+  mimeType: blob.type,
+  processed: false,
+  privacy: privacyNormalizationMark(PRIVACY_METHOD.VERIFIED_CLEAN),
+});
 
 const WS_A = "ws-11111111-1111-4111-8111-111111111111";
 const WS_B = "ws-22222222-2222-4222-8222-222222222222";
@@ -83,7 +94,13 @@ describe("a workspace-scoped creation commits the asset and its queue entry toge
 
   test("every product creation path tags the record and queues the upload", async () => {
     const created = [
-      await createLogoAsset(Object.assign(testBlob("LOGO", "image/png"), { name: "l.png" })),
+      // A logo now goes through the shared PRIVACY boundary before it is
+      // stored (Phase 7.8), which needs a decoder jsdom does not have — the
+      // pipeline itself is proven in src/lib/imageProcessing.test.js, and what
+      // this suite is about is the atomic write, so it is injected here.
+      await createLogoAsset(Object.assign(testBlob("LOGO", "image/png"), { name: "l.png" }), {
+        normalize: passThroughNormalize,
+      }),
       await createPhotoAsset(testBlob("PHOTO", "image/jpeg"), { width: 1 }, "p.jpg"),
       await createEditorImageAsset(testBlob("IMG", "image/png"), { name: "i.png" }),
       await createEditorFileAsset(testBlob("DOC", "application/pdf"), { name: "d.pdf" }),

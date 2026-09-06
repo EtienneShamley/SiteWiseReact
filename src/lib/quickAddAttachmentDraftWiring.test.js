@@ -69,7 +69,12 @@ describe("choosing an attachment stages it instead of inserting it", () => {
 
 describe("the existing photo pipeline is reused, not duplicated", () => {
   test("one stamping function, reached from exactly one place", () => {
-    expect(bottomBar).toMatch(/stamped = await buildStampedImageBLOB\(file, check\.mimeType\)/);
+    // The stamp is given the CONTENT-resolved source type and the output type
+    // it must encode as — a HEIC resolves to JPEG, because NoteWise stores no
+    // HEIF (Production Readiness Phase 7.8).
+    expect(bottomBar).toMatch(
+      /stamped = await buildStampedImageBLOB\(file, outputType, sourceMimeType\)/
+    );
     // 1 definition + 1 call site: `preparePhotoBytes` is now the only caller,
     // and it only calls it when the caller asked for a stamp.
     const stampCalls = bottomBar.match(/buildStampedImageBLOB\(/g) || [];

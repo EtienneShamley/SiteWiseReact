@@ -22,7 +22,7 @@
 // Pure: no DOM, no IndexedDB, no React.
 
 import {
-  ALLOWED_IMAGE_MIME_TYPES,
+  ACCEPTED_IMAGE_SOURCE_MIME_TYPES,
   IMAGE_DECODE_MESSAGE,
   IMAGE_OVERSIZED_MESSAGE,
   IMAGE_STORAGE_MESSAGE,
@@ -32,9 +32,13 @@ import {
 } from "./imageProcessing";
 
 // Re-exported under the editor's own names so the toolbar and BottomBar do not
-// each have to know where the policy lives. SVG is absent deliberately: it is a
-// scriptable XML document format, not an ordinary image.
-export const ALLOWED_EDITOR_IMAGE_MIME_TYPES = ALLOWED_IMAGE_MIME_TYPES;
+// each have to know where the policy lives. This is the SOURCE list — what a
+// user may supply, HEIC/HEIF included — because that is what a file picker's
+// `accept` hint and a surface's pre-check are about. What NoteWise STORES is a
+// narrower list, and the pipeline decides that from the bytes.
+// SVG is absent deliberately: it is a scriptable XML document format, not an
+// ordinary image.
+export const ALLOWED_EDITOR_IMAGE_MIME_TYPES = ACCEPTED_IMAGE_SOURCE_MIME_TYPES;
 export const MAX_EDITOR_IMAGE_BYTES = MAX_IMAGE_SOURCE_BYTES;
 
 export const EDITOR_IMAGE_TYPE_MESSAGE = IMAGE_UNSUPPORTED_MESSAGE;

@@ -18,7 +18,10 @@ import {
   insertImageFromUrl,
   removeLink as removeLinkCommand,
 } from "../../lib/editorCommands";
-import { validateEditorImageFile } from "../../lib/editorImages";
+import {
+  ALLOWED_EDITOR_IMAGE_MIME_TYPES,
+  validateEditorImageFile,
+} from "../../lib/editorImages";
 import {
   ALLOWED_FILE_EXTENSIONS,
   validateEditorFileAttachment,
@@ -82,6 +85,10 @@ export const TOOLBAR_HEADING_LEVELS = Object.freeze([1, 2, 3]);
 // What the Attach file picker offers when the surface supplies no policy of its
 // own — the Free-form note's allowlist, from the one module that owns it.
 const FILE_ATTACH_ACCEPT = ALLOWED_FILE_EXTENSIONS.join(",");
+// The picker HINT for images. Derived from the shared SOURCE list so HEIC/HEIF
+// is offered wherever it is accepted; it decides nothing, because validation
+// always happens against the file's own bytes.
+const IMAGE_UPLOAD_ACCEPT = ALLOWED_EDITOR_IMAGE_MIME_TYPES.join(",");
 
 export default function FormattingControls({
   editor,
@@ -366,15 +373,19 @@ export default function FormattingControls({
     }
   };
 
-  // Image by web address. The surface's policy decides what the address
-  // becomes: a Template Section IMPORTS it into an asset-backed image through
-  // the same pipeline as the local picker (validated from the downloaded
-  // content, never from the URL); the Free-form note keeps its remote-src
-  // behaviour. A refused or blocked address inserts nothing and says why.
+  // Image by web address. BOTH surfaces now IMPORT it into an asset-backed
+  // image through the same pipeline as the local picker — validated and
+  // privacy-normalised from the DOWNLOADED CONTENT, never from the URL — so a
+  // new insertion never persists a remote `src` as the canonical
+  // representation of a NoteWise image (Production Readiness Phase 7.8). The
+  // Free-form note reached this control with no policy at all, which is why
+  // importing is the DEFAULT and only an explicit `importFromUrl: false`
+  // opts a surface back out; notes written BEFORE this change keep their
+  // existing remote images untouched and are never rewritten.
   const insertImageUrl = async () => {
     if (!editor) return;
     const url = window.prompt("Enter image URL");
-    if (!imagePolicy?.importFromUrl) {
+    if (imagePolicy?.importFromUrl === false) {
       report(insertImageFromUrl(editor, url));
       return;
     }
@@ -669,7 +680,7 @@ export default function FormattingControls({
         <>
         <input
           type="file"
-          accept="image/png,image/jpeg,image/webp"
+          accept={IMAGE_UPLOAD_ACCEPT}
           style={{ display: "none" }}
           ref={fileInputRef}
           onChange={handleImageUpload}

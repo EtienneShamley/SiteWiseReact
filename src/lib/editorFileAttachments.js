@@ -382,7 +382,21 @@ function isImageExtension(extension) {
  */
 export function bottomBarRouteFor(file) {
   const declared = normalizeMimeType(file && file.type);
-  return declared.startsWith("image/") ? "image" : "file";
+  if (declared.startsWith("image/")) return "image";
+  // A HEIC routinely arrives with NO declared type at all — Windows and some
+  // Linux desktops have no HEIF codec registered, so the browser has nothing
+  // to report. Routing on the declared type alone therefore sent an iPhone
+  // photograph down the FILE path, where the document allow-list refused it as
+  // an unsupported file. Where the platform said nothing, the extension is the
+  // only hint available and it decides the ROUTE.
+  //
+  // This is a routing decision, not a security one: both paths validate from
+  // the file's own content afterwards, so a document wearing a `.heic` name
+  // simply meets the image validator instead of the file one and is refused by
+  // its bytes either way. `validateEditorFileAttachment` already treats an
+  // image extension as "not a document" for exactly this reason.
+  if (declared && !isGenericMimeType(declared)) return "file";
+  return isImageExtension(fileExtension(file && file.name)) ? "image" : "file";
 }
 
 /* --------------------------- reference model ----------------------------- */

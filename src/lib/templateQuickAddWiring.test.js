@@ -130,12 +130,13 @@ describe("the camera is stamped and the ordinary picker is not", () => {
   });
 
   test("the stamp builder is reached only behind the stamp flag", () => {
-    const prepare = between(bottomBar, "async function preparePhotoBytes", "async function insertPhoto");
-    // An unstamped request returns the picked file before any stamping work.
+    const prepare = between(bottomBar, "async function preparePhotoBytes", "async function convertUnstorableImage");
+    // An unstamped request of a format NoteWise stores returns the picked file
+    // before any stamping work — and before any decode or content sniff.
     expect(prepare).toMatch(
-      /if \(!stamp\) \{[\s\S]{0,160}?return \{ blob: file, mimeType: check\.mimeType \};/
+      /if \(!stamp && isAllowedImageMimeType\(check\.mimeType\)\) \{[\s\S]{0,120}?return \{ blob: file, mimeType: check\.mimeType \};/
     );
-    expect(prepare.indexOf("if (!stamp)")).toBeLessThan(
+    expect(prepare.indexOf("if (!stamp")).toBeLessThan(
       prepare.indexOf("buildStampedImageBLOB(file")
     );
     // Exactly one call site in the whole file (plus the definition).
@@ -183,7 +184,14 @@ describe("the camera is stamped and the ordinary picker is not", () => {
   test("a failed stamp keeps the capture instead of losing it", () => {
     // Geolocation denied, an unreachable map tile or a canvas that produced
     // nothing must not cost the user their photo.
-    expect(bottomBar).toMatch(/return \{ blob: stamped \|\| file, mimeType: check\.mimeType \}/);
+    // A stamp that produced nothing falls back to the photo itself — and, for
+    // a format that cannot be stored as it is (HEIC), to the CONVERTED photo
+    // rather than to raw HEIF bytes.
+    expect(bottomBar).toMatch(/if \(stamped\) return \{ blob: stamped, mimeType: outputType \};/);
+    // `return await`: the conversion must SETTLE inside the try/finally that
+    // owns the busy status, or the status is released the moment it starts.
+    expect(bottomBar).toMatch(/if \(storable\) return \{ blob: file, mimeType: sourceMimeType \};\n      return await convertUnstorableImage\(file\);/);
+    expect(bottomBar).not.toMatch(/return convertUnstorableImage\(/);
     // A missing position simply omits those lines; it is not an error.
     expect(bottomBar).toMatch(/if \(lat == null \|\| lon == null\) return;/);
     expect(bottomBar).toMatch(/if \(!mapImg\) return;/);
@@ -410,7 +418,10 @@ describe("a Section capture goes through the document route only", () => {
     expect(attach).toMatch(/validate: validateComposedPhoto/);
     expect(attach).toMatch(/validate: validateSectionFile/);
     expect(attach).toMatch(/createPhotoAsset\(blob, options\?\.metadata, options\?\.name\)/);
-    expect(attach).toMatch(/createNoteFileAsset\(blob, options\?\.metadata\)/);
+    // The NAME is passed explicitly since Phase 7.8: the Blob reaching the
+    // store may be a derived one (a re-wrapped MIME type, or privacy-normalised
+    // image bytes) and a derived Blob has no filename of its own.
+    expect(attach).toMatch(/createNoteFileAsset\(blob, options\?\.metadata, options\?\.name\)/);
     expect(attach).toMatch(/removeAsset: deleteAsset/);
     // ACTIVE inserts at the live selection; INACTIVE at the end of the document.
     expect(attach).toMatch(/const beforeInsert = target\.active\s*\?\s*undefined\s*:\s*\(\) => placeSectionCaretAtEnd\(editor\)/);

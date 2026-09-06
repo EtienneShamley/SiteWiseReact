@@ -37,6 +37,14 @@ import { makeAssetRecord, getAsset, saveNewAsset } from "../assetStorage";
 import { enqueueAssetUpload, getAssetUpload } from "../assetUploadQueue";
 import { REMOTE_ASSET_STATE, getRemoteAssetEntry } from "../assetRemoteIndex";
 import { deleteAssetDb, installStructuredCloneShim, testBlob } from "../assetDbTestHarness";
+import {
+  PRIVACY_METHOD,
+  PRIVACY_NORMALIZATION_KEY,
+  isPrivacyNormalizableKind,
+  isPrivacyNormalized,
+  privacyNormalizationMark,
+} from "../imagePrivacy";
+import { PRIVACY_RESULT } from "../assetPrivacyNormalization";
 
 installStructuredCloneShim();
 
@@ -119,7 +127,15 @@ function makeEngine(overrides = {}) {
   });
 }
 
-/** Create a workspace-owned local asset AND its queue entry, atomically. */
+/**
+ * Create a workspace-owned local asset AND its queue entry, atomically.
+ *
+ * An IMAGE asset created after Phase 7.8 carries the privacy marker its
+ * creation pipeline wrote (src/lib/imagePrivacy.js), so the default fixture is
+ * an ordinary, already-normalised asset. `privacyNormalized: false` produces
+ * the LEGACY shape — a pre-7.8 image with no marker — which is what the
+ * upload-engine privacy gate exists for and is exercised in its own section.
+ */
 async function createAsset({
   id,
   workspaceId = WS_A,
@@ -127,8 +143,22 @@ async function createAsset({
   name = "photo.png",
   type = "image/png",
   body = "bytes",
+  privacyNormalized = true,
+  metadata = null,
 } = {}) {
-  const record = makeAssetRecord({ id, kind, name, blob: testBlob(body, type), workspaceId });
+  const record = makeAssetRecord({
+    id,
+    kind,
+    name,
+    blob: testBlob(body, type),
+    workspaceId,
+    metadata: {
+      ...(metadata || {}),
+      ...(privacyNormalized && isPrivacyNormalizableKind(kind)
+        ? { [PRIVACY_NORMALIZATION_KEY]: privacyNormalizationMark(PRIVACY_METHOD.VERIFIED_CLEAN) }
+        : {}),
+    },
+  });
   await saveNewAsset(record);
   return record;
 }
@@ -356,6 +386,375 @@ describe("isolation", () => {
     const engine = makeEngine();
     engine.stop();
     expect(() => engine.start()).toThrow(/stopped/i);
+  });
+});
+
+/* ------------------------------ privacy gate ----------------------------- */
+//
+// Production Readiness Phase 7.8. An IMAGE may not leave this device until its
+// record states that its source EXIF/GPS has been removed. The engine enforces
+// that itself rather than trusting that the session's privacy pass ran first —
+// defence in depth, because lifecycle ordering can change and an unnormalised
+// photograph reaching Storage cannot be taken back.
+
+describe("the privacy gate", () => {
+  /** An engine whose normaliser is injected, standing in for the canvas. */
+  function engineWithNormalizer(normalize, calls = []) {
+    return makeEngine({
+      local: {
+        ensureImagePrivacy: async (workspaceId, assetId, record) => {
+          calls.push({ workspaceId, assetId, kind: record.kind });
+          return normalize(record);
+        },
+      },
+    });
+  }
+
+  /** The normalised form of a record: new bytes, and the marker. */
+  function normalized(record, body = "clean-bytes") {
+    const blob = testBlob(body, "image/png");
+    return {
+      status: PRIVACY_RESULT.NORMALIZED,
+      assetId: record.id,
+      record: {
+        ...record,
+        blob,
+        size: blob.size,
+        metadata: { [PRIVACY_NORMALIZATION_KEY]: privacyNormalizationMark(PRIVACY_METHOD.REENCODED) },
+      },
+    };
+  }
+
+  test("a legacy image with no marker is normalised BEFORE anything is uploaded", async () => {
+    const record = await createAsset({ id: "legacy-image", privacyNormalized: false });
+    expect(isPrivacyNormalized(record.metadata)).toBe(false);
+    const calls = [];
+    const engine = engineWithNormalizer((r) => normalized(r), calls);
+
+    await engine.flush();
+
+    expect(calls).toEqual([{ workspaceId: WS_A, assetId: "legacy-image", kind: "editor-image" }]);
+    expect(assetStore.list(WS_A)).toEqual(["legacy-image"]);
+    // What was uploaded is the CLEAN file — the object's own size and the
+    // document that describes it both name the new bytes, not the old ones.
+    const head = await assetStore.objectMetadata(WS_A, "legacy-image");
+    expect(head.size).toBe(testBlob("clean-bytes", "image/png").size);
+    expect(head.size).not.toBe(record.size);
+    const doc = await workspaceStore.readAssetDocument(WS_A, "legacy-image");
+    expect(doc.fields.size).toBe(head.size);
+    // The marker travels with the asset, so another device knows the object
+    // it downloads was normalised under this policy.
+    expect(isPrivacyNormalized(doc.fields.metadata)).toBe(true);
+    expect(await getAssetUpload(WS_A, "legacy-image")).toBeNull();
+  });
+
+  test("an image whose normalisation FAILS is never uploaded", async () => {
+    await createAsset({ id: "stubborn", privacyNormalized: false });
+    const engine = engineWithNormalizer(() => ({ status: PRIVACY_RESULT.FAILED, assetId: "stubborn", record: null }));
+    const outcomes = collectOutcomes(engine);
+
+    await engine.flush();
+
+    expect(outcomes[0]).toMatchObject({
+      outcome: ASSET_SYNC_OUTCOME.FAILED,
+      code: ASSET_SYNC_CODE.PRIVACY_NOT_NORMALIZED,
+    });
+    expect(assetStore.calls.uploads).toEqual([]);
+    expect(assetStore.list(WS_A)).toEqual([]);
+    // The bytes stay on this device, still owed, and the user is told
+    // something they can act on — never a provider's own words.
+    expect(await getAssetUpload(WS_A, "stubborn")).not.toBeNull();
+    expect(assetSyncFailureMessage(ASSET_SYNC_CODE.PRIVACY_NOT_NORMALIZED)).toContain("hidden camera information");
+  });
+
+  test("a normaliser that claims success WITHOUT marking the record is not believed", async () => {
+    // The status is not the proof; the record is. A transformation that did
+    // not land must never read as one that did.
+    const record = await createAsset({ id: "lying", privacyNormalized: false });
+    const engine = engineWithNormalizer(() => ({
+      status: PRIVACY_RESULT.NORMALIZED,
+      assetId: "lying",
+      record: { ...record, metadata: {} },
+    }));
+    const outcomes = collectOutcomes(engine);
+
+    await engine.flush();
+
+    expect(outcomes[0].code).toBe(ASSET_SYNC_CODE.PRIVACY_NOT_NORMALIZED);
+    expect(assetStore.calls.uploads).toEqual([]);
+  });
+
+  test("an asset that is already stored in the cloud is refused, not rewritten with new bytes", async () => {
+    // The immutable-cloud rule outranks the privacy rule: an object that is
+    // already there is never replaced. It is reported instead.
+    await createAsset({ id: "already-up", privacyNormalized: false });
+    const engine = engineWithNormalizer(() => ({
+      status: PRIVACY_RESULT.ALREADY_STORED,
+      assetId: "already-up",
+      record: null,
+    }));
+    const outcomes = collectOutcomes(engine);
+
+    await engine.flush();
+
+    expect(outcomes[0].code).toBe(ASSET_SYNC_CODE.PRIVACY_NOT_NORMALIZED);
+    expect(assetStore.calls.uploads).toEqual([]);
+  });
+
+  test("an already-marked image is uploaded without the normaliser being asked", async () => {
+    await createAsset({ id: "modern" });
+    const calls = [];
+    const engine = engineWithNormalizer((r) => normalized(r), calls);
+
+    await engine.flush();
+
+    expect(calls).toEqual([]);
+    expect(assetStore.list(WS_A)).toEqual(["modern"]);
+  });
+
+  test("a retry does not re-encode: the marker is durable, so the second drain skips it", async () => {
+    await createAsset({ id: "retried", privacyNormalized: false });
+    const calls = [];
+    const engine = makeEngine({
+      local: {
+        ensureImagePrivacy: async (workspaceId, assetId, record) => {
+          calls.push(assetId);
+          // The real normaliser writes the record; this one does too.
+          const outcome = normalized(record);
+          await saveNewAsset(outcome.record);
+          return outcome;
+        },
+      },
+    });
+    // The upload fails transiently the first time, so the entry is retried.
+    assetStore.failNext("upload", "storage/retry-limit-exceeded");
+    await engine.flush();
+    expect(calls).toEqual(["retried"]);
+    expect(assetStore.list(WS_A)).toEqual([]);
+
+    // Past the backoff, the entry is due again.
+    skew += 60_000;
+    await engine.flush();
+
+    // The second attempt found the marker already on the record and asked for
+    // no further work — the bytes are re-encoded once, not once per retry.
+    expect(calls).toEqual(["retried"]);
+    expect(assetStore.list(WS_A)).toEqual(["retried"]);
+  });
+
+  /* ---- the MEDIA decides, not the control the file entered through ---- */
+
+  test("an IMAGE attached as a FILE is normalised before upload, exactly like a photo", async () => {
+    // The product rule: privacy follows the actual binary. A Template File
+    // field accepts JPEG/PNG/WebP, so a `note-file` can be a photograph with
+    // GPS in it, and it must not reach Storage because of which control made
+    // it.
+    const record = await createAsset({
+      id: "photo-as-file",
+      kind: "note-file",
+      name: "site.jpg",
+      type: "image/jpeg",
+      privacyNormalized: false,
+    });
+    const calls = [];
+    const engine = engineWithNormalizer((r) => normalized(r, "clean-jpeg-bytes"), calls);
+
+    await engine.flush();
+
+    expect(calls).toEqual([{ workspaceId: WS_A, assetId: "photo-as-file", kind: "note-file" }]);
+    expect(assetStore.list(WS_A)).toEqual(["photo-as-file"]);
+    const head = await assetStore.objectMetadata(WS_A, "photo-as-file");
+    expect(head.size).toBe(testBlob("clean-jpeg-bytes", "image/png").size);
+    expect(head.size).not.toBe(record.size);
+    const doc = await workspaceStore.readAssetDocument(WS_A, "photo-as-file");
+    expect(doc.fields.assetKind).toBe("note-file");
+    expect(isPrivacyNormalized(doc.fields.metadata)).toBe(true);
+  });
+
+  test("a real DOCUMENT reaches the gate, is found not to be an image, and uploads untouched", async () => {
+    // It IS inspected — only the bytes can say whether an attachment is a
+    // picture — and `not-applicable` is the one outcome accepted WITHOUT a
+    // marker, because marking a PDF as a privacy-normalised image would be a
+    // false statement.
+    const record = await createAsset({
+      id: "doc",
+      kind: "note-file",
+      name: "report.pdf",
+      type: "application/pdf",
+      privacyNormalized: false,
+    });
+    const calls = [];
+    const engine = engineWithNormalizer(
+      (r) => ({ status: PRIVACY_RESULT.NOT_APPLICABLE, assetId: r.id, record: r }),
+      calls
+    );
+
+    await engine.flush();
+
+    expect(calls).toEqual([{ workspaceId: WS_A, assetId: "doc", kind: "note-file" }]);
+    expect(assetStore.list(WS_A)).toEqual(["doc"]);
+    // Byte-for-byte: the object is the size the record always was.
+    const head = await assetStore.objectMetadata(WS_A, "doc");
+    expect(head.size).toBe(record.size);
+    const doc = await workspaceStore.readAssetDocument(WS_A, "doc");
+    expect(isPrivacyNormalized(doc.fields.metadata)).toBe(false);
+  });
+
+  test("a PICTURE kind can NEVER pass on `not-applicable` alone", async () => {
+    // The exception exists for documents. A picture reporting "nothing to do"
+    // without a marker is a transformation that did not happen, and it is
+    // refused rather than uploaded.
+    await createAsset({ id: "sneaky", kind: "editor-image", privacyNormalized: false });
+    const engine = engineWithNormalizer((r) => ({
+      status: PRIVACY_RESULT.NOT_APPLICABLE,
+      assetId: r.id,
+      record: r,
+    }));
+    const outcomes = collectOutcomes(engine);
+
+    await engine.flush();
+
+    expect(outcomes[0].code).toBe(ASSET_SYNC_CODE.PRIVACY_NOT_NORMALIZED);
+    expect(assetStore.calls.uploads).toEqual([]);
+  });
+
+  test("an unmarked image FILE attachment whose normalisation fails is never uploaded", async () => {
+    await createAsset({
+      id: "stubborn-file",
+      kind: "note-file",
+      name: "site.jpg",
+      type: "image/jpeg",
+      privacyNormalized: false,
+    });
+    const engine = engineWithNormalizer(() => ({
+      status: PRIVACY_RESULT.FAILED,
+      assetId: "stubborn-file",
+      record: null,
+    }));
+    const outcomes = collectOutcomes(engine);
+
+    await engine.flush();
+
+    expect(outcomes[0].code).toBe(ASSET_SYNC_CODE.PRIVACY_NOT_NORMALIZED);
+    expect(assetStore.calls.uploads).toEqual([]);
+    expect(await getAssetUpload(WS_A, "stubborn-file")).not.toBeNull();
+  });
+
+  test("RAW HEIC can never be uploaded — the gate converts it first", async () => {
+    // The bytes on the device are HEIF; what reaches Storage is the JPEG the
+    // normaliser produced, described truthfully by both the object and the
+    // metadata document.
+    const record = await createAsset({
+      id: "heic-photo",
+      kind: "editor-image",
+      name: "IMG_4021.HEIC",
+      type: "image/heic",
+      body: "ftypheic-raw-bytes",
+      privacyNormalized: false,
+    });
+    const jpeg = testBlob("converted-jpeg", "image/jpeg");
+    const engine = engineWithNormalizer((r) => ({
+      status: PRIVACY_RESULT.NORMALIZED,
+      assetId: r.id,
+      record: {
+        ...r,
+        blob: jpeg,
+        mimeType: "image/jpeg",
+        size: jpeg.size,
+        metadata: {
+          sourceMimeType: "image/heic",
+          [PRIVACY_NORMALIZATION_KEY]: privacyNormalizationMark(PRIVACY_METHOD.REENCODED),
+        },
+      },
+    }));
+
+    await engine.flush();
+
+    expect(assetStore.list(WS_A)).toEqual(["heic-photo"]);
+    const head = await assetStore.objectMetadata(WS_A, "heic-photo");
+    expect(head.contentType).toBe("image/jpeg");
+    expect(head.size).toBe(jpeg.size);
+    expect(head.size).not.toBe(record.size);
+    const doc = await workspaceStore.readAssetDocument(WS_A, "heic-photo");
+    // Nothing anywhere in the cloud says HEIF — the Storage rules would not
+    // accept it if it did.
+    expect(doc.fields.mimeType).toBe("image/jpeg");
+    expect(doc.fields.metadata.sourceMimeType).toBe("image/heic");
+    expect(isPrivacyNormalized(doc.fields.metadata)).toBe(true);
+  });
+
+  test("a HEIC whose conversion fails is refused, and its bytes stay on the device", async () => {
+    await createAsset({
+      id: "bad-heic",
+      kind: "editor-image",
+      type: "image/heic",
+      privacyNormalized: false,
+    });
+    const engine = engineWithNormalizer(() => ({
+      status: PRIVACY_RESULT.FAILED,
+      assetId: "bad-heic",
+      record: null,
+    }));
+    const outcomes = collectOutcomes(engine);
+
+    await engine.flush();
+
+    expect(outcomes[0].code).toBe(ASSET_SYNC_CODE.PRIVACY_NOT_NORMALIZED);
+    expect(assetStore.calls.uploads).toEqual([]);
+    expect(await getAssetUpload(WS_A, "bad-heic")).not.toBeNull();
+  });
+
+  test("a converted HEIC is not re-converted on a retry", async () => {
+    const jpeg = testBlob("converted-jpeg", "image/jpeg");
+    const calls = [];
+    const engine = makeEngine({
+      local: {
+        ensureImagePrivacy: async (workspaceId, assetId, record) => {
+          calls.push(assetId);
+          const converted = {
+            ...record,
+            blob: jpeg,
+            mimeType: "image/jpeg",
+            size: jpeg.size,
+            metadata: {
+              [PRIVACY_NORMALIZATION_KEY]: privacyNormalizationMark(PRIVACY_METHOD.REENCODED),
+            },
+          };
+          await saveNewAsset(converted);
+          return { status: PRIVACY_RESULT.NORMALIZED, assetId, record: converted };
+        },
+      },
+    });
+    await createAsset({ id: "retried-heic", type: "image/heic", privacyNormalized: false });
+
+    assetStore.failNext("upload", "storage/retry-limit-exceeded");
+    await engine.flush();
+    expect(calls).toEqual(["retried-heic"]);
+
+    skew += 60_000;
+    await engine.flush();
+
+    // Converting a 12 MP HEIC is expensive; the durable marker means it
+    // happens once, not once per attempt.
+    expect(calls).toEqual(["retried-heic"]);
+    expect(assetStore.list(WS_A)).toEqual(["retried-heic"]);
+  });
+
+  test("a PDF source never reaches the gate at all", async () => {
+    const calls = [];
+    const engine = engineWithNormalizer((r) => normalized(r), calls);
+    await engine.flush();
+    expect(calls).toEqual([]);
+  });
+
+  test("the engine's DEFAULT normaliser is the shared one, over the real stores", async () => {
+    // The injected normaliser above proves the ORDERING; this proves the
+    // engine is wired to the module that actually performs it.
+    const record = await createAsset({ id: "wired" });
+    await expect(defaultAssetUploadLocal.ensureImagePrivacy(WS_A, "wired", record)).resolves.toMatchObject({
+      status: PRIVACY_RESULT.ALREADY_NORMALIZED,
+      assetId: "wired",
+    });
   });
 });
 

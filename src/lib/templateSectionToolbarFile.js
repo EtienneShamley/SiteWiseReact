@@ -65,7 +65,11 @@ export function validateSectionFile(file) {
  */
 export const SECTION_FILE_INSERT_DEPS = Object.freeze({
   validate: validateSectionFile,
-  createAsset: (blob, options) => createNoteFileAsset(blob, options?.metadata),
+  // The shared pipeline passes `{ name, metadata }`; `createNoteFileAsset`
+  // takes them positionally. The name is passed EXPLICITLY because the Blob
+  // reaching this point may be a derived one (a re-wrapped MIME type, or
+  // privacy-normalised image bytes) and a derived Blob has no filename.
+  createAsset: (blob, options) => createNoteFileAsset(blob, options?.metadata, options?.name),
   removeAsset: deleteAsset,
 });
 

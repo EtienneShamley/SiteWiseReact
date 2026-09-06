@@ -1091,7 +1091,10 @@ describe("A4c 16-17. files stay canonical, and Attach file is the same pipeline"
     const policy = read("lib/templateSectionToolbarFile.js");
     // The Template's own validator and asset kind...
     expect(policy).toContain("validateNoteFile(file)");
-    expect(policy).toContain("createNoteFileAsset(blob, options?.metadata)");
+    // The name is passed explicitly since Phase 7.8 — the Blob reaching the
+    // store may be derived (a re-wrapped MIME type, or privacy-normalised image
+    // bytes) and a derived Blob has no filename of its own.
+    expect(policy).toContain("createNoteFileAsset(blob, options?.metadata, options?.name)");
     // ...injected into the SHARED sequence, which it does not reimplement.
     expect(policy).not.toContain("insertFileAttachment");
     expect(policy).not.toContain("IndexedDB");

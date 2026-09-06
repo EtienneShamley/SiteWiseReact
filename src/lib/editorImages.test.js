@@ -8,6 +8,7 @@ import {
   validateEditorImageFile,
 } from "./editorImages";
 import {
+  ACCEPTED_IMAGE_SOURCE_MIME_TYPES,
   ALLOWED_IMAGE_MIME_TYPES,
   MAX_IMAGE_SOURCE_BYTES,
 } from "./imageProcessing";
@@ -18,10 +19,14 @@ const fileLike = (type, size, name = "photo.png") => ({ type, size, name });
 
 describe("validateEditorImageFile", () => {
   test("accepts the allowed image types", () => {
+    // The SOURCE list: what a user may supply. HEIC/HEIF is accepted and
+    // converted to JPEG on the way in; it is never a stored format.
     expect(ALLOWED_EDITOR_IMAGE_MIME_TYPES).toEqual([
       "image/png",
       "image/jpeg",
       "image/webp",
+      "image/heic",
+      "image/heif",
     ]);
     for (const type of ALLOWED_EDITOR_IMAGE_MIME_TYPES) {
       expect(validateEditorImageFile(fileLike(type, 1024))).toEqual({
@@ -32,17 +37,23 @@ describe("validateEditorImageFile", () => {
   });
 
   test("rejects a disallowed MIME type", () => {
-    for (const type of [
-      "image/svg+xml",
-      "image/gif",
-      "text/html",
-      "application/pdf",
-      "application/octet-stream",
-      "",
-    ]) {
+    for (const type of ["image/svg+xml", "image/gif", "text/html", "application/pdf"]) {
       const result = validateEditorImageFile(fileLike(type, 1024));
       expect(result.ok).toBe(false);
       expect(result.error).toBe(EDITOR_IMAGE_TYPE_MESSAGE);
+    }
+  });
+
+  test("a type carrying no information is deferred to the bytes, not refused", () => {
+    // A HEIC picked where no HEIF codec is registered arrives like this. The
+    // content decides in the normalization step; refusing here would refuse an
+    // ordinary iPhone photograph over a missing OS codec.
+    for (const type of ["", "application/octet-stream"]) {
+      expect(validateEditorImageFile(fileLike(type, 1024))).toEqual({
+        ok: true,
+        mimeType: null,
+        undecided: true,
+      });
     }
   });
 
@@ -85,7 +96,10 @@ describe("validateEditorImageFile", () => {
   });
 
   test("the editor and Template-form Photo fields share one answer", () => {
-    expect(ALLOWED_EDITOR_IMAGE_MIME_TYPES).toBe(ALLOWED_IMAGE_MIME_TYPES);
+    // The SOURCE list is shared. The narrower STORED list is what the cloud
+    // model and the Storage rules enumerate, and it excludes HEIC/HEIF.
+    expect(ALLOWED_EDITOR_IMAGE_MIME_TYPES).toBe(ACCEPTED_IMAGE_SOURCE_MIME_TYPES);
+    expect(ALLOWED_IMAGE_MIME_TYPES).not.toContain("image/heic");
   });
 
   test("rejects a missing, empty or unreadable file", () => {

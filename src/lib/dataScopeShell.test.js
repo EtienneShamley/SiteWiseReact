@@ -543,7 +543,7 @@ describe("the asset upload engine's session binding (source)", () => {
     expect(SCOPE).toMatch(/if \(uploads\) uploads\.stop\(\);/);
     expect(SCOPE).toMatch(/assetSyncRef\.current = null;/);
     expect(SCOPE).toMatch(
-      /\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill\]/
+      /\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass\]/
     );
     // 7.6: the backfill's session guard is dropped in the SAME cleanup, so a
     // pass in progress stops before the next account's session opens.

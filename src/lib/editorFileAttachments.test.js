@@ -275,6 +275,31 @@ describe("BottomBar routing", () => {
     expect(bottomBarRouteFor(file("mystery", ""))).toBe("file");
     expect(bottomBarRouteFor({})).toBe("file");
   });
+
+  test("a HEIC the platform could not type still goes to the IMAGE path", () => {
+    // Windows and most Linux desktops register no HEIF codec, so the browser
+    // reports nothing for an iPhone photograph. Routing on the declared type
+    // alone sent it down the FILE path, where the document allow-list refused
+    // it — which is why a HEIC picked with `+` could not be added at all.
+    for (const declared of ["", "application/octet-stream", "binary/octet-stream"]) {
+      expect(bottomBarRouteFor(file("IMG_4021.HEIC", declared))).toBe("image");
+      expect(bottomBarRouteFor(file("IMG_4021.heif", declared))).toBe("image");
+      expect(bottomBarRouteFor(file("photo.jpg", declared))).toBe("image");
+    }
+    // A declared image type still decides on its own, as it always did.
+    expect(bottomBarRouteFor(file("IMG.HEIC", "image/heic"))).toBe("image");
+  });
+
+  test("an untyped DOCUMENT still goes to the file path", () => {
+    // The extension only speaks where the platform said nothing, and only for
+    // image extensions — it never pulls a document into the image path.
+    expect(bottomBarRouteFor(file("report.pdf", ""))).toBe("file");
+    expect(bottomBarRouteFor(file("notes.txt", "application/octet-stream"))).toBe("file");
+    expect(bottomBarRouteFor(file("archive", ""))).toBe("file");
+    // And a POSITIVELY declared document type is never second-guessed by a
+    // misleading name.
+    expect(bottomBarRouteFor(file("thing.heic", "application/pdf"))).toBe("file");
+  });
 });
 
 describe("what a stored reference may contain", () => {

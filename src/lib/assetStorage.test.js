@@ -24,6 +24,7 @@ import {
   ALLOWED_IMAGE_MIME_TYPES,
   IMAGE_OVERSIZED_MESSAGE,
   IMAGE_UNSUPPORTED_MESSAGE,
+  ACCEPTED_IMAGE_SOURCE_MIME_TYPES,
   MAX_IMAGE_SOURCE_BYTES,
 } from "./imageProcessing";
 
@@ -123,17 +124,23 @@ describe("validatePhotoFile (note Photo fields)", () => {
   });
 
   test("rejects unsupported photo MIME types with a clear message", () => {
-    for (const type of ["image/gif", "image/svg+xml", "application/pdf", ""]) {
+    for (const type of ["image/gif", "image/svg+xml", "application/pdf"]) {
       const res = validatePhotoFile(blobOf([1], type));
       expect(res.ok).toBe(false);
       expect(res.error).toBe(IMAGE_UNSUPPORTED_MESSAGE);
     }
+    // An EMPTY declared type is not a refusal any more: it is what a HEIC
+    // arrives as where no HEIF codec is registered, so the bytes decide.
+    expect(validatePhotoFile(blobOf([1], "")).ok).toBe(true);
   });
 
   test("shares the 20 MB source limit with Free-form editor images", () => {
     expect(MAX_PHOTO_BYTES).toBe(MAX_IMAGE_SOURCE_BYTES);
     expect(MAX_PHOTO_BYTES).toBe(20 * 1024 * 1024);
-    expect(ALLOWED_PHOTO_MIME_TYPES).toBe(ALLOWED_IMAGE_MIME_TYPES);
+    // Both surfaces take the same SOURCE list, HEIC/HEIF included — the point
+    // of the shared policy is that a user meets one answer to "can I upload
+    // this photo", not two.
+    expect(ALLOWED_PHOTO_MIME_TYPES).toBe(ACCEPTED_IMAGE_SOURCE_MIME_TYPES);
   });
 
   test("a source photo up to 20 MB is accepted", () => {
@@ -174,7 +181,7 @@ describe("the company logo policy is unchanged by the image-upload work", () => 
       "That image is larger than the 5 MB limit."
     );
     expect(validateLogoFile({ size: 10, type: "image/gif" }).error).toBe(
-      "Unsupported image type. Use a PNG, JPEG or WebP file."
+      "Unsupported image type. Use a HEIC, HEIF, PNG, JPEG or WebP file."
     );
   });
 });

@@ -33,6 +33,13 @@
 //                                         references claimed, and what could
 //                                         not be associated. It is about
 //                                         DISCOVERY, never upload progress.
+//     assetPrivacy,                       the IMAGE PRIVACY PASS's state
+//                                         (Phase 7.8): { phase, total, done,
+//                                         result } — this browser's older,
+//                                         still-queued images having their
+//                                         source EXIF/GPS removed before they
+//                                         may be uploaded. Real item counts,
+//                                         never a percentage.
 //     localData,                          what this browser holds outside any account
 //     migration: { offered, state, run, dismiss, assets },
 //     prepareSignOut(),                   flushes queued writes, then gives the
@@ -69,6 +76,10 @@ import { createAssetUploadSync } from "../lib/cloud/assetUploadSync";
 import { createAssetRemoteReader } from "../lib/cloud/assetRemoteRead";
 import { clearAssetRemoteReader, resetAssetReader, setAssetRemoteReader } from "../lib/assetReader";
 import { LOCAL_MIGRATION_STATUS, detectLocalData, readLocalMigrationState, runLocalMigration, shouldOfferLocalMigration } from "../lib/cloud/localMigration";
+import {
+  PRIVACY_PHASE,
+  runImagePrivacyNormalization,
+} from "../lib/assetPrivacyNormalization";
 import {
   BACKFILL_PHASE,
   LOCAL_REFERENCE_SCOPE,
@@ -159,6 +170,13 @@ export function DataScopeProvider({
   // owns that. `liveRef` is the session guard every pass checks between
   // assets, so a sign-out stops it without leaving half-adopted state.
   const [backfill, setBackfill] = useState({ phase: BACKFILL_PHASE.IDLE, result: null });
+  // The IMAGE PRIVACY PASS (Production Readiness Phase 7.8): this browser's
+  // already-stored, still-queued images being brought up to the current
+  // privacy policy before they may be uploaded. It reports real item counts,
+  // never a percentage, and it is NOT the thing that guarantees the
+  // invariant — the upload engine enforces the same rule per asset, so this
+  // pass only decides WHEN the work happens.
+  const [privacy, setPrivacy] = useState({ phase: PRIVACY_PHASE.IDLE, total: 0, done: 0, result: null });
   const [migrationAssets, setMigrationAssets] = useState(null);
   const liveRef = useRef({ active: false, workspaceId: null });
 
@@ -198,6 +216,35 @@ export function DataScopeProvider({
     }
   }, []);
 
+  /**
+   * One image-privacy pass for `workspaceId`, guarded by the session it
+   * belongs to (Production Readiness Phase 7.8). It runs AFTER the backfill,
+   * because the backfill is what puts this browser's legacy images into the
+   * workspace's upload queue in the first place — the queue is exactly the
+   * candidate set. It never throws into the session and never blocks it.
+   */
+  const startPrivacyPass = useCallback(async (workspaceId) => {
+    const isActive = () => liveRef.current.active && liveRef.current.workspaceId === workspaceId;
+    if (!isActive()) return null;
+    setPrivacy({ phase: PRIVACY_PHASE.RUNNING, total: 0, done: 0, result: null });
+    try {
+      const result = await runImagePrivacyNormalization({
+        workspaceId,
+        isActive,
+        onProgress: ({ total, done }) => {
+          if (isActive()) setPrivacy({ phase: PRIVACY_PHASE.RUNNING, total, done, result: null });
+        },
+      });
+      if (isActive()) {
+        setPrivacy({ phase: PRIVACY_PHASE.DONE, total: result.total, done: result.done, result });
+      }
+      return result;
+    } catch {
+      if (isActive()) setPrivacy({ phase: PRIVACY_PHASE.ERROR, total: 0, done: 0, result: null });
+      return null;
+    }
+  }, []);
+
   // Open one workspace session per (uid, attempt); close it when the uid
   // changes or the provider unmounts. The close is DEFERRED to a macrotask:
   // React runs a parent's effect cleanup before its children's, and the
@@ -211,6 +258,7 @@ export function DataScopeProvider({
     setAssetSync(null);
     setMigrationRun(null);
     setBackfill({ phase: BACKFILL_PHASE.IDLE, result: null });
+    setPrivacy({ phase: PRIVACY_PHASE.IDLE, total: 0, done: 0, result: null });
     setMigrationAssets(null);
     liveRef.current = { active: false, workspaceId: null };
 
@@ -297,6 +345,11 @@ export function DataScopeProvider({
           .hydrateIndex()
           .catch(() => null)
           .then(() => startBackfill(opened.workspace.id, uid))
+          // The privacy pass follows the backfill for the same reason the
+          // backfill follows hydration: it works on what the step before it
+          // produced. It is chained, not awaited, and the upload engine
+          // enforces the invariant per asset regardless of this ordering.
+          .then(() => startPrivacyPass(opened.workspace.id))
           .catch(() => null);
         const detected = detectLocalData(uid);
         setLocalData(detected);
@@ -357,7 +410,7 @@ export function DataScopeProvider({
         }, 0);
       }
     };
-  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill]);
+  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
@@ -443,6 +496,10 @@ export function DataScopeProvider({
       // DISCOVERED and ASSOCIATED, never what is uploading — `assetSync`
       // above owns that, and merging the two would make either one a lie.
       assetBackfill: backfill,
+      // The image PRIVACY pass's own state (Phase 7.8) — preparing this
+      // browser's older images so they may be uploaded at all. Separate from
+      // both lines above, because it is neither discovery nor upload.
+      assetPrivacy: privacy,
       localData,
       migration: Object.freeze({
         offered: phase === SCOPE_PHASE.MIGRATION,
@@ -461,7 +518,7 @@ export function DataScopeProvider({
         setMigrationState(readLocalMigrationState());
       },
     });
-  }, [uid, emailVerified, session, assetSync, backfill, localData, phase, migrationState, migrationRun, migrationAssets, runMigration, dismissMigration, prepareSignOut]);
+  }, [uid, emailVerified, session, assetSync, backfill, privacy, localData, phase, migrationState, migrationRun, migrationAssets, runMigration, dismissMigration, prepareSignOut]);
 
   if (!uid) return null;
 

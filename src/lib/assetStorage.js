@@ -37,19 +37,27 @@ import {
 import { DURABLE_SCOPE_KIND, getDurableScope } from "./durableStorage";
 import { isQueueableWorkspaceId, makeAssetUploadEntry } from "./assetUploadQueue";
 import {
-  ALLOWED_IMAGE_MIME_TYPES,
+  ACCEPTED_IMAGE_SOURCE_MIME_TYPES,
+  IMAGE_DECODE_MESSAGE,
   IMAGE_OVERSIZED_MESSAGE,
   IMAGE_UNSUPPORTED_MESSAGE,
   MAX_IMAGE_SOURCE_BYTES,
-  isAllowedImageMimeType,
+  isAcceptedImageSourceMimeType,
+  isUndecidedImageMimeType,
+  normalizeImageFile,
 } from "./imageProcessing";
+import { PRIVACY_NORMALIZATION_KEY } from "./imagePrivacy";
 
 const STORE = ASSET_STORE;
 
 // Logo upload constraints. SVG is intentionally excluded. The logo is a small
 // brand asset with its own smaller limit and is deliberately NOT governed by
 // the shared image-upload policy used for note evidence and editor images.
-export const ALLOWED_LOGO_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"];
+// The logo takes the same SOURCE formats as every other image — an iPhone
+// photograph of a sign is a perfectly ordinary way to supply one — and is
+// converted and privacy-normalised on the way in like any other. Its own
+// smaller SIZE limit is what makes it a separate policy, not its format list.
+export const ALLOWED_LOGO_MIME_TYPES = ACCEPTED_IMAGE_SOURCE_MIME_TYPES;
 export const MAX_LOGO_BYTES = 5 * 1024 * 1024; // 5 MB
 
 // Note Photo-field constraints (evidence photos on a completed note). These are
@@ -57,7 +65,7 @@ export const MAX_LOGO_BYTES = 5 * 1024 * 1024; // 5 MB
 // types, the same 20 MB source limit and the same normalization as a Free-form
 // editor image, so a user does not meet two different answers to "can I upload
 // this photo" in one product.
-export const ALLOWED_PHOTO_MIME_TYPES = ALLOWED_IMAGE_MIME_TYPES;
+export const ALLOWED_PHOTO_MIME_TYPES = ACCEPTED_IMAGE_SOURCE_MIME_TYPES;
 export const MAX_PHOTO_BYTES = MAX_IMAGE_SOURCE_BYTES; // 20 MB
 
 // Note File-field constraints. MIME types vary by OS/browser for Office and CSV
@@ -74,6 +82,11 @@ export const ALLOWED_NOTE_FILE_MIME_TYPES = [
   "image/png",
   "image/jpeg",
   "image/webp",
+  // A File field accepts images, so it accepts the format modern phones
+  // produce. The bytes are converted and privacy-normalised on the way in like
+  // any other image (src/lib/editorFileInsert.js); nothing HEIF is ever stored.
+  "image/heic",
+  "image/heif",
 ];
 export const ALLOWED_NOTE_FILE_EXTENSIONS = [
   ".pdf",
@@ -87,6 +100,8 @@ export const ALLOWED_NOTE_FILE_EXTENSIONS = [
   ".jpg",
   ".jpeg",
   ".webp",
+  ".heic",
+  ".heif",
 ];
 export const MAX_NOTE_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
 
@@ -171,10 +186,13 @@ export function validateLogoFile(file) {
   if (file.size === 0) {
     return { ok: false, error: "That file is empty or unreadable." };
   }
-  if (!ALLOWED_LOGO_MIME_TYPES.includes(file.type)) {
+  // An undecided declared type is deferred to the bytes, exactly as the shared
+  // image validator defers it; the conversion step refuses content that turns
+  // out not to be an image.
+  if (!isUndecidedImageMimeType(file.type) && !isAcceptedImageSourceMimeType(file.type)) {
     return {
       ok: false,
-      error: "Unsupported image type. Use a PNG, JPEG or WebP file.",
+      error: "Unsupported image type. Use a HEIC, HEIF, PNG, JPEG or WebP file.",
     };
   }
   if (file.size > MAX_LOGO_BYTES) {
@@ -196,7 +214,7 @@ export function validatePhotoFile(file) {
   if (file.size === 0) {
     return { ok: false, error: "That file is empty or unreadable." };
   }
-  if (!isAllowedImageMimeType(file.type)) {
+  if (!isUndecidedImageMimeType(file.type) && !isAcceptedImageSourceMimeType(file.type)) {
     return { ok: false, error: IMAGE_UNSUPPORTED_MESSAGE };
   }
   if (file.size > MAX_PHOTO_BYTES) {
@@ -230,7 +248,7 @@ export function validateNoteFile(file) {
     return {
       ok: false,
       error:
-        "Unsupported file type. Use PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, PNG, JPEG or WebP.",
+        "Unsupported file type. Use PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, HEIC, HEIF, PNG, JPEG or WebP.",
     };
   }
   if (file.size > MAX_NOTE_FILE_BYTES) {
@@ -524,10 +542,31 @@ export async function listAssetIds() {
 // Creates and persists a NEW user-uploaded logo asset. Validates first; on
 // invalid input it throws with a user-facing message and creates NO record, so
 // the caller can preserve the previous logo. User uploads get a fresh UUID id.
-export async function createLogoAsset(file) {
+//
+// PRIVACY (Production Readiness Phase 7.8). A logo is an ordinary image file
+// picked off a device and can carry the same EXIF/GPS a photograph does, so it
+// goes through the shared privacy boundary before it is stored — and the
+// statement about what that produced is recorded on the record, because the
+// upload engine must not have to guess. Nothing else about the logo policy
+// changes: `maxLongEdge: Infinity` keeps the existing "a logo is never
+// resized" behaviour, so the only bytes that change are ones that were
+// carrying metadata.
+export async function createLogoAsset(file, { normalize = normalizeImageFile } = {}) {
   const check = validateLogoFile(file);
   if (!check.ok) throw new Error(check.error);
-  return createScopedAsset({ kind: "logo", name: file.name || null, blob: file });
+  let prepared;
+  try {
+    prepared = await normalize(file, { maxLongEdge: Infinity });
+  } catch (err) {
+    throw new Error((err && err.message) || IMAGE_DECODE_MESSAGE);
+  }
+  if (!prepared || !prepared.blob) throw new Error(IMAGE_DECODE_MESSAGE);
+  return createScopedAsset({
+    kind: "logo",
+    name: file.name || null,
+    blob: prepared.blob,
+    metadata: prepared.privacy ? { [PRIVACY_NORMALIZATION_KEY]: prepared.privacy } : {},
+  });
 }
 
 // Creates and persists a NEW note-Photo asset (validation is the caller's
@@ -578,10 +617,16 @@ export async function createEditorFileAsset(blob, { name, metadata } = {}) {
 }
 
 // Creates and persists a NEW note-File asset. Same contract as createPhotoAsset.
-export async function createNoteFileAsset(file, metadata) {
+//
+// `blob` may be the picked File itself, or the same file after the shared
+// insertion pipeline re-wrapped its MIME type or — since Production Readiness
+// Phase 7.8 — privacy-normalised bytes that turned out to be an image. A
+// derived Blob has no filename of its own, which is why `name` may be supplied
+// separately; it falls back to the Blob's own name exactly as before.
+export async function createNoteFileAsset(file, metadata, name) {
   return createScopedAsset({
     kind: ASSET_KIND_NOTE_FILE,
-    name: file.name || null,
+    name: name || file.name || null,
     blob: file,
     metadata,
   });

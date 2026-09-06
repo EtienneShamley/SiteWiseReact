@@ -57,8 +57,10 @@ import {
 } from "../../lib/assetStorage";
 import {
   IMAGE_DECODE_MESSAGE,
+  normalizeImageBytesForPrivacy,
   normalizeImageFile,
 } from "../../lib/imageProcessing";
+import { PRIVACY_NORMALIZATION_KEY } from "../../lib/imagePrivacy";
 import {
   ATTACHMENT_KIND,
   makeAttachment,
@@ -1479,7 +1481,7 @@ export default function NoteTemplateDoc({
               {
                 validate: validateSectionFile,
                 createAsset: (blob, options) =>
-                  createNoteFileAsset(blob, options?.metadata),
+                  createNoteFileAsset(blob, options?.metadata, options?.name),
                 removeAsset: deleteAsset,
               }
             );
@@ -2225,14 +2227,41 @@ export default function NoteTemplateDoc({
         // 2. Photos: normalize. The decode inside it is what rejects a corrupt
         //    image before any Blob or reference is written, and it also yields
         //    the intrinsic dimensions, so the image is decoded exactly once.
-        //    A File field keeps its own document policy and is stored as-is.
+        //
+        //    A FILE keeps its own document policy — but a File field accepts
+        //    JPEG, PNG and WebP, so its bytes may be a photograph with GPS in
+        //    them. Privacy is decided from the BYTES (Production Readiness
+        //    Phase 7.8): an image goes through the same hidden-metadata policy
+        //    a Photo does, and a real document is stored byte-for-byte as it
+        //    came, exactly as before.
         let dims = null;
         let blobToStore = file;
+        // The PRIVACY statement about the bytes being stored. It comes from the
+        // normalization that produced them, so an asset can never claim to be
+        // clean because of where it was created rather than what was done to it.
+        let attachmentMetadata;
         if (isPhoto) {
           try {
             const normalized = await normalizeImageFile(file);
             blobToStore = normalized.blob;
             dims = { width: normalized.width, height: normalized.height };
+            if (normalized.privacy) {
+              attachmentMetadata = { [PRIVACY_NORMALIZATION_KEY]: normalized.privacy };
+            }
+          } catch (err) {
+            failures.push(`${label}: ${err?.message || IMAGE_DECODE_MESSAGE}`);
+            continue;
+          }
+        } else {
+          try {
+            const prepared = await normalizeImageBytesForPrivacy(file, {
+              assumeImage: false,
+              fallbackMimeType: file.type || null,
+            });
+            if (prepared && prepared.image) {
+              blobToStore = prepared.blob;
+              attachmentMetadata = { [PRIVACY_NORMALIZATION_KEY]: prepared.privacy };
+            }
           } catch (err) {
             failures.push(`${label}: ${err?.message || IMAGE_DECODE_MESSAGE}`);
             continue;
@@ -2243,8 +2272,8 @@ export default function NoteTemplateDoc({
         let assetId = null;
         try {
           assetId = isPhoto
-            ? await createPhotoAsset(blobToStore, undefined, file.name)
-            : await createNoteFileAsset(file);
+            ? await createPhotoAsset(blobToStore, attachmentMetadata, file.name)
+            : await createNoteFileAsset(blobToStore, attachmentMetadata, file.name);
         } catch (err) {
           failures.push(
             `${label}: could not be saved to storage (${err?.message || err}).`

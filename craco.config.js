@@ -58,6 +58,24 @@ module.exports = {
             warning.message.includes("@oozcitak") ||
             warning.message.includes("xmlbuilder2")
           ),
+        // libheif-js (the HEIC/HEIF decoder, Production Readiness Phase 7.8)
+        // is an Emscripten build bundled by esbuild, whose output carries a
+        // `require.apply(...)` shim for the NODE branch of the module. That
+        // branch is unreachable in a browser — it is guarded by a
+        // `process.versions.node` check — but webpack cannot know that
+        // statically and warns, and CI builds with warnings as errors.
+        //
+        // The predicate is deliberately narrow: it matches ONLY that warning
+        // AND only when the module it came from is libheif-js, so it cannot
+        // hide a dynamic require introduced anywhere in application code or in
+        // any other dependency.
+        (warning) =>
+          typeof warning?.message === "string" &&
+          warning.message.includes(
+            "require function is used in a way in which dependencies cannot be statically extracted"
+          ) &&
+          typeof warning?.module?.resource === "string" &&
+          warning.module.resource.includes("libheif-js"),
       ];
 
       // Belt-and-braces: ensure source-map-loader doesn't try to pre-load for these deps

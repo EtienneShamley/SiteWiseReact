@@ -36,8 +36,8 @@ import {
   validateAssetTransition,
 } from "./assetCloudModel";
 import { CLOUD_SCHEMA_VERSION, MAX_INLINE_PAYLOAD_UNITS } from "./cloudModel";
-import { ALLOWED_IMAGE_MIME_TYPES } from "../imageProcessing";
-import { ALLOWED_LOGO_MIME_TYPES, ALLOWED_NOTE_FILE_MIME_TYPES, ALLOWED_PHOTO_MIME_TYPES } from "../assetStorage";
+import { ACCEPTED_IMAGE_SOURCE_MIME_TYPES, ALLOWED_IMAGE_MIME_TYPES } from "../imageProcessing";
+import { ALLOWED_NOTE_FILE_MIME_TYPES } from "../assetStorage";
 import { ALLOWED_FILE_MIME_TYPES } from "../editorFileAttachments";
 import { INLINE_IMAGE_MIME_TYPES, INLINE_PDF_MIME_TYPE, INLINE_TEXT_MIME_TYPES, BLOCKED_INLINE_MIME_TYPES } from "../safeAttachmentOpen";
 import { MAX_PDF_SOURCE_BYTES } from "../pdfImportPolicy";
@@ -111,21 +111,43 @@ describe("catalogue", () => {
   });
 });
 
+/** Formats a user may supply but NoteWise never stores. */
+const SOURCE_ONLY_MIME_TYPES = new Set(
+  ACCEPTED_IMAGE_SOURCE_MIME_TYPES.filter((type) => !ALLOWED_IMAGE_MIME_TYPES.includes(type))
+);
+
 describe("the canonical cloud MIME policy", () => {
-  test("covers every type the product accepts today — images, PDF, documents, text and the CSV variants", () => {
-    const accepted = new Set([
+  test("covers every type the product may STORE — images, PDF, documents, text and the CSV variants", () => {
+    // What the cloud list must cover is what an asset can be STORED as, which
+    // since HEIC is deliberately narrower than what a user may SUPPLY: a HEIF
+    // photograph is converted on the way in and only its JPEG is ever an
+    // asset. `ALLOWED_IMAGE_MIME_TYPES` is the stored list;
+    // `ACCEPTED_IMAGE_SOURCE_MIME_TYPES` is the wider input one, and it is
+    // asserted below to be absent from the cloud.
+    const stored = new Set([
       ...ALLOWED_IMAGE_MIME_TYPES,
-      ...ALLOWED_LOGO_MIME_TYPES,
-      ...ALLOWED_PHOTO_MIME_TYPES,
-      ...ALLOWED_NOTE_FILE_MIME_TYPES,
+      ...ALLOWED_NOTE_FILE_MIME_TYPES.filter((type) => !SOURCE_ONLY_MIME_TYPES.has(type)),
       ...ALLOWED_FILE_MIME_TYPES,
       INLINE_PDF_MIME_TYPE,
       ...INLINE_IMAGE_MIME_TYPES,
       ...INLINE_TEXT_MIME_TYPES,
     ]);
-    for (const type of accepted) expect(CLOUD_ASSET_MIME_TYPES).toContain(type);
+    for (const type of stored) expect(CLOUD_ASSET_MIME_TYPES).toContain(type);
     // and nothing beyond them — the cloud list is not wider than the product
-    for (const type of CLOUD_ASSET_MIME_TYPES) expect(accepted.has(type)).toBe(true);
+    for (const type of CLOUD_ASSET_MIME_TYPES) expect(stored.has(type)).toBe(true);
+  });
+
+  test("HEIC/HEIF is a SOURCE format only and can never reach Storage", () => {
+    // The Storage rules enumerate exactly this list, so an object whose
+    // content type were HEIF would be refused by the service. That is the
+    // backstop behind the client conversion: even a bug that tried to upload
+    // raw HEIF bytes could not put them in the bucket.
+    for (const type of SOURCE_ONLY_MIME_TYPES) {
+      expect(ACCEPTED_IMAGE_SOURCE_MIME_TYPES).toContain(type);
+      expect(ALLOWED_IMAGE_MIME_TYPES).not.toContain(type);
+      expect(CLOUD_ASSET_MIME_TYPES).not.toContain(type);
+      expect(isCloudAssetMimeType(type)).toBe(false);
+    }
   });
 
   test("admits nothing the safe-open policy blocks, nothing generic, nothing scriptable", () => {

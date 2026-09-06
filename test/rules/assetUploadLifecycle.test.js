@@ -389,6 +389,71 @@ describe("two clients racing the immutable create", () => {
   });
 });
 
+describe("the privacy-normalisation marker travels with the document and is immutable", () => {
+  // Production Readiness Phase 7.8. The marker is part of the asset's
+  // `metadata` map, which the create rule already types and caps and the
+  // update rule already refuses to change — the object is immutable, so its
+  // description is too. Storage rules deliberately do NOT try to inspect the
+  // bytes for EXIF: rules cannot decode an image, and a rule that pretended to
+  // would be a security control that does not exist. The CLIENT pipeline owns
+  // byte normalisation; what the rules own is that nobody can retro-fit the
+  // claim onto a document after the fact.
+  const PRIVACY = { version: 1, sourceMetadataStripped: true, method: "reencoded" };
+
+  test("a document may be created carrying the marker", async () => {
+    const ref = doc(context(MEMBER).firestore(), "workspaces", WID, "assets", "privacy-marked");
+    await assertSucceeds(
+      setDoc(ref, assetDocument(WID, "privacy-marked", { metadata: { privacyNormalization: PRIVACY } }))
+    );
+    const stored = await getDoc(ref);
+    assert.deepEqual(stored.data().metadata.privacyNormalization, PRIVACY);
+  });
+
+  test("a document written BEFORE the policy — no marker at all — is still valid and readable", async () => {
+    // Backward compatibility: an asset uploaded by an earlier build must not
+    // become unreadable or unwritable because it predates 7.8.
+    const ref = doc(context(MEMBER).firestore(), "workspaces", WID, "assets", "pre-privacy");
+    await assertSucceeds(setDoc(ref, assetDocument(WID, "pre-privacy", { metadata: {} })));
+    await assertSucceeds(getDoc(ref));
+  });
+
+  test("the marker cannot be ADDED to a standing document, nor changed, nor removed", async () => {
+    const ctx = context(MEMBER);
+    const unmarked = doc(ctx.firestore(), "workspaces", WID, "assets", "unmarked");
+    await setDoc(unmarked, assetDocument(WID, "unmarked", { metadata: {} }));
+    // Claiming after the fact that bytes already in the bucket were normalised.
+    await assertFails(
+      setDoc(unmarked, assetDocument(WID, "unmarked", { metadata: { privacyNormalization: PRIVACY } }))
+    );
+
+    const marked = doc(ctx.firestore(), "workspaces", WID, "assets", "marked");
+    await setDoc(marked, assetDocument(WID, "marked", { metadata: { privacyNormalization: PRIVACY } }));
+    await assertFails(setDoc(marked, assetDocument(WID, "marked", { metadata: {} })));
+    await assertFails(
+      setDoc(
+        marked,
+        assetDocument(WID, "marked", {
+          metadata: { privacyNormalization: { ...PRIVACY, version: 99 } },
+        })
+      )
+    );
+    // The lifecycle fields it may change still work, and carry the marker
+    // forward untouched.
+    await assertSucceeds(
+      setDoc(
+        marked,
+        assetDocument(WID, "marked", {
+          metadata: { privacyNormalization: PRIVACY },
+          state: "tombstoned",
+          tombstonedAt: serverTimestamp(),
+        })
+      )
+    );
+    const after = await getDoc(marked);
+    assert.deepEqual(after.data().metadata.privacyNormalization, PRIVACY);
+  });
+});
+
 describe("the lifecycle is refused outside the membership that justifies it", () => {
   test("a non-member cannot head, upload or describe the asset", async () => {
     const ctx = context(OUTSIDER);

@@ -9,6 +9,15 @@
 //   1. validate the file the user picked (type, extension consistency, 25 MB)
 //   2. normalize a GENERIC MIME type to the canonical one by re-wrapping the
 //      SAME bytes — never decoding, copying or re-encoding them
+//   2b. PRIVACY (Production Readiness Phase 7.8): if the bytes are actually an
+//      image — JPEG, PNG or WebP, decided from the BYTES and never from the
+//      declared type or the filename — apply the same hidden-metadata policy
+//      every Photo control applies. A Template File field accepts images, so
+//      an ordinary photograph with GPS in it can arrive through this sequence,
+//      and it must not reach the cloud with that metadata merely because the
+//      user pressed "Attach file" rather than "Add photo". A real DOCUMENT is
+//      not touched at all: a PDF, a Word file or a spreadsheet is stored
+//      byte-for-byte as it came
 //   3. persist the Blob to IndexedDB — a resolved write IS the confirmation
 //   4. re-check that the originating note and the Free-form view are still the
 //      target; the write is asynchronous and the user may have moved on
@@ -34,6 +43,8 @@ import {
 import { createEditorFileAsset, deleteAsset } from "./assetStorage";
 import { insertFileAttachment } from "./editorCommands";
 import { safeDownloadFilename } from "./safeAttachmentOpen";
+import { normalizeImageBytesForPrivacy } from "./imageProcessing";
+import { PRIVACY_NORMALIZATION_KEY } from "./imagePrivacy";
 
 // Re-wrap the SAME bytes with the canonical MIME type. The Blob constructor
 // does not read or copy the underlying data here — it references the same
@@ -73,6 +84,7 @@ export async function insertFreeformFileAttachment(
     createAsset = createEditorFileAsset,
     removeAsset = deleteAsset,
     insertNode = insertFileAttachment,
+    normalizeImagePrivacy = normalizeImageBytesForPrivacy,
   } = deps;
 
   // 1. Validate the user's own input.
@@ -96,6 +108,36 @@ export async function insertFreeformFileAttachment(
     }
   }
 
+  // 2b. Privacy. Decided from the BYTES: an accepted image goes through the
+  //     same inspect-and-re-encode-only-what-carries-metadata policy as a
+  //     Photo, and anything else comes back exactly as it went in, unmarked.
+  //     A failure here writes nothing and inserts nothing.
+  let storedMimeType = check.mimeType;
+  let privacyMark = null;
+  // What the bytes WERE, when the privacy step converted them — `image/heic`
+  // for an iPhone photograph attached through a File field.
+  let convertedFrom = null;
+  try {
+    const prepared = await normalizeImagePrivacy(blobToStore, {
+      assumeImage: false,
+      fallbackMimeType: check.mimeType,
+    });
+    if (prepared && prepared.image) {
+      blobToStore = prepared.blob;
+      convertedFrom = prepared.sourceMimeType || null;
+      // The type the stored Blob actually has, which is what the safe-open
+      // policy will later read. A re-encode preserves the format, so this
+      // normally equals the canonical type decided above.
+      storedMimeType = prepared.mimeType || check.mimeType;
+      privacyMark = prepared.privacy;
+    }
+  } catch {
+    return { ok: false, error: FILE_INSERT_MESSAGE };
+  }
+  if (!blobToStore || typeof blobToStore.size !== "number" || blobToStore.size === 0) {
+    return { ok: false, error: FILE_INSERT_MESSAGE };
+  }
+
   // 3. Persist the bytes. Nothing enters the document until this resolves.
   let assetId;
   try {
@@ -109,6 +151,10 @@ export async function insertFreeformFileAttachment(
         extension: check.extension || null,
         normalizedFromGenericMimeType: !!check.rewrap,
         sourceSize: file && typeof file.size === "number" ? file.size : null,
+        ...(convertedFrom ? { sourceMimeType: convertedFrom } : {}),
+        // Present only when these bytes ARE an image; a document carries no
+        // such claim, because the claim would not be about anything.
+        ...(privacyMark ? { [PRIVACY_NORMALIZATION_KEY]: privacyMark } : {}),
       },
     });
   } catch {
@@ -143,7 +189,7 @@ export async function insertFreeformFileAttachment(
     inserted = insertNode(editor, {
       assetId,
       name,
-      mimeType: check.mimeType,
+      mimeType: storedMimeType,
       size: blobToStore.size,
     });
   } catch {
@@ -161,7 +207,7 @@ export async function insertFreeformFileAttachment(
     ok: true,
     assetId,
     name,
-    mimeType: check.mimeType,
+    mimeType: storedMimeType,
     size: blobToStore.size,
   };
 }

@@ -38,7 +38,27 @@ import {
   ALLOWED_EDITOR_IMAGE_MIME_TYPES,
   validateEditorImageFile,
 } from "../lib/editorImages";
-import { IMAGE_DECODE_MESSAGE } from "../lib/imageProcessing";
+import {
+  IMAGE_DECODE_MESSAGE,
+  chooseOutputType,
+  decodeImageSource,
+  isAllowedImageMimeType,
+  normalizeImageFile,
+} from "../lib/imageProcessing";
+import { blobCarriesSourceImageMetadata } from "../lib/imagePrivacy";
+import {
+  finiteNumberOrNull,
+  formatStampAltitude,
+  formatStampSpeed,
+  readSourcePhotoMetadata,
+  resolveStampAltitude,
+  resolveStampLocation,
+  stampLocationLabel,
+} from "../lib/photoStampMetadata";
+import {
+  composeReverseGeocodeAddressLines,
+  nominatimReverseUrl,
+} from "../lib/reverseGeocodeAddress";
 import {
   ALLOWED_FILE_EXTENSIONS,
   ALLOWED_FILE_MIME_TYPES,
@@ -82,7 +102,67 @@ function wrapTextLines(ctx, text, maxWidth) {
   if (line) lines.push(line);
   return lines;
 }
-function loadImageFromBlobURL(url) {
+/**
+ * Let the browser PAINT the "Processing…" status before the slow part of
+ * a preparation begins.
+ *
+ * The status is set the moment a preparation starts, but the HEIC decode that
+ * follows is synchronous WebAssembly work of a second or more, and the small
+ * byte reads before it settle within one frame. A busy state that is committed
+ * to the DOM and then never reaches the screen before the main thread blocks
+ * — and is cleared the moment it unblocks — is invisible, which is exactly what
+ * an iPhone photograph picked through `+` looked like. One animation frame,
+ * then a task after it (the frame has painted by then), is the standard way to
+ * guarantee the paint. A background tab gets no frames, so a short fallback
+ * timer keeps the preparation from waiting on one.
+ *
+ * Never called on the fast path: a JPEG/PNG/WebP pick returns before this, so
+ * it cannot introduce a flash of busy state where there is no work.
+ */
+function awaitBusyStatusPaint() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => setTimeout(finish, 0));
+    }
+    setTimeout(finish, 250);
+  });
+}
+
+/**
+ * The one reverse lookup against the geocoder. Best-effort: any failure —
+ * offline, a non-2xx answer, a body that is not JSON — resolves to null and
+ * the stamp simply carries no address. The address is COMPOSED elsewhere
+ * (src/lib/reverseGeocodeAddress.js); this only fetches.
+ */
+async function fetchReverseGeocode(lat, lon) {
+  try {
+    const res = await fetch(nominatimReverseUrl(lat, lon));
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load a REMOTE image by URL — the static map tile, and nothing else.
+ *
+ * This is deliberately NOT how a user's own photograph is decoded. It asks the
+ * browser's native image pipeline for a picture from a URL, which is right for
+ * a map tile (a PNG served by Google or OpenStreetMap) and wrong for a source
+ * file: Chrome, Edge and Firefox cannot decode HEIC at all, so handing an
+ * iPhone photograph to an `<img>` fails with an `onerror` and no explanation.
+ * Source images go through the shared decode boundary instead — see
+ * `decodeSourceImage` below.
+ */
+function loadRemoteImage(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = "anonymous";
@@ -286,8 +366,9 @@ export default function BottomBar({
   const captureAccept = useMemo(() => {
     const parts = [];
     // The explicit image list rather than a wildcard: it is what the image path
-    // actually accepts (JPEG/PNG/WebP — SVG is excluded as a scriptable
-    // document), so the picker stops offering files that would only be rejected.
+    // actually accepts (HEIC/HEIF/JPEG/PNG/WebP — SVG is excluded as a
+    // scriptable document), so the picker stops offering files that would only
+    // be rejected.
     if (canCaptureImage) parts.push(...ALLOWED_EDITOR_IMAGE_MIME_TYPES);
     if (canCaptureFile) {
       parts.push(...ALLOWED_FILE_MIME_TYPES, ...ALLOWED_FILE_EXTENSIONS);
@@ -352,17 +433,39 @@ export default function BottomBar({
   }, [currentNoteId, coordSystem]);
 
   // ---------------- EXIF / GPS helpers ----------------
-  async function getExifGeoAndTime(file) {
+  /**
+   * The SHARED decode boundary, for a user's own source image.
+   *
+   * `decodeImageSource` routes HEIC/HEIF to the WebAssembly decoder and
+   * everything else to `createImageBitmap` / `<img>` exactly as before, and it
+   * returns pixels already in their visual orientation. Nothing in this bar
+   * asks the browser to decode a source file directly any more.
+   */
+  async function decodeSourceImage(file, sourceMimeType) {
+    return decodeImageSource(file, {}, { mimeType: sourceMimeType });
+  }
+
+  /**
+   * What a picked file's bytes ACTUALLY are, which is not always what the
+   * platform declared: a HEIC routinely arrives as `application/octet-stream`
+   * or with no type at all where no HEIF codec is registered. Never throws —
+   * an unreadable answer simply leaves the declared type standing.
+   */
+  async function resolveSourceMimeType(file, declared) {
     try {
-      const gps = await exifr.gps(file).catch(() => null);
-      const tags = await exifr.parse(file, ["DateTimeOriginal"]).catch(() => null);
-      const lat = gps?.latitude ?? null;
-      const lon = gps?.longitude ?? null;
-      const exifDate = tags?.DateTimeOriginal instanceof Date ? tags.DateTimeOriginal : null;
-      return { lat, lon, exifDate, altitude: gps?.altitude ?? null };
+      const inspected = await blobCarriesSourceImageMetadata(file);
+      return (inspected && inspected.mimeType) || declared;
     } catch {
-      return { lat: null, lon: null, exifDate: null, altitude: null };
+      return declared;
     }
+  }
+
+  // The source photograph's own position, altitude and capture time, read from
+  // its ORIGINAL bytes — the file the user took, never the decoded surface or
+  // the privacy-normalised output, neither of which has any. The reading and
+  // the altitude's sign live in src/lib/photoStampMetadata.js.
+  async function getExifGeoAndTime(file) {
+    return readSourcePhotoMetadata(file, { exifr });
   }
   function formatLocalWithTz(dt) {
     try {
@@ -388,11 +491,14 @@ export default function BottomBar({
         (pos) => {
           const { latitude, longitude, accuracy, altitude, speed } = pos.coords || {};
           if (typeof latitude === "number" && typeof longitude === "number") {
+            // `altitude` and `speed` are null whenever the device cannot say —
+            // most desktops, and many phones indoors. They stay null here; the
+            // stamp shows "n/a" for them rather than a fabricated zero.
             resolve({
               lat: latitude, lon: longitude,
               acc: accuracy ?? null,
-              alt: typeof altitude === "number" ? altitude : null,
-              spd: typeof speed === "number" ? speed : null,
+              alt: finiteNumberOrNull(altitude),
+              spd: finiteNumberOrNull(speed),
             });
           } else {
             resolve(null);
@@ -403,18 +509,14 @@ export default function BottomBar({
       );
     });
   }
+  // The stamp's address lines: ONE honest answer for the coordinates the
+  // source-precedence rule selected, composed as the provider returned it. On
+  // a beachfront that is the promenade the photograph was taken on, not a
+  // nearby street it was not. Best-effort with the current provider; the
+  // coordinates on the stamp remain the authoritative record.
   async function reverseGeocode(lat, lon) {
     try {
-      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&addressdetails=1`;
-      const res = await fetch(url);
-      if (!res.ok) return null;
-      const data = await res.json();
-      const a = data?.address || {};
-      const line1 = [a.house_number, a.road].filter(Boolean).join(" ").trim() || null;
-      const line2 = a.suburb || a.neighbourhood || a.locality || null;
-      const line3 = a.city || a.town || a.village || a.county || null;
-      const line4 = a.state || a.region || a.province || null;
-      return [line1, line2, line3, line4].filter(Boolean);
+      return composeReverseGeocodeAddressLines(await fetchReverseGeocode(lat, lon));
     } catch {
       return null;
     }
@@ -447,7 +549,7 @@ export default function BottomBar({
 
     const mapImg = await (async () => {
       try {
-        return await loadImageFromBlobURL(url);
+        return await loadRemoteImage(url);
       } catch {
         return null;
       }
@@ -478,29 +580,54 @@ export default function BottomBar({
     ctx.restore();
   }
 
-  // `outputType` keeps the stamped result in the SOURCE photo's format: the
-  // canvas would otherwise always emit PNG, turning an ordinary JPEG capture
-  // into a far larger file for no visible gain.
-  async function buildStampedImageBLOB(file, outputType = "image/png") {
-    const originalURL = URL.createObjectURL(file);
-    let img;
-    try { img = await loadImageFromBlobURL(originalURL); }
-    finally { URL.revokeObjectURL(originalURL); }
+  // `outputType` keeps the stamped result in the SOURCE photo's format where
+  // NoteWise stores that format — the canvas would otherwise always emit PNG,
+  // turning an ordinary JPEG capture into a far larger file for no visible
+  // gain. A HEIC resolves to JPEG, because NoteWise stores no HEIF.
+  //
+  // TWO SEPARATE RESPONSIBILITIES, deliberately:
+  //
+  //   PIXELS    through the SHARED decode boundary (src/lib/imageProcessing.js
+  //             -> `decodeImageSource`), which routes HEIC/HEIF to the
+  //             WebAssembly decoder and everything else to the browser's own,
+  //             and hands back pixels already in their visual orientation.
+  //   METADATA  from the ORIGINAL bytes, with `exifr`, exactly as before —
+  //             the GPS, altitude and capture time that get burned into the
+  //             stamp are read from the file the user actually took, not from
+  //             the decoded surface, which has no metadata by construction.
+  //
+  // Before this, the stamp asked an `<img>` to decode the source file. That
+  // works for JPEG/PNG/WebP and fails outright for HEIC on every browser but
+  // Safari, which is why an iPhone photograph could not be captured on Chrome.
+  async function buildStampedImageBLOB(file, outputType = "image/png", sourceMimeType = null) {
+    const img = await decodeSourceImage(file, sourceMimeType);
 
     const { lat: exifLat, lon: exifLon, exifDate, altitude: exifAlt } = await getExifGeoAndTime(file);
-    let lat = exifLat, lon = exifLon, acc = null, alt = exifAlt, spdMs = null;
+    let acc = null, browserGeo = null, browserAlt = null, spdMs = null;
 
-    if (lat == null || lon == null || alt == null) {
-      const browserGeo = await getBrowserGeo(8000);
+    // The device is consulted only for what the photograph does not carry: its
+    // position when the photograph has none, and its altitude and speed
+    // otherwise. A photograph WITH a position never asks for one.
+    if (exifLat == null || exifLon == null || exifAlt == null) {
+      browserGeo = await getBrowserGeo(8000);
       if (browserGeo) {
-        lat = lat ?? browserGeo.lat;
-        lon = lon ?? browserGeo.lon;
         // eslint-disable-next-line no-unused-vars
         acc = browserGeo.acc ?? null;
-        alt = alt ?? browserGeo.alt;
+        browserAlt = browserGeo.alt;
         spdMs = browserGeo.spd;
       }
     }
+    // WHERE the stamp says the photograph is (V1 rule): the photograph's own
+    // GPS position first; the device's current position only when the
+    // photograph has none; otherwise no location. A historical photograph
+    // documents where it was taken, not where it was added from, so the
+    // device never silently replaces a photograph's position.
+    const location = resolveStampLocation({ photo: { lat: exifLat, lon: exifLon }, device: browserGeo });
+    const { lat, lon } = location;
+    // The photograph's own altitude first, the device's current one second,
+    // and an honest "n/a" otherwise. A valid 0 m is 0; nothing becomes zero
+    // because it was missing.
+    const alt = resolveStampAltitude({ exifAltitude: exifAlt, browserAltitude: browserAlt });
 
     const indexNo = (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
     localStorage.setItem("sitewise_photo_index", String(indexNo));
@@ -510,9 +637,14 @@ export default function BottomBar({
     const networkStr = formatLocalWithTz(networkDt);
     const localStr = formatLocalWithTz(localDt);
 
-    // Reverse geocode (best-effort)
+    // Reverse geocode (best-effort) — of the SELECTED coordinates, so a
+    // photograph's position is never described by the device's address.
     let addrLines = null;
     if (lat != null && lon != null) addrLines = await reverseGeocode(lat, lon);
+    // The label says which source the address AND the coordinates below it
+    // came from — "Photo location:" or "Current location:" — and nothing else
+    // on the stamp repeats that.
+    const locationLabel = stampLocationLabel(location.source);
 
     const coordStr = lat != null && lon != null ? `${lat.toFixed(6)}, ${lon.toFixed(6)}` : null;
 
@@ -522,14 +654,14 @@ export default function BottomBar({
         ? await formatConvertedLineAsync(coordSystem, lat, lon)
         : null;
 
-    let altDisplay = "n/a";
-    if (typeof alt === "number" && isFinite(alt) && Math.abs(alt) >= 1) altDisplay = `${alt.toFixed(1)}m`;
-    const spdDisplay = typeof spdMs === "number" ? `${(spdMs * 3.6).toFixed(1)}km/h` : "0.0km/h";
+    const altDisplay = formatStampAltitude(alt);
+    const spdDisplay = formatStampSpeed(spdMs);
 
     const lines = [
       `network: ${networkStr}`,
       `Local: ${localStr}`,
     ];
+    if (locationLabel) lines.push(locationLabel);
     if (addrLines && addrLines.length) lines.push(...addrLines);
     if (coordStr) lines.push(`Coordinates: ${coordStr}`);
     if (convertedStr) lines.push(convertedStr); // directly underneath
@@ -537,13 +669,19 @@ export default function BottomBar({
     lines.push(`speed: ${spdDisplay}`);
     lines.push(`index number ${indexNo}`);
 
-    // Prepare canvas and draw
+    // Prepare canvas and draw. The dimensions are the DECODER's — already
+    // oriented, so a portrait photograph stamps as a portrait one.
     const stampedCanvas = document.createElement("canvas");
     const maxW = img.width, maxH = img.height;
     stampedCanvas.width = maxW; stampedCanvas.height = maxH;
     const ctx = stampedCanvas.getContext("2d");
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(img, 0, 0, maxW, maxH);
+    // An ImageBitmap, an HTMLImageElement or a canvas — `drawImage` takes all
+    // three, which is what lets the decode boundary choose the route.
+    ctx.drawImage(img.source, 0, 0, maxW, maxH);
+    // The decoded surface is finished with: the pixels are on the canvas now,
+    // and a full-resolution photograph is worth releasing promptly.
+    img.release();
 
     // Left info box
     const padX = 10, padY = 10;
@@ -602,15 +740,20 @@ export default function BottomBar({
   // for location either. No structured GPS/address metadata is produced by
   // either route: the camera stamp is, and stays, visible pixels in the Blob.
   //
+  // WHAT BOTH ROUTES NOW SHARE (Production Readiness Phase 7.8): the DECODE.
+  // Neither one hands a source file to an `<img>` any more — HEIC/HEIF goes to
+  // the WebAssembly decoder and everything else to the browser's own, through
+  // the one boundary in src/lib/imageProcessing.js. An unstamped pick of a
+  // format NoteWise cannot store is converted here rather than staged raw, so
+  // the composer's preview shows the picture and nothing decodes it twice.
+  //
   // `stamp` is passed explicitly by each call site rather than inferred from the
   // file, because a file cannot say how it was obtained — only the control the
   // user pressed knows that.
   async function preparePhotoBytes(file, { stamp }) {
     // The busy status covers the whole preparation, however it ends: the
     // `finally` below is the ONLY place it is released, so a refusal, a failed
-    // stamp or a thrown error can never leave the composer looking busy. An
-    // unstamped pick has no await between the two updates, so React batches
-    // them and nothing flashes.
+    // stamp or a thrown error can never leave the composer looking busy.
     setPreparingImages((n) => n + 1);
     try {
       // The 20 MB source limit is applied to the picked file FIRST, before any
@@ -621,25 +764,77 @@ export default function BottomBar({
         onImageError?.(check.error);
         return null;
       }
-      if (!stamp) {
-        // The picked file, untouched. No location, no map, no labels.
+
+      // An ordinary pick of a format the browser can display and NoteWise can
+      // store is staged UNTOUCHED and SYNCHRONOUSLY, exactly as it always was:
+      // no decode, no sniff, no re-encode, no busy flicker. The shared write
+      // sequence still decides everything from the bytes when it stores them —
+      // this only decides whether any work is needed here and now.
+      if (!stamp && isAllowedImageMimeType(check.mimeType)) {
         return { blob: file, mimeType: check.mimeType };
       }
+
+      // Everything past this point is asynchronous and, for a HEIC, heavy: the
+      // busy status set above is given one frame to reach the screen before
+      // the decoder can block the main thread. See `awaitBusyStatusPaint`.
+      await awaitBusyStatusPaint();
+
+      // Otherwise the bytes decide, because what the platform DECLARED may be
+      // nothing at all for a HEIC.
+      const sourceMimeType = await resolveSourceMimeType(file, check.mimeType);
+      // Never HEIF: a format NoteWise does not store resolves to JPEG.
+      const outputType = chooseOutputType(sourceMimeType);
+      const storable = outputType === sourceMimeType;
+
+      if (!stamp) {
+        if (storable) return { blob: file, mimeType: sourceMimeType };
+        // A HEIC can be neither displayed by the composer's preview nor stored
+        // as it is. It is converted HERE, once, through the shared pipeline:
+        // staging raw HEIF would show the user a broken thumbnail, and
+        // converting later would mean decoding the same photograph twice.
+        //
+        // `return await`, deliberately: a bare `return promise` inside this
+        // try/finally runs the `finally` — and releases the busy status — the
+        // moment the conversion STARTS, not when it settles. That is why a
+        // HEIC picked through `+` showed no "Processing…" at all.
+        return await convertUnstorableImage(file);
+      }
+
       let stamped = null;
       try {
-        stamped = await buildStampedImageBLOB(file, check.mimeType);
+        stamped = await buildStampedImageBLOB(file, outputType, sourceMimeType);
       } catch {
         onImageError?.(IMAGE_DECODE_MESSAGE);
         return null;
       }
+      if (stamped) return { blob: stamped, mimeType: outputType };
+
       // A failed stamp — geolocation denied, the map thumbnail unavailable, a
-      // canvas that produced nothing — falls back to the original photo rather
-      // than losing the capture. buildStampedImageBLOB already treats a missing
-      // position and an unreachable map tile as omissions rather than errors, so
-      // a camera capture stays usable in all three cases.
-      return { blob: stamped || file, mimeType: check.mimeType };
+      // canvas that produced nothing — falls back to the photo itself rather
+      // than losing the capture. For a format that cannot be stored as it is,
+      // the fallback is the CONVERTED photo, not the raw file.
+      if (storable) return { blob: file, mimeType: sourceMimeType };
+      return await convertUnstorableImage(file);
     } finally {
       setPreparingImages((n) => Math.max(0, n - 1));
+    }
+  }
+
+  /**
+   * Convert a source format NoteWise does not store — HEIC/HEIF — through the
+   * SHARED pipeline, which decodes it, applies the ordinary size and quality
+   * policy and encodes one JPEG. One conversion, not two: the shared write
+   * sequence then finds an image already inside its budget and stores those
+   * exact bytes.
+   */
+  async function convertUnstorableImage(file) {
+    try {
+      const converted = await normalizeImageFile(file);
+      if (!converted || !converted.blob) throw new Error(IMAGE_DECODE_MESSAGE);
+      return { blob: converted.blob, mimeType: converted.mimeType };
+    } catch (err) {
+      onImageError?.((err && err.message) || IMAGE_DECODE_MESSAGE);
+      return null;
     }
   }
 
@@ -934,11 +1129,12 @@ export default function BottomBar({
         {/* A photo being prepared — validated and, for a camera capture,
             stamped — before it appears below as a staged attachment (or, with
             no composing destination, is handed to MainArea, whose own status
-            then takes over). Activity only, never a fabricated percentage. */}
+            then takes over). Activity only, never a fabricated percentage.
+            The generic wording: Quick Add prepares images AND files here. */}
         {preparingImage && (
           <BusyStatus
             className="mb-2"
-            label="Processing image…"
+            label="Processing…"
           />
         )}
 

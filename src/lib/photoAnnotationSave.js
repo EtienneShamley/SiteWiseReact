@@ -25,6 +25,11 @@
 import { createEditorImageAsset, deleteAsset } from "./assetStorage";
 import { replaceImageAssetReference } from "./editorCommands";
 import {
+  PRIVACY_METHOD,
+  PRIVACY_NORMALIZATION_KEY,
+  privacyNormalizationMark,
+} from "./imagePrivacy";
+import {
   PHOTO_NOT_IN_NOTE_MESSAGE,
   PHOTO_SAVE_ACTION,
   PHOTO_SAVE_MESSAGE,
@@ -84,6 +89,11 @@ export async function savePhotoAnnotation(request, result, deps = {}) {
         height: result.height || null,
         sourceMimeType: result.mimeType || null,
         normalized: false,
+        // A rendition is NoteWise's own canvas output drawn over the original's
+        // decoded pixels: it cannot carry the original's EXIF/GPS, so it is
+        // marked clean at source rather than pointlessly re-encoded a second
+        // time (Production Readiness Phase 7.8).
+        [PRIVACY_NORMALIZATION_KEY]: privacyNormalizationMark(PRIVACY_METHOD.GENERATED),
         annotation: layer,
       },
     });

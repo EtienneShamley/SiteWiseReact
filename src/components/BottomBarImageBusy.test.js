@@ -1,12 +1,15 @@
 // src/components/BottomBarImageBusy.test.js
 //
 // The Quick Add composer's photo preparation, RENDERED with react-dom in jsdom.
-// A camera capture is stamped before it is staged, and the stamp begins by
-// decoding the photo through an <img> — so the test replaces `Image` with one
-// it controls and holds the decode open for as long as it needs. That is the
-// same shape the real slow case has (EXIF, geolocation, reverse geocode, map
-// tile, re-encode all follow the decode); what matters here is that the
-// composer says so, holds its controls, and lets go on every outcome.
+// A camera capture is stamped before it is staged. Since Phase 7.8 the stamp
+// gets its pixels from the SHARED decode boundary rather than from an <img> of
+// its own — but for a JPEG in jsdom that boundary still ends at an
+// HTMLImageElement (there is no `createImageBitmap` here), so the test replaces
+// `Image` with one it controls and holds the decode open for as long as it
+// needs. That is the same shape the real slow case has (a content sniff, then
+// the decode, then EXIF, geolocation, reverse geocode, map tile and re-encode);
+// what matters here is that the composer says so, holds its controls, and lets
+// go on every outcome.
 import React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -17,12 +20,30 @@ import { IMAGE_DECODE_MESSAGE } from "../lib/imageProcessing";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+// Microtasks AND several macrotask turns: before the stamp decodes it gives
+// the busy status one animation frame to paint (stubbed below to a task), then
+// reads a short prefix of the file to decide what the bytes are — and jsdom's
+// Blob has no `arrayBuffer()`, so that read goes through FileReader and
+// settles on a task rather than a microtask.
 const flush = () =>
   act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.resolve();
+    }
   });
+
+// jsdom's requestAnimationFrame runs on a 60 Hz timer; the busy-paint yield is
+// made deterministic by turning it into a task, and COUNTED, because the fast
+// path must never reach it.
+let paintYields = 0;
+const stubAnimationFrame = (cb) => {
+  paintYields += 1;
+  return setTimeout(cb, 0);
+};
 
 class FakeImage {
   static instances = [];
@@ -42,16 +63,19 @@ class FakeImage {
 const realImage = globalThis.Image;
 const realCreateObjectURL = URL.createObjectURL;
 const realRevokeObjectURL = URL.revokeObjectURL;
+const realAnimationFrame = globalThis.requestAnimationFrame;
 
 beforeAll(() => {
   globalThis.Image = FakeImage;
   URL.createObjectURL = (blob) => `blob:mock-${blob?.name || "x"}`;
   URL.revokeObjectURL = () => {};
+  globalThis.requestAnimationFrame = stubAnimationFrame;
 });
 afterAll(() => {
   globalThis.Image = realImage;
   URL.createObjectURL = realCreateObjectURL;
   URL.revokeObjectURL = realRevokeObjectURL;
+  globalThis.requestAnimationFrame = realAnimationFrame;
 });
 
 const target = { kind: QUICK_ADD_KIND.FREEFORM };
@@ -68,6 +92,7 @@ let onSendComposer;
 
 function mount(props = {}) {
   FakeImage.instances = [];
+  paintYields = 0;
   onImageError = jest.fn();
   onSendComposer = jest.fn(async () => ({ ok: true, deliveredIds: [], textDelivered: false }));
   host = document.createElement("div");
@@ -121,12 +146,15 @@ describe("Quick Add camera capture — busy feedback while the photo is prepared
     choose(cameraInput(), [imageFile()]);
     await flush();
 
-    // The stamp is waiting on the photo's decode — nothing has resolved.
+    // The stamp is waiting on the photo's decode — nothing has resolved. The
+    // status was given its paint frame BEFORE the decode began.
+    expect(paintYields).toBe(1);
     expect(FakeImage.instances).toHaveLength(1);
     const region = status();
     expect(region).not.toBeNull();
     expect(region.getAttribute("aria-live")).toBe("polite");
-    expect(region.textContent).toBe("Processing image…");
+    expect(region.textContent).toBe("Processing…");
+    expect(host.textContent).not.toMatch(/Processing image/);
     expect(region.querySelector('[data-busy-spinner][aria-hidden="true"]')).not.toBeNull();
 
     // Held: the same photo cannot be captured or picked twice, and Send cannot
@@ -139,7 +167,7 @@ describe("Quick Add camera capture — busy feedback while the photo is prepared
     expect(host.querySelector('button[aria-label^="Open Live transcript"]').disabled).toBe(false);
 
     await flush();
-    expect(status().textContent).toBe("Processing image…");
+    expect(status().textContent).toBe("Processing…");
 
     // A click on the held camera control opens no picker.
     const clickSpy = jest.spyOn(cameraInput(), "click");
@@ -172,7 +200,7 @@ describe("Quick Add camera capture — busy feedback while the photo is prepared
     mount();
     choose(cameraInput(), [imageFile()]);
     await flush();
-    expect(status().textContent).toBe("Processing image…");
+    expect(status().textContent).toBe("Processing…");
 
     act(() => FakeImage.instances[0].onerror(new Event("error")));
     await flush();
@@ -189,10 +217,16 @@ describe("Quick Add camera capture — busy feedback while the photo is prepared
   test("an unstamped pick stages immediately and leaves no busy state behind", async () => {
     mount();
     choose(pickerInput(), [imageFile("chosen.jpg")]);
+    // Synchronously after the change event: the fast path has already
+    // returned, so the busy count never rendered as anything but zero — no
+    // flash of "Processing…" for a file that needed no work.
+    expect(status()).toBeNull();
     await flush();
 
-    // No decode was needed: the picked file is staged as-is.
+    // No decode was needed: the picked file is staged as-is — and the paint
+    // yield that precedes real work was never reached.
     expect(FakeImage.instances).toHaveLength(0);
+    expect(paintYields).toBe(0);
     expect(status()).toBeNull();
     expect(host.querySelector("[data-busy-spinner]")).toBeNull();
     const staged = host.querySelectorAll(".nw-quickadd-staged-item");
@@ -210,6 +244,7 @@ describe("Quick Add camera capture — busy feedback while the photo is prepared
     await flush();
 
     expect(FakeImage.instances).toHaveLength(0);
+    expect(paintYields).toBe(0);
     expect(status()).toBeNull();
     expect(onImageError).toHaveBeenCalledTimes(1);
     expect(cameraButton().disabled).toBe(false);

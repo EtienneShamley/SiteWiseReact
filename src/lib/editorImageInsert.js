@@ -27,6 +27,7 @@
 import { validateEditorImageFile } from "./editorImages";
 import { normalizeImageFile, IMAGE_STORAGE_MESSAGE } from "./imageProcessing";
 import { createEditorImageAsset, deleteAsset } from "./assetStorage";
+import { PRIVACY_NORMALIZATION_KEY } from "./imagePrivacy";
 import { insertImageAsset } from "./editorCommands";
 import { EDITOR_IMAGE_INSERT_MESSAGE } from "./editorImageAssets";
 
@@ -92,10 +93,18 @@ export async function insertLocalImageAsset(
       metadata: {
         width: normalized.width || null,
         height: normalized.height || null,
-        sourceMimeType: check.mimeType,
+        // What the user actually supplied. For a converted iPhone photograph
+        // this is `image/heic` while the stored Blob is the JPEG — the record
+        // describes the bytes, and this remembers where they came from.
+        sourceMimeType: normalized.sourceMimeType || check.mimeType,
         sourceSize:
           sourceFile && typeof sourceFile.size === "number" ? sourceFile.size : null,
         normalized: !!normalized.processed,
+        // The PRIVACY statement about the bytes actually being stored (Phase
+        // 7.8), made by the pipeline that produced them. Without it the upload
+        // engine treats the asset as unverified legacy and normalises it again
+        // before it may leave the device.
+        ...(normalized.privacy ? { [PRIVACY_NORMALIZATION_KEY]: normalized.privacy } : {}),
       },
     });
   } catch {

@@ -85,7 +85,9 @@ describe("every image-add surface reports through the shared indicator", () => {
 
   test("the Quick Add composer reports photo preparation and holds its controls", () => {
     expect(bottomBar).toMatch(/import BusyStatus from "\.\/BusyStatus"/);
-    expect(bottomBar).toMatch(/label="Processing image…"/);
+    // Generic wording: Quick Add prepares images AND files here.
+    expect(bottomBar).toMatch(/label="Processing…"/);
+    expect(bottomBar).not.toMatch(/label="Processing image…"/);
     // Released in exactly one place, whatever the outcome.
     const prepare = bottomBar.slice(
       bottomBar.indexOf("async function preparePhotoBytes"),

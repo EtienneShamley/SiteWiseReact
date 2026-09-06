@@ -22,7 +22,7 @@
 // This indicates ACTIVITY, never progress: the image pipeline (decode → cap
 // the long edge → re-encode → IndexedDB write) exposes no real percentage, and
 // a fabricated one would be a lie. The label says what is happening ("Adding
-// image…", "Processing image…") — never "Uploading…", because nothing here
+// image…", "Processing…") — never "Uploading…", because nothing here
 // leaves the device.
 
 import React from "react";

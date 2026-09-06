@@ -26,6 +26,15 @@
 //
 //   A. read the local asset through the local cache boundary, by the queue
 //      entry's own workspace, asset and kind (src/lib/localAssetCache.js);
+//   A0. THE PRIVACY GATE (Phase 7.8): an IMAGE BINARY whose record does not
+//      state that its source metadata has been removed is normalised in place
+//      before anything is sent — same asset id, same references — and is
+//      refused outright if that cannot be done. What counts as an image is
+//      decided from the BYTES, so a JPEG attached through a File field is
+//      governed exactly like one added through a Photo control, and a real
+//      document is left byte-for-byte alone. The engine never knowingly
+//      uploads an unnormalised source image merely because it was queued
+//      before the policy existed, or because of which control created it;
 //   B. resolve the canonical CLOUD TRANSPORT type from the record
 //      (src/lib/cloud/assetTransportMime.js) — legacy records accepted by
 //      EXTENSION carry no usable MIME type and would otherwise be refused by
@@ -106,6 +115,8 @@ import {
 } from "./assetCloudModel";
 import { resolveCloudTransportMime } from "./assetTransportMime";
 import { ASSET_KIND_PDF_SOURCE, readLocalAsset } from "../localAssetCache";
+import { isPrivacyNormalizableKind, isPrivacyNormalized, isPrivacyPictureKind } from "../imagePrivacy";
+import { PRIVACY_RESULT, isPrivacySatisfied, normalizeStoredAssetPrivacy } from "../assetPrivacyNormalization";
 import {
   listPendingAssetUploads,
   settleAssetUpload,
@@ -154,6 +165,7 @@ export const ASSET_SYNC_CODE = Object.freeze({
   OBJECT_CONFLICT: "object-conflict",
   METADATA_CONFLICT: "metadata-conflict",
   MALFORMED_CLOUD_RECORD: "malformed-cloud-record",
+  PRIVACY_NOT_NORMALIZED: "privacy-not-normalized",
   OFFLINE: "offline",
   UNCONFIGURED: "unconfigured",
 });
@@ -242,6 +254,9 @@ export const ASSET_SYNC_FAILURE_MESSAGE = Object.freeze({
     "Your account already describes a different file under this file's name, so nothing was changed. Your copy stays on this device.",
   [ASSET_SYNC_CODE.MALFORMED_CLOUD_RECORD]:
     "A file record in your account is unreadable and was not overwritten. Your copy stays on this device.",
+  [ASSET_SYNC_CODE.PRIVACY_NOT_NORMALIZED]:
+    "An image waiting to upload could not have its hidden camera information removed, so it was not sent. It stays on this device.",
+
   [ASSET_STORAGE_ERROR.UNAUTHORIZED]:
     "Your account is not allowed to store files in this workspace. Sign out and back in; if it persists, contact support.",
   [ASSET_STORAGE_ERROR.UNAUTHENTICATED]:
@@ -279,6 +294,8 @@ export const defaultAssetUploadLocal = Object.freeze({
   updateAttempt: (workspaceId, assetId, patch) => updateAssetUploadAttempt(workspaceId, assetId, patch),
   settle: (workspaceId, assetId) => settleAssetUpload(workspaceId, assetId),
   settleStored: (entry) => settleAssetUploadAsStored(entry),
+  ensureImagePrivacy: (workspaceId, assetId, record) =>
+    normalizeStoredAssetPrivacy({ workspaceId, assetId, record }),
   currentPdfSources: (workspaceId) => currentPdfSourceIds(workspaceId),
   reconcilePdfSources: (workspaceId, options) =>
     reconcilePdfSourceUploads({ workspaceId, sources: currentPdfSourceIds(workspaceId), ...(options || {}) }),
@@ -556,12 +573,74 @@ export function createAssetUploadSync({
       return fail(entry, { outcome: ASSET_SYNC_OUTCOME.FAILED, code: ASSET_SYNC_CODE.LOCAL_ASSET_MISSING });
     }
 
-    const facts = factsOf(entry, record);
+    let facts = factsOf(entry, record);
     if (facts.owner && facts.owner !== workspaceId) {
       return fail(entry, { outcome: ASSET_SYNC_OUTCOME.FAILED, code: ASSET_SYNC_CODE.WORKSPACE_MISMATCH });
     }
     if (!isCloudAssetKind(facts.assetKind) || !facts.data || !(facts.size > 0)) {
       return fail(entry, { outcome: ASSET_SYNC_OUTCOME.FAILED, code: ASSET_SYNC_CODE.MALFORMED_LOCAL_RECORD });
+    }
+
+    // A0 — THE PRIVACY GATE (Production Readiness Phase 7.8).
+    //
+    // An IMAGE BINARY may not leave this device until its bytes are KNOWN to
+    // carry no source EXIF/GPS, and "known" means the record itself says so
+    // under the current policy — never "every creation path was updated, so it
+    // must be fine". An asset queued before 7.8, or adopted out of this
+    // browser's legacy store by the 7.6 backfill, arrives here unmarked and is
+    // normalised in place first: same asset id, same references, one local
+    // transaction (src/lib/assetPrivacyNormalization.js). If that cannot be
+    // done the upload is REFUSED and the bytes stay on this device.
+    //
+    // WHAT COUNTS AS AN IMAGE IS DECIDED FROM THE MEDIA, NOT FROM THE KIND.
+    // A Photo field and a File field both accept JPEG/PNG/WebP, so a
+    // `note-file` / `editor-file` can be a photograph with GPS in it, and
+    // letting it through because of which control created it would be exactly
+    // the gap this gate exists to close. Every governed kind is therefore
+    // handed to the normaliser, which reads the BYTES — never the declared
+    // MIME type, never the filename. An attachment whose bytes turn out to be
+    // a real document comes back `not-applicable` and is uploaded untouched,
+    // and that is the ONE outcome accepted without a marker; a PICTURE kind
+    // can never reach it, which is asserted here rather than assumed.
+    //
+    // It is deliberately enforced HERE as well as in the session's own pass,
+    // because the invariant must not depend on which of them ran first. The
+    // marker is durable, so a retry finds the asset already normalised and
+    // re-encodes nothing. It runs AFTER the ownership and shape checks above:
+    // another workspace's record is reported as what it is and is never even
+    // read for normalisation.
+    if (isPrivacyNormalizableKind(record.kind) && !isPrivacyNormalized(record.metadata)) {
+      let privacy;
+      try {
+        privacy = await ifLive(() => local.ensureImagePrivacy(workspaceId, assetId, record));
+      } catch (error) {
+        return fail(entry, classifyAssetUploadError(error));
+      }
+      if (stopped) return null;
+      const normalized = privacy && privacy.record ? privacy.record : null;
+      // BOTH halves are required: an outcome that says the asset is safe, AND
+      // a record that actually carries the marker. A status on its own is not
+      // proof — a transformation that did not land must never read as one that
+      // did. The single exception is a NON-PICTURE kind reported
+      // `not-applicable`: "these bytes are not an image" is a statement only
+      // the code that read them can make, and marking a document as a
+      // privacy-normalised image would be a false one.
+      const documentNotAnImage =
+        privacy &&
+        privacy.status === PRIVACY_RESULT.NOT_APPLICABLE &&
+        !isPrivacyPictureKind(record.kind);
+      if (
+        !privacy ||
+        !isPrivacySatisfied(privacy.status) ||
+        !normalized ||
+        (!documentNotAnImage && !isPrivacyNormalized(normalized.metadata))
+      ) {
+        return fail(entry, { outcome: ASSET_SYNC_OUTCOME.FAILED, code: ASSET_SYNC_CODE.PRIVACY_NOT_NORMALIZED });
+      }
+      // The bytes, size and content type may all have changed; everything
+      // below describes what is stored NOW.
+      record = normalized;
+      facts = factsOf(entry, record);
     }
 
     const transport = resolveCloudTransportMime({
