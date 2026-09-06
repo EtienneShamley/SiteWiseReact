@@ -126,3 +126,48 @@ test("current PDF source ids join the set unchanged; malformed input is tolerate
   expect([...recordedLiveAssetIds()].length).toBe(0);
   expect([...recordedLiveAssetIds({ noteContent: [], templateInstances: 7, assets: null })].length).toBe(0);
 });
+
+/* --------------------- cloud-supplied rendition edges (7.9A) -------------- */
+
+// The local listing only knows the renditions THIS device holds. The
+// workspace's own cloud asset documents carry `sourceAssetId` as a validated
+// field, so `derivedFrom` supplies the same edge for a rendition this browser
+// has never downloaded. Without it, a collector on such a device would read a
+// referenced rendition's original as unreferenced and destroy it.
+test("a cloud-supplied rendition edge keeps a source alive with NO local record of either", () => {
+  const ids = recordedLiveAssetIds({
+    noteContent: { n: '<img data-asset-id="r1">' },
+    assets: [],
+    derivedFrom: [{ id: "r1", sourceAssetId: "orig" }],
+  });
+  expect([...ids].sort()).toEqual(["orig", "r1"]);
+});
+
+test("a cloud-supplied chain of renditions runs to the same fixed point", () => {
+  const ids = recordedLiveAssetIds({
+    noteContent: { n: '<img data-asset-id="r2">' },
+    derivedFrom: [
+      { id: "r2", sourceAssetId: "r1" },
+      { id: "r1", sourceAssetId: "orig" },
+      { id: "orphan", sourceAssetId: "orphan-orig" },
+    ],
+  });
+  expect([...ids].sort()).toEqual(["orig", "r1", "r2"]);
+});
+
+test("local and cloud edges are UNIONED, so a disagreement keeps BOTH originals alive", () => {
+  const ids = recordedLiveAssetIds({
+    noteContent: { n: '<img data-asset-id="r1">' },
+    assets: [{ id: "r1", metadata: { annotation: { sourceAssetId: "local-orig" } } }],
+    derivedFrom: [{ id: "r1", sourceAssetId: "cloud-orig" }],
+  });
+  expect([...ids].sort()).toEqual(["cloud-orig", "local-orig", "r1"]);
+});
+
+test("a malformed or self-referential cloud edge is ignored rather than looping", () => {
+  const ids = recordedLiveAssetIds({
+    noteContent: { n: '<img data-asset-id="r1">' },
+    derivedFrom: [{ id: "r1", sourceAssetId: "r1" }, { id: "r1" }, null, { sourceAssetId: "x" }],
+  });
+  expect([...ids]).toEqual(["r1"]);
+});

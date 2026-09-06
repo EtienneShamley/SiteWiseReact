@@ -197,6 +197,14 @@ export function resolveAdoptionAuthority({ uid = null, workspaceId, migration = 
 
 /* --------------------------- reference discovery -------------------------- */
 
+/** The four durable records that can carry an asset reference. */
+export const REFERENCE_RECORD_KEYS = Object.freeze([
+  DURABLE_KEYS.noteContent,
+  DURABLE_KEYS.templateInstances,
+  DURABLE_KEYS.templateVersions,
+  DURABLE_KEYS.pdfDocs,
+]);
+
 /**
  * Every asset id one SCOPE's durable records reference, split into the two
  * universes the storage layer actually has: general assets (the `assets`
@@ -207,13 +215,32 @@ export function resolveAdoptionAuthority({ uid = null, workspaceId, migration = 
  * for the backfill, the pre-account local scope for the migration summary —
  * and hands them to the ONE collector (src/lib/assetReferences.js →
  * `recordedLiveAssetIds`). There is no second, narrower scan anywhere.
+ *
+ * `derivedFrom` is passed straight through to that collector: the rendition
+ * edges the workspace's own cloud documents state, which this browser's local
+ * listing cannot supply for a rendition it has never downloaded. The backfill
+ * does not use it (it works on what is HERE); the garbage-collection mark pass
+ * does, and it must not have a second collector of its own.
+ *
+ * `states` reports the durable-record state of each of the four keys
+ * (src/lib/durableStorage.js -> RECORD_STATE). A CORRUPT record is quarantined
+ * and then reads as empty, which is safe for the backfill — it adopts less —
+ * and catastrophic for a collector, which would read a whole note store's
+ * references as absent. Reporting it here is what lets the mark pass REFUSE
+ * rather than infer garbage; nothing about the returned id sets changes.
  */
-export function collectScopeReferences({ scope, storage = undefined, assets = [] } = {}) {
+export function collectScopeReferences({ scope, storage = undefined, assets = [], derivedFrom = [] } = {}) {
   const options = { scope, ...(storage === undefined ? {} : { storage }) };
-  const noteContent = readDurableMap(DURABLE_KEYS.noteContent, options).map;
-  const templateInstances = readDurableMap(DURABLE_KEYS.templateInstances, options).map;
-  const templateVersions = readDurableMap(DURABLE_KEYS.templateVersions, options).map;
-  const pdfDocs = readDurableMap(DURABLE_KEYS.pdfDocs, options).map;
+  const states = {};
+  const readMap = (key) => {
+    const result = readDurableMap(key, options);
+    states[key] = result.state;
+    return result.map;
+  };
+  const noteContent = readMap(DURABLE_KEYS.noteContent);
+  const templateInstances = readMap(DURABLE_KEYS.templateInstances);
+  const templateVersions = readMap(DURABLE_KEYS.templateVersions);
+  const pdfDocs = readMap(DURABLE_KEYS.pdfDocs);
 
   const pdfSourceIds = [];
   for (const doc of Object.values(pdfDocs)) {
@@ -227,13 +254,14 @@ export function collectScopeReferences({ scope, storage = undefined, assets = []
     templateVersions,
     assets,
     pdfSourceIds,
+    derivedFrom,
   });
   const pdfSet = new Set(pdfSourceIds);
   const general = [];
   for (const id of all) {
     if (!pdfSet.has(id)) general.push(id);
   }
-  return { all, general, pdfSourceIds };
+  return { all, general, pdfSourceIds, states };
 }
 
 /* --------------------------- cloud-state authority ------------------------ */

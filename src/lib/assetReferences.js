@@ -161,6 +161,18 @@ export function liveAssetIds({ notes = [], versions = {}, renditionSources = [] 
  * once nothing else names it) and for the backfill (an orphan is not adopted,
  * and neither is its source).
  *
+ * `derivedFrom` supplies the SAME rendition edges from a source this browser's
+ * listing cannot provide: `[{ id, sourceAssetId }]`, as the workspace's own
+ * cloud asset documents state them (src/lib/cloud/assetCloudModel.js carries
+ * `sourceAssetId` as a validated first-class field). It exists because the
+ * local listing only knows the renditions THIS device holds: a device that has
+ * never downloaded an annotated rendition cannot see that it was made from an
+ * original, and a collector reading the local listing alone would conclude the
+ * original is unreferenced and destroy it. The two sources are UNIONED, never
+ * reconciled — if they disagree about a rendition's origin, both originals stay
+ * alive, because the cost of a false reference is one retained object and the
+ * cost of a missed one is destroyed evidence.
+ *
  * `pdfSourceIds` — the CURRENT source ids of the workspace's PDF registry —
  * are unioned in unchanged. They are references like any other, and the
  * registry is the only authority on which of them are current: bytes of a
@@ -174,6 +186,7 @@ export function recordedLiveAssetIds({
   templateVersions = {},
   assets = [],
   pdfSourceIds = [],
+  derivedFrom = [],
 } = {}) {
   const content = noteContent && typeof noteContent === "object" && !Array.isArray(noteContent) ? noteContent : {};
   const instances =
@@ -187,19 +200,33 @@ export function recordedLiveAssetIds({
   const ids = liveAssetIds({ notes, versions: templateVersions, renditionSources: [] });
 
   // The rendition closure, run to a fixed point so a chain of annotations
-  // (a rendition annotated again) keeps its whole ancestry.
+  // (a rendition annotated again) keeps its whole ancestry. A rendition may
+  // carry more than one claimed origin once the local listing and the cloud
+  // documents are both consulted; every one of them is kept.
   const sourceOf = new Map();
-  for (const record of Array.isArray(assets) ? assets : []) {
-    const source = record?.metadata?.annotation?.sourceAssetId;
-    if (record && typeof record.id === "string" && record.id && typeof source === "string" && source) {
-      sourceOf.set(record.id, source);
+  const addEdge = (renditionId, sourceId) => {
+    if (typeof renditionId !== "string" || !renditionId) return;
+    if (typeof sourceId !== "string" || !sourceId || sourceId === renditionId) return;
+    let sources = sourceOf.get(renditionId);
+    if (!sources) {
+      sources = new Set();
+      sourceOf.set(renditionId, sources);
     }
+    sources.add(sourceId);
+  };
+  for (const record of Array.isArray(assets) ? assets : []) {
+    addEdge(record?.id, record?.metadata?.annotation?.sourceAssetId);
+  }
+  for (const edge of Array.isArray(derivedFrom) ? derivedFrom : []) {
+    addEdge(edge?.id, edge?.sourceAssetId);
   }
   let grew = true;
   while (grew) {
     grew = false;
-    for (const [renditionId, sourceId] of sourceOf) {
-      if (ids.has(renditionId) && !ids.has(sourceId)) {
+    for (const [renditionId, sources] of sourceOf) {
+      if (!ids.has(renditionId)) continue;
+      for (const sourceId of sources) {
+        if (ids.has(sourceId)) continue;
         ids.add(sourceId);
         grew = true;
       }

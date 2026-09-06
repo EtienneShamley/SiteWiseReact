@@ -276,8 +276,13 @@ describe("logo controls are unchanged behaviourally, moved to the ribbon (A1)", 
   });
 
   test("IndexedDB asset handling in TemplateBuilderDoc is untouched", () => {
-    expect(doc).toContain("await createLogoAsset(file);");
-    expect(doc).toContain("draftAssetIds.current.add(id);");
+    // Re-targeted in Phase 7.9A: the creation is now the one-snapshot draft
+    // sequence in src/lib/templateLogoDraft.js (which calls createLogoAsset),
+    // and the session's draft assets are tracked in one ref that also holds
+    // each one's garbage-collection release handle. The IndexedDB handling
+    // either side of it is unchanged.
+    expect(doc).toContain("const result = await createLogoDraft(file, {");
+    expect(doc).toContain("register: (assetId, release) => draftAssetProtections.current.set(assetId, release),");
     expect(doc).toContain("deleteAsset(id).catch(() => {});");
     expect(doc).toContain("isLogoAssetReferenced(id)");
   });

@@ -543,7 +543,7 @@ describe("the asset upload engine's session binding (source)", () => {
     expect(SCOPE).toMatch(/if \(uploads\) uploads\.stop\(\);/);
     expect(SCOPE).toMatch(/assetSyncRef\.current = null;/);
     expect(SCOPE).toMatch(
-      /\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass\]/
+      /\[uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass, startGcMarkPass\]/
     );
     // 7.6: the backfill's session guard is dropped in the SAME cleanup, so a
     // pass in progress stops before the next account's session opens.
@@ -600,6 +600,72 @@ describe("the asset upload engine's session binding (source)", () => {
     expect(SETTINGS).toMatch(/assetBackfillStatusLine\(backfillStatus\)/);
     expect(SETTINGS).toMatch(/gate = await planOldCopyRemoval\(\{/);
     expect(SETTINGS).toMatch(/if \(!gate\.allowed\) \{\s*setLocalNotice\(oldCopyRefusalMessage/);
+  });
+
+  test("the GC MARK pass runs LAST in the session chain, on the steps' own results (7.9A)", () => {
+    // Chained after the privacy pass, which is chained after the backfill,
+    // which is chained after hydration. Each step's RESULT is threaded through
+    // rather than read back from React state, which may not have committed.
+    expect(SCOPE).toMatch(
+      /startPrivacyPass\(opened\.workspace\.id\)\.then\(\(privacyResult\) => \(\{ backfillResult, privacyResult \}\)\)/
+    );
+    expect(SCOPE).toMatch(/\.then\(\(results\) => startGcMarkPass\(opened, results \|\| \{\}\)\)/);
+    // Still fire-and-forget: nothing below it waits, and a failure cannot
+    // reach the session.
+    expect(SCOPE).toMatch(/\.then\(\(results\) => startGcMarkPass\(opened, results \|\| \{\}\)\)\s*\.catch\(\(\) => null\);/);
+  });
+
+  test("the mark pass is given the session's OWN facts and the store's own three methods (7.9A)", () => {
+    expect(SCOPE).toMatch(/sessionMode: opened\.mode,/);
+    expect(SCOPE).toMatch(/hydration: opened\.hydration,/);
+    expect(SCOPE).toMatch(/outboxPending: outboxSize\(workspaceId\),/);
+    expect(SCOPE).toMatch(/clean: isCleanBackfill\(backfillResult\)/);
+    expect(SCOPE).toMatch(/readAssetIndex: \(wid\) => store\.readAssetIndex\(wid\),/);
+    expect(SCOPE).toMatch(/writeAssetDocument: \(wid, assetId, fields\) => store\.writeAssetDocument\(wid, assetId, fields\),/);
+    // The SAME session guard the backfill and the privacy pass use.
+    expect(SCOPE).toMatch(/liveRef\.current\.active && liveRef\.current\.workspaceId === workspaceId/);
+  });
+
+  test("nothing in the wiring sweeps, tombstones or deletes (7.9A)", () => {
+    expect(SCOPE).toMatch(/runAssetGcMarkPass/);
+    expect(SCOPE).not.toMatch(/tombstoneAssetDocument|deleteAssetDocument|runAssetGcSweep/);
+  });
+
+  test("the Template Builder declares its unsaved draft logo as protected, bound to ONE workspace (7.9A)", () => {
+    const BUILDER = fs.readFileSync(
+      path.join(__dirname, "..", "components", "template", "TemplateBuilderDoc.js"),
+      "utf8"
+    );
+    // Protected the moment the asset exists — it is queued for upload from
+    // creation and may reach the account long before a version names it. ONE
+    // workspace snapshot, read BEFORE the await, both tags the record and
+    // records the protection (src/lib/templateLogoDraft.js); the liveness the
+    // sequence checks is this builder's own mounted flag, and the register
+    // call is the only thing that puts a handle into the map.
+    expect(BUILDER).toMatch(
+      /const result = await createLogoDraft\(file, \{\s*workspaceId: activeAssetWorkspaceId\(\),\s*isAlive: \(\) => mountedRef\.current,\s*register: \(assetId, release\) => draftAssetProtections\.current\.set\(assetId, release\),\s*\}\);/
+    );
+    // The component never calls the creation boundary or the register itself.
+    expect(BUILDER).not.toMatch(/createLogoAsset\(/);
+    expect(BUILDER).not.toMatch(/protectAsset\(/);
+    // Unmount flips liveness FIRST, so an in-flight creation sees it.
+    expect(BUILDER).toMatch(/return \(\) => \{\s*(\/\/[^\n]*\n\s*)*mountedRef\.current = false;/);
+    expect(BUILDER).toMatch(/mountedRef\.current = true;/);
+    // Every release goes through the asset's OWN handle. Nothing releases by
+    // id alone, and nothing re-reads the active workspace to release.
+    expect(BUILDER).toMatch(
+      /function releaseDraftAsset\(id\) \{\s*const release = draftAssetProtections\.current\.get\(id\);\s*if \(release\) release\(\);/
+    );
+    // Publish keeps the logo (the version now references it) and releases it;
+    // a replaced draft is deleted and released.
+    expect(BUILDER).toMatch(/deleteAsset\(id\)\.catch\(\(\) => \{\}\);\s*releaseDraftAsset\(id\);/);
+    expect(BUILDER).toMatch(/if \(keepId\) releaseDraftAsset\(keepId\);/);
+    // Cancel / unmount releases each handle, whatever workspace is active by
+    // the time the cleanup runs.
+    expect(BUILDER).toMatch(/for \(const \[id, release\] of Array\.from\(protections\)\) \{[\s\S]{0,600}?release\(\);/);
+    expect(BUILDER).toMatch(/protections\.clear\(\);/);
+    // The removed API must not come back: no id-only release anywhere.
+    expect(BUILDER).not.toMatch(/releaseAsset\(/);
   });
 
   test("the PDF lifecycle enqueues only after the document is durable, and releases before the bytes go", () => {

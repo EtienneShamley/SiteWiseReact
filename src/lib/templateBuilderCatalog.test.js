@@ -992,8 +992,10 @@ describe("nothing outside the Builder catalog changed", () => {
     expect(changed).not.toMatch(/evidence/i);
     expect(changed).not.toContain("NOTE_VIEW.FREEFORM");
     expect(changed).not.toContain("deleteAssetsFor");
-    // The Builder's only asset concern is still the template LOGO, unchanged.
-    expect(read(BUILDER_DOC)).toContain("createLogoAsset");
+    // The Builder's only asset concern is still the template LOGO, unchanged
+    // — reached since Phase 7.9A through the draft sequence that owns the
+    // createLogoAsset call (src/lib/templateLogoDraft.js).
+    expect(read(BUILDER_DOC)).toContain("createLogoDraft");
     expect(read(BUILDER_DOC)).toContain("isLogoAssetReferenced");
   });
 

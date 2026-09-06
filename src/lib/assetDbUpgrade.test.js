@@ -1,15 +1,20 @@
 // src/lib/assetDbUpgrade.test.js
 //
-// THE UPGRADE THAT MUST NOT LOSE ANYTHING (Production Readiness Phase 7.2).
+// THE UPGRADES THAT MUST NOT LOSE ANYTHING (Production Readiness Phases 7.2
+// and 7.9A).
 //
-// Every browser that has used NoteWise holds a version 1 `notewise-assets`
-// database: one `assets` store, records with no workspace on them, and the
-// only copy of that person's logos, evidence photos, attached files and
-// Free-form images. The v2 upgrade adds two stores beside it. This suite
-// proves it adds and does not touch: same ids, same fields, same bytes.
+// Every browser that has used NoteWise holds a `notewise-assets` database at
+// one of the earlier schemas: v1 is one `assets` store, records with no
+// workspace on them, and the only copy of that person's logos, evidence
+// photos, attached files and Free-form images; v2 adds the upload queue and
+// the remote index beside it. Each upgrade only ADDS stores. This suite proves
+// that from BOTH starting points: same ids, same fields, same bytes, and the
+// rows of the stores that already existed still there.
 import "fake-indexeddb/auto";
 import {
   ASSET_DB_VERSION,
+  ASSET_GC_OBSERVATION_STORE,
+  ASSET_GC_RUN_STORE,
   ASSET_REMOTE_INDEX_STORE,
   ASSET_STORE,
   ASSET_UPLOAD_QUEUE_STORE,
@@ -19,11 +24,13 @@ import {
   deleteAssetDb,
   installStructuredCloneShim,
   seedV1AssetDb,
+  seedV2AssetDb,
   testBlob,
 } from "./assetDbTestHarness";
 import { assetExists, getAsset, listAssetIds, listAssets } from "./assetStorage";
-import { countPendingAssetUploads } from "./assetUploadQueue";
-import { listRemoteAssetEntries } from "./assetRemoteIndex";
+import { countPendingAssetUploads, getAssetUpload, listPendingAssetUploads } from "./assetUploadQueue";
+import { getRemoteAssetEntry, listRemoteAssetEntries } from "./assetRemoteIndex";
+import { listGcObservations, readAssetGcRun } from "./assetGcLedger";
 
 installStructuredCloneShim();
 
@@ -60,14 +67,20 @@ beforeEach(async () => {
   ]);
 });
 
-describe("the v1 → v2 upgrade is additive", () => {
-  test("the database opens at v2 with the two new stores beside `assets`", async () => {
+const ALL_STORES = [
+  ASSET_STORE,
+  ASSET_REMOTE_INDEX_STORE,
+  ASSET_UPLOAD_QUEUE_STORE,
+  ASSET_GC_OBSERVATION_STORE,
+  ASSET_GC_RUN_STORE,
+].sort();
+
+describe("the v1 → current upgrade is additive", () => {
+  test("the database opens at the current version with every store beside `assets`", async () => {
     // The first read through the module performs the upgrade.
     await listAssetIds();
-    expect(ASSET_DB_VERSION).toBe(2);
-    expect(await assetDbStoreNames()).toEqual(
-      [ASSET_STORE, ASSET_REMOTE_INDEX_STORE, ASSET_UPLOAD_QUEUE_STORE].sort()
-    );
+    expect(ASSET_DB_VERSION).toBe(3);
+    expect(await assetDbStoreNames()).toEqual(ALL_STORES);
   });
 
   test("every v1 record survives, with its id, kind, name, size and metadata", async () => {
@@ -96,5 +109,68 @@ describe("the v1 → v2 upgrade is additive", () => {
     expect(rows.map((r) => r.id).sort()).toEqual(["legacy-photo-1", "tpl-logo-legacy-1"]);
     expect(rows.every((r) => r.blob === undefined)).toBe(true);
     expect(await listAssets({ kind: "logo" })).toHaveLength(1);
+  });
+});
+
+/* --------------------------- v2 → current (7.9A) -------------------------- */
+
+// A v2 browser is not empty: it has the same assets AND whatever the upload
+// queue and remote index recorded about them. The 7.9A upgrade adds the two
+// garbage-collection stores and must carry all three existing ones across.
+describe("the v2 → current upgrade is additive", () => {
+  const QUEUED = {
+    workspaceId: WS,
+    assetId: "queued-asset-1",
+    kind: "editor-image",
+    at: 4000,
+    attempts: 1,
+    nextAttemptAt: 5000,
+    lastCode: "storage/retry-limit-exceeded",
+  };
+  const INDEXED = {
+    workspaceId: WS,
+    assetId: "stored-asset-1",
+    kind: "note-photo",
+    name: "site.jpg",
+    mimeType: "image/jpeg",
+    size: 11,
+    sourceAssetId: null,
+    state: "stored",
+    updatedAt: 6000,
+  };
+
+  beforeEach(async () => {
+    await deleteAssetDb();
+    await seedV2AssetDb({
+      assets: [
+        { ...LEGACY_LOGO, workspaceId: WS, blob: testBlob("LOGOBYTE", "image/png") },
+        { ...LEGACY_PHOTO, blob: testBlob("PHOTOBYTES", "image/jpeg") },
+      ],
+      uploads: [QUEUED],
+      remoteIndex: [INDEXED],
+    });
+  });
+
+  test("the database opens at the current version with the two GC stores added", async () => {
+    await listAssetIds();
+    expect(await assetDbStoreNames()).toEqual(ALL_STORES);
+  });
+
+  test("every v2 asset, queue entry and index entry survives untouched", async () => {
+    expect((await listAssetIds()).sort()).toEqual(["legacy-photo-1", "tpl-logo-legacy-1"]);
+    expect(await (await getAsset("tpl-logo-legacy-1")).blob.text()).toBe("LOGOBYTE");
+    expect((await getAsset("tpl-logo-legacy-1")).workspaceId).toBe(WS);
+
+    expect(await countPendingAssetUploads(WS)).toBe(1);
+    expect(await getAssetUpload(WS, "queued-asset-1")).toEqual(QUEUED);
+    expect((await listPendingAssetUploads(WS)).map((e) => e.assetId)).toEqual(["queued-asset-1"]);
+
+    expect(await getRemoteAssetEntry(WS, "stored-asset-1")).toEqual(INDEXED);
+    expect(await listRemoteAssetEntries(WS)).toEqual([INDEXED]);
+  });
+
+  test("the new GC stores start empty rather than inventing state", async () => {
+    expect(await listGcObservations(WS)).toEqual([]);
+    expect(await readAssetGcRun(WS)).toBeNull();
   });
 });

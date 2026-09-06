@@ -132,6 +132,48 @@ describe("a workspace-scoped creation commits the asset and its queue entry toge
   });
 });
 
+// Added for Production Readiness Phase 7.9A (race correction): a caller that
+// must bind something else to the SAME workspace the record is tagged with
+// captures the scope once and passes it in, and that snapshot wins over
+// whatever the scope has become by the time the record is written.
+describe("an explicit workspace snapshot outranks the scope at write time", () => {
+  test("the logo is tagged and queued under the snapshot, not the workspace active when it is written", async () => {
+    signInTo(WS_A);
+    const snapshot = activeAssetWorkspaceId();
+    // The switch lands inside the await, before the record exists.
+    const normalize = async (blob) => {
+      signInTo(WS_B);
+      return passThroughNormalize(blob);
+    };
+    const id = await createLogoAsset(Object.assign(testBlob("LOGO", "image/png"), { name: "l.png" }), {
+      normalize,
+      workspaceId: snapshot,
+    });
+    expect(activeAssetWorkspaceId()).toBe(WS_B);
+    expect((await getAsset(id)).workspaceId).toBe(WS_A);
+    expect(await getAssetUpload(WS_A, id)).not.toBeNull();
+    expect(await countPendingAssetUploads(WS_B)).toBe(0);
+  });
+
+  test("an explicit null snapshot is a local-only asset even inside a signed-in session", async () => {
+    signInTo(WS_A);
+    const id = await createLogoAsset(Object.assign(testBlob("LOGO", "image/png"), { name: "l.png" }), {
+      normalize: passThroughNormalize,
+      workspaceId: null,
+    });
+    expect((await getAsset(id)).workspaceId).toBeNull();
+    expect(await countPendingAssetUploads(WS_A)).toBe(0);
+  });
+
+  test("with no snapshot given, the active scope at write time is still the answer", async () => {
+    signInTo(WS_A);
+    const id = await createLogoAsset(Object.assign(testBlob("LOGO", "image/png"), { name: "l.png" }), {
+      normalize: passThroughNormalize,
+    });
+    expect((await getAsset(id)).workspaceId).toBe(WS_A);
+  });
+});
+
 describe("a failed transaction leaves neither record", () => {
   test("a refused QUEUE write rolls back the asset that was already put", async () => {
     const id = "half-committed-1";

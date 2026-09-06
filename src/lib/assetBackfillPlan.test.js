@@ -209,6 +209,32 @@ describe("reference discovery", () => {
     expect([...collectScopeReferences({ scope: SCOPE }).all]).toEqual([]);
     expect([...collectScopeReferences({ scope: LOCAL_REFERENCE_SCOPE }).all]).toEqual(["local-only"]);
   });
+
+  // Added for Production Readiness Phase 7.9A. The backfill's own behaviour is
+  // unchanged by both of these: the ids it works on are exactly what they were.
+  test("the state of every reference-bearing record is reported, so a collector can refuse", () => {
+    seedScope(SCOPE, { [DURABLE_KEYS.noteContent]: { n1: '<img data-asset-id="a">' } });
+    window.localStorage.setItem(scopedStorageKey(DURABLE_KEYS.templateVersions, SCOPE), "{not json");
+    const refs = collectScopeReferences({ scope: SCOPE });
+    expect(refs.states[DURABLE_KEYS.noteContent]).toBe("ok");
+    expect(refs.states[DURABLE_KEYS.templateVersions]).toBe("corrupt");
+    expect(refs.states[DURABLE_KEYS.pdfDocs]).toBe("missing");
+    // A quarantined record reads as EMPTY, which is exactly why the state
+    // matters: the ids alone cannot tell the two situations apart.
+    expect([...refs.all]).toEqual(["a"]);
+  });
+
+  test("cloud-supplied rendition edges pass straight through to the one collector", () => {
+    seedScope(SCOPE, { [DURABLE_KEYS.noteContent]: { n1: '<img data-asset-id="rendition">' } });
+    const withEdges = collectScopeReferences({
+      scope: SCOPE,
+      assets: [],
+      derivedFrom: [{ id: "rendition", sourceAssetId: "original" }],
+    });
+    expect([...withEdges.all].sort()).toEqual(["original", "rendition"]);
+    // The backfill supplies none, and gets exactly what it always got.
+    expect([...collectScopeReferences({ scope: SCOPE, assets: [] }).all]).toEqual(["rendition"]);
+  });
 });
 
 /* --------------------------- adoption authority -------------------------- */

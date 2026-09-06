@@ -207,8 +207,10 @@ describe("[10] the Template editing ribbon stays outside the document scroller",
     const editor = createHeaderTextEditor({ value: "Header" });
     expect(toolbarControlsForEditor(editor).has("imageUpload")).toBe(false);
     editor.destroy();
-    // The Builder still wires the same asset path it always did.
-    expect(BUILDER).toContain("createLogoAsset(file)");
+    // The Builder still wires the same asset path it always did — since
+    // Phase 7.9A through the one-snapshot draft sequence
+    // (src/lib/templateLogoDraft.js), which is what calls createLogoAsset.
+    expect(BUILDER).toContain("createLogoDraft(file, {");
     expect(BUILDER).toContain("onLogoFile={handleLogoFile}");
   });
 

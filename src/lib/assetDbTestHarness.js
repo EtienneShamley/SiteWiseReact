@@ -14,14 +14,21 @@
 //      src/lib/assetStorageIndexedDb.test.js; new suites share this copy
 //      rather than making a fourth.
 //
-//   2. A way to build a database at SCHEMA v1 — the schema that exists in
-//      every browser that has used NoteWise before Production Readiness Phase
-//      7.2 — so the upgrade can be proved against real v1 data rather than
-//      against an empty store.
+//   2. A way to build a database at SCHEMA v1 or v2 — the schemas that exist
+//      in every browser that has used NoteWise before Production Readiness
+//      Phase 7.2 and before 7.9A respectively — so each upgrade can be proved
+//      against real data rather than against an empty store.
 
 import { Blob as NodeBlob } from "buffer";
 import { deserialize, serialize } from "v8";
-import { ASSET_DB_NAME, ASSET_STORE, resetAssetDbConnection } from "./assetDb";
+import {
+  ASSET_DB_NAME,
+  ASSET_REMOTE_INDEX_STORE,
+  ASSET_STORE,
+  ASSET_UPLOAD_QUEUE_STORE,
+  WORKSPACE_ASSET_KEY_PATH,
+  resetAssetDbConnection,
+} from "./assetDb";
 
 /* global globalThis */ // the ES2020 global object; the CRA browser env predates it
 
@@ -141,6 +148,58 @@ export function seedV1AssetDb(records = []) {
       tx.onerror = () => {
         db.close();
         reject(tx.error || new Error("Could not seed the v1 asset database"));
+      };
+    };
+  });
+}
+
+/**
+ * Creates the database at VERSION 2 — the schema every browser that has used
+ * NoteWise since Production Readiness Phase 7.2 holds — and writes the given
+ * rows into its three stores. This is what the v3 upgrade must carry across
+ * untouched.
+ */
+export function seedV2AssetDb({ assets = [], uploads = [], remoteIndex = [] } = {}) {
+  resetAssetDbConnection();
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(ASSET_DB_NAME, 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(ASSET_STORE)) {
+        db.createObjectStore(ASSET_STORE, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(ASSET_UPLOAD_QUEUE_STORE)) {
+        db.createObjectStore(ASSET_UPLOAD_QUEUE_STORE, { keyPath: WORKSPACE_ASSET_KEY_PATH });
+      }
+      if (!db.objectStoreNames.contains(ASSET_REMOTE_INDEX_STORE)) {
+        db.createObjectStore(ASSET_REMOTE_INDEX_STORE, { keyPath: WORKSPACE_ASSET_KEY_PATH });
+      }
+    };
+    req.onerror = () => reject(req.error || new Error("Could not open the v2 asset database"));
+    req.onsuccess = () => {
+      const db = req.result;
+      const work = [
+        [ASSET_STORE, assets],
+        [ASSET_UPLOAD_QUEUE_STORE, uploads],
+        [ASSET_REMOTE_INDEX_STORE, remoteIndex],
+      ].filter(([, rows]) => rows.length > 0);
+      if (work.length === 0) {
+        db.close();
+        resolve();
+        return;
+      }
+      const tx = db.transaction(work.map(([name]) => name), "readwrite");
+      for (const [name, rows] of work) {
+        const store = tx.objectStore(name);
+        for (const row of rows) store.put(row);
+      }
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error || new Error("Could not seed the v2 asset database"));
       };
     };
   });

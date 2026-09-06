@@ -86,6 +86,12 @@ import {
   planAssetBackfill,
   runAssetBackfill,
 } from "../lib/assetBackfill";
+import {
+  GC_MARK_PHASE,
+  isCleanBackfill,
+  runAssetGcMarkPass,
+} from "../lib/assetGarbageCollection";
+import { outboxSize } from "../lib/cloud/cloudOutbox";
 import { MALFORMED_CLOUD_RECORD_MESSAGE } from "../lib/cloud/workspaceHydration";
 import { reportPersistenceIssue } from "../lib/durableStorage";
 import WorkspaceGate, { FLUSH_PENDING_WRITES_EVENT } from "../components/auth/WorkspaceGate";
@@ -177,6 +183,12 @@ export function DataScopeProvider({
   // invariant — the upload engine enforces the same rule per asset, so this
   // pass only decides WHEN the work happens.
   const [privacy, setPrivacy] = useState({ phase: PRIVACY_PHASE.IDLE, total: 0, done: 0, result: null });
+  // The cloud asset GARBAGE-COLLECTION MARK PASS (Production Readiness Phase
+  // 7.9A). It tombstones nothing and deletes nothing: it restores assets the
+  // workspace still references but whose cloud record was tombstoned (the
+  // cross-device seam Phase 7.5 left open), and records which cloud assets are
+  // currently unreferenced so a later phase's grace period can accumulate.
+  const [gc, setGc] = useState({ phase: GC_MARK_PHASE.IDLE, result: null });
   const [migrationAssets, setMigrationAssets] = useState(null);
   const liveRef = useRef({ active: false, workspaceId: null });
 
@@ -245,6 +257,63 @@ export function DataScopeProvider({
     }
   }, []);
 
+  /**
+   * One garbage-collection MARK pass for `workspaceId` (Production Readiness
+   * Phase 7.9A), guarded by the session it belongs to.
+   *
+   * It runs LAST in the session chain because every gate it applies is about
+   * the steps before it having finished: hydration placed the cloud's
+   * references into the mirror, the backfill associated this browser's files
+   * and settled what is owed, and the privacy pass finished preparing what the
+   * uploader may send. A pass that runs while any of those is outstanding
+   * would be measuring an incomplete reference universe, so it refuses instead
+   * — and says which gate refused it.
+   *
+   * The facts are read HERE, from the session that owns them, and handed in:
+   * the pass itself takes no ambient state and reaches no React context.
+   */
+  const startGcMarkPass = useCallback(async (opened, { backfillResult, privacyResult }) => {
+    const workspaceId = opened && opened.workspace ? opened.workspace.id : null;
+    const isActive = () => liveRef.current.active && liveRef.current.workspaceId === workspaceId;
+    if (!workspaceId || !isActive()) return null;
+    const store = storeRef.current;
+    const configured = Boolean(
+      store &&
+        typeof store.readAssetIndex === "function" &&
+        typeof store.readAssetDocument === "function" &&
+        typeof store.writeAssetDocument === "function"
+    );
+    const syncStatus = typeof opened.sync?.getStatus === "function" ? opened.sync.getStatus() : null;
+    const facts = {
+      configured,
+      online: typeof navigator === "undefined" || navigator.onLine !== false,
+      sessionMode: opened.mode,
+      hydration: opened.hydration,
+      outboxPending: outboxSize(workspaceId),
+      syncPending: syncStatus ? syncStatus.pending : 0,
+      backfill: { phase: backfillResult ? BACKFILL_PHASE.DONE : null, clean: isCleanBackfill(backfillResult) },
+      privacy: { phase: privacyResult ? PRIVACY_PHASE.DONE : null },
+    };
+    const deps = configured
+      ? {
+          readAssetIndex: (wid) => store.readAssetIndex(wid),
+          readAssetDocument: (wid, assetId) => store.readAssetDocument(wid, assetId),
+          writeAssetDocument: (wid, assetId, fields) => store.writeAssetDocument(wid, assetId, fields),
+        }
+      : null;
+    setGc({ phase: GC_MARK_PHASE.RUNNING, result: null });
+    try {
+      const result = await runAssetGcMarkPass({ workspaceId, facts, deps, isActive });
+      if (isActive()) {
+        setGc({ phase: result.gate.ok ? GC_MARK_PHASE.DONE : GC_MARK_PHASE.SKIPPED, result });
+      }
+      return result;
+    } catch {
+      if (isActive()) setGc({ phase: GC_MARK_PHASE.ERROR, result: null });
+      return null;
+    }
+  }, []);
+
   // Open one workspace session per (uid, attempt); close it when the uid
   // changes or the provider unmounts. The close is DEFERRED to a macrotask:
   // React runs a parent's effect cleanup before its children's, and the
@@ -259,6 +328,7 @@ export function DataScopeProvider({
     setMigrationRun(null);
     setBackfill({ phase: BACKFILL_PHASE.IDLE, result: null });
     setPrivacy({ phase: PRIVACY_PHASE.IDLE, total: 0, done: 0, result: null });
+    setGc({ phase: GC_MARK_PHASE.IDLE, result: null });
     setMigrationAssets(null);
     liveRef.current = { active: false, workspaceId: null };
 
@@ -349,7 +419,15 @@ export function DataScopeProvider({
           // backfill follows hydration: it works on what the step before it
           // produced. It is chained, not awaited, and the upload engine
           // enforces the invariant per asset regardless of this ordering.
-          .then(() => startPrivacyPass(opened.workspace.id))
+          .then((backfillResult) =>
+            startPrivacyPass(opened.workspace.id).then((privacyResult) => ({ backfillResult, privacyResult }))
+          )
+          // And the GC mark pass follows both, for the same reason again: its
+          // whole job is to measure the reference universe, and it must not do
+          // that while the steps that complete it are still running. Each
+          // step's own RESULT is threaded through rather than read back from
+          // React state, which may not have committed yet.
+          .then((results) => startGcMarkPass(opened, results || {}))
           .catch(() => null);
         const detected = detectLocalData(uid);
         setLocalData(detected);
@@ -410,7 +488,7 @@ export function DataScopeProvider({
         }, 0);
       }
     };
-  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass]);
+  }, [uid, attempt, injectedStore, injectedAssetStore, uploadOptions, readOptions, sessionOptions, startBackfill, startPrivacyPass, startGcMarkPass]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
@@ -500,6 +578,10 @@ export function DataScopeProvider({
       // browser's older images so they may be uploaded at all. Separate from
       // both lines above, because it is neither discovery nor upload.
       assetPrivacy: privacy,
+      // The cloud asset GC MARK pass's own state (Phase 7.9A): what it
+      // restored, and which gate refused it when it did not run. It is not a
+      // sweep and never reports one — nothing tombstones or deletes yet.
+      assetGc: gc,
       localData,
       migration: Object.freeze({
         offered: phase === SCOPE_PHASE.MIGRATION,
@@ -518,7 +600,7 @@ export function DataScopeProvider({
         setMigrationState(readLocalMigrationState());
       },
     });
-  }, [uid, emailVerified, session, assetSync, backfill, privacy, localData, phase, migrationState, migrationRun, migrationAssets, runMigration, dismissMigration, prepareSignOut]);
+  }, [uid, emailVerified, session, assetSync, backfill, privacy, gc, localData, phase, migrationState, migrationRun, migrationAssets, runMigration, dismissMigration, prepareSignOut]);
 
   if (!uid) return null;
 

@@ -45,7 +45,8 @@ import {
   storedFill,
 } from "../../lib/templateFill";
 import { rowDragMinPx, rowHeightDragPatch } from "../../lib/templateRowHeight";
-import { createLogoAsset, deleteAsset } from "../../lib/assetStorage";
+import { activeAssetWorkspaceId, deleteAsset } from "../../lib/assetStorage";
+import { LOGO_DRAFT_RESULT, createLogoDraft } from "../../lib/templateLogoDraft";
 import {
   DEFAULT_BRANDING,
   isDefaultPageFill,
@@ -207,7 +208,17 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
   // Asset ids created during THIS builder session. On cancel/unmount, any that
   // were never published (and are provably unreferenced) are cleaned up so
   // temporary uploads don't accumulate. Never touches referenced assets.
-  const draftAssetIds = useRef(new Set());
+  // Draft logo assets created in THIS builder session, each with the release
+  // of its garbage-collection protection (src/lib/assetProtection.js). One map
+  // rather than a Set plus a parallel one: the id and its release must never
+  // be able to drift apart, and the release is bound to the workspace the
+  // asset was created under, not to whichever one is active when it runs.
+  const draftAssetProtections = useRef(new Map());
+  // Whether this builder is still mounted — the liveness a logo creation that
+  // is still in flight checks before it may register a protection. Set true in
+  // the effect body (not only at construction) so a StrictMode remount does
+  // not leave it false.
+  const mountedRef = useRef(true);
 
   const assetUrl = useAssetObjectUrl(logoAssetId);
   // Prefer the IndexedDB asset; fall back to a legacy data URL only while this
@@ -512,14 +523,29 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
   // show a clear error, create NO asset, and preserve the previous logo.
   async function handleLogoFile(file) {
     setLogoError("");
-    try {
-      const id = await createLogoAsset(file);
-      draftAssetIds.current.add(id);
-      setLogoAssetId(id);
-      setLegacyLogoSrc(null);
-    } catch (err) {
-      setLogoError(err?.message || "Could not add that logo.");
+    // The asset is workspace-owned and queued from creation, so the upload
+    // engine can carry it into the account long before any template version
+    // names it. Declaring it protected is what stops the cloud collector
+    // reading an unpublished draft as garbage (src/lib/assetProtection.js).
+    //
+    // ONE workspace snapshot, taken BEFORE the await, tags the record AND
+    // records the protection (src/lib/templateLogoDraft.js): a session change
+    // while the file is being prepared can change neither. If this builder is
+    // gone by the time the asset exists, the draft is dropped by the cancel
+    // rule and nothing is registered — the liveness check and the register
+    // call are one synchronous step inside the sequence.
+    const result = await createLogoDraft(file, {
+      workspaceId: activeAssetWorkspaceId(),
+      isAlive: () => mountedRef.current,
+      register: (assetId, release) => draftAssetProtections.current.set(assetId, release),
+    });
+    if (result.status === LOGO_DRAFT_RESULT.FAILED) {
+      if (mountedRef.current) setLogoError(result.message || "Could not add that logo.");
+      return;
     }
+    if (result.status !== LOGO_DRAFT_RESULT.CREATED) return;
+    setLogoAssetId(result.assetId);
+    setLegacyLogoSrc(null);
   }
 
   // Remove clears the draft reference only; publishing this creates a new
@@ -533,24 +559,43 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
   // Delete session draft assets that are not the one we keep and are not
   // referenced by any retained version/pinned note. Safe reference check guards
   // against ever removing a historically-referenced asset.
+  function releaseDraftAsset(id) {
+    const release = draftAssetProtections.current.get(id);
+    if (release) release();
+    draftAssetProtections.current.delete(id);
+  }
+
   function cleanupDraftAssets(keepId) {
-    for (const id of Array.from(draftAssetIds.current)) {
+    for (const id of Array.from(draftAssetProtections.current.keys())) {
       if (id === keepId) continue;
       if (isLogoAssetReferenced(id)) continue;
       deleteAsset(id).catch(() => {});
-      draftAssetIds.current.delete(id);
+      releaseDraftAsset(id);
     }
-    if (keepId) draftAssetIds.current.delete(keepId);
+    // The kept logo is published now: a retained version names it, so the
+    // durable reference has taken over from the draft protection.
+    if (keepId) releaseDraftAsset(keepId);
   }
 
   // On cancel/unmount: drop any still-unpublished, unreferenced draft assets.
   useEffect(() => {
-    const drafts = draftAssetIds.current;
+    const protections = draftAssetProtections.current;
+    mountedRef.current = true;
     return () => {
-      for (const id of Array.from(drafts)) {
+      // Flipped FIRST: a creation still awaiting its asset sees this and
+      // drops the draft instead of registering into a builder that is gone.
+      mountedRef.current = false;
+      for (const [id, release] of Array.from(protections)) {
+        // Released either way, through its OWN handle: the builder is gone, so
+        // nothing here is holding the asset any more. A published one is kept
+        // alive by the version that references it, not by this register. The
+        // handle names the workspace the asset was created in, so an unmount
+        // that runs after an account switch still releases the right one.
+        release();
         if (isLogoAssetReferenced(id)) continue;
         deleteAsset(id).catch(() => {});
       }
+      protections.clear();
     };
   }, []);
 

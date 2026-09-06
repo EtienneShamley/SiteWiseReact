@@ -356,18 +356,26 @@ export async function saveNewAsset(record) {
 }
 
 /**
- * Build and persist one NEW asset under the ACTIVE workspace scope.
- * The single place every `create…Asset` below goes through, so none of them
- * can grow its own idea of tagging, queueing or ordering.
+ * Build and persist one NEW asset under the ACTIVE workspace scope — or under
+ * the workspace a caller names EXPLICITLY. The single place every
+ * `create…Asset` below goes through, so none of them can grow its own idea of
+ * tagging, queueing or ordering.
+ *
+ * `workspaceId` is optional. `undefined` means "the active scope, read now";
+ * anything else — including `null`, a local-only asset — is used as given. A
+ * caller that must bind something else to the SAME workspace the record is
+ * tagged with (the Template Builder's draft protection, Phase 7.9A) captures
+ * the scope once, before its own await, and passes it here, so the two can
+ * never be read at different moments across a session change.
  */
-async function createScopedAsset({ kind, name, blob, metadata }) {
+async function createScopedAsset({ kind, name, blob, metadata, workspaceId }) {
   const record = makeAssetRecord({
     id: newId(),
     kind,
     name,
     blob,
     metadata,
-    workspaceId: activeAssetWorkspaceId(),
+    workspaceId: workspaceId === undefined ? activeAssetWorkspaceId() : workspaceId,
   });
   await saveNewAsset(record);
   return record.id;
@@ -551,7 +559,10 @@ export async function listAssetIds() {
 // changes: `maxLongEdge: Infinity` keeps the existing "a logo is never
 // resized" behaviour, so the only bytes that change are ones that were
 // carrying metadata.
-export async function createLogoAsset(file, { normalize = normalizeImageFile } = {}) {
+//
+// `workspaceId` (optional) names the workspace the record is tagged with, in
+// place of the active scope read at write time — see `createScopedAsset`.
+export async function createLogoAsset(file, { normalize = normalizeImageFile, workspaceId } = {}) {
   const check = validateLogoFile(file);
   if (!check.ok) throw new Error(check.error);
   let prepared;
@@ -566,6 +577,7 @@ export async function createLogoAsset(file, { normalize = normalizeImageFile } =
     name: file.name || null,
     blob: prepared.blob,
     metadata: prepared.privacy ? { [PRIVACY_NORMALIZATION_KEY]: prepared.privacy } : {},
+    workspaceId,
   });
 }
 
