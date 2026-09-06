@@ -23,24 +23,27 @@
 //     double writes in one step and has no fractions to report, and inventing
 //     them would let a test pass on a number the product cannot produce.
 //
-// THE STORAGE RULES (Phase 7.3). The real rules decide membership and
-// ownership by reading FIRESTORE cross-service (storage.rules →
-// `firestore.exists` / `firestore.get`). This double does the same thing
-// against the in-memory WORKSPACE store when one is attached —
+// THE STORAGE RULES (Phase 7.3, narrowed in 7.10A). The real rules decide
+// membership by reading FIRESTORE cross-service (storage.rules →
+// `firestore.exists`). This double does the same thing against the in-memory
+// WORKSPACE store when one is attached —
 // `createMemoryAssetStore({ workspaceStore })` — reading the caller from
-// `workspaceStore.getUser()` and the membership / owner documents it holds:
+// `workspaceStore.getUser()` and the membership documents it holds:
 //   - get / upload need membership of the path's workspace;
 //   - an upload must be 1 byte … 50 MB, carry a content type on the canonical
 //     cloud list, and name its identity (assetId, workspaceId, assetKind) in
 //     custom metadata matching the path (src/lib/cloud/assetCloudModel.js);
-//   - DELETE is the workspace OWNER's alone (workspaces/{wid}.ownerUid), so
-//     no test can rely on a delete the real rule denies;
+//   - DELETE is DENIED to every signed-in caller (Phase 7.10A: NoteWise V1
+//     performs no physical cloud-asset deletion, so `storage.rules` says
+//     `allow delete: if false`), and no test can rely on a delete the real
+//     rule denies;
 //   - a signed-out caller gets `storage/unauthenticated`, any other refusal
 //     `storage/unauthorized` — the SDK's own codes.
 // WITHOUT a workspace store the double runs RULES-BYPASSED — the equivalent
 // of the emulator's `withSecurityRulesDisabled` — for tests of the byte
-// contract alone; the create-only rule and the path/type checks apply in
-// both modes. The rules themselves are tested against the real emulators
+// contract alone, and that is the only mode in which `deleteAsset` still
+// removes anything (the emulator suites empty the bucket the same way); the
+// create-only rule and the path/type checks apply in both modes. The rules themselves are tested against the real emulators
 // (test/rules/storage.rules.test.js).
 //
 // Failure injection: `failNext(operation, code)` makes the next
@@ -94,18 +97,16 @@ export function createMemoryAssetStore({ bucket = "memory-bucket", now = () => D
   }
 
   // storage.rules, evaluated against the attached workspace store: `get` and
-  // `create` for a member, `delete` for the owner. Nothing when no store is
+  // `create` for a member, `delete` for nobody. Nothing when no store is
   // attached (rules bypassed).
   function authorize(operation, workspaceId) {
     if (!workspaceStore) return;
     const uid = workspaceStore.getUser();
     if (!uid) throw assetStorageError(ASSET_STORAGE_ERROR.UNAUTHENTICATED, "No signed-in user");
     if (operation === "delete") {
-      const workspace = workspaceStore.get(["workspaces", workspaceId]);
-      if (!workspace || workspace.ownerUid !== uid) {
-        throw assetStorageError(ASSET_STORAGE_ERROR.UNAUTHORIZED, "Only the workspace owner may delete an asset object");
-      }
-      return;
+      // `allow delete: if false` (Phase 7.10A). Not the owner's either: V1
+      // retains canonical asset bytes and cleans up by reversible tombstone.
+      throw assetStorageError(ASSET_STORAGE_ERROR.UNAUTHORIZED, "Asset objects are never deleted in NoteWise V1");
     }
     if (!workspaceStore.get(["workspaces", workspaceId, "members", uid])) {
       throw assetStorageError(ASSET_STORAGE_ERROR.UNAUTHORIZED, "Not a member of this workspace");

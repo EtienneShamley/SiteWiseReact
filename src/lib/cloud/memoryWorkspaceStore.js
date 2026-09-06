@@ -27,9 +27,13 @@
 //     but state / tombstonedAt / updatedAt — stored → tombstoned only with
 //     the store's own timestamp, tombstoned → stored dropping it, and a
 //     standing tombstone keeping its clock;
-//   - DELETION is the workspace OWNER's alone (workspaces/{wid}.ownerUid):
-//     an ordinary member's delete is refused here exactly as the real rule
-//     refuses it, so no test can rely on a delete the service would deny.
+//   - DELETION is DENIED to everybody (Phase 7.10A: NoteWise V1 performs no
+//     physical cloud-asset deletion, so `firestore.rules` says
+//     `allow delete: if false` for this collection). Every caller's delete —
+//     the workspace owner's included, and whether direct or inside a batch —
+//     is refused here exactly as the real rule refuses it, so no test can
+//     rely on a delete the service would deny. `seed` remains the
+//     rules-bypassed way to arrange a document's absence.
 // They take the existing `read` / `commit` failure kinds. `readWorkspace`
 // excludes the collection: asset metadata is not part of the workspace
 // mirror the owner modules read, exactly as in the Firestore store.
@@ -66,13 +70,6 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
   function isMember(workspaceId, uid) {
     const member = docs.get(pathOf(["workspaces", workspaceId, "members", uid]));
     return Boolean(member);
-  }
-
-  // The one enforceable owner: workspaces/{wid}.ownerUid (firestore.rules
-  // `isOwner`). A membership document's role is never consulted for this.
-  function isOwner(workspaceId, uid) {
-    const workspace = docs.get(pathOf(["workspaces", workspaceId]));
-    return Boolean(workspace) && workspace.ownerUid === uid;
   }
 
   function assertAuthenticated() {
@@ -146,12 +143,12 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
     }
   }
 
-  // A delete in the assets collection is the owner's alone; every other
-  // entity delete is a member's.
+  // A delete in the assets collection is refused for everybody (Phase 7.10A);
+  // every other entity delete is a member's.
   function authorizeDelete(workspaceId, relativePath) {
     if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
-    if (relativePath[0] === ASSET_COLLECTION && relativePath.length === 2 && !isOwner(workspaceId, currentUid)) {
-      throw firestoreError("permission-denied", "assets: delete is owner-only");
+    if (relativePath[0] === ASSET_COLLECTION && relativePath.length === 2) {
+      throw firestoreError("permission-denied", "assets: delete is denied");
     }
   }
 

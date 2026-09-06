@@ -14,6 +14,8 @@
 //   uploadAsset(workspaceId, assetId, data, opts)   → { path, size, contentType }
 //   downloadAsset(workspaceId, assetId)             → Blob
 //   deleteAsset(workspaceId, assetId)               → { deleted: boolean }
+//                                                   (denied by the rules in
+//                                                   V1; no product caller)
 //
 // Locations come from src/lib/cloud/assetPaths.js — `workspaces/{wid}/assets/
 // {assetId}` — and both segments are validated there, so no caller can
@@ -43,9 +45,12 @@
 //     `uploadBytes` request it has always been. No percentage is ever
 //     synthesised, and a small file that completes in one chunk simply
 //     reports its completion.
-//   - `deleteAsset` reports `{ deleted: false }` for an object that is
-//     already gone — a garbage collector that runs twice is not an error —
-//     and lets every other failure propagate.
+//   - `deleteAsset` is a TRANSPORT SEAM with no product caller: since Phase
+//     7.10A `storage.rules` denies `delete` to every client, because NoteWise
+//     V1 performs no physical cloud-asset deletion. It reports
+//     `{ deleted: false }` for an object that is already gone — a garbage
+//     collector that runs twice is not an error — and lets every other
+//     failure, the service's refusal included, propagate.
 //
 // Errors carry the Firebase Storage `code` (`storage/object-not-found`,
 // `storage/unauthorized`, …); see ASSET_STORAGE_ERROR in assetPaths.js. A
@@ -234,7 +239,12 @@ export function createFirebaseStorageAdapter(config) {
       }
     },
 
-    /** Remove one asset's object. `{ deleted: false }` when it was already gone. */
+    /**
+     * Remove one asset's object. `{ deleted: false }` when it was already gone.
+     *
+     * No product caller: `storage.rules` denies `delete` to every client
+     * (Phase 7.10A), so a real call can only be refused.
+     */
     async deleteAsset(workspaceId, assetId) {
       try {
         await deleteObject(refFor(workspaceId, assetId));

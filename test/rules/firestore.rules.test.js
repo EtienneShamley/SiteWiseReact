@@ -402,14 +402,48 @@ describe("asset metadata documents", { concurrency: false }, () => {
     await assertFails(setDoc(doc(db("bob"), "workspaces", "ws-alice", "assets", ASSET), assetDoc("ws-alice", ASSET, { state: "tombstoned", tombstonedAt: serverTimestamp() })));
   });
 
-  test("delete: the workspace owner only — not an ordinary member, not another workspace's owner", async () => {
+  // Phase 7.10A: NoteWise V1 performs no physical cloud-asset deletion, so
+  // the metadata document — the only handle the product has on an object —
+  // is never destroyed from a client. `allow delete: if false`.
+  test("delete: denied to EVERYBODY — the workspace owner included", async () => {
     await seedAsset("ws-alice", ASSET);
-    await assertFails(deleteDoc(doc(db("mia"), "workspaces", "ws-alice", "assets", ASSET)));
-    await assertFails(deleteDoc(doc(db("bob"), "workspaces", "ws-alice", "assets", ASSET)));
-    await assertFails(deleteDoc(doc(anon(), "workspaces", "ws-alice", "assets", ASSET)));
+    await assertFails(deleteDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET))); // the owner
+    await assertFails(deleteDoc(doc(db("mia"), "workspaces", "ws-alice", "assets", ASSET))); // an ordinary member
+    await assertFails(deleteDoc(doc(db("bob"), "workspaces", "ws-alice", "assets", ASSET))); // another workspace's owner
+    await assertFails(deleteDoc(doc(anon(), "workspaces", "ws-alice", "assets", ASSET))); // signed out
+    // The document is untouched, and still deletable by nobody after a tombstone.
     assert.equal((await getDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET))).exists(), true);
-    await assertSucceeds(deleteDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET)));
-    assert.equal((await getDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET))).exists(), false);
+    await assertSucceeds(
+      setDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET), assetDoc("ws-alice", ASSET, { state: "tombstoned", tombstonedAt: serverTimestamp() }))
+    );
+    await assertFails(deleteDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET)));
+    const standing = await getDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET));
+    assert.equal(standing.exists(), true);
+    assert.equal(standing.data().state, "tombstoned");
+  });
+
+  test("delete: denied inside a batch too, and the batch's other writes do not land", async () => {
+    await seedAsset("ws-alice", ASSET);
+    const f = db("alice");
+    const batch = writeBatch(f);
+    batch.set(doc(f, "workspaces", "ws-alice", "nodes", "p1"), { workspaceId: "ws-alice", id: "p1", kind: "nodes", schemaVersion: 1, nodeKind: "project", name: "P", updatedAt: serverTimestamp() });
+    batch.delete(doc(f, "workspaces", "ws-alice", "assets", ASSET));
+    await assertFails(batch.commit());
+    assert.equal((await getDoc(doc(f, "workspaces", "ws-alice", "assets", ASSET))).exists(), true);
+    assert.equal((await getDoc(doc(f, "workspaces", "ws-alice", "nodes", "p1"))).exists(), false);
+  });
+
+  test("an unrelated workspace can neither read, rewrite, tombstone nor delete this asset", async () => {
+    await seedAsset("ws-alice", ASSET);
+    const stranger = db("bob"); // owner of ws-bob, nothing in ws-alice
+    const ref = doc(stranger, "workspaces", "ws-alice", "assets", ASSET);
+    await assertFails(getDoc(ref));
+    await assertFails(setDoc(ref, assetDoc("ws-alice", ASSET)));
+    await assertFails(setDoc(ref, assetDoc("ws-alice", ASSET, { state: "tombstoned", tombstonedAt: serverTimestamp() })));
+    await assertFails(deleteDoc(ref));
+    const snap = await getDoc(doc(db("alice"), "workspaces", "ws-alice", "assets", ASSET));
+    assert.equal(snap.exists(), true);
+    assert.equal(snap.data().state, "stored");
   });
 
   test("a batch mixing a valid asset write with a foreign one fails as a whole", async () => {

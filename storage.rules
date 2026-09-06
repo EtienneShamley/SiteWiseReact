@@ -13,9 +13,9 @@ rules_version = '2';
 //
 // Membership comes from FIRESTORE — the same workspaces/{wid}/members/{uid}
 // document firestore.rules trusts — read cross-service with
-// `firestore.exists(...)`; ownership from workspaces/{wid}.ownerUid, the one
-// enforceable owner the current model has. Both look-ups are proven against
-// the paired Firestore + Storage emulators in test/rules/storage.rules.test.js.
+// `firestore.exists(...)`. It is the ONLY authorization fact these rules
+// read, and it is proven against the paired Firestore + Storage emulators in
+// test/rules/storage.rules.test.js.
 //
 // Invariants enforced:
 //   - every access requires a signed-in Firebase user who is a member of the
@@ -31,9 +31,15 @@ rules_version = '2';
 //     (assetId, workspaceId, assetKind) matching the path, so bytes can never
 //     be filed under a different record than the one that describes them;
 //   - listing a prefix is not granted (the asset index lives in Firestore);
-//   - DELETION is the workspace OWNER's alone: destructive cloud garbage
-//     collection is owner-authorised, exactly as the metadata document's
-//     deletion is in firestore.rules.
+//   - DELETION IS DENIED TO EVERYBODY (Phase 7.10A). NoteWise V1 performs no
+//     physical cloud-asset deletion: an unused asset is logically tombstoned
+//     in Firestore, reversibly, and its canonical bytes are retained. That is
+//     an evidence-recoverability policy, and Storage growth is an accepted V1
+//     operational cost. The metadata document's `delete` is denied in
+//     firestore.rules for the same reason. A future server-side retention
+//     design must change this rule explicitly, under its own review — which
+//     is why no ownership look-up is left standing here to be re-wired
+//     casually.
 //
 // Tested against the emulators: test/rules/storage.rules.test.js.
 
@@ -48,18 +54,8 @@ service firebase.storage {
       return /databases/(default)/documents/workspaces/$(wid)/members/$(uid);
     }
 
-    function workspacePath(wid) {
-      return /databases/(default)/documents/workspaces/$(wid);
-    }
-
     function isMember(wid) {
       return signedIn() && firestore.exists(memberPath(wid, request.auth.uid));
-    }
-
-    function isOwner(wid) {
-      return signedIn()
-        && firestore.exists(workspacePath(wid))
-        && firestore.get(workspacePath(wid)).data.ownerUid == request.auth.uid;
     }
 
     function assetSegment(value) {
@@ -110,9 +106,7 @@ service firebase.storage {
 
       allow update: if false;
 
-      allow delete: if isOwner(workspaceId)
-        && assetSegment(workspaceId)
-        && assetSegment(assetId);
+      allow delete: if false;
     }
 
     match /{allPaths=**} {

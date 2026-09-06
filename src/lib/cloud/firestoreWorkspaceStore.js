@@ -17,6 +17,8 @@
 //   readAssetDocument(wid, assetId)   one asset metadata document
 //   writeAssetDocument(wid, assetId, fields)  create / rewrite one (server-stamped)
 //   deleteAssetDocument(wid, assetId) remove one asset metadata document
+//                                     (a transport seam only — denied by the
+//                                     rules and called by nothing in V1)
 //   close()
 //
 // ASSET METADATA (Production Readiness Phase 7). `workspaces/{wid}/assets/
@@ -25,10 +27,12 @@
 // the shared path convention is src/lib/cloud/assetPaths.js). The field
 // model is src/lib/cloud/assetCloudModel.js; `firestore.rules` admits the
 // collection since Phase 7.3 — members read, create and tombstone / restore
-// a document, and ONLY the workspace owner deletes one. The reads are what a
-// later phase's reconciliation and the reference-driven sweep need; the
-// write is the upload processor's and the lifecycle's; the delete is the
-// sweep's, and it is refused by the rules for anybody but the owner. Every
+// a document, and NOBODY deletes one (Phase 7.10A: `allow delete: if false`,
+// because NoteWise V1 performs no physical cloud-asset deletion). The reads
+// are what reconciliation and the reference-driven sweep need; the write is
+// the upload processor's and the lifecycle's; `deleteAssetDocument` has no
+// caller in the product and is refused by the rules for every caller,
+// including the workspace owner. Every
 // write here adds `updatedAt: serverTimestamp()` because the rules require
 // it, and a tombstone's `tombstonedAt` must be `timestamp()` too (the rules
 // refuse a client clock). `readWorkspace` does NOT include the collection —
@@ -150,7 +154,13 @@ export function createFirestoreWorkspaceStore(config) {
       await setDoc(ref(assetDocumentPath(workspaceId, assetId)), { ...fields, updatedAt: serverTimestamp() });
     },
 
-    /** Remove one asset metadata document (the sweep's own write; owner-only by the rules). */
+    /**
+     * Remove one asset metadata document.
+     *
+     * A TRANSPORT SEAM with no product caller: `firestore.rules` denies this
+     * delete to every client (Phase 7.10A), so it can only ever succeed
+     * against a future, separately reviewed server-side retention design.
+     */
     async deleteAssetDocument(workspaceId, assetId) {
       await deleteDoc(ref(assetDocumentPath(workspaceId, assetId)));
     },

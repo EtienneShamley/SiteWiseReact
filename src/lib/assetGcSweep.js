@@ -26,8 +26,8 @@
 //              must not be able to mature a candidate on its own, and a
 //              hundred passes in one afternoon must not shorten the 48 hours.
 //   OWNERSHIP  only the workspace OWNER tombstones. The Security Rules permit
-//              any member to make this transition (deletion, and only
-//              deletion, is owner-only there) and they are NOT weakened or
+//              any member to make this transition (deletion is permitted to
+//              NOBODY there since Phase 7.10A) and they are NOT weakened or
 //              widened here; this is a CLIENT POLICY on top of them, so a
 //              future member of someone else's workspace cannot quietly
 //              retire that workspace's files. Resurrection stays open to

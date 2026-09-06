@@ -24,7 +24,9 @@ rules_version = '2';
 //   - nothing is ever deleted at the workspace/user/member level from the
 //     client (account deletion is a later, coordinated workflow);
 //   - asset metadata (workspaces/{wid}/assets, Phase 7.3) is created and
-//     tombstoned by members but DELETED only by the workspace owner.
+//     tombstoned by members and is NEVER deleted from the client: NoteWise
+//     V1 performs no physical cloud-asset deletion (Phase 7.10A), so the
+//     canonical record of an asset survives its own tombstone.
 //
 // Tested against the emulator: test/rules/firestore.rules.test.js.
 
@@ -242,8 +244,13 @@ service cloud.firestore {
       //                  is too); stored → tombstoned stamps tombstonedAt with
       //                  the server clock; tombstoned → stored drops it;
       //                  a standing tombstone keeps its original clock
-      //   delete         the workspace OWNER only (destructive cloud GC is
-      //                  owner-authorised — workspaces/{wid}.ownerUid)
+      //   delete         DENIED to everybody (Phase 7.10A). The V1 asset
+      //                  lifecycle is `stored ↔ tombstoned` and nothing more:
+      //                  tombstoning is reversible and the canonical record is
+      //                  retained, so no client — the workspace owner
+      //                  included — may destroy it. A future server-side
+      //                  retention design must change this rule explicitly and
+      //                  be reviewed on its own terms.
       function assetSegment(value) {
         return value.matches('^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$');
       }
@@ -308,7 +315,7 @@ service cloud.firestore {
           && validAssetFields(assetId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['state', 'tombstonedAt', 'updatedAt'])
           && validAssetStateChange();
-        allow delete: if isOwner(wid);
+        allow delete: if false;
       }
 
       match /migrations/{sourceId} {

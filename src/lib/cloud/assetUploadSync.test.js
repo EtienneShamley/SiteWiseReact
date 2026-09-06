@@ -3,7 +3,7 @@
 // The upload engine (Production Readiness Phase 7.4), against a REAL
 // IndexedDB (fake-indexeddb) for the local queue/index and the in-memory
 // Storage + Firestore doubles for the cloud — the doubles that enforce the
-// deployed rules (membership, create-only objects, owner-only deletion, the
+// deployed rules (membership, create-only objects, no deletion at all, the
 // asset document state machine), so an "it settled" here is a settlement the
 // service would also have permitted.
 //

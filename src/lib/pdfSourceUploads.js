@@ -114,8 +114,9 @@ export async function enqueuePdfSourceUpload(sourceId, { workspaceId, at } = {})
  * not been SETTLED (settlement deletes the row in the same transaction that
  * records the object — src/lib/assetUploadQueue.js), so releasing it can
  * never un-know an object the account holds. An object that did reach the
- * cloud stays there for the collector under the owner-only delete rule; this
- * function deletes nothing in the cloud. The remote index is not consulted:
+ * cloud stays there for the collector, which in V1 only ever tombstones it
+ * (no rule permits a client to delete it); this function deletes nothing in
+ * the cloud. The remote index is not consulted:
  * it is a cache, and a stale `stored` entry must never keep an obsolete
  * source's identity alive so that a deleted or replaced PDF is uploaded later.
  *

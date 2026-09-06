@@ -17,14 +17,17 @@
 // Firebase SDK need the real Node realm's `fetch` and web streams.
 //
 // PHASE 7.3 CONTRACT (the deny-all of 7.1 re-targeted, not deleted — the
-// unauthenticated and non-member cases stay refusals for good):
+// unauthenticated and non-member cases stay refusals for good), NARROWED BY
+// PHASE 7.10A on the delete:
 //   unauthenticated: no read, create or delete · member: read + create in
 //   the own workspace, nothing in another's · non-member: nothing ·
 //   objects: create-only (no overwrite), path segments validated, custom
 //   metadata must match the path, kind allow-listed, 0 bytes and > 50 MB
 //   refused, the canonical MIME list accepted and anything else refused ·
-//   delete: the workspace OWNER only — an ordinary member, and the owner of
-//   another workspace, cannot · listing not granted · other paths closed.
+//   delete: DENIED TO EVERYBODY, the workspace owner included — NoteWise V1
+//   performs no physical cloud-asset deletion, and unused assets are cleaned
+//   up by the reversible Firestore tombstone instead · listing not granted ·
+//   other paths closed.
 //
 // `getBytes` is used for the read attempt because `getBlob` — the read path
 // the application itself uses — is browser-only; both go through the same
@@ -160,19 +163,21 @@ async function seedObject(objectPath = ASSET_PATH, options = upload()) {
 }
 
 describe("storage.rules — the file", { concurrency: false }, () => {
-  test("it is a version-2 Storage rules file that decides membership and ownership in Firestore", () => {
+  test("it is a version-2 Storage rules file that decides membership in Firestore and grants no delete", () => {
     const rules = fs.readFileSync(path.join(__dirname, "..", "..", "storage.rules"), "utf8");
     const code = rules.replace(/\/\/.*$/gm, "");
     assert.match(code, /rules_version = '2'/);
     assert.match(code, /service firebase\.storage/);
     assert.match(code, /match \/workspaces\/\{workspaceId\}\/assets\/\{assetId\}/);
     assert.match(code, /firestore\.exists\(memberPath\(wid, request\.auth\.uid\)\)/);
-    assert.match(code, /firestore\.exists\(workspacePath\(wid\)\)/);
-    assert.match(code, /firestore\.get\(workspacePath\(wid\)\)\.data\.ownerUid == request\.auth\.uid/);
     assert.match(code, /allow update: if false;/);
     assert.match(code, /allow list: if false;/);
-    assert.match(code, /allow delete: if isOwner\(workspaceId\)/);
+    assert.match(code, /allow delete: if false;/);
     assert.match(code, /match \/\{allPaths=\*\*\} \{\s*allow read, write: if false;\s*\}/);
+    // Phase 7.10A: no ownership look-up is left standing to be re-wired to a
+    // delete grant by accident — re-enabling deletion is a deliberate edit.
+    assert.doesNotMatch(code, /isOwner/);
+    assert.doesNotMatch(code, /ownerUid/);
     // No rule grants anything to a mere member of nothing — `if true` never appears.
     assert.doesNotMatch(code, /if\s+true/);
   });
@@ -195,12 +200,15 @@ describe("storage.rules — cross-service membership (the firestore.exists proof
     await assertSucceeds(uploadBytes(ref(storage, `workspaces/${WID}/assets/asset-2`), BYTES, upload("image/jpeg", { assetId: "asset-2" })));
   });
 
-  test("ownership too: the owner recorded on workspaces/{wid} may delete, and nobody else", async () => {
+  test("membership is the ONLY fact read: it opens read and create, and opens no delete for anybody", async () => {
     await seedWorkspace("alice", WID, { members: ["bob"] });
     await seedObject();
+    await assertSucceeds(getBytes(ref(authed("bob"), ASSET_PATH)));
     await assertFails(deleteObject(ref(authed("bob"), ASSET_PATH)));
-    await assertSucceeds(deleteObject(ref(authed("alice"), ASSET_PATH)));
-    await assert.rejects(getMetadata(ref(authed("alice"), ASSET_PATH)), { code: "storage/object-not-found" }); // gone
+    await assertFails(deleteObject(ref(authed("alice"), ASSET_PATH))); // the workspace owner too
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      assert.equal(Number((await getMetadata(ref(ctx.storage(), ASSET_PATH))).size), BYTES.length); // still there
+    });
   });
 });
 
@@ -356,38 +364,58 @@ describe("storage.rules — object invariants", { concurrency: false }, () => {
   });
 });
 
-describe("storage.rules — deletion is owner-authorised", { concurrency: false }, () => {
+// Phase 7.10A. NoteWise V1 performs no physical cloud-asset deletion: an
+// unused asset is logically tombstoned in Firestore, reversibly, and its
+// canonical bytes stay in the bucket. `allow delete: if false`.
+describe("storage.rules — deletion is denied outright", { concurrency: false }, () => {
   beforeEach(async () => {
     await seedWorkspace("alice", WID, { members: ["bob"] });
     await seedWorkspace("carol", OTHER_WID);
     await seedObject();
   });
 
-  test("the workspace owner deletes", async () => {
-    await assertSucceeds(deleteObject(ref(authed("alice"), ASSET_PATH)));
-    await assert.rejects(getMetadata(ref(authed("alice"), ASSET_PATH)), { code: "storage/object-not-found" });
+  /** The object is still exactly as it was seeded. */
+  async function objectSurvives() {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      assert.equal(Number((await getMetadata(ref(ctx.storage(), ASSET_PATH))).size), BYTES.length);
+    });
+  }
+
+  test("the workspace OWNER cannot delete", async () => {
+    await assertFails(deleteObject(ref(authed("alice"), ASSET_PATH)));
+    await objectSurvives();
   });
 
   test("an ordinary member of the same workspace cannot delete, though they can read", async () => {
     await assertSucceeds(getBytes(ref(authed("bob"), ASSET_PATH)));
     await assertFails(deleteObject(ref(authed("bob"), ASSET_PATH)));
+    await objectSurvives();
   });
 
-  test("the owner of ANOTHER workspace cannot delete here", async () => {
-    await assertFails(deleteObject(ref(authed("carol"), ASSET_PATH)));
-    await env.withSecurityRulesDisabled(async (ctx) => {
-      assert.equal(Number((await getMetadata(ref(ctx.storage(), ASSET_PATH))).size), BYTES.length);
-    });
+  test("the owner of ANOTHER workspace, a stranger and a signed-out caller cannot delete here", async () => {
+    for (const storage of [authed("carol"), authed("mallory"), anon()]) {
+      await assertFails(deleteObject(ref(storage, ASSET_PATH)));
+    }
+    await objectSurvives();
   });
 
-  test("an owner membership document alone does not make an owner — workspaces/{wid}.ownerUid decides", async () => {
+  test("an owner-role membership document buys nothing either — no rule reads ownership at all", async () => {
     // A forged/stale owner-role membership for mallory, with the workspace still alice's.
     await env.withSecurityRulesDisabled(async (ctx) => {
       const now = new Date();
       await setDoc(doc(ctx.firestore(), "workspaces", WID, "members", "mallory"), { uid: "mallory", role: "owner", addedAt: now, addedBy: "mallory" });
     });
     await assertSucceeds(getBytes(ref(authed("mallory"), ASSET_PATH))); // a member, so may read
-    await assertFails(deleteObject(ref(authed("mallory"), ASSET_PATH))); // not the owner
+    await assertFails(deleteObject(ref(authed("mallory"), ASSET_PATH)));
+    await objectSurvives();
+  });
+
+  test("the object stays create-only rather than becoming replaceable: no delete-then-recreate path", async () => {
+    const storage = authed("alice");
+    await assertFails(deleteObject(ref(storage, ASSET_PATH)));
+    await assertFails(uploadBytes(ref(storage, ASSET_PATH), new Uint8Array([7, 7]), upload()));
+    const bytes = await getBytes(ref(storage, ASSET_PATH));
+    assert.deepEqual(new Uint8Array(bytes), BYTES);
   });
 });
 

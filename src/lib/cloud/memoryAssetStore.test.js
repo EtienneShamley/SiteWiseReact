@@ -305,20 +305,25 @@ describe("with a workspace store attached — the Storage rules' equivalent", ()
     expect(await store.objectExists(WID_A, AID)).toBe(true);
   });
 
-  test("delete is the workspace owner's alone; an ordinary member and another workspace's owner are refused", async () => {
+  // Phase 7.10A: `storage.rules` says `allow delete: if false`, because
+  // NoteWise V1 performs no physical cloud-asset deletion. The double refuses
+  // every signed-in caller so no test can rely on a delete the service denies.
+  test("delete is refused for EVERY signed-in caller — the workspace owner included — and the object stands", async () => {
     const { store, workspaceStore } = stores();
     await store.seed(WID_A, AID, bytes(1), { contentType: "image/png" });
-    workspaceStore.setUser("bob");
-    await expect(store.deleteAsset(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
-    workspaceStore.setUser("carol");
-    await expect(store.deleteAsset(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    for (const uid of ["alice", "bob", "carol", "mallory"]) {
+      workspaceStore.setUser(uid);
+      await expect(store.deleteAsset(WID_A, AID)).rejects.toMatchObject({ code: ASSET_STORAGE_ERROR.UNAUTHORIZED });
+    }
     expect(store.list(WID_A)).toEqual([AID]);
+    // Nor is the object absence reachable by deleting one that is not there.
     workspaceStore.setUser("alice");
-    expect(await store.deleteAsset(WID_A, AID)).toEqual({ deleted: true });
-    expect(await store.deleteAsset(WID_A, AID)).toEqual({ deleted: false });
+    await expect(store.deleteAsset(WID_A, "asset-2222-4222-8333-444455556666")).rejects.toMatchObject({
+      code: ASSET_STORAGE_ERROR.UNAUTHORIZED,
+    });
   });
 
-  test("an owner-role membership document alone does not make an owner — the workspace's ownerUid decides", async () => {
+  test("an owner-role membership document buys no delete either — reading stays a member's right", async () => {
     const { store, workspaceStore } = stores();
     workspaceStore.seed(["workspaces", WID_A, "members", "mallory"], { uid: "mallory", role: "owner" });
     await store.seed(WID_A, AID, bytes(1), { contentType: "image/png" });

@@ -35,11 +35,14 @@
 // one to delay it. `createdAt` is informational (the local clock) and never a
 // lifecycle input.
 //
-// LIFECYCLE the rules permit: create as `stored` → `tombstoned` (when the
-// workspace no longer references the asset) → back to `stored` (a reference
-// reappeared inside the grace period) → deleted by the workspace OWNER. On
-// an update nothing but `state`, `tombstonedAt` and `updatedAt` may change:
-// the object is immutable, so its description is too.
+// LIFECYCLE the rules permit: create as `stored` ↔ `tombstoned` (tombstoned
+// when the workspace no longer references the asset, back to `stored` when a
+// reference reappears). There is no third step: since Phase 7.10A both rules
+// files deny `delete` outright, because NoteWise V1 performs no physical
+// cloud-asset deletion — tombstoning is reversible and the canonical bytes
+// and record are retained. On an update nothing but `state`, `tombstonedAt`
+// and `updatedAt` may change: the object is immutable, so its description
+// is too.
 //
 // The MIME policy below is the ONE canonical list for cloud assets — the
 // Storage rules' content-type allow-list and the Firestore rules' `mimeType`

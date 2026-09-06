@@ -1,17 +1,19 @@
 // src/lib/cloud/workspaceAssetDocuments.test.js
 //
-// The workspace store's ASSET METADATA operations — the reads a later
-// phase's reconciliation and reference-driven sweep need, the write the
-// upload processor and the lifecycle perform, and the delete that sweep
-// performs. Exercised against the in-memory store (the Firestore twin is not
-// loadable under Jest); the Firestore adapter is checked for the same four
-// operations over the same shared paths.
+// The workspace store's ASSET METADATA operations — the reads reconciliation
+// and the reference-driven sweep need, the write the upload processor and the
+// lifecycle perform, and the delete that has no product caller and is denied
+// by the rules. Exercised against the in-memory store (the Firestore twin is
+// not loadable under Jest); the Firestore adapter is checked for the same
+// four operations over the same shared paths.
 //
 // Since Phase 7.3 the memory store enforces the asset rules of
 // firestore.rules: a written document is validated against the field model
-// (src/lib/cloud/assetCloudModel.js), the state machine is respected, a
-// fresh tombstone needs the store's own timestamp, and DELETE is the
-// workspace owner's alone.
+// (src/lib/cloud/assetCloudModel.js), the state machine is respected and a
+// fresh tombstone needs the store's own timestamp. Since Phase 7.10A DELETE
+// is refused for EVERY caller, the workspace owner included: NoteWise V1
+// performs no physical cloud-asset deletion, so `firestore.rules` says
+// `allow delete: if false` for this collection.
 import fs from "fs";
 import path from "path";
 import { assetCollectionPath, assetDocumentPath } from "./assetPaths";
@@ -62,14 +64,13 @@ describe("asset metadata operations (memory workspace store)", () => {
     expect(await store.readAssetDocument(WID, A2)).toEqual({ exists: false, fields: null });
   });
 
-  test("a document deletes, and deleting what is already gone reports it", async () => {
+  test("a document is never deleted — not by the workspace owner, and not out of the index", async () => {
     const store = storeWithWorkspace();
     seedAsset(store, WID, A1);
 
-    expect(await store.deleteAssetDocument(WID, A1)).toEqual({ deleted: true });
-    expect(await store.readAssetDocument(WID, A1)).toEqual({ exists: false, fields: null });
-    expect(await store.deleteAssetDocument(WID, A1)).toEqual({ deleted: false });
-    expect((await store.readAssetIndex(WID)).assets).toEqual([]);
+    await expect(store.deleteAssetDocument(WID, A1)).rejects.toMatchObject({ code: "permission-denied" });
+    expect((await store.readAssetDocument(WID, A1)).exists).toBe(true);
+    expect((await store.readAssetIndex(WID)).assets.map((a) => a.id)).toEqual([A1]);
   });
 
   test("a non-member is refused every asset operation, and nothing is deleted", async () => {
@@ -103,8 +104,8 @@ describe("asset metadata operations (memory workspace store)", () => {
     await expect(store.readAssetIndex(WID)).rejects.toMatchObject({ code: "unavailable" });
     expect((await store.readAssetIndex(WID)).assets).toHaveLength(1);
 
-    store.failNext("commit", "permission-denied");
-    await expect(store.deleteAssetDocument(WID, A1)).rejects.toMatchObject({ code: "permission-denied" });
+    store.failNext("commit", "unavailable");
+    await expect(store.writeAssetDocument(WID, A1, validAsset(WID, A1))).rejects.toMatchObject({ code: "unavailable" });
     expect((await store.readAssetDocument(WID, A1)).exists).toBe(true);
   });
 
@@ -211,35 +212,99 @@ describe("asset metadata writes and lifecycle (memory workspace store, the rules
     expect((await store.readAssetDocument(WID, A1)).fields.name).toBe("photo.jpg");
   });
 
-  test("delete is the owner's alone — an ordinary member is refused, directly and through a batch", async () => {
+  test("delete is refused for everybody — member and owner, directly and through a batch — while entity deletes still work", async () => {
     const store = storeWithWorkspace("alice", { members: ["mia"] });
     seedAsset(store, WID, A1);
-    store.setUser("mia");
-    await expect(store.deleteAssetDocument(WID, A1)).rejects.toMatchObject({ code: "permission-denied" });
-    await expect(store.commitBatch(WID, [{ type: "delete", path: ["assets", A1] }])).rejects.toMatchObject({ code: "permission-denied" });
+    for (const uid of ["mia", "alice"]) {
+      store.setUser(uid);
+      await expect(store.deleteAssetDocument(WID, A1)).rejects.toMatchObject({ code: "permission-denied" });
+      await expect(store.commitBatch(WID, [{ type: "delete", path: ["assets", A1] }])).rejects.toMatchObject({ code: "permission-denied" });
+    }
     expect((await store.readAssetDocument(WID, A1)).exists).toBe(true);
-    // the member still deletes ordinary entities
+    // Ordinary entity deletes are untouched — this narrowing is the asset
+    // collection's alone.
+    store.setUser("mia");
     store.seed(["workspaces", WID, "nodes", "n1"], { workspaceId: WID, id: "n1", kind: "nodes", nodeKind: "note" });
     await store.commitBatch(WID, [{ type: "delete", path: ["nodes", "n1"] }]);
     expect(store.get(["workspaces", WID, "nodes", "n1"])).toBe(null);
-    // and the owner deletes the asset document
-    store.setUser("alice");
-    expect(await store.deleteAssetDocument(WID, A1)).toEqual({ deleted: true });
   });
 
-  test("the owner of another workspace is not this workspace's owner", async () => {
+  test("a batch mixing an entity delete with an asset delete lands neither", async () => {
+    const store = storeWithWorkspace("alice");
+    seedAsset(store, WID, A1);
+    store.seed(["workspaces", WID, "nodes", "n1"], { workspaceId: WID, id: "n1", kind: "nodes", nodeKind: "note" });
+    await expect(
+      store.commitBatch(WID, [
+        { type: "delete", path: ["nodes", "n1"] },
+        { type: "delete", path: ["assets", A1] },
+      ])
+    ).rejects.toMatchObject({ code: "permission-denied" });
+    expect(store.get(["workspaces", WID, "nodes", "n1"])).not.toBe(null);
+    expect((await store.readAssetDocument(WID, A1)).exists).toBe(true);
+  });
+
+  test("a tombstoned document is no more deletable than a stored one", async () => {
+    const store = storeWithWorkspace("alice", { members: ["mia"] });
+    await store.writeAssetDocument(WID, A1, validAsset(WID, A1));
+    const stored = (await store.readAssetDocument(WID, A1)).fields;
+    await store.writeAssetDocument(WID, A1, tombstoneAssetDocument(stored, store.timestamp()));
+    expect((await store.readAssetDocument(WID, A1)).fields.state).toBe("tombstoned");
+    await expect(store.deleteAssetDocument(WID, A1)).rejects.toMatchObject({ code: "permission-denied" });
+    store.setUser("mia");
+    await expect(store.deleteAssetDocument(WID, A1)).rejects.toMatchObject({ code: "permission-denied" });
+    expect((await store.readAssetDocument(WID, A1)).exists).toBe(true);
+  });
+
+  test("an unrelated workspace's owner can neither read, rewrite nor delete this asset", async () => {
     const store = storeWithWorkspace("alice");
     store.seed(["workspaces", OTHER], { id: OTHER, ownerUid: "carol", schemaVersion: 1 });
     store.seed(["workspaces", OTHER, "members", "carol"], { uid: "carol", role: "owner" });
     seedAsset(store, WID, A1);
     store.setUser("carol");
+    await expect(store.readAssetDocument(WID, A1)).rejects.toMatchObject({ code: "permission-denied" });
+    await expect(store.writeAssetDocument(WID, A1, validAsset(WID, A1))).rejects.toMatchObject({ code: "permission-denied" });
     await expect(store.deleteAssetDocument(WID, A1)).rejects.toMatchObject({ code: "permission-denied" });
+  });
+});
+
+// Phase 7.10A. The two cloud DELETE boundaries — the Firestore asset
+// document's and the Storage object's — are transport seams the rules refuse.
+// Nothing in the product may call them, and this scan is what keeps that
+// true: a future caller has to delete this test to ship.
+describe("no product path deletes a cloud asset", () => {
+  const SRC = path.join(__dirname, "..", "..");
+
+  /** Every application source file, tests and the two store modules excluded. */
+  function productSources(dir = SRC, out = []) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) productSources(full, out);
+      else if (entry.name.endsWith(".js") && !entry.name.endsWith(".test.js")) out.push(full);
+    }
+    return out;
+  }
+
+  const DEFINITIONS = ["firestoreWorkspaceStore.js", "memoryWorkspaceStore.js", "firebaseStorageAdapter.js", "memoryAssetStore.js"];
+
+  test("no module outside the store definitions names deleteAssetDocument, and nothing calls a store's deleteAsset", () => {
+    const offenders = { document: [], object: [] };
+    for (const file of productSources()) {
+      const source = fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+      const name = path.basename(file);
+      if (/deleteAssetDocument/.test(source) && !DEFINITIONS.includes(name)) offenders.document.push(name);
+      // The LOCAL `deleteAsset(id)` of src/lib/assetStorage.js is a different
+      // function and stays in use; a CLOUD delete is a call on a store object.
+      if (/\.deleteAsset\s*\(/.test(source)) offenders.object.push(name);
+    }
+    expect(offenders).toEqual({ document: [], object: [] });
   });
 });
 
 describe("the Firestore adapter carries the same operations", () => {
   const source = fs.readFileSync(path.join(__dirname, "firestoreWorkspaceStore.js"), "utf8");
 
+  // `deleteAssetDocument` remains a transport seam: the rules deny it, and
+  // nothing in the product calls it (asserted below).
   test("it implements readAssetIndex, readAssetDocument, writeAssetDocument and deleteAssetDocument", () => {
     expect(source).toMatch(/async readAssetIndex\(workspaceId\)/);
     expect(source).toMatch(/async readAssetDocument\(workspaceId, assetId\)/);

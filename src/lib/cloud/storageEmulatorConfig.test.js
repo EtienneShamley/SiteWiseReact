@@ -41,21 +41,26 @@ describe("storage.rules", () => {
     expect(code).toMatch(/service firebase\.storage/);
   });
 
-  test("Phase 7.3: one namespace, membership from Firestore, create-only objects, owner-only deletion, everything else closed", () => {
+  test("Phase 7.3, narrowed by 7.10A: one namespace, membership from Firestore, create-only objects, NO deletion, everything else closed", () => {
     expect(code).toMatch(/match \/workspaces\/\{workspaceId\}\/assets\/\{assetId\}/);
-    // Every grant is conditional on a Firestore membership or ownership look-up.
+    // Every grant is conditional on a Firestore membership look-up, and only
+    // reading and creating are granted at all.
     const grants = code.match(/allow [a-z, ]+: if (?!false;)[^;]*;/g);
-    expect(grants).toHaveLength(3);
+    expect(grants).toHaveLength(2);
     expect(grants[0]).toMatch(/^allow get: if isMember\(workspaceId\)/);
     expect(grants[1]).toMatch(/^allow create: if isMember\(workspaceId\)/);
     expect(grants[1]).toMatch(/resource == null/);
     expect(grants[1]).toMatch(/validNewObject\(workspaceId, assetId\)/);
-    expect(grants[2]).toMatch(/^allow delete: if isOwner\(workspaceId\)/);
     expect(code).toMatch(/allow update: if false;/);
     expect(code).toMatch(/allow list: if false;/);
+    expect(code).toMatch(/allow delete: if false;/);
     expect(code).toMatch(/match \/\{allPaths=\*\*\} \{\s*allow read, write: if false;\s*\}/);
     expect(code).toMatch(/firestore\.exists\(memberPath\(wid, request\.auth\.uid\)\)/);
-    expect(code).toMatch(/firestore\.get\(workspacePath\(wid\)\)\.data\.ownerUid == request\.auth\.uid/);
+    // Phase 7.10A: NoteWise V1 performs no physical cloud-asset deletion, so
+    // the file reads no ownership at all — there is no dormant owner check a
+    // later edit could re-wire to a delete grant without noticing.
+    expect(code).not.toMatch(/isOwner/);
+    expect(code).not.toMatch(/ownerUid/);
     // Nothing is decided from a membership document's role field.
     expect(code).not.toMatch(/role/);
     // No download URL, no public read, no unconditional grant.
@@ -74,10 +79,18 @@ describe("storage.rules", () => {
 
 describe("firestore.rules — the asset metadata collection", () => {
   const code = read("firestore.rules").replace(/\/\/.*$/gm, "");
+  /** The `match /assets/{assetId}` block alone, so a grant elsewhere cannot stand in for one here. */
+  const assetsBlock = code.match(/match \/assets\/\{assetId\} \{[\s\S]*?\n {6}\}/)[0];
 
-  test("assets are admitted additively, owner-only on delete, and pdfAnnotations joins the JSON collections", () => {
+  test("assets are admitted additively, deletable by nobody, and pdfAnnotations joins the JSON collections", () => {
     expect(code).toMatch(/match \/assets\/\{assetId\} \{/);
-    expect(code).toMatch(/allow delete: if isOwner\(wid\);/);
+    // Phase 7.10A: no client physically deletes an asset record in V1.
+    expect(assetsBlock).toMatch(/allow delete: if false;/);
+    expect(assetsBlock).not.toMatch(/isOwner/);
+    // Members still read, create and move the document between its two states.
+    expect(assetsBlock).toMatch(/allow read: if isMember\(wid\);/);
+    expect(assetsBlock).toMatch(/allow create: if isMember\(wid\)/);
+    expect(assetsBlock).toMatch(/allow update: if isMember\(wid\)/);
     expect(code).toMatch(/validEnvelope\('assets', assetId\)/);
     expect(code).toMatch(/request\.resource\.data\.state == 'stored'/);
     expect(code).toMatch(/next\.tombstonedAt == request\.time/);
