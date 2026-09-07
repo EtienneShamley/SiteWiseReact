@@ -47,6 +47,12 @@ import {
 } from "../lib/imageProcessing";
 import { blobCarriesSourceImageMetadata } from "../lib/imagePrivacy";
 import {
+  commitPhotoNumber,
+  loadPhotoDetails,
+  peekNextPhotoNumber,
+  savePhotoDetails,
+} from "../lib/photoDetailsPreference";
+import {
   finiteNumberOrNull,
   formatStampAltitude,
   formatStampSpeed,
@@ -173,6 +179,9 @@ function loadRemoteImage(url) {
 }
 // ------------------------------------------------------
 
+/** Supporting copy for the photo-details toggle: what the stamp puts on the picture. */
+const PHOTO_DETAILS_HINT = "Date, location, coordinates and map";
+
 // The former per-note "AI writing style" map ("sitewise-note-style-v1") is
 // retired: the Refine mode is one app-wide preference now
 // (src/lib/refinePreference.js). The old key is left in storage untouched.
@@ -288,6 +297,18 @@ export default function BottomBar({
 
   // NEW: coordinate system state (default Mount Eden 2000)
   const [coordSystem, setCoordSystem] = useState(DEFAULT_COORD_SYSTEM);
+  // ADD PHOTO DETAILS — the visible documentary stamp, for BOTH capture
+  // controls. Read once from the workspace's own preference: this component
+  // renders only after the durable scope is resolved (DataScopeProvider gates
+  // its children on that) and is unmounted on sign-out, so the value can never
+  // be the previous account's. Off unless this workspace explicitly turned it
+  // on. Writing back happens ONLY in the toggle's handler, so a user who never
+  // touches the control is never written to.
+  const [photoDetails, setPhotoDetails] = useState(() => loadPhotoDetails());
+  const togglePhotoDetails = (next) => {
+    setPhotoDetails(next);
+    savePhotoDetails(next);
+  };
 
   // Refs
   const fileInputRef = useRef(null);
@@ -629,8 +650,14 @@ export default function BottomBar({
     // because it was missing.
     const alt = resolveStampAltitude({ exifAltitude: exifAlt, browserAltitude: browserAlt });
 
-    const indexNo = (Number(localStorage.getItem("sitewise_photo_index") || "0") || 0) + 1;
-    localStorage.setItem("sitewise_photo_index", String(indexNo));
+    // The WORKSPACE's own photo number, not the browser's. The number is
+    // visible documentary content, so a counter shared by every account on the
+    // device was wrong the moment `+` uploads could be stamped too: one
+    // workspace's numbering would advance because of another's photographs.
+    // RESERVED here and COMMITTED only once the stamped Blob exists (below),
+    // so a stamp that fails and falls back to the unstamped photograph leaves
+    // no gap in the numbering. See src/lib/photoDetailsPreference.js.
+    const indexNo = peekNextPhotoNumber();
 
     const networkDt = exifDate || new Date();
     const localDt = new Date();
@@ -713,6 +740,9 @@ export default function BottomBar({
     const stampedBlob = await new Promise((resolve) =>
       stampedCanvas.toBlob(resolve, outputType, 0.92)
     );
+    // The number is consumed only now, by a stamp that actually produced
+    // bytes. A canvas that yielded nothing consumes nothing.
+    if (stampedBlob) commitPhotoNumber(indexNo);
     return stampedBlob;
   }
 
@@ -721,24 +751,35 @@ export default function BottomBar({
   // The ONE place this bar decides what an image's bytes are, and the ONE place
   // the stamping pipeline is reached from.
   //
-  //   CAMERA CAPTURE  -> stamped. The photo the user just TOOK is documentary
-  //                      evidence, and the existing burnt-in info box (time,
-  //                      address, coordinates, altitude, index) plus the map
-  //                      thumbnail is exactly what makes it usable as such. That
-  //                      behaviour is unchanged, layout included.
-  //   `+` PICKER      -> NOT stamped. An image the user CHOSE off their device
-  //                      is an ordinary picture: a diagram, a screenshot, a
-  //                      manufacturer's photo. Stamping it would burn today's
-  //                      location into a file that has nothing to do with here,
-  //                      and — because the stamp asks for geolocation — would
-  //                      also make choosing a picture prompt for location
-  //                      permission. Both routed through the stamping path
-  //                      before this phase; that was the bug.
+  // THE DECISION IS THE USER'S, NOT THE CONTROL'S (2026-09-07). Until this
+  // change the CONTROL decided: a camera capture was always stamped and a `+`
+  // pick never was. That axis was wrong. NoteWise is not construction-only —
+  // the same person photographs a whiteboard (wanting a clean picture) and a
+  // site defect (wanting visible date/location evidence), and which button was
+  // nearest says nothing about which one this is. Both controls now read ONE
+  // source-neutral preference, "Add photo details", which is OFF on first use
+  // for the camera as well; see src/lib/photoDetailsPreference.js.
   //
-  // Ordinary uploads therefore never call buildStampedImageBLOB, and since every
-  // geolocation / reverse-geocode / map request lives inside it, they never ask
-  // for location either. No structured GPS/address metadata is produced by
-  // either route: the camera stamp is, and stays, visible pixels in the Blob.
+  //   stamp: true   -> the burnt-in info box (time, address, coordinates,
+  //                    altitude, speed, the workspace's photo number) and the
+  //                    map thumbnail. Unchanged in content and layout; it is
+  //                    now reachable from `+` as well as the camera.
+  //   stamp: false  -> an ordinary picture, prepared and stored exactly as any
+  //                    other image.
+  //
+  // WHAT "OFF" DOES NOT MEAN. It does not mean the source file is kept as it
+  // is. The toggle sits UPSTREAM of the Phase 7.8 privacy pipeline, not inside
+  // it: both routes hand their Blob to the shared write sequence, which
+  // re-encodes or verifies it and records `metadata.privacyNormalization`
+  // either way. Hidden EXIF/GPS is removed from the STORED image whichever way
+  // this is set — see src/lib/editorImageInsert.js.
+  //
+  // Only buildStampedImageBLOB asks for geolocation, reverse-geocoding or a map
+  // tile, so an UNSTAMPED image — from either control — still makes none of
+  // those requests and still prompts for no location permission. That property
+  // is what made the old `+` behaviour worth keeping as the default. No
+  // structured GPS/address metadata is produced by either route: the stamp is,
+  // and stays, visible pixels in the Blob.
   //
   // WHAT BOTH ROUTES NOW SHARE (Production Readiness Phase 7.8): the DECODE.
   // Neither one hands a source file to an `<img>` any more — HEIC/HEIF goes to
@@ -1018,13 +1059,14 @@ export default function BottomBar({
     // point is snapshotted here — staging is not delivery, and the destination
     // is resolved at Send from wherever the user is by then.
     //
-    // `stamp: false` — this is the ORDINARY upload picker. A picture chosen off
-    // the device stays a normal picture: no location is requested, no map is
-    // drawn and no camera labels are burnt into it.
+    // The stamp follows the user's own "Add photo details" choice, not the
+    // control: a picture chosen off the device is stamped when this workspace
+    // asked for stamped photographs, and is otherwise left an ordinary picture
+    // with no location requested, no map drawn and no labels burnt into it.
     if (stagingEnabled) {
       for (const f of files) {
         if (bottomBarRouteFor(f) === "image") {
-          await stagePhoto(f, { stamp: false });
+          await stagePhoto(f, { stamp: photoDetails });
           continue;
         }
         stageAttachedFile(f);
@@ -1034,11 +1076,11 @@ export default function BottomBar({
 
     // No composing destination (no note, or a Template form with no row
     // selected — where both capture controls are disabled anyway): the original
-    // immediate insertion, and still unstamped for a picked image.
+    // immediate insertion, under the same preference.
     const insertPoint = snapshotInsertPoint();
     for (const f of files) {
       if (bottomBarRouteFor(f) === "image") {
-        await insertPhoto(f, insertPoint, { stamp: false });
+        await insertPhoto(f, insertPoint, { stamp: photoDetails });
         continue;
       }
       await insertAttachedFile(f, insertPoint);
@@ -1050,10 +1092,11 @@ export default function BottomBar({
     e.target.value = "";
     if (!f) return;
 
-    // The camera stages into the same queue as the picker, but with `stamp:
-    // true` — a real capture keeps the existing burnt-in info box and map
-    // thumbnail. The STAMPED Blob is what is staged, previewed and, at Send,
-    // persisted; the unstamped original is never stored.
+    // The camera stages into the same queue as the picker and under the SAME
+    // preference: a capture is no longer stamped merely because it came from
+    // the camera. When the stamp is on, the STAMPED Blob is what is staged,
+    // previewed and, at Send, persisted; the unstamped original is never
+    // stored either way.
     if (stagingEnabled) {
       if (bottomBarRouteFor(f) !== "image") {
         // A device that hands back something that is not an image must not lose
@@ -1062,7 +1105,7 @@ export default function BottomBar({
         stageAttachedFile(f);
         return;
       }
-      await stagePhoto(f, { stamp: true });
+      await stagePhoto(f, { stamp: photoDetails });
       return;
     }
 
@@ -1074,7 +1117,7 @@ export default function BottomBar({
       await insertAttachedFile(f, insertPoint);
       return;
     }
-    await insertPhoto(f, insertPoint, { stamp: true });
+    await insertPhoto(f, insertPoint, { stamp: photoDetails });
   };
 
   // ---------------- Live transcript shortcut ----------------
@@ -1259,6 +1302,38 @@ export default function BottomBar({
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
+
+          {/* ADD PHOTO DETAILS — the visible documentary stamp, for BOTH the
+              `+` picker and the camera. ONE toggle, deliberately: date, map,
+              coordinates, altitude, location and speed are one editorial
+              decision ("is this photograph evidence?"), not six, and six
+              switches here would be a settings panel in a composer.
+
+              Shown only where an image can actually be captured, so a Template
+              File row — which can hold no photograph — offers no photo control,
+              and an ordinary document picked through `+` is unaffected by it
+              whatever it says. The supporting copy rides on the title and the
+              accessible description rather than a second line of text, which is
+              what keeps this the same weight as the two selects beside it. */}
+          {canCaptureImage && (
+            <label
+              className="inline-flex items-center gap-1 text-xs text-gray-700 dark:text-gray-200"
+              title={PHOTO_DETAILS_HINT}
+            >
+              <input
+                type="checkbox"
+                className="nw-focusable w-3.5 h-3.5"
+                checked={photoDetails}
+                disabled={isDisabled}
+                onChange={(e) => togglePhotoDetails(e.target.checked)}
+                aria-describedby="nw-photo-details-hint"
+              />
+              Add photo details
+              <span id="nw-photo-details-hint" className="sr-only">
+                {PHOTO_DETAILS_HINT}
+              </span>
+            </label>
+          )}
 
           {!!composerError && (
             <span className="text-xs px-2 py-1 rounded bg-red-100 text-red-900 dark:bg-red-900/40 dark:text-red-200 border border-red-300 dark:border-red-700" role="alert">

@@ -29,14 +29,14 @@ const mainArea = withoutComments(read("components/MainArea.js"));
 
 describe("choosing an attachment stages it instead of inserting it", () => {
   test("the picker routes to the staging functions when staging is enabled", () => {
-    expect(bottomBar).toMatch(/if \(stagingEnabled\) \{[\s\S]{0,400}?stagePhoto\(f, \{ stamp: false \}\)/);
+    expect(bottomBar).toMatch(/if \(stagingEnabled\) \{[\s\S]{0,400}?stagePhoto\(f, \{ stamp: photoDetails \}\)/);
     expect(bottomBar).toMatch(/stageAttachedFile\(f\)/);
   });
 
   test("the camera routes to the same staging functions", () => {
     const camera = bottomBar.slice(bottomBar.indexOf("const handleCameraSelected"));
     expect(camera).toMatch(/stagingEnabled/);
-    expect(camera).toMatch(/stagePhoto\(f, \{ stamp: true \}\)/);
+    expect(camera).toMatch(/stagePhoto\(f, \{ stamp: photoDetails \}\)/);
     expect(camera).toMatch(/stageAttachedFile\(f\)/);
   });
 
@@ -95,8 +95,8 @@ describe("the existing photo pipeline is reused, not duplicated", () => {
 });
 
 describe("the immediate insertion fallback still exists", () => {
-  test("a destination that does not compose still inserts, and still unstamped", () => {
-    expect(bottomBar).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: false \}\)/);
+  test("a destination that does not compose still inserts, under the same preference", () => {
+    expect(bottomBar).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: photoDetails \}\)/);
     expect(bottomBar).toMatch(/insertAttachedFile\(f, insertPoint\)/);
     expect(bottomBar).toMatch(/const insertPoint = snapshotInsertPoint\(\)/);
   });

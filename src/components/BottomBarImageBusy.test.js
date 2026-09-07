@@ -17,6 +17,7 @@ import BottomBar from "./BottomBar";
 import { AppStateContext } from "../context/AppStateContext";
 import { QUICK_ADD_KIND } from "../lib/quickAddTarget";
 import { IMAGE_DECODE_MESSAGE } from "../lib/imageProcessing";
+import { savePhotoDetails } from "../lib/photoDetailsPreference";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -114,6 +115,12 @@ function mount(props = {}) {
   );
 }
 
+beforeEach(() => {
+  // Each test starts from the first-use default (the stamp OFF); the two
+  // that are about a STAMPED capture turn it on for themselves.
+  localStorage.clear();
+});
+
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
@@ -142,6 +149,9 @@ describe("Quick Add camera capture — busy feedback while the photo is prepared
   });
 
   test("busy state appears at once and stays while the stamp is unresolved", async () => {
+    // Stamping is opt-in since 2026-09-07, and this test is about the busy
+    // state the STAMP produces (src/lib/photoDetailsPreference.js).
+    savePhotoDetails(true);
     mount();
     choose(cameraInput(), [imageFile()]);
     await flush();
@@ -197,6 +207,9 @@ describe("Quick Add camera capture — busy feedback while the photo is prepared
   });
 
   test("busy state disappears on failure, the existing error is reported, and nothing is staged", async () => {
+    // Stamping is opt-in since 2026-09-07, and this test is about the busy
+    // state the STAMP produces (src/lib/photoDetailsPreference.js).
+    savePhotoDetails(true);
     mount();
     choose(cameraInput(), [imageFile()]);
     await flush();

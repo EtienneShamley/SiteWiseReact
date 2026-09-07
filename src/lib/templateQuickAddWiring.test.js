@@ -105,28 +105,42 @@ describe("a Template row capture stages and persists nothing", () => {
 /* 2. CAMERA vs ORDINARY UPLOAD                                                */
 /* -------------------------------------------------------------------------- */
 
-describe("the camera is stamped and the ordinary picker is not", () => {
-  test("every image path states its intent explicitly", () => {
+describe("both controls read ONE source-neutral stamp preference", () => {
+  // Until 2026-09-07 the CONTROL decided: `stamp: false` was hard-coded in the
+  // picker and `stamp: true` in the camera. The stamp is now the user's own
+  // "Add photo details" choice, read once and passed by BOTH handlers, so the
+  // invariant worth pinning flipped: there must be NO literal left anywhere.
+  test("every image path passes the preference, and no path hard-codes a stamp", () => {
     // The picker — staging and the immediate fallback.
-    expect(bottomBar).toMatch(/stagePhoto\(f, \{ stamp: false \}\)/);
-    expect(bottomBar).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: false \}\)/);
-    // The camera — staging and the immediate fallback.
-    expect(bottomBar).toMatch(/stagePhoto\(f, \{ stamp: true \}\)/);
-    expect(bottomBar).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: true \}\)/);
+    expect(bottomBar).toMatch(/stagePhoto\(f, \{ stamp: photoDetails \}\)/);
+    expect(bottomBar).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: photoDetails \}\)/);
+    // The camera — staging and the immediate fallback. The SAME value.
+    const passes = bottomBar.match(/\{ stamp: photoDetails \}/g) || [];
+    expect(passes).toHaveLength(4);
+    // No `stamp: true` / `stamp: false` survives in CODE. (The comments that
+    // explain the two modes are stripped before this is judged.)
+    const code = bottomBar.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code).not.toMatch(/stamp:\s*(true|false)/);
   });
 
-  test("`stamp: true` appears ONLY in the camera handler", () => {
-    const camera = between(bottomBar, "const handleCameraSelected", "const pickMimeType");
-    const stampTrue = bottomBar.match(/stamp: true/g) || [];
-    const cameraStampTrue = camera.match(/stamp: true/g) || [];
-    expect(stampTrue).toHaveLength(cameraStampTrue.length);
-    expect(cameraStampTrue.length).toBeGreaterThan(0);
+  test("the preference comes from the one owning module, and is written only on an explicit change", () => {
+    expect(bottomBar).toMatch(/from "\.\.\/lib\/photoDetailsPreference"/);
+    // Seeded once from the workspace's own value...
+    expect(bottomBar).toMatch(/useState\(\(\) => loadPhotoDetails\(\)\)/);
+    // ...and written back ONLY by the toggle's handler, never on mount, so a
+    // user who never touches the control keeps the default rather than having
+    // it written at them.
+    const writes = bottomBar.match(/savePhotoDetails\(/g) || [];
+    expect(writes).toHaveLength(1);
+    expect(bottomBar).toMatch(/const togglePhotoDetails = \(next\) => \{[\s\S]*?savePhotoDetails\(next\);/);
   });
 
-  test("the picker handler never asks for a stamp", () => {
-    const picker = between(bottomBar, "const handleFilesSelected", "const handleCameraSelected");
-    expect(picker).not.toMatch(/stamp: true/);
-    expect(picker).toMatch(/stamp: false/);
+  test("the photo number is the WORKSPACE's, never the browser's", () => {
+    // The retired global counter is gone from the composer entirely.
+    expect(bottomBar).not.toMatch(/sitewise_photo_index/);
+    // Reserved before the stamp is drawn, committed only once it produced bytes.
+    expect(bottomBar).toMatch(/const indexNo = peekNextPhotoNumber\(\);/);
+    expect(bottomBar).toMatch(/if \(stampedBlob\) commitPhotoNumber\(indexNo\);/);
   });
 
   test("the stamp builder is reached only behind the stamp flag", () => {

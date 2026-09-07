@@ -45,6 +45,7 @@ import { AppStateContext } from "../context/AppStateContext";
 import { QUICK_ADD_KIND } from "../lib/quickAddTarget";
 import { decodeImageSource } from "../lib/imageProcessing";
 import { blobCarriesSourceImageMetadata } from "../lib/imagePrivacy";
+import { savePhotoDetails } from "../lib/photoDetailsPreference";
 import exifr from "exifr";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -245,6 +246,14 @@ beforeEach(() => {
   answerGeolocation(null);
   answerExif();
   localStorage.clear();
+  // "Add photo details" is OFF on first use for BOTH controls since
+  // 2026-09-07 — the stamp is the user's explicit choice, not the camera's
+  // (src/lib/photoDetailsPreference.js). This suite is about what the stamp
+  // SAYS, so it turns the preference on before mounting and keeps testing
+  // exactly what it was written to test. The default itself is covered in
+  // src/lib/photoDetailsPreference.test.js and
+  // src/components/BottomBarPhotoDetails.test.js.
+  savePhotoDetails(true);
 });
 
 afterEach(() => {
