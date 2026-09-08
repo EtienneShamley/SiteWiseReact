@@ -105,40 +105,60 @@ describe("a Template row capture stages and persists nothing", () => {
 /* 2. CAMERA vs ORDINARY UPLOAD                                                */
 /* -------------------------------------------------------------------------- */
 
-describe("both controls read ONE source-neutral stamp preference", () => {
-  // Until 2026-09-07 the CONTROL decided: `stamp: false` was hard-coded in the
-  // picker and `stamp: true` in the camera. The stamp is now the user's own
-  // "Add photo details" choice, read once and passed by BOTH handlers, so the
-  // invariant worth pinning flipped: there must be NO literal left anywhere.
-  test("every image path passes the preference, and no path hard-codes a stamp", () => {
-    // The picker — staging and the immediate fallback.
-    expect(bottomBar).toMatch(/stagePhoto\(f, \{ stamp: photoDetails \}\)/);
-    expect(bottomBar).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: photoDetails \}\)/);
-    // The camera — staging and the immediate fallback. The SAME value.
-    const passes = bottomBar.match(/\{ stamp: photoDetails \}/g) || [];
-    expect(passes).toHaveLength(4);
-    // No `stamp: true` / `stamp: false` survives in CODE. (The comments that
-    // explain the two modes are stripped before this is judged.)
+describe("both controls ask ONE policy, from the workspace's Photo details setting", () => {
+  // Until 2026-09-07 the CONTROL decided (`stamp: true` hard-coded in the
+  // camera, `stamp: false` in the picker); for a day it was a boolean toggle in
+  // the composer. Since 2026-09-08 the composer contributes only the ORIGIN
+  // and asks `stampPolicyFor(mode, origin)` at capture time — so the invariant
+  // worth pinning is: every image path names its origin, no path hard-codes a
+  // stamp, and nothing here holds a copy of the setting that could go stale.
+  test("every image path names its origin, and no path hard-codes a stamp", () => {
+    const picker = between(bottomBar, "const handleFilesSelected", "const handleCameraSelected");
+    const camera = between(bottomBar, "const handleCameraSelected", "const pickMimeType");
+    expect(picker).toMatch(/stagePhoto\(f, \{ stamp: stampPolicy\(PHOTO_ORIGIN\.UPLOAD\) \}\)/);
+    expect(picker).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: stampPolicy\(PHOTO_ORIGIN\.UPLOAD\) \}\)/);
+    expect(camera).toMatch(/stagePhoto\(f, \{ stamp: stampPolicy\(PHOTO_ORIGIN\.CAMERA\) \}\)/);
+    expect(camera).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: stampPolicy\(PHOTO_ORIGIN\.CAMERA\) \}\)/);
+    // The picker never claims to be the camera, and vice versa.
+    expect(picker).not.toMatch(/PHOTO_ORIGIN\.CAMERA/);
+    expect(camera).not.toMatch(/PHOTO_ORIGIN\.UPLOAD/);
+    // No `stamp: true` / `stamp: false` survives in CODE.
     const code = bottomBar.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(code).not.toMatch(/stamp:\s*(true|false)/);
   });
 
-  test("the preference comes from the one owning module, and is written only on an explicit change", () => {
+  test("the setting is read at capture time from its owning module, and never written here", () => {
     expect(bottomBar).toMatch(/from "\.\.\/lib\/photoDetailsPreference"/);
-    // Seeded once from the workspace's own value...
-    expect(bottomBar).toMatch(/useState\(\(\) => loadPhotoDetails\(\)\)/);
-    // ...and written back ONLY by the toggle's handler, never on mount, so a
-    // user who never touches the control keeps the default rather than having
-    // it written at them.
-    const writes = bottomBar.match(/savePhotoDetails\(/g) || [];
-    expect(writes).toHaveLength(1);
-    expect(bottomBar).toMatch(/const togglePhotoDetails = \(next\) => \{[\s\S]*?savePhotoDetails\(next\);/);
+    expect(bottomBar).toMatch(/const stampPolicy = \(origin\) => stampPolicyFor\(loadPhotoDetailsMode\(\), origin\);/);
+    // No React state mirrors the setting (a copy taken at mount would miss a
+    // change made in Settings), and the composer never writes it.
+    expect(bottomBar).not.toMatch(/useState\([^)]*loadPhotoDetails/);
+    expect(bottomBar).not.toMatch(/savePhotoDetails/);
+  });
+
+  test("the inline toggle is gone: Photo details is a Settings control", () => {
+    expect(bottomBar).not.toMatch(/Add photo details/);
+    expect(bottomBar).not.toMatch(/type="checkbox"/);
+    const settings = read("components/SettingsModal.js");
+    expect(settings).toMatch(/PHOTO_DETAILS_LABEL = "Photo details"/);
+    expect(settings).toMatch(/savePhotoDetailsMode\(mode\)/);
+  });
+
+  test("an UPLOAD is stamped only from the original file, and only when it has enough", () => {
+    const prepare = between(bottomBar, "async function preparePhotoBytes", "async function convertUnstorableImage");
+    // The gate runs BEFORE the stamp builder and before any decode.
+    expect(prepare).toMatch(/if \(stamp === STAMP_POLICY\.ORIGINAL_ONLY\) \{[\s\S]*?sourceMeta = await getExifGeoAndTime\(file\);[\s\S]*?if \(!hasSufficientOriginalDetails\(sourceMeta\)\)/);
+    // The metadata it read is handed on, so the bytes are inspected once.
+    expect(prepare).toMatch(/buildStampedImageBLOB\(file, outputType, sourceMimeType, \{ policy: stamp, sourceMeta \}\)/);
+    // And inside the builder the device is consulted only under DOCUMENTARY.
+    const builder = between(bottomBar, "async function buildStampedImageBLOB", "async function preparePhotoBytes");
+    expect(builder).toMatch(/const deviceMayFillIn = policy === STAMP_POLICY\.DOCUMENTARY;/);
+    expect(builder).toMatch(/if \(deviceMayFillIn && \(exifLat == null \|\| exifLon == null \|\| exifAlt == null\)\) \{[\s\S]*?getBrowserGeo\(/);
+    expect((builder.match(/getBrowserGeo\(/g) || []).length).toBe(1);
   });
 
   test("the photo number is the WORKSPACE's, never the browser's", () => {
-    // The retired global counter is gone from the composer entirely.
     expect(bottomBar).not.toMatch(/sitewise_photo_index/);
-    // Reserved before the stamp is drawn, committed only once it produced bytes.
     expect(bottomBar).toMatch(/const indexNo = peekNextPhotoNumber\(\);/);
     expect(bottomBar).toMatch(/if \(stampedBlob\) commitPhotoNumber\(indexNo\);/);
   });
@@ -166,13 +186,23 @@ describe("both controls read ONE source-neutral stamp preference", () => {
       "async function buildStampedImageBLOB",
       "async function preparePhotoBytes"
     );
-    for (const effect of ["getBrowserGeo", "reverseGeocode", "getExifGeoAndTime", "drawMapThumbnail"]) {
+    for (const effect of ["getBrowserGeo", "reverseGeocode", "drawMapThumbnail"]) {
       const all = bottomBar.match(new RegExp(`${effect}\\(`, "g")) || [];
       const inBuilder = stampBuilder.match(new RegExp(`${effect}\\(`, "g")) || [];
       // 1 definition + calls, and every call is inside the stamp builder.
       expect(all.length).toBe(inBuilder.length + 1);
       expect(inBuilder.length).toBeGreaterThan(0);
     }
+    // Reading the ORIGINAL file's metadata is not a location effect — it asks
+    // nothing of the device — and since 2026-09-08 it has exactly one caller
+    // outside the builder: the ORIGINAL_ONLY gate in preparePhotoBytes, which
+    // decides from the file's own facts whether an upload may be stamped at
+    // all, before anything is decoded.
+    const prepare = between(bottomBar, "async function preparePhotoBytes", "async function convertUnstorableImage");
+    expect(bottomBar.match(/getExifGeoAndTime\(/g) || []).toHaveLength(3);
+    expect(stampBuilder.match(/getExifGeoAndTime\(/g) || []).toHaveLength(1);
+    expect(prepare.match(/getExifGeoAndTime\(/g) || []).toHaveLength(1);
+    expect(prepare).toMatch(/if \(stamp === STAMP_POLICY\.ORIGINAL_ONLY\) \{\s*sourceMeta = await getExifGeoAndTime\(file\);/);
   });
 
   test("navigator.geolocation is reachable from exactly one function", () => {

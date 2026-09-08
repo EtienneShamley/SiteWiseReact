@@ -18,6 +18,7 @@ import {
 } from "../lib/assetPrivacyNormalization";
 import { assetGcAttentionLine, assetGcStatusLine } from "../lib/assetGcSweep";
 import { SESSION_MODE } from "../lib/cloud/workspaceSession";
+import { PHOTO_DETAILS_MODE, loadPhotoDetailsMode, savePhotoDetailsMode } from "../lib/photoDetailsPreference";
 
 export const SIGN_OUT_LABEL = "Sign out";
 export const SIGN_OUT_NOTE =
@@ -38,6 +39,24 @@ export const REMOVE_LOCAL_COPY_NOTE =
 export const MIGRATE_LOCAL_LABEL = "Move browser notes into my workspace";
 export const RETRY_SYNC_LABEL = "Retry now";
 export const RETRY_UPLOADS_LABEL = "Retry";
+
+/* ------------------------------ Photo details ----------------------------- */
+// The visible documentary stamp (date, location, coordinates, map) that Quick
+// Add burns into a photograph's pixels. One three-way setting of the WORKSPACE
+// (src/lib/photoDetailsPreference.js), chosen here rather than beside the
+// capture buttons: it is a standing decision about what this workspace's
+// photographs are for, not a per-shot switch. The copy is named once so the
+// tests can hold the control to it.
+export const PHOTO_DETAILS_LABEL = "Photo details";
+export const PHOTO_DETAILS_OPTION_LABELS = Object.freeze({
+  [PHOTO_DETAILS_MODE.CAMERA_ONLY]: "Camera photos only",
+  [PHOTO_DETAILS_MODE.CAMERA_AND_ORIGINAL]: "Camera + uploaded photos with original details",
+  [PHOTO_DETAILS_MODE.OFF]: "Off",
+});
+// The one fact worth stating under the control, whichever mode is chosen: an
+// uploaded photograph is only ever described by what it already carried.
+export const PHOTO_DETAILS_NOTE =
+  "Writes the date, location, coordinates and a map onto camera photos. Uploaded photos only ever use the details stored in the original photo — never this device's location or the time of upload — and are left unmarked when the original has none.";
 
 export function syncStatusLine(status) {
   if (!status) return "";
@@ -117,6 +136,14 @@ export default function SettingsModal({ open, onClose }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const [localNotice, setLocalNotice] = useState(null);
+  // Read when the panel opens (it renders nothing while closed, so this is
+  // per opening), from the active workspace's own scope; written only on an
+  // explicit change, so an untouched setting is never written back.
+  const [photoDetailsMode, setPhotoDetailsMode] = useState(() => loadPhotoDetailsMode());
+  const changePhotoDetailsMode = (mode) => {
+    if (!savePhotoDetailsMode(mode)) return;
+    setPhotoDetailsMode(mode);
+  };
 
   if (!open) return null;
 
@@ -382,6 +409,42 @@ export default function SettingsModal({ open, onClose }) {
               uploaded to it as well; anything that has not finished stays on this device and is sent the next time
               you sign in here.
             </p>
+
+            {/* Photo details — the visible stamp Quick Add burns into a
+                photograph. A workspace preference kept in this browser (it
+                survives sign-out and never leaves the device), so it lives
+                with the other workspace facts rather than in a page of its
+                own. One select, three modes; the note under it states the
+                single rule a user needs: an uploaded photo is only ever
+                described by what it already carried. */}
+            <div className="mt-3">
+              <label
+                htmlFor="nw-settings-photo-details"
+                className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1"
+              >
+                {PHOTO_DETAILS_LABEL}
+              </label>
+              <select
+                id="nw-settings-photo-details"
+                className="nw-field w-full px-2 py-1 text-xs rounded"
+                value={photoDetailsMode}
+                onChange={(e) => changePhotoDetailsMode(e.target.value)}
+                disabled={busy}
+                aria-describedby="nw-settings-photo-details-note"
+              >
+                {Object.entries(PHOTO_DETAILS_OPTION_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <p
+                id="nw-settings-photo-details-note"
+                className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 leading-snug"
+              >
+                {PHOTO_DETAILS_NOTE}
+              </p>
+            </div>
           </section>
         )}
 

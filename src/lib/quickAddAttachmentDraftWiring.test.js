@@ -29,14 +29,14 @@ const mainArea = withoutComments(read("components/MainArea.js"));
 
 describe("choosing an attachment stages it instead of inserting it", () => {
   test("the picker routes to the staging functions when staging is enabled", () => {
-    expect(bottomBar).toMatch(/if \(stagingEnabled\) \{[\s\S]{0,400}?stagePhoto\(f, \{ stamp: photoDetails \}\)/);
+    expect(bottomBar).toMatch(/if \(stagingEnabled\) \{[\s\S]{0,400}?stagePhoto\(f, \{ stamp: stampPolicy\(PHOTO_ORIGIN\.UPLOAD\) \}\)/);
     expect(bottomBar).toMatch(/stageAttachedFile\(f\)/);
   });
 
   test("the camera routes to the same staging functions", () => {
     const camera = bottomBar.slice(bottomBar.indexOf("const handleCameraSelected"));
     expect(camera).toMatch(/stagingEnabled/);
-    expect(camera).toMatch(/stagePhoto\(f, \{ stamp: photoDetails \}\)/);
+    expect(camera).toMatch(/stagePhoto\(f, \{ stamp: stampPolicy\(PHOTO_ORIGIN\.CAMERA\) \}\)/);
     expect(camera).toMatch(/stageAttachedFile\(f\)/);
   });
 
@@ -72,8 +72,10 @@ describe("the existing photo pipeline is reused, not duplicated", () => {
     // The stamp is given the CONTENT-resolved source type and the output type
     // it must encode as — a HEIC resolves to JPEG, because NoteWise stores no
     // HEIF (Production Readiness Phase 7.8).
+    // …and, since 2026-09-08, the POLICY the caller resolved (camera or
+    // original-only) with any original metadata it already read.
     expect(bottomBar).toMatch(
-      /stamped = await buildStampedImageBLOB\(file, outputType, sourceMimeType\)/
+      /stamped = await buildStampedImageBLOB\(file, outputType, sourceMimeType, \{ policy: stamp, sourceMeta \}\)/
     );
     // 1 definition + 1 call site: `preparePhotoBytes` is now the only caller,
     // and it only calls it when the caller asked for a stamp.
@@ -96,7 +98,7 @@ describe("the existing photo pipeline is reused, not duplicated", () => {
 
 describe("the immediate insertion fallback still exists", () => {
   test("a destination that does not compose still inserts, under the same preference", () => {
-    expect(bottomBar).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: photoDetails \}\)/);
+    expect(bottomBar).toMatch(/insertPhoto\(f, insertPoint, \{ stamp: stampPolicy\(PHOTO_ORIGIN\.(UPLOAD|CAMERA)\) \}\)/);
     expect(bottomBar).toMatch(/insertAttachedFile\(f, insertPoint\)/);
     expect(bottomBar).toMatch(/const insertPoint = snapshotInsertPoint\(\)/);
   });

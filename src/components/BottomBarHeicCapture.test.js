@@ -59,7 +59,6 @@ import {
   normalizeImageFile,
 } from "../lib/imageProcessing";
 import { blobCarriesSourceImageMetadata } from "../lib/imagePrivacy";
-import { savePhotoDetails } from "../lib/photoDetailsPreference";
 import { STAMP_SOURCE_METADATA_TAGS } from "../lib/photoStampMetadata";
 import exifr from "exifr";
 
@@ -261,8 +260,6 @@ beforeEach(() => {
   // reinstalled rather than declared once.
   exifr.gps.mockReset().mockResolvedValue(null);
   exifr.parse.mockReset().mockResolvedValue(null);
-  // Each test starts from the first-use default (the stamp OFF); the groups
-  // that are about a STAMPED photograph turn it on for themselves.
   localStorage.clear();
 });
 
@@ -277,9 +274,6 @@ afterEach(() => {
 /* ------------------------- the regression itself -------------------------- */
 
 describe("a HEIC capture never reaches an HTMLImageElement", () => {
-  // Every test in this group is about the STAMP, so it opts in before
-  // mounting — since 2026-09-07 a camera capture is not stamped by default.
-  beforeEach(() => savePhotoDetails(true));
 
   test("THE BUG: the raw HEIC is not handed to an <img>, and the shared decoder is used", async () => {
     mount();
@@ -556,7 +550,6 @@ describe("JPEG, PNG and WebP behave exactly as they did", () => {
   });
 
   test("a stamped JPEG capture keeps its own format and its stamp", async () => {
-    savePhotoDetails(true);
     blobCarriesSourceImageMetadata.mockResolvedValue({ carries: false, mimeType: "image/jpeg" });
     decodeImageSource.mockResolvedValue({
       source: { __decodedBy: "browser" },
