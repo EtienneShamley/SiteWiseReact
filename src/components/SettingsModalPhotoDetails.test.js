@@ -165,3 +165,52 @@ describe("the control", () => {
     expect(select()).toBeNull();
   });
 });
+
+/* --------------- Settings keeps the DETAILED file state (2026-09-12) ------ */
+//
+// The top-of-app line is quiet about routine syncing; this panel is where the
+// routine states are still spelled out, for visibility and troubleshooting.
+
+describe("Settings → Workspace → Files still shows routine upload detail", () => {
+  function stubAssetSync(initial) {
+    let status = initial;
+    const listeners = new Set();
+    return {
+      getStatus: () => status,
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      retryNow: () => {},
+      push(next) {
+        status = next;
+        for (const listener of listeners) listener({ type: "status", ...next });
+      },
+    };
+  }
+  const filesBlock = () =>
+    Array.from(host.querySelectorAll("div")).find((el) => el.textContent === "Files")?.parentElement || null;
+
+  test("Uploading N files…, then Files synced, then Offline — waiting, then a failure with Retry", () => {
+    const engine = stubAssetSync({ status: "uploading", pending: 2, failed: 0, active: 2, bytesTotal: 0, bytesDone: 0 });
+    mockScope = { ...workspaceScope("ws-alice"), assetSync: engine };
+    mount();
+    expect(filesBlock()).not.toBeNull();
+    expect(filesBlock().textContent).toMatch(/Uploading 2 files…/);
+
+    // Real bytes reported: Settings shows the progress sentence; the panel is
+    // the only surface that does.
+    act(() => engine.push({ status: "uploading", pending: 1, failed: 0, active: 1, bytesTotal: 8 * 1024 * 1024, bytesDone: 3.1 * 1024 * 1024 }));
+    expect(filesBlock().textContent).toMatch(/Uploading 1 file · 3\.1 MB of 8 MB/);
+
+    act(() => engine.push({ status: "idle", pending: 0, failed: 0, active: 0, bytesTotal: 0, bytesDone: 0 }));
+    expect(filesBlock().textContent).toMatch(/Files synced/);
+
+    act(() => engine.push({ status: "offline", pending: 3, failed: 0, active: 0, bytesTotal: 0, bytesDone: 0 }));
+    expect(filesBlock().textContent).toMatch(/Offline — 3 files waiting to upload\./);
+
+    act(() => engine.push({ status: "failed", pending: 1, failed: 1, active: 0, bytesTotal: 0, bytesDone: 0, error: "unknown" }));
+    expect(filesBlock().textContent).toMatch(/Retry/);
+    expect(filesBlock().textContent).toMatch(/Some files could not be uploaded to your account/);
+  });
+});

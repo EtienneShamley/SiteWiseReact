@@ -4,7 +4,7 @@ import { useAuth } from "../context/AuthContext";
 import { useOptionalDataScope } from "../context/DataScopeContext";
 import { SYNC_STATUS, syncFailureMessage } from "../lib/cloud/cloudSync";
 import { ASSET_SYNC_STATUS, assetSyncFailureMessage } from "../lib/cloud/assetUploadSync";
-import { useAssetUploadStatus } from "./AssetUploadStatus";
+import { RETRY_UPLOADS_LABEL, assetSyncAttentionLine, assetSyncStatusLine, useAssetUploadStatus } from "./AssetUploadStatus";
 import { LOCAL_MIGRATION_STATUS, removeLocalOriginals } from "../lib/cloud/localMigration";
 import {
   assetBackfillAttentionLine,
@@ -38,7 +38,8 @@ export const REMOVE_LOCAL_COPY_NOTE =
   "This removes the pre-account notes, templates and PDF entries only. Your images, PDF files and attachments are not removed — they are the same files your workspace uses now.";
 export const MIGRATE_LOCAL_LABEL = "Move browser notes into my workspace";
 export const RETRY_SYNC_LABEL = "Retry now";
-export const RETRY_UPLOADS_LABEL = "Retry";
+// The files Retry label is the component's (src/components/AssetUploadStatus.js) — one string in both places.
+export { RETRY_UPLOADS_LABEL } from "./AssetUploadStatus";
 
 /* ------------------------------ Photo details ----------------------------- */
 // The visible documentary stamp (date, location, coordinates, map) that Quick
@@ -75,45 +76,11 @@ export function syncStatusLine(status) {
   }
 }
 
-/**
- * The workspace's FILE state, in one sentence (Production Readiness Phase
- * 7.4). Deliberately about files only: notes, templates and PDF entries have
- * their own line above it, and merging the two would make either one vague.
- *
- * It never says "uploading" for a queue that is merely waiting — offline, or
- * with no bucket configured — because that would tell the user their files
- * are on their way when nothing is moving.
- */
-export function assetSyncStatusLine(status) {
-  if (!status) return "";
-  const pending = Number(status.pending) || 0;
-  const failed = Number(status.failed) || 0;
-  const waiting = Math.max(0, pending - failed);
-  const files = (n) => `${n} ${n === 1 ? "file" : "files"}`;
-  switch (status.status) {
-    case ASSET_SYNC_STATUS.UNCONFIGURED:
-      return "Files stay on this device — uploading files to your account is not switched on in this version.";
-    case ASSET_SYNC_STATUS.OFFLINE:
-      return waiting > 0
-        ? `Offline — ${files(waiting)} waiting to upload.`
-        : "Offline — no files are waiting to upload.";
-    case ASSET_SYNC_STATUS.UPLOADING:
-      return `Uploading ${files(Math.max(1, Number(status.active) || waiting || 1))}…`;
-    case ASSET_SYNC_STATUS.WAITING:
-      return waiting > 0 ? `${files(waiting)} waiting to upload` : "Files synced";
-    case ASSET_SYNC_STATUS.FAILED:
-      return waiting > 0 ? `${files(waiting)} waiting to upload` : "Files synced";
-    default:
-      return waiting > 0 ? `${files(waiting)} waiting to upload` : "Files synced";
-  }
-}
-
-/** "1 file needs attention", or "" when none does. */
-export function assetSyncAttentionLine(status) {
-  const failed = status ? Number(status.failed) || 0 : 0;
-  if (failed <= 0) return "";
-  return `${failed} ${failed === 1 ? "file needs" : "files need"} attention`;
-}
+// The two FILE line builders now live beside the component that shows them at
+// the top of the app (src/components/AssetUploadStatus.js) and are re-exported
+// here unchanged, so this panel and that line can never word a state
+// differently.
+export { assetSyncAttentionLine, assetSyncStatusLine } from "./AssetUploadStatus";
 
 function useSyncStatus(sync) {
   const [status, setStatus] = useState(() => (sync ? sync.getStatus() : null));

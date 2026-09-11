@@ -2031,9 +2031,10 @@ export default function MainArea() {
                   ACTIVE NOTE VIEW (never by the toolbar's editor), and the
                   preview shows exactly what that export produces — the same
                   `exportSource`, so the two can never disagree. */}
-              {/* Files leaving the device for the account. Real bytes only,
-                  and silent unless an upload is actually in flight — a queue
-                  that is merely waiting is reported in Settings, in words. */}
+              {/* Files and the account — ONLY when the user needs to know:
+                  offline with files waiting, or files that need attention
+                  (with Retry). Routine uploading and "synced" are silent here
+                  and spelled out in Settings → Workspace → Files instead. */}
               <AssetUploadStatus assetSync={dataScope ? dataScope.assetSync : null} />
 
               <ExportMenu source={exportSource} />
