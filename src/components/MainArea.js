@@ -2233,10 +2233,12 @@ export default function MainArea() {
           </div>
         </div>
 
-        {/* The Quick Add capture bar (Note tab only). Live transcription is
-            NOT here any more: it is the sidebar's Capture → Live transcript
-            workspace (LiveTranscriptDialog below), a different tool with its
-            own surface — the composer's microphone merely opens it. */}
+        {/* The Quick Add capture bar (Note tab only). Its microphone is Quick
+            Add DICTATION — one short clip into the editable draft, sent only
+            by Send (src/hooks/useDictation.js). Live transcript is a separate
+            tool with its own surface: the sidebar's Capture → Live transcript
+            workspace (LiveTranscriptDialog, rendered by App.js); the composer
+            no longer opens it. */}
         <div
           className="bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800"
           style={{ display: activeTab === "note" ? "block" : "none" }}
@@ -2337,11 +2339,6 @@ export default function MainArea() {
               // presses Send. The destination is resolved inside this handler,
               // at Send time, and re-checked before every item.
               onSendComposer={handleQuickAddComposerSend}
-              // The composer's microphone opens the ONE Live Transcript
-              // workspace (same session as the sidebar's Capture group) —
-              // it never records on its own.
-              onOpenLiveTranscript={(el) => liveTranscript?.openWorkspace(el)}
-              liveTranscriptRecording={!!liveTranscript?.recording}
               onCompositionChange={setComposerHasDraft}
             />
             </div>

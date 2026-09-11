@@ -261,20 +261,23 @@ describe("the composer clears only what was delivered", () => {
   });
 });
 
-describe("the composer's microphone is a Live Transcript shortcut, not a recorder", () => {
+describe("the composer's microphone is Quick Add dictation: text into the draft, never a Live Transcript shortcut", () => {
   const voice = bottomBar.slice(
-    bottomBar.indexOf("const handleVoiceClick"),
+    bottomBar.indexOf("const handleDictateClick"),
     bottomBar.indexOf("const runRefine")
   );
 
-  test("it opens the one Live Transcript session and touches nothing in the composer", () => {
-    // 2026-08-18: the composer's own recorder/transcriber was retired; the
-    // microphone opens the sidebar's Capture → Live transcript workspace,
-    // whose insertion goes through MainArea (liveTranscriptWiring.test.js).
-    expect(voice).toMatch(/onOpenLiveTranscript\(e\.currentTarget\)/);
+  test("it feeds the text draft and leaves staged attachments and Send alone", () => {
+    // 2026-09-11 (Phase 8C.1): the composer records ONE short clip through its
+    // own hook and appends the text to the draft; the note is reached only by
+    // Send. It never opens the Live transcript workspace
+    // (quickAddDictationWiring.test.js, BottomBarDictation.test.js).
+    expect(voice).not.toMatch(/onOpenLiveTranscript|openWorkspace|LiveTranscript/);
+    expect(voice).toMatch(/setRefinedDraft\(\(p\) => mergeDictationIntoDraft\(p, result\.text\)\)/);
+    expect(voice).toMatch(/setInput\(\(p\) => mergeDictationIntoDraft\(p, result\.text\)\)/);
     expect(voice).not.toMatch(/draftStoreRef|clearStaged|removeMany|syncStaged/);
-    expect(voice).not.toMatch(/setRefinedDraft\(|setInput\(/);
-    expect(voice).not.toMatch(/onSendComposer|handleSend/);
+    expect(voice).not.toMatch(/onSendComposer|handleSend|onInsertText/);
+    // The recorder itself lives in the hook, not in this component.
     expect(bottomBar).not.toMatch(/MediaRecorder|getUserMedia|transcribeBlob|useTranscription/);
   });
 });

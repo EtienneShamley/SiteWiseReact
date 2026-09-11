@@ -1,6 +1,9 @@
 // src/lib/transcriptionLanguage.js
 //
-// TRANSCRIPTION LANGUAGE — the language a Live Transcript session listens in.
+// TRANSCRIPTION LANGUAGE — the language speech is transcribed in, for BOTH
+// voice workflows: a Live Transcript session and a Quick Add dictation
+// (Phase 8C.1). They share this list and this per-note memory; each keeps its
+// own control and its own in-flight choice.
 //
 // This is deliberately a preference of its own, separate from any DOCUMENT
 // language: a user may write an English report from an Afrikaans interview or
@@ -55,6 +58,17 @@ export function normalizeTranscriptionLanguage(value) {
 export function transcriptionLanguageLabel(value) {
   const found = TRANSCRIPTION_LANGUAGES.find((l) => l.value === value);
   return found ? found.label : "";
+}
+
+/**
+ * The few characters a COMPACT language control shows on its face ("Auto",
+ * "EN", "AF"): derived from the same list, so it can never name a language
+ * the list does not offer. The full label stays the control's option text,
+ * title and accessible value.
+ */
+export function transcriptionLanguageShortLabel(value) {
+  const language = normalizeTranscriptionLanguage(value);
+  return language === TRANSCRIPTION_LANGUAGE_AUTO ? "Auto" : language.toUpperCase();
 }
 
 // Per-note memory. The key is unchanged from the composer's former voice

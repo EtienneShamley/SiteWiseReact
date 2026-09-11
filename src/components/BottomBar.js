@@ -8,12 +8,29 @@ import {
   FaUndo,
   FaTrash,
   FaPaperclip,
-  FaMicrophone,
 } from "react-icons/fa";
 import StylePresetSelect from "./StylePresetSelect";
 import BusyStatus from "./BusyStatus";
+import VoiceButton from "./VoiceButton";
+import VoiceLanguageSelect, { VOICE_LANGUAGE_SELECT_VARIANT } from "./VoiceLanguageSelect";
 import { useRefine } from "../hooks/useRefine";
+import useDictation from "../hooks/useDictation";
 import { useAppState } from "../context/AppStateContext";
+import {
+  DICTATION_LANGUAGE_CONTROL_LABEL,
+  DICTATION_MESSAGE,
+  DICTATION_PHASE,
+  dictationControlLabel,
+  dictationErrorMessage,
+  dictationLanguageTitle,
+  dictationResultAccepted,
+  mergeDictationIntoDraft,
+} from "../lib/quickAddDictation";
+import {
+  loadTranscriptionLanguage,
+  normalizeTranscriptionLanguage,
+  saveTranscriptionLanguage,
+} from "../lib/transcriptionLanguage";
 import { loadCoordSystem, saveCoordSystem } from "../lib/notePreferences";
 import {
   QUICK_ADD_KIND,
@@ -235,13 +252,6 @@ export default function BottomBar({
   //   stylePreset: an allowlisted preset value; onStyleChange: (style) => void
   stylePreset,
   onStyleChange,
-  // LIVE TRANSCRIPT. The composer records nothing itself any more: its
-  // microphone is a shortcut that opens the ONE Live Transcript workspace
-  // (sidebar → Capture → Live transcript, LiveTranscriptProvider) — the same
-  // session, never a second recorder. `(triggerElement) => void`.
-  onOpenLiveTranscript,
-  // Whether that session is recording right now — the shortcut shows it.
-  liveTranscriptRecording = false,
   // Reports whether an unsent composition (text or staged attachments) exists,
   // so a collapsed composer's handle can say a draft is kept.
   //   (hasComposition: boolean) => void
@@ -317,11 +327,45 @@ export default function BottomBar({
 
   // Hooks
   const { refineText } = useRefine();
+  // QUICK ADD DICTATION — one short clip whose text lands in THIS draft
+  // (src/hooks/useDictation.js). Its own state, independent of the Live
+  // transcript session; the two only share the microphone, one at a time.
+  const dictation = useDictation();
+  const dictationRecording = dictation.phase === DICTATION_PHASE.RECORDING;
+  const dictationTranscribing = dictation.phase === DICTATION_PHASE.TRANSCRIBING;
+  // A dictation failure — a blocked microphone, a refused start, a transport
+  // error — is the composer's own failure, shown on the same line as an AI
+  // refine failure. Every failure is a fresh Error, so each one is reported.
+  const dictationError = dictation.error;
+  useEffect(() => {
+    if (dictationError) setComposerError(dictationErrorMessage(dictationError));
+  }, [dictationError]);
+  // The DICTATION LANGUAGE — the language the next clip is transcribed in.
+  // It lives in the shared per-note transcription-language memory
+  // (src/lib/transcriptionLanguage.js, the one reader and writer of its key,
+  // which Live transcript also uses): re-read whenever another note opens, and
+  // written only when the user chooses a language here. The live value is
+  // this control's; the clip being recorded keeps the value it STARTED with
+  // (useDictation snapshots it), so a change mid-dictation applies next time.
+  const [dictationLanguage, setDictationLanguage] = useState(() =>
+    loadTranscriptionLanguage(currentNoteId)
+  );
+  useEffect(() => {
+    setDictationLanguage(loadTranscriptionLanguage(currentNoteId));
+  }, [currentNoteId]);
+  const chooseDictationLanguage = (value) => {
+    const language = normalizeTranscriptionLanguage(value);
+    setDictationLanguage(language);
+    saveTranscriptionLanguage(currentNoteId, language);
+  };
 
   // Derived
   const currentText = refinedDraft ?? input;
   const hasText = useMemo(() => currentText.trim().length > 0, [currentText]);
-  const isDisabled = disabled || busy || sending;
+  // Held while a clip is being transcribed, exactly as the original composer
+  // recorder held them: the text is about to change, so a refine or a send
+  // must not race it. The draft itself stays editable throughout.
+  const isDisabled = disabled || busy || sending || dictationTranscribing;
 
   /* ------------------------------ Quick Add ------------------------------- */
 
@@ -1170,12 +1214,49 @@ export default function BottomBar({
     await insertPhoto(f, insertPoint, { stamp: stampPolicy(PHOTO_ORIGIN.CAMERA) });
   };
 
-  // ---------------- Live transcript shortcut ----------------
-  // The composer no longer records or transcribes on its own (that second
-  // recorder is gone): the microphone opens the ONE Live Transcript
-  // workspace, whose session is owned by LiveTranscriptProvider.
-  const handleVoiceClick = (e) => {
-    if (typeof onOpenLiveTranscript === "function") onOpenLiveTranscript(e.currentTarget);
+  // ---------------- Quick Add dictation ----------------
+  // ONE short clip → the existing transcription transport → this draft. The
+  // note is never touched here: the text joins whatever the user has typed
+  // (or refined), stays editable, can be refined like typed text, and reaches
+  // the note only through Send. Staged attachments are left exactly as they
+  // are. This is not Live transcript and never opens it.
+  //
+  // The DESTINATION is captured when the dictation BEGINS, exactly like the
+  // Free-form insertion point for a photo. Transcription is asynchronous and
+  // the user is free to select another row, switch view or open another note
+  // while it runs; a result whose destination has moved is REJECTED with a
+  // message, never redirected (src/lib/quickAddDictation.js).
+  //
+  // The LANGUAGE is captured at the same moment, by the hook: the clip is
+  // transcribed in the language selected when recording started.
+  const dictationTargetRef = useRef(null);
+  const handleDictateClick = async () => {
+    if (dictation.phase === DICTATION_PHASE.IDLE) {
+      setComposerError("");
+      dictationTargetRef.current = targetToken;
+      await dictation.start({ language: dictationLanguage });
+      return;
+    }
+    if (dictation.phase !== DICTATION_PHASE.RECORDING) return;
+    const startedToken = dictationTargetRef.current;
+    const result = await dictation.stop();
+    if (!result) return; // cancelled, silent, or failed — the hook's error is already shown
+    if (!dictationResultAccepted({ startedToken, currentToken: targetTokenRef.current })) {
+      setComposerError(DICTATION_MESSAGE.DESTINATION_CHANGED);
+      return;
+    }
+    if (!result.text) {
+      setComposerError(DICTATION_MESSAGE.NO_SPEECH);
+      return;
+    }
+    if (refinedDraft != null) setRefinedDraft((p) => mergeDictationIntoDraft(p, result.text));
+    else setInput((p) => mergeDictationIntoDraft(p, result.text));
+  };
+  // Discard the clip being recorded: the microphone is released, nothing is
+  // transcribed, the draft and staged attachments are untouched.
+  const handleDictateCancel = () => {
+    dictation.cancel();
+    setComposerError("");
   };
   // ----------------------------------------------------------
 
@@ -1278,7 +1359,7 @@ export default function BottomBar({
 
         <textarea
           className="w-full resize-none bg-transparent outline-none text-sm text-black dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
-          placeholder={placeholder}
+          placeholder={dictationTranscribing ? "Transcribing…" : placeholder}
           aria-label={inputLabel}
           rows={5}
           disabled={disabled}
@@ -1418,25 +1499,49 @@ export default function BottomBar({
             <FaCamera />
           </button>
 
-          {/* Live transcript shortcut: opens the sidebar's Capture workspace
-              (same session), red while that session is recording. It records
-              nothing itself. */}
-          <button
-            type="button"
-            onClick={handleVoiceClick}
+          {/* DICTATE — one short clip into this draft. Red (the Stop control)
+              while recording, held while stopping/transcribing, never a Live
+              transcript shortcut. A red trash beside it discards the clip
+              being recorded without transcribing anything. */}
+          {dictationRecording && (
+            <button
+              type="button"
+              onClick={handleDictateCancel}
+              title="Discard dictation"
+              aria-label="Discard dictation"
+              className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] text-red-700 dark:text-red-200 border border-red-300 dark:border-red-700"
+            >
+              <FaTrash />
+            </button>
+          )}
+          {/* DICTATION LANGUAGE — a compact chip ("Auto", "EN") beside the
+              Dictate control, a native select underneath. It configures the
+              NEXT dictation only; it opens nothing else and stays available
+              while a clip is in flight (that clip keeps its own language). */}
+          <VoiceLanguageSelect
+            variant={VOICE_LANGUAGE_SELECT_VARIANT.COMPACT}
+            value={dictationLanguage}
+            onChange={chooseDictationLanguage}
             disabled={disabled}
-            className={[
-              "p-2 rounded-full border disabled:opacity-60",
-              liveTranscriptRecording
-                ? "bg-red-50 dark:bg-red-900/30 border-red-300 dark:border-red-700 text-red-700 dark:text-red-200"
-                : "bg-white dark:bg-[#1b1b1b] border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200",
-            ].join(" ")}
-            aria-label={liveTranscriptRecording ? "Open Live transcript — recording" : "Open Live transcript"}
-            title={liveTranscriptRecording ? "Live transcript — recording" : "Live transcript"}
-            aria-haspopup="dialog"
-          >
-            <FaMicrophone aria-hidden="true" />
-          </button>
+            label={DICTATION_LANGUAGE_CONTROL_LABEL}
+            title={dictationLanguageTitle({
+              language: dictationLanguage,
+              dictating: dictation.phase !== DICTATION_PHASE.IDLE,
+            })}
+          />
+          <div className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200">
+            {/* Not disabled where recording is unsupported: pressing it then
+                explains why on the composer's error line, rather than a dead
+                control. */}
+            <VoiceButton
+              phase={dictation.phase}
+              disabled={disabled || sending}
+              onClick={handleDictateClick}
+              idleLabel={dictationControlLabel(DICTATION_PHASE.IDLE)}
+              recordingLabel={dictationControlLabel(DICTATION_PHASE.RECORDING)}
+              busyLabel={dictationControlLabel(dictation.phase)}
+            />
+          </div>
 
           <button
             type="button"

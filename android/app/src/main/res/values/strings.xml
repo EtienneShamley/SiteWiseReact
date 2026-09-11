@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">NoteWise</string>
+    <string name="title_activity_main">NoteWise</string>
+    <string name="package_name">com.notewise.spike</string>
+    <string name="custom_url_scheme">com.notewise.spike</string>
+</resources>

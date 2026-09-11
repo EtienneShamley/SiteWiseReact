@@ -666,6 +666,93 @@
 }
 
 /* -------------------------------------------------------------------------- */
+/* Quick Add dictation language (VoiceLanguageSelect, compact variant)        */
+/*                                                                            */
+/* A small chip beside the Dictate control naming the language the NEXT       */
+/* dictation is transcribed in ("Auto", "EN"). It IS a control, so it takes   */
+/* the quiet field surface and the field's hover/focus/disabled treatment —   */
+/* never the accent fill the destination chip uses for status.                */
+/*                                                                            */
+/* The face is decoration only: a real native <select> lies transparently     */
+/* over it, so the platform picker, the options and the keyboard stay native. */
+/* Because that select is invisible, focus is drawn on the FACE through       */
+/* :focus-within, with the same ring every other control uses.                */
+/* -------------------------------------------------------------------------- */
+
+.nw-voice-lang-compact {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.nw-voice-lang-compact-face {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.125rem;
+  min-width: 2.75rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--nw-field-border);
+  border-radius: 9999px;
+  background-color: var(--nw-field-bg);
+  color: var(--nw-field-text);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  transition: border-color 140ms ease, outline-color 140ms ease;
+}
+
+.nw-voice-lang-compact-caret {
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+.nw-voice-lang-compact-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+  appearance: none;
+  /* At least 16px, so iOS does not zoom the page when the picker opens. */
+  font-size: 16px;
+}
+
+.nw-voice-lang-compact:hover .nw-voice-lang-compact-face {
+  border-color: var(--nw-field-border-hover);
+}
+
+.nw-voice-lang-compact:focus-within .nw-voice-lang-compact-face {
+  border-color: var(--nw-accent-bright);
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: 2px;
+}
+
+.nw-voice-lang-compact-select:disabled {
+  cursor: not-allowed;
+}
+
+.nw-voice-lang-compact[data-disabled="true"] .nw-voice-lang-compact-face,
+.nw-voice-lang-compact[data-disabled="true"]:hover .nw-voice-lang-compact-face {
+  color: var(--nw-state-disabled-text);
+  background-color: var(--nw-field-disabled-bg);
+  border-color: var(--nw-field-border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nw-voice-lang-compact-face {
+    transition: none;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Quick Add staged attachments                                               */
 /*                                                                            */
 /* Attachments the composer is HOLDING, not yet in the note. They must read as */

@@ -164,7 +164,7 @@ describe("Quick Add camera capture — busy feedback while the photo is prepared
     expect(plusButton().disabled).toBe(true);
     expect(sendButton().disabled).toBe(true);
     expect(host.querySelector("textarea").disabled).toBe(false);
-    expect(host.querySelector('button[aria-label^="Open Live transcript"]').disabled).toBe(false);
+    expect(host.querySelector('button[aria-label="Dictate into Quick Add"]').disabled).toBe(false);
 
     await flush();
     expect(status().textContent).toBe("Processing…");

@@ -9,6 +9,9 @@ import { iconButtonClass } from "../lib/interactionStyles";
  * - phase: 'idle' | 'recording' | 'stopping' | 'transcribing'
  * - disabled
  * - onClick()
+ * - idleLabel / recordingLabel / busyLabel — the accessible name per phase
+ *   (defaults keep the generic recording wording; the Quick Add composer
+ *   names its control "Dictate…", see src/lib/quickAddDictation.js)
  */
 /**
  * Everything this button derives from its phase, as a pure function so the
@@ -18,12 +21,19 @@ import { iconButtonClass } from "../lib/interactionStyles";
  * `recording` is taken from the phase the parent actually owns, never from a
  * local approximation, so the visible state cannot drift from the recorder.
  */
-export function voiceButtonState({ phase = "idle", disabled = false } = {}) {
+export function voiceButtonState({
+  phase = "idle",
+  disabled = false,
+  idleLabel = "Start recording",
+  recordingLabel = "Stop recording",
+  busyLabel = idleLabel,
+} = {}) {
   const recording = phase === "recording";
-  const isDisabled =
-    disabled || phase === "stopping" || phase === "transcribing";
+  const busy = phase === "stopping" || phase === "transcribing";
+  const isDisabled = disabled || busy;
   return {
     recording,
+    busy,
     isDisabled,
     // While recording this control IS the Stop control, so it takes the danger
     // treatment — red through idle, hover, focus and press, never turquoise.
@@ -33,22 +43,35 @@ export function voiceButtonState({ phase = "idle", disabled = false } = {}) {
       danger: recording,
       className: "p-1 rounded disabled:opacity-60",
     }),
-    label: recording ? "Stop recording" : "Start recording",
+    label: recording ? recordingLabel : busy ? busyLabel : idleLabel,
   };
 }
 
-export default function VoiceButton({ phase = "idle", disabled = false, onClick }) {
-  const { isDisabled, recording, className, label } = voiceButtonState({
+export default function VoiceButton({
+  phase = "idle",
+  disabled = false,
+  onClick,
+  idleLabel,
+  recordingLabel,
+  busyLabel,
+}) {
+  const { isDisabled, recording, busy, className, label } = voiceButtonState({
     phase,
     disabled,
+    idleLabel,
+    recordingLabel,
+    busyLabel,
   });
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={isDisabled}
       className={className}
       title={label}
       aria-label={label}
+      aria-busy={busy || undefined}
+      data-voice-phase={phase}
     >
       {recording ? <FaStop /> : <FaMicrophone />}
     </button>

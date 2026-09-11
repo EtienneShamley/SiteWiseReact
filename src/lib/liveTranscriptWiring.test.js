@@ -381,30 +381,42 @@ describe("29/30. the old Listening / Auto-detect strip and the composer's privat
     for (const source of [MAIN_AREA, BOTTOM_BAR, SIDEBAR, APP]) {
       expect(source).not.toMatch(/ListenInPanel|useListenIn|Listen-In|meeting capture/);
     }
-    // No transcription language select above the composer any more; the one
-    // language control is in the workspace.
-    expect(BOTTOM_BAR).not.toMatch(/VoiceLanguageSelect|transcribeLang|VOICE_LANG_MEM_KEY/);
+    // The old composer's private language state is gone. Since 2026-09-11
+    // (Phase 8C.1) the composer has its OWN dictation-language control — the
+    // same shared selector in its compact form, configuring Quick Add
+    // dictation only (quickAddDictationWiring.test.js); this workspace keeps
+    // its field form, wired to the session.
+    expect(BOTTOM_BAR).not.toMatch(/transcribeLang|VOICE_LANG_MEM_KEY/);
     const users = allSourceFiles()
       .filter((file) => /<VoiceLanguageSelect/.test(fs.readFileSync(file, "utf8")))
-      .map((file) => path.basename(file));
-    expect(users).toEqual(["LiveTranscriptDialog.js"]);
+      .map((file) => path.basename(file))
+      .sort();
+    expect(users).toEqual(["BottomBar.js", "LiveTranscriptDialog.js"]);
+    expect(DIALOG).not.toMatch(/VOICE_LANGUAGE_SELECT_VARIANT/);
   });
 
-  test("30. no competing transcription state owner: the composer's mic only opens the one session", () => {
-    expect(BOTTOM_BAR).not.toMatch(/MediaRecorder|getUserMedia|useTranscription|transcribeBlob|transcribeStatus|cancelRecording|startRecording|stopRecording/);
-    expect(BOTTOM_BAR).toMatch(/const handleVoiceClick = \(e\) => \{\s*\n\s*if \(typeof onOpenLiveTranscript === "function"\) onOpenLiveTranscript\(e\.currentTarget\);/);
-    expect(BOTTOM_BAR).toMatch(/aria-label=\{liveTranscriptRecording \? "Open Live transcript — recording" : "Open Live transcript"\}/);
-    expect(BOTTOM_BAR).toContain('aria-haspopup="dialog"');
-    // The blob:<audio> insertion into the editor is gone with it.
+  test("30. no competing Live transcript state owner: the composer's mic is a SEPARATE dictation, not this session", () => {
+    // 2026-09-11 (Phase 8C.1): the composer's microphone is Quick Add
+    // dictation again — its own hook, its own state, feeding the editable
+    // draft — and no longer opens this workspace. The session, its dialog and
+    // its sidebar entry are unchanged (quickAddDictationWiring.test.js).
+    expect(BOTTOM_BAR).not.toMatch(/onOpenLiveTranscript|liveTranscriptRecording|openWorkspace|useLiveTranscriptSession|LiveTranscriptContext/);
+    expect(BOTTOM_BAR).not.toMatch(/Open Live transcript|aria-haspopup="dialog"/);
+    expect(BOTTOM_BAR).not.toMatch(/MediaRecorder|getUserMedia|useTranscription|transcribeBlob|transcribeStatus/);
+    expect(BOTTOM_BAR).toMatch(/const dictation = useDictation\(\);/);
+    // The blob:<audio> insertion into the editor stays gone.
     expect(BOTTOM_BAR).not.toMatch(/<audio/);
     expect(BOTTOM_BAR).not.toMatch(/insertContent\([\s\S]{0,120}audio/);
-    // Exactly one place calls transcribeBlob: the session hook.
+    // Exactly two places call transcribeBlob: one per voice workflow.
     const callers = allSourceFiles()
       .filter((file) => /transcribeBlob\(/.test(fs.readFileSync(file, "utf8")))
       .map((file) => path.basename(file))
       .sort();
-    expect(callers).toEqual(["useLiveTranscript.js"]);
-    expect(MAIN_AREA).toMatch(/onOpenLiveTranscript=\{\(el\) => liveTranscript\?\.openWorkspace\(el\)\}/);
+    expect(callers).toEqual(["useDictation.js", "useLiveTranscript.js"]);
+    expect(MAIN_AREA).not.toMatch(/onOpenLiveTranscript/);
+    // This workspace is still opened from the sidebar's Capture entry alone.
+    expect(SIDEBAR).toMatch(/liveTranscript\.openWorkspace\(e\.currentTarget\)/);
+    expect(APP).toMatch(/<LiveTranscriptDialog \/>/);
   });
 });
 

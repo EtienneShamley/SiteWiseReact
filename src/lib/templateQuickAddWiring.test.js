@@ -374,13 +374,17 @@ describe("Template Quick Add text becomes Section document content, never an ans
     expect(appendText).not.toMatch(/appendSectionText|persistSectionContent|sectionContent/);
   });
 
-  test("the composer's microphone only opens the Live Transcript workspace — it records and sends nothing itself", () => {
-    // 2026-08-18: the composer's private recorder is gone; the ONE
-    // transcription session lives in LiveTranscriptProvider and inserts
-    // through MainArea's shared paths (liveTranscriptWiring.test.js).
-    const voice = between(bottomBar, "const handleVoiceClick", "const runRefine");
-    expect(voice).toMatch(/onOpenLiveTranscript\(e\.currentTarget\)/);
-    expect(voice).not.toMatch(/onSendComposer|handleSend|draftStoreRef|onInsertText|MediaRecorder|transcribeBlob|setInput\(|setRefinedDraft\(/);
+  test("the composer's microphone dictates into the draft for a Template row too — it never writes a Section or opens Live Transcript", () => {
+    // 2026-09-11 (Phase 8C.1): Quick Add dictation is back as its own
+    // workflow. The text joins the composer's draft; a Template Section
+    // receives it only through the ordinary composer Send (above). No
+    // Free-form editor is required (the historical `!editor` gate is gone).
+    const voice = between(bottomBar, "const handleDictateClick", "const runRefine");
+    expect(voice).not.toMatch(/onOpenLiveTranscript|openWorkspace|LiveTranscript/);
+    expect(voice).not.toMatch(/onSendComposer|handleSend|draftStoreRef|onInsertText|MediaRecorder|transcribeBlob/);
+    expect(voice).not.toMatch(/appendText|appendSectionText|sectionContent|compose\./);
+    expect(voice).not.toMatch(/!editor/);
+    expect(voice).toMatch(/mergeDictationIntoDraft\(p, result\.text\)/);
   });
 });
 

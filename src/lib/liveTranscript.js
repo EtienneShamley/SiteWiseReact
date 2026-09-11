@@ -247,6 +247,11 @@ export const LIVE_TRANSCRIPT_MESSAGE = Object.freeze({
   MIC_BUSY:
     "The microphone is being used by another application. Close it and start again.",
   MIC_UNUSABLE: "This microphone could not be used for recording. Try a different one.",
+  // The other voice workflow (Quick Add dictation, src/hooks/useDictation.js)
+  // holds the microphone; the two never record at once
+  // (src/lib/microphoneOwnership.js).
+  MIC_IN_USE:
+    "The microphone is in use by Quick Add dictation. Stop or discard that dictation, then start again.",
   NO_AUDIO: "No audio was captured. Nothing has been added to your note.",
   UNAVAILABLE:
     "Transcription is currently unavailable. Your recording could not be transcribed; nothing has been added to your note.",

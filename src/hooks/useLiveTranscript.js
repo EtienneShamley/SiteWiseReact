@@ -37,33 +37,24 @@ import {
   TRANSCRIPTION_LANGUAGE_AUTO,
   normalizeTranscriptionLanguage,
 } from "../lib/transcriptionLanguage";
-
-// Choose a supported audio mimeType at runtime (varies by browser).
-function pickSupportedMime() {
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/ogg;codecs=opus",
-    "audio/ogg",
-    "audio/mp4",
-  ];
-  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
-    return "";
-  }
-  for (const t of candidates) {
-    if (MediaRecorder.isTypeSupported(t)) return t;
-  }
-  return "";
-}
+// The recording facts shared with Quick Add dictation (src/hooks/useDictation.js):
+// the container negotiation, the support check and the one-recorder-at-a-time
+// microphone claim. Nothing above this line is shared — the session, the
+// segments and the insert action stay this feature's own.
+import { isAudioRecordingSupported, pickSupportedMime } from "../lib/audioRecording";
+import {
+  MICROPHONE_OWNER,
+  claimMicrophone,
+  releaseMicrophone,
+} from "../lib/microphoneOwnership";
 
 /** Whether this browser can record audio at all. */
 export function isLiveTranscriptSupported() {
-  return (
-    typeof navigator !== "undefined" &&
-    !!navigator.mediaDevices &&
-    typeof navigator.mediaDevices.getUserMedia === "function" &&
-    typeof MediaRecorder !== "undefined"
-  );
+  return isAudioRecordingSupported();
+}
+
+function microphoneInUseError() {
+  return new Error(LIVE_TRANSCRIPT_MESSAGE.MIC_IN_USE);
 }
 
 function unsupportedError() {
@@ -109,6 +100,7 @@ export default function useLiveTranscript({ segmentMs = SEGMENT_MS } = {}) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
+      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
     };
   }, []);
 
@@ -184,15 +176,23 @@ export default function useLiveTranscript({ segmentMs = SEGMENT_MS } = {}) {
       safeSet((s) => setSessionError(s, unsupportedError()));
       return false;
     }
+    // One recorder at a time: a Quick Add dictation in progress keeps the
+    // microphone until the user stops or discards it there.
+    if (!claimMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT).ok) {
+      safeSet((s) => setSessionError(s, microphoneInUseError()));
+      return false;
+    }
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
       safeSet((s) => setSessionError(s, e));
+      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
       return false;
     }
     if (!mountedRef.current) {
       stream.getTracks().forEach((t) => t.stop());
+      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
       return false;
     }
     streamRef.current = stream;
@@ -200,6 +200,7 @@ export default function useLiveTranscript({ segmentMs = SEGMENT_MS } = {}) {
     if (!startSegmentRecorder()) {
       stream.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
+      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
       safeSet((s) => recorderReleased(s));
       return false;
     }
@@ -220,6 +221,7 @@ export default function useLiveTranscript({ segmentMs = SEGMENT_MS } = {}) {
       if (stream) stream.getTracks().forEach((t) => t.stop());
       if (streamRef.current === stream) streamRef.current = null;
       recorderRef.current = null;
+      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
       safeSet((s) => recorderReleased(s));
     };
     if (mr && mr.state === "recording") {
