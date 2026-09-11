@@ -29,7 +29,14 @@ import "fake-indexeddb/auto";
 import { ASSET_STORE, assetDbTransaction } from "./assetDb";
 import { deleteAssetDb, installStructuredCloneShim, testBlob } from "./assetDbTestHarness";
 import { getAsset, makeAssetRecord, saveNewAsset } from "./assetStorage";
-import { getAssetUpload, settleAssetUploadAsStored, updateAssetUploadAttempt } from "./assetUploadQueue";
+import {
+  __resetAssetQueueWriteListenersForTests,
+  getAssetUpload,
+  listPendingAssetUploads,
+  settleAssetUploadAsStored,
+  subscribeAssetQueueWrites,
+  updateAssetUploadAttempt,
+} from "./assetUploadQueue";
 import { REMOTE_ASSET_STATE, putRemoteAssetEntry } from "./assetRemoteIndex";
 import {
   PRIVACY_METHOD,
@@ -130,6 +137,7 @@ async function seedLegacyImage({
 
 beforeEach(async () => {
   await deleteAssetDb();
+  __resetAssetQueueWriteListenersForTests();
 });
 
 /* -------------------------- one legacy image ----------------------------- */
@@ -741,5 +749,57 @@ describe("what the user is told", () => {
     expect(imagePrivacyAttentionLine(null)).toBe("");
     expect(imagePrivacyStatusLine(null)).toBe("");
     expect(imagePrivacyStatusLine({ phase: PRIVACY_PHASE.ERROR })).toContain("could not be prepared");
+  });
+});
+
+/* ------------------------ the live wake-up after a re-arm ----------------- */
+
+describe("a re-armed queue entry wakes the engine, consistently (2026-09-11)", () => {
+  test("bytes rewritten → the queue row is re-armed and announced ONCE, after the commit", async () => {
+    await seedLegacyImage();
+    await updateAssetUploadAttempt(WS_A, "legacy-1", { attempts: 4, nextAttemptAt: 9e12, lastCode: "network" });
+
+    const seen = [];
+    const rowsAtNotify = [];
+    subscribeAssetQueueWrites((wid) => {
+      seen.push(wid);
+      rowsAtNotify.push(getAssetUpload(wid, "legacy-1"));
+    });
+    const outcome = await normalizeStoredAssetPrivacy({ workspaceId: WS_A, assetId: "legacy-1" }, pipeline().deps);
+    expect(outcome.status).toBe(PRIVACY_RESULT.NORMALIZED);
+    expect(seen).toEqual([WS_A]);
+    // What the listener sees at once is the RE-ARMED row: due now, gate lifted.
+    expect(await rowsAtNotify[0]).toMatchObject({ attempts: 0, nextAttemptAt: 5_000_000, lastCode: null });
+  });
+
+  test("bytes already clean → marked, not rewritten, nothing re-armed, nothing announced", async () => {
+    await seedLegacyImage();
+    const seen = [];
+    subscribeAssetQueueWrites((wid) => seen.push(wid));
+    const outcome = await normalizeStoredAssetPrivacy({ workspaceId: WS_A, assetId: "legacy-1" }, pipeline({ carries: false }).deps);
+    expect(outcome.status).toBe(PRIVACY_RESULT.VERIFIED);
+    expect(seen).toEqual([]);
+  });
+
+  test("a second pass over an already-normalised asset announces nothing", async () => {
+    await seedLegacyImage();
+    await normalizeStoredAssetPrivacy({ workspaceId: WS_A, assetId: "legacy-1" }, pipeline().deps);
+    const seen = [];
+    subscribeAssetQueueWrites((wid) => seen.push(wid));
+    const outcome = await normalizeStoredAssetPrivacy({ workspaceId: WS_A, assetId: "legacy-1" }, pipeline().deps);
+    expect(outcome.status).toBe(PRIVACY_RESULT.ALREADY_NORMALIZED);
+    expect(seen).toEqual([]);
+    expect((await listPendingAssetUploads(WS_A)).map((e) => e.assetId)).toEqual(["legacy-1"]);
+  });
+
+  test("a failed transformation announces nothing — the original row and its gate stand", async () => {
+    await seedLegacyImage();
+    await updateAssetUploadAttempt(WS_A, "legacy-1", { attempts: 2, nextAttemptAt: 9e12, lastCode: "network" });
+    const seen = [];
+    subscribeAssetQueueWrites((wid) => seen.push(wid));
+    const outcome = await normalizeStoredAssetPrivacy({ workspaceId: WS_A, assetId: "legacy-1" }, pipeline({ fail: "encode" }).deps);
+    expect(outcome.status).toBe(PRIVACY_RESULT.FAILED);
+    expect(seen).toEqual([]);
+    expect(await getAssetUpload(WS_A, "legacy-1")).toMatchObject({ attempts: 2, nextAttemptAt: 9e12 });
   });
 });

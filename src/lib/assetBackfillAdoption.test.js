@@ -32,7 +32,12 @@ import {
   runAssetBackfill,
 } from "./assetBackfill";
 import { getAsset, makeAssetRecord, saveAsset, saveNewAsset } from "./assetStorage";
-import { getAssetUpload, listPendingAssetUploads } from "./assetUploadQueue";
+import {
+  __resetAssetQueueWriteListenersForTests,
+  getAssetUpload,
+  listPendingAssetUploads,
+  subscribeAssetQueueWrites,
+} from "./assetUploadQueue";
 import { REMOTE_ASSET_STATE, getRemoteAssetEntry, makeRemoteAssetEntry, putRemoteAssetEntry } from "./assetRemoteIndex";
 import { buildAssetDocument, tombstoneAssetDocument } from "./cloud/assetCloudModel";
 import { LOCAL_MIGRATION_STATUS } from "./cloud/localMigration";
@@ -104,6 +109,7 @@ beforeEach(async () => {
 });
 afterEach(() => {
   __resetDurableStorageForTests();
+  __resetAssetQueueWriteListenersForTests();
   window.localStorage.clear();
 });
 
@@ -509,5 +515,44 @@ describe("runAssetBackfill", () => {
       stores[ASSET_REMOTE_INDEX_STORE].getAll()
     );
     expect(remote).toEqual([]);
+  });
+});
+
+/* ---------------------- the live wake-up after adoption ------------------- */
+
+describe("a backfill run announces ONE committed queue write for the workspace (2026-09-11)", () => {
+  test("three adoptions, one announcement, after every row is committed", async () => {
+    seedScope({
+      [DURABLE_KEYS.noteContent]: { n1: '<img data-asset-id="ref-image"><a data-file-asset-id="ref-file"></a>' },
+      [DURABLE_KEYS.templateVersions]: { v1: { logoAssetId: "ref-logo" } },
+    });
+    await seedLegacyAsset("ref-image", { kind: "editor-image" });
+    await seedLegacyAsset("ref-file", { kind: "editor-file" });
+    await seedLegacyAsset("ref-logo", { kind: "logo" });
+
+    const seen = [];
+    const rowsAtNotify = [];
+    subscribeAssetQueueWrites((wid) => {
+      seen.push(wid);
+      rowsAtNotify.push(listPendingAssetUploads(wid));
+    });
+    const result = await runAssetBackfill({ workspaceId: WS, uid: UID, deps: backfillDeps() });
+    expect(result.queued).toHaveLength(3);
+    // Not one per asset: the engine is woken once, and every row is already
+    // there when it looks.
+    expect(seen).toEqual([WS]);
+    expect((await rowsAtNotify[0]).map((e) => e.assetId).sort()).toEqual(["ref-file", "ref-image", "ref-logo"]);
+  });
+
+  test("a run that queues nothing — a second, converged run — announces nothing", async () => {
+    seedScope({ [DURABLE_KEYS.noteContent]: { n1: '<img data-asset-id="ref-image">' } });
+    await seedLegacyAsset("ref-image", { kind: "editor-image" });
+    await runAssetBackfill({ workspaceId: WS, uid: UID, deps: backfillDeps() });
+
+    const seen = [];
+    subscribeAssetQueueWrites((wid) => seen.push(wid));
+    const second = await runAssetBackfill({ workspaceId: WS, uid: UID, deps: backfillDeps() });
+    expect(second.queued).toEqual([]);
+    expect(seen).toEqual([]);
   });
 });

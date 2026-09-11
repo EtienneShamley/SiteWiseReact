@@ -121,6 +121,7 @@ import {
   listPendingAssetUploads,
   settleAssetUpload,
   settleAssetUploadAsStored,
+  subscribeAssetQueueWrites,
   updateAssetUploadAttempt,
 } from "../assetUploadQueue";
 import { currentPdfSourceIds, reconcilePdfSourceUploads } from "../pdfSourceUploads";
@@ -315,6 +316,10 @@ export const defaultAssetUploadLocal = Object.freeze({
  *   isOnline?: () => boolean,
  *   setTimer?: Function, clearTimer?: Function, now?: () => number,
  *   addOnlineListener?: (fn: Function) => (() => void),
+ *   subscribeQueueWrites?: (fn: (workspaceId: string) => void) => (() => void),
+ *                                 how the engine learns that a queue entry was
+ *                                 COMMITTED in this process (default: the queue
+ *                                 module's own notifier). Injected in tests.
  * }} options
  */
 export function createAssetUploadSync({
@@ -333,6 +338,7 @@ export function createAssetUploadSync({
     window.addEventListener("online", fn);
     return () => window.removeEventListener("online", fn);
   },
+  subscribeQueueWrites = subscribeAssetQueueWrites,
 } = {}) {
   if (!workspaceId) throw new Error("A workspace id is required to upload assets");
 
@@ -343,6 +349,7 @@ export function createAssetUploadSync({
   let stopped = false;
   let started = false;
   let removeOnline = null;
+  let removeQueueListener = null;
   let retryTimer = null;
   let retryAttempt = 0;
   let draining = null; // the in-flight drain promise
@@ -970,7 +977,24 @@ export function createAssetUploadSync({
         // the next sign-in, and nothing has been lost meanwhile.
       })
       .then(() => {
-        if (!stopped) drain();
+        if (stopped) return;
+        // LIVE QUEUE OBSERVATION (2026-09-11), installed in this exact
+        // position — after the reconcile, BEFORE the first drain — so there
+        // is no blind window: an entry committed during the reconcile is
+        // found by the first drain, and one committed during the first drain
+        // reaches this listener and rides the existing `drainAgain`
+        // coalescing. Before this, an idle engine armed no timer and had no
+        // listener, so anything queued after start-up waited for a reload.
+        //
+        // Only this workspace's writes; `drain()` itself — the same
+        // coalesced drain every other trigger uses, so the retry/backoff
+        // state is untouched: a new entry is due at once regardless, and an
+        // older failing one keeps its own gate.
+        removeQueueListener = subscribeQueueWrites((wid) => {
+          if (stopped || wid !== workspaceId) return;
+          drain();
+        });
+        drain();
       });
     return api;
   }
@@ -981,6 +1005,8 @@ export function createAssetUploadSync({
     disarmRetry();
     if (removeOnline) removeOnline();
     removeOnline = null;
+    if (removeQueueListener) removeQueueListener();
+    removeQueueListener = null;
     inFlight.clear();
     listeners.clear();
   }

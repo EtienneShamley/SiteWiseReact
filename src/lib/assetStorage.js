@@ -35,7 +35,7 @@ import {
   assetDbTransaction,
 } from "./assetDb";
 import { DURABLE_SCOPE_KIND, getDurableScope } from "./durableStorage";
-import { isQueueableWorkspaceId, makeAssetUploadEntry } from "./assetUploadQueue";
+import { isQueueableWorkspaceId, makeAssetUploadEntry, notifyAssetQueueWrite } from "./assetUploadQueue";
 import {
   ACCEPTED_IMAGE_SOURCE_MIME_TYPES,
   IMAGE_DECODE_MESSAGE,
@@ -352,6 +352,10 @@ export async function saveNewAsset(record) {
     stores[STORE].put(record);
     stores[ASSET_UPLOAD_QUEUE_STORE].put(entry);
   });
+  // COMMITTED — only now is the workspace's upload engine told something new
+  // is owed (src/lib/assetUploadQueue.js). Announced for the workspace the
+  // RECORD names, never the ambient scope, and never for a local-only asset.
+  notifyAssetQueueWrite(workspaceId);
   return record.id;
 }
 

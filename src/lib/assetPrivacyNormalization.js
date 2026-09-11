@@ -84,7 +84,7 @@
 // between an unnormalised image and the cloud.
 
 import { ASSET_STORE, ASSET_UPLOAD_QUEUE_STORE, ASSET_REMOTE_INDEX_STORE, assetDbTransaction } from "./assetDb";
-import { isQueueableWorkspaceId, listPendingAssetUploads } from "./assetUploadQueue";
+import { isQueueableWorkspaceId, listPendingAssetUploads, notifyAssetQueueWrite } from "./assetUploadQueue";
 import { REMOTE_ASSET_STATE } from "./assetRemoteIndex";
 import { isValidAssetSegment } from "./cloud/assetPaths";
 import { normalizeImageBytesForPrivacy } from "./imageProcessing";
@@ -344,7 +344,15 @@ function commit({ workspaceId, assetId, previous, blob, mimeType, at }, mark, su
       };
       return () => outcome;
     }
-  ).catch(() => ({ status: PRIVACY_RESULT.FAILED, assetId, record: null }));
+  )
+    .then((outcome) => {
+      // A re-armed entry is due again NOW, and the engine may be idle or
+      // sitting on a long backoff against the OLD bytes. Told only after the
+      // commit, and only when the queue row was actually rewritten.
+      if (blob && outcome && outcome.status === successStatus) notifyAssetQueueWrite(workspaceId);
+      return outcome;
+    })
+    .catch(() => ({ status: PRIVACY_RESULT.FAILED, assetId, record: null }));
 }
 
 /* -------------------------------- the pass -------------------------------- */

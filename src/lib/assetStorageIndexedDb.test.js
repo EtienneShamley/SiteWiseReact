@@ -19,7 +19,13 @@ import {
   listAssets,
   makeAssetRecord,
   saveAsset,
+  saveNewAsset,
 } from "./assetStorage";
+import {
+  __resetAssetQueueWriteListenersForTests,
+  listPendingAssetUploads,
+  subscribeAssetQueueWrites,
+} from "./assetUploadQueue";
 import {
   loadAnnotations,
   loadPdfBytes,
@@ -219,5 +225,46 @@ describe("33. the annotation rendition ↔ source relationship remains valid", (
     expect(live.has(originalId)).toBe(true);
     expect(live.has(renditionId)).toBe(true);
     expect(live.has(noise)).toBe(false);
+  });
+});
+
+/* ------------------- the live wake-up from an asset creation -------------- */
+
+describe("saveNewAsset announces a committed queue write (2026-09-11)", () => {
+  const WS = "ws-11111111-1111-4111-8111-111111111111";
+  afterEach(() => __resetAssetQueueWriteListenersForTests());
+
+  test("exactly one announcement, for the RECORD's workspace, after the asset and its queue row are committed", async () => {
+    const seen = [];
+    const rowsAtNotify = [];
+    subscribeAssetQueueWrites((wid) => {
+      seen.push(wid);
+      rowsAtNotify.push(listPendingAssetUploads(wid));
+    });
+    const record = makeAssetRecord({ id: "live-1", kind: ASSET_KIND_EDITOR_IMAGE, name: "a.png", blob: blob([1, 2, 3]), workspaceId: WS });
+    await saveNewAsset(record);
+    expect(seen).toEqual([WS]);
+    expect((await rowsAtNotify[0]).map((e) => e.assetId)).toEqual(["live-1"]);
+    expect(await getAsset("live-1")).not.toBeNull();
+  });
+
+  test("a workspace-less (local-only) record is owed to nobody and announces nothing", async () => {
+    const seen = [];
+    subscribeAssetQueueWrites((wid) => seen.push(wid));
+    const record = makeAssetRecord({ id: "local-1", kind: ASSET_KIND_EDITOR_IMAGE, name: "a.png", blob: blob([1]) });
+    delete record.workspaceId;
+    await saveNewAsset(record);
+    expect(await getAsset("local-1")).not.toBeNull();
+    expect(seen).toEqual([]);
+  });
+
+  test("a refused write — an unaddressable workspace id — throws before anything is written, and announces nothing", async () => {
+    const seen = [];
+    subscribeAssetQueueWrites((wid) => seen.push(wid));
+    const record = makeAssetRecord({ id: "bad-1", kind: ASSET_KIND_EDITOR_IMAGE, name: "a.png", blob: blob([1]), workspaceId: WS });
+    record.workspaceId = "ws/with/slashes"; // past the builder's normalisation, on purpose
+    await expect(saveNewAsset(record)).rejects.toThrow(/invalid workspace/i);
+    expect(await getAsset("bad-1")).toBeNull();
+    expect(seen).toEqual([]);
   });
 });

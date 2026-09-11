@@ -34,7 +34,12 @@ import { createMemoryWorkspaceStore } from "./memoryWorkspaceStore";
 import { assetDocumentPath } from "./assetPaths";
 import { buildAssetDocument } from "./assetCloudModel";
 import { makeAssetRecord, getAsset, saveNewAsset } from "../assetStorage";
-import { enqueueAssetUpload, getAssetUpload } from "../assetUploadQueue";
+import {
+  __resetAssetQueueWriteListenersForTests,
+  enqueueAssetUpload,
+  getAssetUpload,
+  listPendingAssetUploads,
+} from "../assetUploadQueue";
 import { REMOTE_ASSET_STATE, getRemoteAssetEntry } from "../assetRemoteIndex";
 import { deleteAssetDb, installStructuredCloneShim, testBlob } from "../assetDbTestHarness";
 import {
@@ -82,6 +87,7 @@ function seedWorkspace(store, workspaceId, ownerUid) {
 
 beforeEach(async () => {
   await deleteAssetDb();
+  __resetAssetQueueWriteListenersForTests();
   online = true;
   // The engine reads the REAL clock, plus whatever a test has fast-forwarded.
   // A frozen clock would not do: queue entries are stamped by the atomic
@@ -1703,5 +1709,252 @@ describe("a queued PDF source whose file is gone", () => {
     const outcomes = collectOutcomes(engine);
     await engine.flush();
     expect(outcomes[0].code).toBe(ASSET_SYNC_CODE.LOCAL_ASSET_MISSING);
+  });
+});
+
+/* ------------------- a LIVE session uploads what arrives ------------------ */
+//
+// THE DEFECT (2026-09-11): every suite above drives the engine with an
+// explicit `flush()`. That proves persistence and bootstrap draining, and
+// nothing about a session that is already running — which is where the real
+// product lives. An idle engine armed no timer and had no listener, so a
+// photograph added to an open note sat in the queue until the next reload's
+// start-up drain found it. Nothing here calls `flush()` or `retryNow()`, and
+// the harness's timers NEVER fire on their own, so the only thing that can
+// start a drain below is the queue-write wake-up.
+
+/** Let the engine's own async work settle, with real (jsdom) macrotasks. */
+async function settle(until, label, turns = 200) {
+  for (let i = 0; i < turns; i++) {
+    if (until()) return;
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error(`timed out waiting for: ${label}`);
+}
+const isIdle = (engine) => engine.getStatus().status === ASSET_SYNC_STATUS.IDLE;
+
+/**
+ * An engine whose queue listings are counted. A configured engine is
+ * constructed IDLE, so "idle" alone does not prove the start-up drain has run
+ * — `started()` waits for the first listing as well.
+ */
+function liveEngine(overrides = {}) {
+  const drains = [];
+  const { local: localOverrides, ...rest } = overrides;
+  const engine = makeEngine({
+    ...rest,
+    local: {
+      listPending: async (wid) => {
+        drains.push(wid);
+        return listPendingAssetUploads(wid);
+      },
+      ...(localOverrides || {}),
+    },
+  });
+  const started = () => drains.length >= 1 && isIdle(engine);
+  return { engine, drains, started };
+}
+
+describe("a LIVE session uploads what is queued after it started (2026-09-11)", () => {
+  test("1. engine idle on an empty queue → a new asset is saved → it uploads, with no flush, retry, timer or restart", async () => {
+    const { engine, started } = liveEngine();
+    const outcomes = collectOutcomes(engine);
+    engine.start();
+    await settle(started, "the start-up drain over an empty queue");
+    expect(assetStore.list(WS_A)).toEqual([]);
+    expect(timers).toEqual([]); // nothing armed: an idle engine has no clock
+
+    await createAsset({ id: "live-photo" });
+
+    await settle(() => assetStore.list(WS_A).includes("live-photo"), "the live upload");
+    await settle(() => isIdle(engine), "settling after the live upload");
+    expect(outcomes.filter((o) => o.assetId === "live-photo").map((o) => o.outcome)).toEqual([
+      ASSET_SYNC_OUTCOME.SYNCED,
+    ]);
+    expect(await getAssetUpload(WS_A, "live-photo")).toBeNull(); // settled
+    expect((await workspaceStore.readAssetDocument(WS_A, "live-photo")).exists).toBe(true);
+    expect(timers).toEqual([]); // still no timer: the wake-up did the work
+    engine.stop();
+  });
+
+  test("2. the PDF-source enqueue path (`enqueueAssetUpload`) wakes the live engine too", async () => {
+    const { engine, drains, started } = liveEngine();
+    engine.start();
+    await settle(started, "start-up");
+    const before = drains.length;
+
+    await enqueueAssetUpload({ workspaceId: WS_A, assetId: "pdf-src-live", kind: "pdf-source" });
+
+    await settle(() => drains.length > before, "a drain triggered by the enqueue");
+    engine.stop();
+  });
+
+  test("3. a queue write DURING an in-flight drain causes exactly one follow-up drain and no duplicate upload", async () => {
+    const uploads = [];
+    let releaseFirst;
+    const gate = new Promise((resolve) => { releaseFirst = resolve; });
+    const real = assetStore.uploadAsset;
+    assetStore.uploadAsset = async (wid, assetId, ...rest) => {
+      uploads.push(assetId);
+      if (assetId === "in-flight") await gate;
+      return real(wid, assetId, ...rest);
+    };
+    const { engine, drains } = liveEngine();
+    await createAsset({ id: "in-flight" });
+    engine.start();
+    // The first drain has listed the queue and is now blocked inside upload.
+    await settle(() => uploads.includes("in-flight"), "the first drain's upload to begin");
+    const drainsBefore = drains.length;
+
+    await createAsset({ id: "arrived-mid-drain" }); // → drainAgain, nothing more
+
+    releaseFirst();
+    await settle(() => assetStore.list(WS_A).includes("arrived-mid-drain"), "the follow-up drain");
+    await settle(() => isIdle(engine), "settling");
+
+    expect(uploads).toEqual(["in-flight", "arrived-mid-drain"]); // each exactly once
+    expect(assetStore.list(WS_A).sort()).toEqual(["arrived-mid-drain", "in-flight"]);
+    // Exactly one follow-up drain: the first drain's recount (1), then the
+    // follow-up's own listing (2) and recount (3). A second follow-up would
+    // show as 5.
+    expect(drains.length - drainsBefore).toBe(3);
+    // (The first drain's recount sees the newer entry and arms the ordinary
+    // backoff, which the follow-up drain disarms at once — the harness's
+    // timers never fire, so the follow-up above can only have come from the
+    // wake-up's `drainAgain`, which is the point.)
+    engine.stop();
+  });
+
+  test("4. a queue write for ANOTHER workspace is ignored — no drain, nothing touched", async () => {
+    const { engine, drains, started } = liveEngine();
+    engine.start();
+    await settle(started, "start-up");
+    const before = drains.length;
+
+    await createAsset({ id: "theirs", workspaceId: WS_B });
+    for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(drains.length).toBe(before);
+    expect(assetStore.list(WS_A)).toEqual([]);
+    expect(assetStore.list(WS_B)).toEqual([]);
+    expect(await getAssetUpload(WS_B, "theirs")).not.toBeNull(); // still owed, by B's own engine one day
+    engine.stop();
+  });
+
+  test("5. after stop() the subscription is removed and a queue write does nothing", async () => {
+    let removed = 0;
+    const subscribers = [];
+    const engine = makeEngine({
+      subscribeQueueWrites: (fn) => {
+        subscribers.push(fn);
+        return () => { removed += 1; };
+      },
+    });
+    engine.start();
+    await settle(() => subscribers.length === 1, "the subscription");
+    await settle(() => isIdle(engine), "start-up");
+    engine.stop();
+    expect(removed).toBe(1);
+
+    // Even a stale reference to the listener does nothing now.
+    subscribers[0](WS_A);
+    await createAsset({ id: "after-stop" });
+    for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(assetStore.list(WS_A)).toEqual([]);
+    expect(await getAssetUpload(WS_A, "after-stop")).not.toBeNull();
+  });
+
+  test("6. an asset queued during the reconcile/bootstrap window is uploaded exactly once — and the subscription is installed BEFORE the first drain", async () => {
+    let finishReconcile;
+    const reconcile = new Promise((resolve) => { finishReconcile = resolve; });
+    const sequence = [];
+    const uploads = [];
+    const real = assetStore.uploadAsset;
+    assetStore.uploadAsset = async (wid, assetId, ...rest) => {
+      uploads.push(assetId);
+      return real(wid, assetId, ...rest);
+    };
+    const engine = makeEngine({
+      subscribeQueueWrites: (fn) => {
+        sequence.push("subscribe");
+        return require("../assetUploadQueue").subscribeAssetQueueWrites(fn);
+      },
+      local: {
+        reconcilePdfSources: async () => {
+          sequence.push("reconcile");
+          await reconcile;
+          return { enqueued: [], settled: [] };
+        },
+        listPending: async (wid) => {
+          sequence.push("listPending");
+          return listPendingAssetUploads(wid);
+        },
+      },
+    });
+    engine.start();
+    await settle(() => sequence.includes("reconcile"), "the reconcile to begin");
+
+    await createAsset({ id: "during-bootstrap" }); // announced while nobody listens: the first drain must find it
+
+    finishReconcile();
+    await settle(() => assetStore.list(WS_A).includes("during-bootstrap"), "the first drain");
+    await settle(() => isIdle(engine), "settling");
+
+    expect(uploads).toEqual(["during-bootstrap"]);
+    // The REQUIRED ORDER: reconcile → subscribe → first drain.
+    expect(sequence.slice(0, 3)).toEqual(["reconcile", "subscribe", "listPending"]);
+    engine.stop();
+  });
+
+  test("7. an unconfigured engine subscribes to nothing and starts no cloud work when an asset is queued", async () => {
+    let subscribed = 0;
+    const engine = createAssetUploadSync({
+      workspaceId: WS_A,
+      assetStore: null,
+      workspaceStore,
+      now: nowMs,
+      setTimer: (fn, ms) => timers.push({ fn, ms }),
+      clearTimer: () => {},
+      addOnlineListener: () => () => {},
+      subscribeQueueWrites: () => {
+        subscribed += 1;
+        return () => {};
+      },
+    });
+    engine.start();
+    await createAsset({ id: "no-bucket-live" });
+    for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(subscribed).toBe(0);
+    expect(engine.getStatus().status).toBe(ASSET_SYNC_STATUS.UNCONFIGURED);
+    expect(assetStore.list(WS_A)).toEqual([]);
+    expect(await getAssetUpload(WS_A, "no-bucket-live")).not.toBeNull();
+    engine.stop();
+  });
+
+  test("a wake-up does not reset the backoff of an entry that is still failing", async () => {
+    // An entry that has failed once: its own gate is in the future.
+    await createAsset({ id: "failing" });
+    const realUpload = assetStore.uploadAsset;
+    assetStore.uploadAsset = async (wid, assetId, ...rest) => {
+      // A TRANSIENT failure: the entry stays queued behind its own backoff gate.
+      if (assetId === "failing") throw Object.assign(new Error("boom"), { code: "network" });
+      return realUpload(wid, assetId, ...rest);
+    };
+    const engine = makeEngine();
+    engine.start();
+    await settle(() => engine.getStatus().status === ASSET_SYNC_STATUS.WAITING, "the first failure");
+    const gated = await getAssetUpload(WS_A, "failing");
+    expect(gated.attempts).toBe(1);
+    const armedBefore = timers.length;
+
+    await createAsset({ id: "fresh" }); // due at once; the failing one is not
+
+    await settle(() => assetStore.list(WS_A).includes("fresh"), "the fresh upload");
+    await settle(() => engine.getStatus().status === ASSET_SYNC_STATUS.WAITING, "settling");
+    expect((await getAssetUpload(WS_A, "failing")).attempts).toBe(1); // not retried early
+    expect(timers.length).toBeGreaterThan(armedBefore); // its own backoff was re-armed by the drain, as before
+    engine.stop();
   });
 });

@@ -248,3 +248,63 @@ describe("settleAssetUploadAsStored — the end of one upload, atomically", () =
     );
   });
 });
+
+/* ------------------------- queue-write notifications ---------------------- */
+
+describe("queue-write notifications (the live wake-up, 2026-09-11)", () => {
+  const { subscribeAssetQueueWrites, notifyAssetQueueWrite, __resetAssetQueueWriteListenersForTests } =
+    require("./assetUploadQueue");
+
+  afterEach(() => __resetAssetQueueWriteListenersForTests());
+
+  test("an enqueue announces its workspace exactly once, AFTER the row is committed", async () => {
+    const seen = [];
+    const rowsAtNotify = [];
+    subscribeAssetQueueWrites((wid) => {
+      seen.push(wid);
+      // Listing at once must show the committed row: the announcement comes
+      // after the transaction, never from inside it.
+      rowsAtNotify.push(listPendingAssetUploads(wid));
+    });
+    await enqueueAssetUpload({ workspaceId: WS_A, assetId: ASSET, kind: "pdf-source" });
+    expect(seen).toEqual([WS_A]);
+    const rows = await rowsAtNotify[0];
+    expect(rows.map((e) => e.assetId)).toEqual([ASSET]);
+  });
+
+  test("unsubscribing stops delivery, and other subscribers are unaffected", async () => {
+    const a = [];
+    const b = [];
+    const stopA = subscribeAssetQueueWrites((wid) => a.push(wid));
+    subscribeAssetQueueWrites((wid) => b.push(wid));
+    stopA();
+    await enqueueAssetUpload({ workspaceId: WS_A, assetId: ASSET, kind: "pdf-source" });
+    expect(a).toEqual([]);
+    expect(b).toEqual([WS_A]);
+  });
+
+  test("a listener that throws does not make the durable enqueue fail, and later listeners still run", async () => {
+    const after = [];
+    subscribeAssetQueueWrites(() => {
+      throw new Error("subscriber bug");
+    });
+    subscribeAssetQueueWrites((wid) => after.push(wid));
+    const entry = await enqueueAssetUpload({ workspaceId: WS_A, assetId: ASSET, kind: "pdf-source" });
+    expect(entry.assetId).toBe(ASSET);
+    expect(await getAssetUpload(WS_A, ASSET)).not.toBeNull();
+    expect(after).toEqual([WS_A]);
+  });
+
+  test("nothing is announced for a workspace the queue could not hold, and a non-function subscriber is ignored", () => {
+    const seen = [];
+    subscribeAssetQueueWrites((wid) => seen.push(wid));
+    const unsubscribe = subscribeAssetQueueWrites("not a function");
+    notifyAssetQueueWrite(null);
+    notifyAssetQueueWrite("");
+    notifyAssetQueueWrite("ws/with/slashes");
+    expect(seen).toEqual([]);
+    expect(typeof unsubscribe).toBe("function");
+    notifyAssetQueueWrite(WS_B);
+    expect(seen).toEqual([WS_B]);
+  });
+});

@@ -33,6 +33,20 @@
 // own is the END of an upload: `settleAssetUploadAsStored` writes the remote
 // index and removes the queue entry in ONE transaction, so local sync state
 // cannot become self-contradictory.
+//
+// THE ONE SIGNAL IT OWNS (2026-09-11): "something new is owed". Every
+// producer that COMMITS a new or re-armed queue entry — the atomic asset
+// creation in src/lib/assetStorage.js, `enqueueAssetUpload` below (the PDF
+// source path), the legacy backfill's adoption and the privacy pass's
+// re-arm — calls `notifyAssetQueueWrite(workspaceId)` AFTER its IndexedDB
+// transaction has committed. The upload engine subscribes for its own
+// workspace and drains. Without this the engine had no way to learn of an
+// entry written after its start-up drain: an idle engine arms no timer, so a
+// photograph added to an open session sat in the queue until the next reload
+// discovered it. In-process only — no timer, no poll, no storage event, and
+// nothing crosses a tab or a process. It is a wake-up, never a promise of
+// delivery: the queue row is the durable fact, and a listener that is absent
+// (no session yet) or throws changes nothing about what is owed.
 
 import {
   ASSET_REMOTE_INDEX_STORE,
@@ -101,7 +115,48 @@ export async function enqueueAssetUpload({ workspaceId, assetId, kind, at } = {}
   await assetDbTransaction(ASSET_UPLOAD_QUEUE_STORE, "readwrite", (stores) =>
     stores[ASSET_UPLOAD_QUEUE_STORE].put(entry)
   );
+  notifyAssetQueueWrite(entry.workspaceId);
   return entry;
+}
+
+/* ------------------------- queue-write notifications ---------------------- */
+
+const queueWriteListeners = new Set();
+
+/**
+ * Be told, in this process, that a workspace has a new or re-armed queue
+ * entry. Returns the unsubscribe. The listener receives the workspace id and
+ * nothing else — what is owed is read from the queue, not from the event.
+ */
+export function subscribeAssetQueueWrites(listener) {
+  if (typeof listener !== "function") return () => {};
+  queueWriteListeners.add(listener);
+  return () => queueWriteListeners.delete(listener);
+}
+
+/**
+ * Announce a COMMITTED queue write for `workspaceId`.
+ *
+ * Call it only after the transaction that wrote the entry has resolved, so a
+ * listener that lists the queue at once sees the row. A listener that throws
+ * is isolated: the write it is being told about has already happened, and
+ * one bad subscriber must not make a durable enqueue look like a failure.
+ * Nothing is announced for a workspace id the queue could not hold.
+ */
+export function notifyAssetQueueWrite(workspaceId) {
+  if (!isQueueableWorkspaceId(workspaceId) || queueWriteListeners.size === 0) return;
+  for (const listener of Array.from(queueWriteListeners)) {
+    try {
+      listener(workspaceId);
+    } catch {
+      // A listener's failure is its own; the queue write it describes stands.
+    }
+  }
+}
+
+/** Test/reset helper: drop every subscriber. Never used by the product. */
+export function __resetAssetQueueWriteListenersForTests() {
+  queueWriteListeners.clear();
 }
 
 /** One workspace's entry for one asset, or null. */

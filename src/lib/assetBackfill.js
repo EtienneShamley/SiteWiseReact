@@ -56,7 +56,7 @@
 
 import { listAssets } from "./assetStorage";
 import { ASSET_STORE, ASSET_UPLOAD_QUEUE_STORE, assetDbTransaction } from "./assetDb";
-import { getAssetUpload, isQueueableWorkspaceId, makeAssetUploadEntry } from "./assetUploadQueue";
+import { getAssetUpload, isQueueableWorkspaceId, makeAssetUploadEntry, notifyAssetQueueWrite } from "./assetUploadQueue";
 import { ASSET_KIND_PDF_SOURCE, localAssetSize } from "./localAssetCache";
 import { reconcilePdfSourceUploads } from "./pdfSourceUploads";
 import { recordedLiveAssetIds } from "./assetReferences";
@@ -643,6 +643,11 @@ export async function runAssetBackfill({
     }
     if (outcome.created) result.queued.push(item.assetId);
   }
+  // ONE wake-up for the workspace, after the adoptions have committed — not
+  // one per asset — so the upload engine drains the backlog in THIS session
+  // rather than at the next reload. (The PDF reconciler below announces its
+  // own enqueues through `enqueueAssetUpload`.)
+  if (result.queued.length > 0) notifyAssetQueueWrite(workspaceId);
 
   if (!isActive()) {
     result.stopped = true;
