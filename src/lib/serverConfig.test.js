@@ -12,6 +12,8 @@
 const {
   SERVER_MODE,
   DEVELOPMENT_ORIGINS,
+  APP_NATIVE_ORIGIN_IOS,
+  APP_NATIVE_ORIGINS,
   FIREBASE_PROJECT_ID_VARIABLE,
   FIREBASE_AUTH_EMULATOR_VARIABLE,
   IP_LIMIT_MULTIPLIER,
@@ -148,6 +150,65 @@ describe("allowed origins", () => {
     expect(normalizeOrigin("http://localhost:3000/")).toBe("http://localhost:3000");
     expect(normalizeOrigin("http://localhost:8080")).toBe("http://localhost:8080");
     expect(normalizeOrigin("   ")).toBeNull();
+  });
+});
+
+/* ------------------ the application's own native origin ------------------ */
+//
+// Phase 8C.2. The iOS Capacitor WebView's page origin is `capacitor://
+// localhost`, which is not an http(s) origin. It is accepted as ONE literal
+// and only when it is configured explicitly — no mode defaults to it, and no
+// other custom scheme, host or port is admitted with it.
+
+describe("the NoteWise app origin (Capacitor)", () => {
+  test("the allowlist is exactly one literal, and that literal is the iOS WebView origin", () => {
+    expect(APP_NATIVE_ORIGIN_IOS).toBe("capacitor://localhost");
+    expect(APP_NATIVE_ORIGINS).toEqual([APP_NATIVE_ORIGIN_IOS]);
+    expect(Object.isFrozen(APP_NATIVE_ORIGINS)).toBe(true);
+  });
+
+  test("it is accepted when explicitly configured, beside ordinary web origins", () => {
+    const config = loadServerConfig({
+      ...PROD,
+      CORS_ALLOWED_ORIGINS: `https://app.example.com, ${APP_NATIVE_ORIGIN_IOS}`,
+    });
+    expect(config.cors.allowedOrigins).toEqual(["https://app.example.com", APP_NATIVE_ORIGIN_IOS]);
+    expect(config.cors.source).toBe("env");
+    expect(describeServerConfig(config)).toContain(APP_NATIVE_ORIGIN_IOS);
+  });
+
+  test("a scheme and a host are case-insensitive, and a trailing slash is not an origin", () => {
+    expect(normalizeOrigin("CAPACITOR://LocalHost")).toBe(APP_NATIVE_ORIGIN_IOS);
+    expect(normalizeOrigin("capacitor://localhost/")).toBe(APP_NATIVE_ORIGIN_IOS);
+    expect(normalizeOrigin(" capacitor://localhost ")).toBe(APP_NATIVE_ORIGIN_IOS);
+  });
+
+  test("Android's WebView needs nothing special: https://localhost is an ordinary https origin", () => {
+    expect(normalizeOrigin("https://localhost")).toBe("https://localhost");
+    const config = loadServerConfig({ ...PROD, CORS_ALLOWED_ORIGINS: "https://localhost" });
+    expect(config.cors.allowedOrigins).toEqual(["https://localhost"]);
+  });
+
+  test.each([
+    ["ionic://localhost"],
+    ["capacitor://evil.example"],
+    ["capacitor://localhost:8080"],
+    ["capacitor://localhost.evil.example"],
+    ["capacitorx://localhost"],
+    ["capacitor:localhost"],
+    ["capacitor://"],
+    ["file:///index.html"],
+    ["chrome-extension://abcdefghijklmnop"],
+  ])("rejects the unapproved custom scheme/host %s at start-up", (value) => {
+    expect(() => loadServerConfig({ CORS_ALLOWED_ORIGINS: value })).toThrow(ServerConfigError);
+    expect(() => loadServerConfig({ CORS_ALLOWED_ORIGINS: value })).toThrow(/http or https/);
+  });
+
+  test("nothing grants it implicitly — no mode defaults to it", () => {
+    for (const env of [{ NODE_ENV: "development" }, { NODE_ENV: "test" }, PROD]) {
+      expect(loadServerConfig(env).cors.allowedOrigins).not.toContain(APP_NATIVE_ORIGIN_IOS);
+    }
+    expect(DEVELOPMENT_ORIGINS).not.toContain(APP_NATIVE_ORIGIN_IOS);
   });
 });
 

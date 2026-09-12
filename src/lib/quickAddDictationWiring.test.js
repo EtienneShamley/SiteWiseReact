@@ -125,7 +125,80 @@ describe("1. the composer's microphone is Quick Add dictation and never Live tra
     const stop = between(DICTATION_HOOK, "const stop = useCallback(", "const cancel = useCallback(");
     expect(stop).toMatch(/async \(\) => \{/);
     expect(stop).toMatch(/const language = languageRef\.current;/);
-    expect(stop).toMatch(/await transcribeBlob\(blob, language\)/);
+    // Every PART of one dictation is transcribed in that one snapshot — the
+    // transport is called from the part queue and reads the same ref, so
+    // there is no second place a language could be resolved from.
+    const enqueue = between(DICTATION_HOOK, "const enqueuePart = useCallback(", "const startPartRecorder");
+    expect(enqueue).toMatch(/await transcribeBlob\(blob, languageRef\.current, \{/);
+    expect(
+      (DICTATION_HOOK.match(/transcribeBlob\(/g) || []).length
+    ).toBe(1);
+    expect(stop).toMatch(/return \{ text, language \};/);
+  });
+});
+
+/* ------------- multi-part dictation (Phase 8C.2) is still ONE ------------- */
+
+describe("1b. a dictation is recorded in parts, and stays one dictation", () => {
+  test("parts are whole containers from a reopened recorder — never timesliced pieces", () => {
+    // `mr.start()` is called with NO argument: a timeslice would hand back
+    // fragments with no container header, which POST /api/transcribe refuses
+    // because it decides what an upload is from its leading bytes.
+    expect(DICTATION_HOOK).toMatch(/mr\.start\(\);/);
+    expect(DICTATION_HOOK).not.toMatch(/mr\.start\([^)]/);
+    expect(DICTATION_HOOK).not.toMatch(/timeslice|timeSlice/i);
+    // One stream, reopened per part.
+    expect(DICTATION_HOOK).toMatch(/const rollPart = useCallback\(/);
+    expect(DICTATION_HOOK).toMatch(/mr\.stop\(\);[\s\S]{0,80}startPartRecorder\(\);/);
+    expect((DICTATION_HOOK.match(/getUserMedia\(/g) || []).length).toBe(1);
+  });
+
+  test("the composer's contract is unchanged: one start, one stop, one result", () => {
+    const handler = between(BOTTOM_BAR, "const handleDictateClick", "const runRefine");
+    expect(handler).toMatch(/await dictation\.start\(\{ language: dictationLanguage \}\)/);
+    expect(handler).toMatch(/const result = await dictation\.stop\(\);/);
+    // The composer knows nothing about parts.
+    expect(BOTTOM_BAR).not.toMatch(/partsRef|rollPart|DICTATION_PART|combineDictationParts/);
+  });
+
+  test("the destination is checked ONCE, against the whole combined result", () => {
+    const handler = between(BOTTOM_BAR, "const handleDictateClick", "const runRefine");
+    expect((handler.match(/dictationResultAccepted\(/g) || []).length).toBe(1);
+    expect(handler).toMatch(/dictationTargetRef\.current = targetToken;/);
+    expect(handler).toMatch(
+      /dictationResultAccepted\(\{ startedToken, currentToken: targetTokenRef\.current \}\)/
+    );
+  });
+
+  test("parts are combined by the shared pure function, and only a whole result is returned", () => {
+    expect(DICTATION_HOOK).toMatch(/combineDictationParts\(parts\.texts\)/);
+    const stop = between(DICTATION_HOOK, "const stop = useCallback(", "const cancel = useCallback(");
+    // Exactly one success return, after the whole queue has drained.
+    expect(stop).toMatch(/await queueRef\.current;/);
+    expect((stop.match(/return \{ text/g) || []).length).toBe(1);
+  });
+
+  test("a dictation persists nothing and recovers nothing — it is not Listen In", () => {
+    expect(DICTATION_HOOK).not.toMatch(/localStorage|sessionStorage|indexedDB|assetDb|durableStorage/);
+    expect(DICTATION_HOOK).not.toMatch(/resume|recover|rehydrate|sessionId|workspaceId/i);
+    expect(DICTATION_HOOK).not.toMatch(/navigator\.serviceWorker|BackgroundFetch|wakeLock/i);
+  });
+
+  test("cancelling aborts the request in flight rather than only ignoring it", () => {
+    expect(DICTATION_HOOK).toMatch(/new AbortController\(\)/);
+    const cancel = between(DICTATION_HOOK, "const cancel = useCallback(", "const clearError = useCallback(");
+    expect(cancel).toMatch(/abortPending\(\);/);
+    expect(cancel).toMatch(/release\(\);/);
+    expect(cancel).not.toMatch(/setInput|setRefinedDraft|transcribeBlob/);
+  });
+
+  test("the longer deadline is asked for per part, and the transport still bounds it", () => {
+    const transport = withoutComments(read("hooks/useTranscription.js"));
+    expect(transport).toMatch(/export const TRANSCRIBE_MAX_TIMEOUT_MS = \d+;/);
+    expect(transport).toMatch(/timeout: resolveTranscribeTimeout\(timeoutMs\)/);
+    expect(transport).toMatch(/Math\.min\(Math\.max\(value, TRANSCRIBE_MIN_TIMEOUT_MS\), TRANSCRIBE_MAX_TIMEOUT_MS\)/);
+    // The Live transcript session keeps the unchanged default.
+    expect(LIVE_HOOK).not.toMatch(/timeoutMs|TRANSCRIBE_MAX_TIMEOUT_MS/);
   });
 });
 

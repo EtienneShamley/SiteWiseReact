@@ -26,6 +26,10 @@ const h = require("./backendTestHarness");
 const DEV_ORIGIN = "http://localhost:3000";
 const PROD_ORIGIN = "https://app.example.com";
 const EVIL_ORIGIN = "https://evil.example";
+// The NoteWise iOS shell's own page origin (Phase 8C.2); Android's WebView
+// serves the same build from an ordinary https origin.
+const APP_ORIGIN = require("../../server/config").APP_NATIVE_ORIGIN_IOS;
+const ANDROID_APP_ORIGIN = "https://localhost";
 const NOTE = "Borehole 14: silty CLAY, moist, firm. Groundwater at 2.3 m.";
 // A verified test user; every provider request below is made as this user
 // unless the test is about identity itself.
@@ -159,6 +163,75 @@ describe("origin policy", () => {
     const res = await h.request(port, { path: "/api/health" });
     expect(res.status).toBe(200);
     expect(res.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  /* ------------- the NoteWise app origin (Capacitor, Phase 8C.2) ---------- */
+
+  test("the configured iOS app origin is granted CORS the same way a web origin is", async () => {
+    const { port } = await start({ ...PROD, CORS_ALLOWED_ORIGINS: `${PROD_ORIGIN}, ${APP_ORIGIN}` });
+    const res = await h.request(port, { path: "/api/health", headers: { Origin: APP_ORIGIN } });
+    expect(res.status).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe(APP_ORIGIN);
+    expect(res.headers["access-control-allow-credentials"]).toBeUndefined();
+    // The web origin beside it is unaffected.
+    const web = await h.request(port, { path: "/api/health", headers: { Origin: PROD_ORIGIN } });
+    expect(web.headers["access-control-allow-origin"]).toBe(PROD_ORIGIN);
+  });
+
+  test("the app origin's preflight answers with the same method/header set as a web origin's", async () => {
+    const { port } = await start({ ...PROD, CORS_ALLOWED_ORIGINS: APP_ORIGIN });
+    const res = await h.request(port, {
+      method: "OPTIONS",
+      path: "/api/transcribe",
+      headers: {
+        Origin: APP_ORIGIN,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type, authorization",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers["access-control-allow-origin"]).toBe(APP_ORIGIN);
+    expect(res.headers["access-control-allow-methods"]).toBe("GET,POST,OPTIONS");
+    expect(res.headers["access-control-allow-headers"]).toBe("Content-Type,Authorization");
+  });
+
+  test("a request from the app origin still needs a verified identity — the origin grants nothing", async () => {
+    const { port } = await start({ ...PROD, CORS_ALLOWED_ORIGINS: APP_ORIGIN });
+    const res = await h.postJson(port, "/api/refine", { text: NOTE }, { Origin: APP_ORIGIN });
+    expect(res.status).toBe(401);
+    expect(mockChatCreate).not.toHaveBeenCalled();
+  });
+
+  test("a look-alike or unapproved custom scheme from the same WebView family is refused", async () => {
+    const { port } = await start({ ...PROD, CORS_ALLOWED_ORIGINS: APP_ORIGIN });
+    for (const origin of [
+      "ionic://localhost",
+      "capacitor://evil.example",
+      "capacitor://localhost:8080",
+      "capacitor://localhost.evil.example",
+      "file://",
+      "https://localhost",
+    ]) {
+      const res = await h.request(port, { path: "/api/health", headers: { Origin: origin } });
+      expect(res.status).toBe(403);
+      expect(res.headers["access-control-allow-origin"]).toBeUndefined();
+    }
+  });
+
+  test("Android's app origin is served by the ordinary https path", async () => {
+    const { port } = await start({ ...PROD, CORS_ALLOWED_ORIGINS: ANDROID_APP_ORIGIN });
+    const res = await h.request(port, { path: "/api/health", headers: { Origin: ANDROID_APP_ORIGIN } });
+    expect(res.status).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe(ANDROID_APP_ORIGIN);
+    // The iOS origin is NOT admitted by configuring the Android one.
+    expect((await h.request(port, { path: "/api/health", headers: { Origin: APP_ORIGIN } })).status).toBe(403);
+  });
+
+  test("an app origin that is not configured is refused like any other unapproved origin", async () => {
+    const { port } = await start({ ...PROD, CORS_ALLOWED_ORIGINS: PROD_ORIGIN });
+    const res = await h.request(port, { path: "/api/health", headers: { Origin: APP_ORIGIN } });
+    expect(res.status).toBe(403);
+    expect(res.json).toEqual({ error: "Origin not allowed", code: "origin_not_allowed" });
   });
 });
 

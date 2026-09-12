@@ -15,6 +15,11 @@
 // recorders can never disagree about what a segment is, and the backend's
 // byte sniffer (server/transcriptionPolicy.js) sees one set of containers.
 //
+// It also holds the one RECORDER OPTIONS builder and the speech bitrate it
+// can ask for (Phase 8C.2). The constant lives here, with the container list
+// it belongs beside, rather than in either workflow; which workflow asks for
+// it is that workflow's decision, and today only Quick Add dictation does.
+//
 // Pure apart from the two globals it reads, both injectable for tests.
 
 /**
@@ -72,6 +77,43 @@ export function isAudioRecordingSupported({
     typeof recorder !== "undefined" &&
     recorder !== null
   );
+}
+
+/**
+ * A speech-grade constant audio bitrate, in bits per second, for a recording
+ * whose whole purpose is to be transcribed (Phase 8C.2).
+ *
+ * WHY ASK AT ALL. Left to itself a browser picks its own bitrate — in
+ * practice anywhere from about 48 to 128 kbps — so the size of a fixed length
+ * of speech is unpredictable by a factor of nearly three. That matters not
+ * because of the backend's 25 MB ceiling (nothing here comes close) but
+ * because the UPLOAD has to finish inside the transport's deadline: on a poor
+ * mobile uplink the difference between 48 and 128 kbps is the difference
+ * between a request that completes and one the browser aborts.
+ *
+ * WHY 48 kbps. It is a normal speech rate for Opus, and Opus is what Chrome,
+ * Edge and Firefox record; Safari and the iOS/Android WebViews record AAC in
+ * `audio/mp4`, for which 48 kbps mono is still ordinary speech quality. Going
+ * lower would start to cost transcription accuracy for no useful gain.
+ *
+ * It is a REQUEST, not a guarantee: a browser is free to ignore
+ * `audioBitsPerSecond`, which is why nothing downstream assumes a size.
+ */
+export const SPEECH_AUDIO_BITS_PER_SECOND = 48000;
+
+/**
+ * The `MediaRecorder` options object for one recording, or `undefined` when
+ * there is nothing to ask for — which is what the constructor wants in that
+ * case, rather than an empty object. Unsupported keys are ignored by the
+ * browser, so an option it does not honour degrades to its own default.
+ */
+export function audioRecorderOptions({ mimeType = "", audioBitsPerSecond = 0 } = {}) {
+  const options = {};
+  if (typeof mimeType === "string" && mimeType) options.mimeType = mimeType;
+  if (Number.isFinite(audioBitsPerSecond) && audioBitsPerSecond > 0) {
+    options.audioBitsPerSecond = audioBitsPerSecond;
+  }
+  return Object.keys(options).length > 0 ? options : undefined;
 }
 
 /**

@@ -28,6 +28,30 @@ const DEVELOPMENT_ORIGINS = Object.freeze([
   "http://127.0.0.1:3000",
 ]);
 
+// THE APPLICATION'S OWN NATIVE ORIGIN (Phase 8C.2).
+//
+// NoteWise's iOS shell is a Capacitor WKWebView serving the bundled build
+// from the fixed origin `capacitor://localhost` — Capacitor's `iosScheme`
+// default, with `localhost` as the host; `capacitor.config.js` configures no
+// `server` block, so that default holds. A `fetch` from that page to this
+// backend therefore carries `Origin: capacitor://localhost`, which is not an
+// http(s) origin and which `normalizeOrigin` below would otherwise refuse to
+// even configure. Android needs nothing here: its WebView serves NoteWise
+// from `https://localhost` (the `androidScheme` default), an ordinary https
+// origin that has always gone through the normal path.
+//
+// This is an ALLOWLIST OF ONE, not a rule that custom schemes are acceptable.
+// A custom scheme carries no DNS ownership and no TLS identity, so it can
+// only ever be trusted as a literal this application itself ships; every
+// other scheme is still refused at start-up with the same error as before.
+// It also grants nothing implicitly: it must be listed in
+// CORS_ALLOWED_ORIGINS like any other origin, no mode defaults to it, and the
+// origin allowlist remains a browser/WebView request control rather than the
+// authorization boundary — a verified Firebase ID token is still what every
+// provider route requires (server/auth.js).
+const APP_NATIVE_ORIGIN_IOS = "capacitor://localhost";
+const APP_NATIVE_ORIGINS = Object.freeze([APP_NATIVE_ORIGIN_IOS]);
+
 // Firebase Authentication. The backend only ever VERIFIES ID tokens (it never
 // mints, refreshes or stores them), and verification needs exactly one thing:
 // the Firebase project id, so the token's audience can be checked. No service
@@ -95,7 +119,8 @@ function parseInteger(env, name, { fallback, min, max }) {
  * Normalise ONE configured origin to the exact form a browser sends in its
  * `Origin` header: lowercase scheme and host, explicit port only when it is
  * not the scheme default, nothing after the host. Anything that is not a bare
- * http(s) origin is a configuration error, not something to guess at.
+ * http(s) origin — or the one native application origin above — is a
+ * configuration error, not something to guess at.
  */
 function normalizeOrigin(raw) {
   const text = String(raw).trim();
@@ -105,6 +130,15 @@ function normalizeOrigin(raw) {
       'CORS_ALLOWED_ORIGINS must list explicit origins; "*" is not accepted'
     );
   }
+  // The application's own native origin, matched as a WHOLE LITERAL before
+  // anything is parsed. `new URL()` cannot be used to decide or to spell this
+  // one: for a non-special scheme it reports `origin` as the string "null"
+  // and leaves the host's case alone, so there is no parsed form to compare.
+  // A scheme and a host are case-insensitive and the Origin header carries no
+  // trailing slash, so both are normalised away before the comparison — which
+  // still accepts nothing but the exact literals in APP_NATIVE_ORIGINS.
+  const literal = text.toLowerCase().replace(/\/+$/, "");
+  if (APP_NATIVE_ORIGINS.includes(literal)) return literal;
   let url;
   try {
     url = new URL(text);
@@ -112,7 +146,9 @@ function normalizeOrigin(raw) {
     throw new ServerConfigError(`CORS_ALLOWED_ORIGINS entry is not a valid origin: ${text}`);
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new ServerConfigError(`CORS_ALLOWED_ORIGINS entry must use http or https: ${text}`);
+    throw new ServerConfigError(
+      `CORS_ALLOWED_ORIGINS entry must use http or https (the only other accepted origin is the NoteWise app origin ${APP_NATIVE_ORIGIN_IOS}): ${text}`
+    );
   }
   if (url.username || url.password) {
     throw new ServerConfigError(`CORS_ALLOWED_ORIGINS entry must not carry credentials: ${text}`);
@@ -281,6 +317,8 @@ function describeServerConfig(config) {
 module.exports = {
   SERVER_MODE,
   DEVELOPMENT_ORIGINS,
+  APP_NATIVE_ORIGIN_IOS,
+  APP_NATIVE_ORIGINS,
   FIREBASE_PROJECT_ID_VARIABLE,
   FIREBASE_AUTH_EMULATOR_VARIABLE,
   IP_LIMIT_MULTIPLIER,

@@ -3,6 +3,18 @@
 // The transport for one audio segment: POST /api/transcribe with the current
 // user's identity attached (src/lib/apiAuth.js) and a client deadline.
 //
+// The DEADLINE is per call and bounded (Phase 8C.2). Its default is the 60 s
+// every caller used when the only upload was a 30 s Live transcript segment.
+// A caller whose upload is legitimately larger — a Quick Add dictation part —
+// may ask for longer, up to TRANSCRIBE_MAX_TIMEOUT_MS; it can never ask for
+// no deadline at all, and a value that is absent, out of range or not a
+// number resolves to the default rather than removing the bound.
+//
+// A caller may also pass its own AbortSignal, so abandoned work (a cancelled
+// dictation) stops travelling instead of finishing into nothing. Aborting is
+// indistinguishable from the deadline expiring, by design: both are "this
+// request is over", and neither is reported as a provider failure.
+//
 // Failures are reported as Errors with FIXED messages that
 // src/lib/liveTranscript.js maps to user-facing sentences — never the
 // server's or a provider's text. Two of those are identity outcomes:
@@ -26,20 +38,43 @@ function authErrorFor(outcome) {
   );
 }
 
+/** The default deadline: unchanged, and what every caller gets by default. */
+export const TRANSCRIBE_DEFAULT_TIMEOUT_MS = 60000;
+/** The longest deadline any caller may ask for. There is no unbounded form. */
+export const TRANSCRIBE_MAX_TIMEOUT_MS = 120000;
+/** The shortest, so a mistaken tiny value cannot make every request fail. */
+export const TRANSCRIBE_MIN_TIMEOUT_MS = 5000;
+
+/** A caller's requested deadline, clamped into the bounded range above. */
+export function resolveTranscribeTimeout(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return TRANSCRIBE_DEFAULT_TIMEOUT_MS;
+  return Math.min(Math.max(value, TRANSCRIBE_MIN_TIMEOUT_MS), TRANSCRIBE_MAX_TIMEOUT_MS);
+}
+
 async function fetchWithTimeout(resource, options = {}) {
-  const { timeout = 60000, ...rest } = options;
+  const { timeout = TRANSCRIBE_DEFAULT_TIMEOUT_MS, signal: callerSignal, ...rest } = options;
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
+  // The caller's signal is relayed rather than passed through, so the request
+  // has exactly one controller and the deadline still applies to a caller
+  // that never aborts. `addEventListener` is used instead of AbortSignal.any
+  // for the browser baseline this project supports.
+  const relay = () => controller.abort();
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort();
+    else callerSignal.addEventListener("abort", relay);
+  }
   try {
     const resp = await authorizedFetch(resource, { ...rest, signal: controller.signal });
     return resp;
   } finally {
     clearTimeout(id);
+    if (callerSignal) callerSignal.removeEventListener("abort", relay);
   }
 }
 
 export function useTranscription() {
-  const transcribeBlob = async (blob, language = "auto") => {
+  const transcribeBlob = async (blob, language = "auto", { timeoutMs, signal } = {}) => {
     const form = new FormData();
     form.append("audio", blob, "audio.webm");
     form.append("language", language); // ✅ send plain string
@@ -49,7 +84,8 @@ export function useTranscription() {
       resp = await fetchWithTimeout(`${API_BASE}/api/transcribe`, {
         method: "POST",
         body: form,
-        timeout: 60000,
+        timeout: resolveTranscribeTimeout(timeoutMs),
+        signal,
       });
     } catch (e) {
       if (e instanceof ApiAuthError) throw authErrorFor(e.outcome);

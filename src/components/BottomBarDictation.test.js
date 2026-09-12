@@ -2,13 +2,19 @@
 //
 // QUICK ADD DICTATION, RENDERED with react-dom in jsdom (Phase 8C.1).
 //
-// The composer's microphone records ONE short clip, transcribes it through
+// The composer's microphone records ONE dictation, transcribes it through
 // the existing transport, and puts the text into the editable Quick Add
 // draft — nothing reaches the note until Send. jsdom has no microphone and no
 // MediaRecorder, so both are replaced with fakes the test controls; the
-// transport hook is mocked so the clip handed to it, and the text it returns,
+// transport hook is mocked so the audio handed to it, and the text it returns,
 // are observable. The Live transcript hook is mounted beside it for the
 // microphone-ownership cases: the two never record at once.
+//
+// The M-series at the end covers Phase 8C.2: a dictation long enough to be
+// recorded in several PARTS is still one dictation to the user — one Stop,
+// one combined result, one destination check, and no partial text in the
+// draft. Parts roll on a timer, so those tests drive that timer directly
+// (see `rollPart`) rather than waiting two real minutes.
 import React, { useImperativeHandle, forwardRef } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -16,7 +22,12 @@ import BottomBar from "./BottomBar";
 import useLiveTranscript from "../hooks/useLiveTranscript";
 import { AppStateContext } from "../context/AppStateContext";
 import { QUICK_ADD_KIND } from "../lib/quickAddTarget";
-import { DICTATION_MESSAGE } from "../lib/quickAddDictation";
+import {
+  DICTATION_MESSAGE,
+  DICTATION_PART_MS,
+  DICTATION_PART_REQUEST_TIMEOUT_MS,
+} from "../lib/quickAddDictation";
+import { SPEECH_AUDIO_BITS_PER_SECOND } from "../lib/audioRecording";
 import {
   TRANSCRIPTION_LANGUAGES,
   TRANSCRIPTION_LANGUAGE_MEMORY_KEY,
@@ -54,7 +65,9 @@ class FakeMediaRecorder {
   }
   constructor(stream, options) {
     this.stream = stream;
+    this.options = options;
     this.mimeType = (options && options.mimeType) || "";
+    this.audioBitsPerSecond = options && options.audioBitsPerSecond;
     this.state = "inactive";
     this.ondataavailable = null;
     this.onstop = null;
@@ -70,6 +83,17 @@ class FakeMediaRecorder {
     if (this.ondataavailable) this.ondataavailable({ data });
     if (this.onstop) this.onstop();
   }
+}
+
+// The dictation's part timer, captured rather than faked: the real interval
+// still runs (nothing else in the composer uses setInterval), and the tests
+// invoke its callback themselves to roll a part when they want one.
+let partIntervals;
+const realSetInterval = globalThis.setInterval;
+function rollPart() {
+  const entry = partIntervals.find(([, ms]) => ms === DICTATION_PART_MS);
+  if (!entry) throw new Error("no dictation part timer is armed");
+  act(() => entry[0]());
 }
 
 let tracks;
@@ -95,6 +119,11 @@ beforeEach(() => {
   localStorage.clear();
   noteId = "note-1";
   resetMicrophoneOwnershipForTests();
+  partIntervals = [];
+  jest.spyOn(globalThis, "setInterval").mockImplementation((fn, ms, ...rest) => {
+    partIntervals.push([fn, ms]);
+    return realSetInterval(fn, ms, ...rest);
+  });
   FakeMediaRecorder.instances = [];
   FakeMediaRecorder.clipBytes = 8;
   getUserMedia = jest.fn(async () => fakeStream());
@@ -166,6 +195,7 @@ afterEach(() => {
   if (host) host.remove();
   root = null;
   host = null;
+  jest.restoreAllMocks();
 });
 
 const micButton = () => host.querySelector("button[data-voice-phase]");
@@ -756,5 +786,548 @@ describe("L10. Template Quick Add dictates in the chosen language", () => {
     expect(onSendComposer).toHaveBeenCalledTimes(1);
     expect(onSendComposer.mock.calls[0][0].text).toBe("Hello site");
     expect(onInsertText).not.toHaveBeenCalled();
+  });
+});
+
+/* ================== M-series: one dictation, many parts ================== */
+//
+// Phase 8C.2. "Quick Add" is about how fast the workflow is reached, not how
+// long the user may speak, so a dictation rolls into fresh audio containers
+// as it runs. Everything below is about that being INVISIBLE: one press to
+// start, one to stop, one result, one destination check, and never a partial
+// draft.
+
+// Speak across `parts` recordings, then stop. The user presses nothing
+// between them — the hook's own timer rolls each part.
+async function dictateParts(parts) {
+  click(micButton());
+  await flush();
+  for (let i = 1; i < parts; i += 1) rollPart();
+  click(micButton());
+  await flush();
+}
+
+// Distinct text per request, so order is provable.
+function textPerPart(texts) {
+  let n = 0;
+  mockTranscribeBlob.mockImplementation(async () => {
+    const text = texts[n];
+    n += 1;
+    return text;
+  });
+}
+
+describe("M1. a short dictation is unchanged: one part, one request, one result", () => {
+  test("no roll happens, so the pipeline is exactly what it was before parts existed", async () => {
+    mount();
+    await dictate();
+    expect(FakeMediaRecorder.instances).toHaveLength(1);
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(1);
+    expect(textarea().value).toBe("Hello site");
+    expect(micButton().getAttribute("data-voice-phase")).toBe("idle");
+    expect(alertLine()).toBeNull();
+  });
+
+  test("a single-part failure keeps its own wording, not the multi-part sentence", async () => {
+    mount();
+    mockTranscribeBlob.mockRejectedValue(new Error("Network error"));
+    await dictate();
+    expect(alertLine().textContent).toBe(LIVE_TRANSCRIPT_MESSAGE.NETWORK);
+    expect(alertLine().textContent).not.toBe(DICTATION_MESSAGE.PART_FAILED);
+    expect(textarea().value).toBe("");
+  });
+});
+
+describe("M2. every part is a complete audio container, recorded at the speech bitrate", () => {
+  test("each part is its own MediaRecorder on the same stream, with the negotiated container", async () => {
+    mount();
+    await dictateParts(3);
+    expect(FakeMediaRecorder.instances).toHaveLength(3);
+    const streams = new Set(FakeMediaRecorder.instances.map((r) => r.stream));
+    expect(streams.size).toBe(1); // one microphone, reopened — not three
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    for (const recorder of FakeMediaRecorder.instances) {
+      expect(recorder.state).toBe("inactive");
+      expect(recorder.mimeType).toBe("audio/webm;codecs=opus");
+      expect(recorder.audioBitsPerSecond).toBe(SPEECH_AUDIO_BITS_PER_SECOND);
+    }
+    // Each upload is a whole Blob of that container type — never a fragment.
+    for (const [blob] of mockTranscribeBlob.mock.calls) {
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.size).toBe(8);
+      expect(blob.type).toBe("audio/webm;codecs=opus");
+    }
+  });
+
+  test("a part's request carries the scoped longer deadline, still bounded", async () => {
+    mount();
+    await dictateParts(2);
+    for (const call of mockTranscribeBlob.mock.calls) {
+      expect(call[2]).toMatchObject({ timeoutMs: DICTATION_PART_REQUEST_TIMEOUT_MS });
+    }
+    expect(DICTATION_PART_REQUEST_TIMEOUT_MS).toBeGreaterThan(60000);
+    expect(DICTATION_PART_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(120000);
+  });
+});
+
+describe("M3. rolling is invisible: it is still one dictation", () => {
+  test("the user presses nothing between parts and the control never leaves recording", async () => {
+    mount();
+    click(micButton());
+    await flush();
+    expect(micButton().getAttribute("data-voice-phase")).toBe("recording");
+    rollPart();
+    await flush();
+    // A part has been sealed and sent, yet the composer is simply recording.
+    expect(FakeMediaRecorder.instances).toHaveLength(2);
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(1);
+    expect(micButton().getAttribute("data-voice-phase")).toBe("recording");
+    expect(micButton().getAttribute("aria-label")).toBe("Stop dictation");
+    expect(discardButton()).not.toBeNull();
+    expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.QUICK_ADD_DICTATION);
+    // …and nothing has reached the draft yet.
+    expect(textarea().value).toBe("");
+    click(micButton());
+    await flush();
+    expect(textarea().value).toBe("Hello site Hello site");
+  });
+
+  test("stopping seals the final part, so every part recorded is a part transcribed", async () => {
+    mount();
+    textPerPart(["one", "two", "three"]);
+    await dictateParts(3);
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(3);
+    for (const t of tracks) expect(t.stop).toHaveBeenCalled();
+    expect(currentMicrophoneOwner()).toBeNull();
+  });
+});
+
+describe("M4. parts transcribe in order and arrive as ONE combined result", () => {
+  test("the draft receives the parts in the order they were spoken", async () => {
+    mount();
+    textPerPart(["First paragraph.", "Second paragraph.", "Third paragraph."]);
+    await dictateParts(3);
+    expect(textarea().value).toBe("First paragraph. Second paragraph. Third paragraph.");
+  });
+
+  test("the transport is called sequentially — a part waits for the one before it", async () => {
+    mount();
+    const settle = [];
+    const order = [];
+    mockTranscribeBlob.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          order.push(order.length);
+          settle.push(resolve);
+        })
+    );
+    click(micButton());
+    await flush();
+    rollPart();
+    await flush();
+    rollPart();
+    await flush();
+    // Three parts recorded, but only the FIRST has been sent.
+    expect(FakeMediaRecorder.instances).toHaveLength(3);
+    expect(settle).toHaveLength(1);
+    await act(async () => settle[0]("alpha"));
+    await flush();
+    expect(settle).toHaveLength(2);
+    await act(async () => settle[1]("beta"));
+    await flush();
+    click(micButton());
+    await flush();
+    expect(settle).toHaveLength(3);
+    await act(async () => settle[2]("gamma"));
+    await flush();
+    expect(textarea().value).toBe("alpha beta gamma");
+  });
+
+  test("a silent part is not a gap and not a failure", async () => {
+    mount();
+    textPerPart(["spoken", "   ", "spoken again"]);
+    await dictateParts(3);
+    expect(textarea().value).toBe("spoken spoken again");
+    expect(alertLine()).toBeNull();
+  });
+
+  test("a dictation that produced no words anywhere says so and adds nothing", async () => {
+    mount();
+    mockTranscribeBlob.mockResolvedValue("");
+    await dictateParts(3);
+    expect(textarea().value).toBe("");
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.NO_SPEECH);
+  });
+});
+
+describe("M5. nothing reaches the draft until the whole dictation is ready", () => {
+  test("earlier parts are held back while a later one is still transcribing", async () => {
+    mount();
+    let resolveLast;
+    let call = 0;
+    mockTranscribeBlob.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return Promise.resolve("early words");
+      return new Promise((resolve) => (resolveLast = resolve));
+    });
+    click(micButton());
+    await flush();
+    rollPart();
+    await flush();
+    // The first part's text exists inside the hook and nowhere the user can see.
+    expect(textarea().value).toBe("");
+    click(micButton());
+    await flush();
+    expect(micButton().getAttribute("data-voice-phase")).toBe("transcribing");
+    expect(textarea().value).toBe("");
+    await act(async () => resolveLast("late words"));
+    await flush();
+    expect(textarea().value).toBe("early words late words");
+  });
+
+  test("text typed while the dictation ran is kept, and the result joins it once", async () => {
+    mount();
+    textPerPart(["dictated one", "dictated two"]);
+    click(micButton());
+    await flush();
+    rollPart();
+    typeInto(textarea(), "typed first");
+    click(micButton());
+    await flush();
+    expect(textarea().value).toBe("typed first dictated one dictated two");
+  });
+});
+
+describe("M6. one language for the whole dictation", () => {
+  test("every part is transcribed in the language selected when recording began", async () => {
+    mount();
+    chooseLanguage("fr");
+    await dictateParts(3);
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(3);
+    for (const call of mockTranscribeBlob.mock.calls) expect(call[1]).toBe("fr");
+  });
+
+  test("changing the selector mid-dictation applies to the NEXT one, never to parts in flight", async () => {
+    mount();
+    chooseLanguage("fr");
+    click(micButton());
+    await flush();
+    rollPart();
+    chooseLanguage("de");
+    rollPart();
+    click(micButton());
+    await flush();
+    for (const call of mockTranscribeBlob.mock.calls) expect(call[1]).toBe("fr");
+    mockTranscribeBlob.mockClear();
+    await dictateParts(2);
+    for (const call of mockTranscribeBlob.mock.calls) expect(call[1]).toBe("de");
+  });
+});
+
+describe("M7/M8. the whole dictation is bound to the destination it began in", () => {
+  test("a destination that moved discards the COMBINED result, not just the last part", async () => {
+    mount();
+    textPerPart(["alpha", "beta", "gamma"]);
+    click(micButton());
+    await flush();
+    rollPart();
+    rollPart();
+    render({ target: templateRow, targetToken: "note-1|row-1" });
+    click(micButton());
+    await flush();
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(3);
+    expect(textarea().value).toBe("");
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.DESTINATION_CHANGED);
+    expect(onInsertText).not.toHaveBeenCalled();
+    expect(onSendComposer).not.toHaveBeenCalled();
+  });
+
+  test("staged attachments survive a multi-part dictation untouched", async () => {
+    mount();
+    choose(pickerInput(), [new File([new Uint8Array([1, 2, 3])], "plan.pdf", { type: "application/pdf" })]);
+    await flush();
+    expect(host.querySelectorAll(".nw-quickadd-staged-item")).toHaveLength(1);
+    textPerPart(["alpha", "beta"]);
+    await dictateParts(2);
+    expect(textarea().value).toBe("alpha beta");
+    expect(host.querySelectorAll(".nw-quickadd-staged-item")).toHaveLength(1);
+    expect(onInsertText).not.toHaveBeenCalled();
+    expect(onSendComposer).not.toHaveBeenCalled();
+  });
+});
+
+describe("M9. cancelling a multi-part dictation inserts nothing", () => {
+  test("Discard mid-dictation stops recording, frees the microphone and leaves the draft alone", async () => {
+    mount();
+    typeInto(textarea(), "existing draft");
+    click(micButton());
+    await flush();
+    rollPart();
+    await flush();
+    click(discardButton());
+    await flush();
+    expect(micButton().getAttribute("data-voice-phase")).toBe("idle");
+    expect(discardButton()).toBeNull();
+    expect(currentMicrophoneOwner()).toBeNull();
+    for (const t of tracks) expect(t.stop).toHaveBeenCalled();
+    expect(textarea().value).toBe("existing draft");
+    expect(alertLine()).toBeNull();
+  });
+
+  test("a part still in flight is aborted and its text never reaches the draft", async () => {
+    mount();
+    let signal;
+    let resolveFirst;
+    mockTranscribeBlob.mockImplementation((blob, language, options) => {
+      signal = options && options.signal;
+      return new Promise((resolve) => (resolveFirst = resolve));
+    });
+    click(micButton());
+    await flush();
+    rollPart();
+    await flush();
+    expect(signal).toBeDefined();
+    expect(signal.aborted).toBe(false);
+    click(discardButton());
+    await flush();
+    expect(signal.aborted).toBe(true);
+    // Even a request that answers anyway changes nothing.
+    await act(async () => resolveFirst("words from an abandoned dictation"));
+    await flush();
+    expect(textarea().value).toBe("");
+    expect(alertLine()).toBeNull();
+  });
+});
+
+describe("M10. a failed part never becomes an apparently-complete dictation", () => {
+  test("a middle part failing discards the whole result and says so", async () => {
+    mount();
+    let call = 0;
+    mockTranscribeBlob.mockImplementation(async () => {
+      call += 1;
+      if (call === 2) throw new Error("Network error");
+      return `part ${call}`;
+    });
+    await dictateParts(3);
+    expect(textarea().value).toBe("");
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.PART_FAILED);
+    // The sentence has to say that nothing was kept, because nothing was.
+    expect(DICTATION_MESSAGE.PART_FAILED).toMatch(/none of it was added/);
+    expect(DICTATION_MESSAGE.PART_FAILED).toMatch(/not kept/);
+    expect(onInsertText).not.toHaveBeenCalled();
+    expect(onSendComposer).not.toHaveBeenCalled();
+    expect(micButton().getAttribute("data-voice-phase")).toBe("idle");
+  });
+
+  test("after the first failure the remaining parts are not sent — no request is spent on a discarded result", async () => {
+    mount();
+    let call = 0;
+    mockTranscribeBlob.mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw new Error("Network error");
+      return "never offered";
+    });
+    await dictateParts(4);
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(1);
+    expect(textarea().value).toBe("");
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.PART_FAILED);
+  });
+
+  test("a failed dictation leaves an existing draft exactly as it was", async () => {
+    mount();
+    typeInto(textarea(), "field notes so far");
+    mockTranscribeBlob.mockRejectedValue(new Error("Network error"));
+    await dictateParts(2);
+    expect(textarea().value).toBe("field notes so far");
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.PART_FAILED);
+  });
+});
+
+describe("M11. Live transcript is still a separate workflow beside a multi-part dictation", () => {
+  test("the microphone stays mutually exclusive for the whole dictation, parts and all", async () => {
+    mount();
+    click(micButton());
+    await flush();
+    rollPart();
+    await flush();
+    // Mid-dictation, between parts, Live transcript still cannot record.
+    expect(claimMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT)).toEqual({
+      ok: false,
+      owner: MICROPHONE_OWNER.QUICK_ADD_DICTATION,
+    });
+    click(micButton());
+    await flush();
+    expect(currentMicrophoneOwner()).toBeNull();
+    // Released, the other workflow may take it.
+    expect(claimMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT)).toEqual({ ok: true });
+    releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
+    expect(textarea().value).toBe("Hello site Hello site");
+  });
+});
+
+describe("M12. a recorder the browser ends on its own", () => {
+  test("its part is sealed once, so Stop cannot transcribe the same audio twice", async () => {
+    mount();
+    click(micButton());
+    await flush();
+    // The microphone track ends and the browser stops the recorder itself:
+    // `onstop` has already run before the user presses Stop.
+    act(() => FakeMediaRecorder.instances[0].stop());
+    await flush();
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(1);
+    click(micButton());
+    await flush();
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(1);
+    expect(textarea().value).toBe("Hello site");
+    expect(currentMicrophoneOwner()).toBeNull();
+  });
+});
+
+describe("M13. a part that fails while the user is STILL SPEAKING ends the dictation at once", () => {
+  // The doomed-dictation case. A completed part's transcription fails
+  // terminally while recording has already rolled on. The dictation can only
+  // ever be discarded now, so the user must not be left speaking into it for
+  // minutes and only find out when they press Stop.
+  function pendingCall() {
+    let settle;
+    const promise = new Promise((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    return { promise, settle };
+  }
+
+  test("part 2 failing while part 3 records stops the recorder and tells the user, with no Stop press", async () => {
+    mount();
+    const second = pendingCall();
+    let call = 0;
+    mockTranscribeBlob.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return Promise.resolve("part one words");
+      if (call === 2) return second.promise;
+      return Promise.resolve("never reached");
+    });
+
+    click(micButton());
+    await flush();
+    rollPart(); // part 1 sealed → part 2 recording
+    await flush();
+    rollPart(); // part 2 sealed → part 3 recording
+    await flush();
+
+    // The state the requirement is about: part 3 is live, part 2 is in flight.
+    expect(FakeMediaRecorder.instances).toHaveLength(3);
+    expect(FakeMediaRecorder.instances[2].state).toBe("recording");
+    expect(micButton().getAttribute("data-voice-phase")).toBe("recording");
+    expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.QUICK_ADD_DICTATION);
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(2);
+
+    // Part 2 fails terminally. The user presses NOTHING.
+    await act(async () => second.settle.reject(new Error("Network error")));
+    await flush();
+
+    // Recording has ended on its own.
+    expect(FakeMediaRecorder.instances[2].state).toBe("inactive");
+    expect(FakeMediaRecorder.instances).toHaveLength(3); // no part 4 was opened
+    expect(currentMicrophoneOwner()).toBeNull();
+    for (const t of tracks) expect(t.stop).toHaveBeenCalled();
+
+    // The UI has left recording and says what happened.
+    expect(micButton().getAttribute("data-voice-phase")).toBe("idle");
+    expect(micButton().disabled).toBe(false);
+    expect(discardButton()).toBeNull();
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.PART_FAILED);
+
+    // Nothing partial anywhere, and no request spent on the discarded audio.
+    expect(textarea().value).toBe("");
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(2);
+    expect(onInsertText).not.toHaveBeenCalled();
+    expect(onSendComposer).not.toHaveBeenCalled();
+  });
+
+  test("the in-progress part is discarded, not sealed: it is never transcribed", async () => {
+    mount();
+    let call = 0;
+    mockTranscribeBlob.mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw new Error("Network error");
+      return "the part that was still recording";
+    });
+    click(micButton());
+    await flush();
+    rollPart(); // part 1 sealed → part 2 recording
+    await flush();
+    // Part 1 failed while part 2 was recording. Part 2's audio is dropped.
+    expect(mockTranscribeBlob).toHaveBeenCalledTimes(1);
+    expect(textarea().value).toBe("");
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.PART_FAILED);
+  });
+
+  test("the existing draft and staged attachments are untouched", async () => {
+    mount();
+    typeInto(textarea(), "field notes so far");
+    choose(pickerInput(), [new File([new Uint8Array([1, 2, 3])], "plan.pdf", { type: "application/pdf" })]);
+    await flush();
+    mockTranscribeBlob.mockRejectedValue(new Error("Network error"));
+    click(micButton());
+    await flush();
+    rollPart();
+    await flush();
+    expect(micButton().getAttribute("data-voice-phase")).toBe("idle");
+    expect(textarea().value).toBe("field notes so far");
+    expect(host.querySelectorAll(".nw-quickadd-staged-item")).toHaveLength(1);
+  });
+
+  test("the microphone is genuinely free — Live transcript may take it immediately", async () => {
+    mount();
+    mockTranscribeBlob.mockRejectedValue(new Error("Network error"));
+    click(micButton());
+    await flush();
+    rollPart();
+    await flush();
+    expect(currentMicrophoneOwner()).toBeNull();
+    expect(claimMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT)).toEqual({ ok: true });
+    releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
+  });
+
+  test("pressing the control afterwards starts a clean new dictation, not a resumed one", async () => {
+    mount();
+    let call = 0;
+    mockTranscribeBlob.mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw new Error("Network error");
+      return "fresh dictation";
+    });
+    click(micButton());
+    await flush();
+    rollPart();
+    await flush();
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.PART_FAILED);
+    // A new dictation: the failed one contributes nothing and the error clears.
+    await dictate();
+    expect(textarea().value).toBe("fresh dictation");
+    expect(alertLine()).toBeNull();
+  });
+
+  test("a failure arriving AFTER Stop still reports through the ordinary stop path", async () => {
+    mount();
+    const second = pendingCall();
+    let call = 0;
+    mockTranscribeBlob.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return Promise.resolve("part one");
+      return second.promise;
+    });
+    click(micButton());
+    await flush();
+    rollPart();
+    await flush();
+    click(micButton()); // Stop: the final part is sealed and the mic released
+    await flush();
+    expect(micButton().getAttribute("data-voice-phase")).toBe("transcribing");
+    await act(async () => second.settle.reject(new Error("Network error")));
+    await flush();
+    expect(micButton().getAttribute("data-voice-phase")).toBe("idle");
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.PART_FAILED);
+    expect(textarea().value).toBe("");
   });
 });

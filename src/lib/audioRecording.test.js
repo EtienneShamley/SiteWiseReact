@@ -5,6 +5,8 @@
 // finished clip is stamped with. Recorder and navigator are injected.
 import {
   AUDIO_RECORDING_MIME_CANDIDATES,
+  SPEECH_AUDIO_BITS_PER_SECOND,
+  audioRecorderOptions,
   isAudioRecordingSupported,
   pickSupportedMime,
   recordedBlobType,
@@ -72,5 +74,46 @@ describe("recordedBlobType", () => {
     expect(recordedBlobType("", { mimeType: "audio/ogg;codecs=opus" })).toBe("audio/ogg;codecs=opus");
     expect(recordedBlobType("", { mimeType: "" })).toBe("audio/webm");
     expect(recordedBlobType("", null)).toBe("audio/webm");
+  });
+});
+
+/* ---------------- recorder options and the speech bitrate ---------------- */
+//
+// Phase 8C.2. A dictation part's size has to be predictable enough to finish
+// uploading inside the transport's deadline, so the recorder is asked for a
+// speech bitrate. It is a REQUEST — a browser may ignore it — which is why
+// nothing downstream computes a size from it.
+
+describe("audioRecorderOptions", () => {
+  test("carries whichever of the two facts is actually known", () => {
+    expect(audioRecorderOptions({ mimeType: "audio/webm;codecs=opus", audioBitsPerSecond: 48000 })).toEqual({
+      mimeType: "audio/webm;codecs=opus",
+      audioBitsPerSecond: 48000,
+    });
+    expect(audioRecorderOptions({ mimeType: "audio/mp4" })).toEqual({ mimeType: "audio/mp4" });
+    expect(audioRecorderOptions({ audioBitsPerSecond: 48000 })).toEqual({ audioBitsPerSecond: 48000 });
+  });
+
+  test("with nothing to ask for it yields undefined — what the constructor wants, not an empty object", () => {
+    expect(audioRecorderOptions()).toBeUndefined();
+    expect(audioRecorderOptions({})).toBeUndefined();
+    expect(audioRecorderOptions({ mimeType: "", audioBitsPerSecond: 0 })).toBeUndefined();
+  });
+
+  test("an unusable bitrate is omitted rather than passed on to the recorder", () => {
+    for (const bad of [0, -1, NaN, Infinity, "48000", null, undefined]) {
+      expect(audioRecorderOptions({ mimeType: "audio/webm", audioBitsPerSecond: bad })).toEqual({
+        mimeType: "audio/webm",
+      });
+    }
+  });
+
+  test("the speech bitrate is a real speech rate, and low enough to keep a part small", () => {
+    expect(SPEECH_AUDIO_BITS_PER_SECOND).toBe(48000);
+    // Two minutes at this rate is well under a megabyte, and two orders of
+    // magnitude clear of the route's 25 MB ceiling.
+    const twoMinuteBytes = (SPEECH_AUDIO_BITS_PER_SECOND / 8) * 120;
+    expect(twoMinuteBytes).toBeLessThan(1024 * 1024);
+    expect(twoMinuteBytes * 10).toBeLessThan(25 * 1024 * 1024);
   });
 });
