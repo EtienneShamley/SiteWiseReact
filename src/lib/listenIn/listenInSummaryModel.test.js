@@ -30,6 +30,7 @@ import {
   listenInSummaryStatusLabel,
   mergeSummaryResults,
   nextSummaryWindow,
+  rewindSummaryCoverage,
   settledThroughSeq,
   summaryDisplayText,
   summaryMergeGroups,
@@ -549,5 +550,89 @@ describe("an action item keeps a stable identity for a future NoteWise task", ()
     expect(listenInActionItemId("s-1", { task: "Do the thing", sourceSeq: null })).toBe(
       "s-1:x:do-the-thing"
     );
+  });
+});
+
+/* ===================== filling a hole a retry recovered ================== */
+
+describe("rewinding coverage so a filled hole reaches the summary (8D.3)", () => {
+  test("a retried sequence is re-read: the parts past it go, the ones before stay", () => {
+    let summary = appendSummaryPart(fresh(), {
+      part: result("first half"),
+      fromSeq: 0,
+      toSeq: 3,
+      now: 1000,
+    });
+    summary = appendSummaryPart(summary, {
+      part: result("second half"),
+      fromSeq: 4,
+      toSeq: 7,
+      missingSeqs: [5],
+      now: 2000,
+    });
+    summary = withFinalSummary(summary, { result: result("the whole meeting"), now: 3000 });
+    expect(summary.coveredThroughSeq).toBe(7);
+    expect(summary.missingSeqs).toEqual([5]);
+
+    // Chunk 5 has just been transcribed by an explicit retry.
+    const rewound = rewindSummaryCoverage(summary, { throughSeq: 4, now: 4000 });
+    expect(rewound.coveredThroughSeq).toBe(4);
+    // The part that read 4–7 is gone; the part that read 0–3 is untouched.
+    expect(rewound.parts.map((p) => [p.fromSeq, p.toSeq])).toEqual([[0, 3]]);
+    expect(rewound.result.summaryText).toBe("first half");
+    // The hole is no longer claimed, and the summary is no longer final.
+    expect(rewound.missingSeqs).toEqual([]);
+    expect(rewound.final).toBe(false);
+    expect(rewound.status).toBe(LISTEN_IN_SUMMARY_STATUS.READY);
+    // …so the engine asks for the window again, from the corrected transcript.
+    expect(
+      hasUnsummarisedTranscript({
+        chunks: [said(5, lots()), said(6, lots()), said(7, lots())],
+        summary: rewound,
+        maxAttempts: 5,
+      })
+    ).toBe(true);
+  });
+
+  test("a person's own wording is never touched by a rewind", () => {
+    let summary = appendSummaryPart(fresh(), {
+      part: result("generated"),
+      fromSeq: 0,
+      toSeq: 2,
+      missingSeqs: [1],
+      now: 1000,
+    });
+    summary = withUserSummaryText(summary, "What I actually think happened", { now: 1500 });
+    const rewound = rewindSummaryCoverage(summary, { throughSeq: 0, now: 2000 });
+    expect(rewound.userSummaryText).toBe("What I actually think happened");
+    expect(summaryDisplayText(rewound)).toBe("What I actually think happened");
+  });
+
+  test("rewinding to where it already is, or past it, changes nothing at all", () => {
+    const summary = appendSummaryPart(fresh(), {
+      part: result("all of it"),
+      fromSeq: 0,
+      toSeq: 3,
+      now: 1000,
+    });
+    expect(rewindSummaryCoverage(summary, { throughSeq: 3, now: 2000 })).toBe(summary);
+    expect(rewindSummaryCoverage(summary, { throughSeq: 9, now: 2000 })).toBe(summary);
+    expect(rewindSummaryCoverage(null, { throughSeq: 0 })).toBeNull();
+  });
+
+  test("rewinding past the beginning empties the summary rather than inventing one", () => {
+    const summary = appendSummaryPart(fresh(), {
+      part: result("only part"),
+      fromSeq: 0,
+      toSeq: 1,
+      missingSeqs: [0],
+      now: 1000,
+    });
+    const rewound = rewindSummaryCoverage(summary, { throughSeq: -1, now: 2000 });
+    expect(rewound.coveredThroughSeq).toBe(-1);
+    expect(rewound.parts).toEqual([]);
+    expect(rewound.missingSeqs).toEqual([]);
+    expect(rewound.result.summaryText).toBe("");
+    expect(hasSummaryToShow(rewound)).toBe(false);
   });
 });

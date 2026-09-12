@@ -26,6 +26,7 @@
 // path Quick Add uses (MainArea); export builds a Blob the way every other
 // export does. Pure: no React, no DOM, no timers.
 import { REFINE_ERROR_CODE, REFINE_ERROR_MESSAGE } from "./refineContract";
+import { LISTEN_IN_MESSAGE } from "./listenIn/listenInModel";
 
 /* ================================ Session ================================ */
 
@@ -305,9 +306,14 @@ export function liveTranscriptErrorMessage(error) {
   if (raw === "Transcription failed") return LIVE_TRANSCRIPT_MESSAGE.FAILED;
   if (raw === "Sign in required") return LIVE_TRANSCRIPT_MESSAGE.SIGN_IN_REQUIRED;
   if (raw === "Email verification required") return LIVE_TRANSCRIPT_MESSAGE.EMAIL_VERIFICATION_REQUIRED;
-  // Own wording (this module's constants, or the refine contract's): already
-  // written for the user.
+  // Own wording (this module's constants, the session model's, or the refine
+  // contract's): already written for the user. The session model's sentences
+  // reach here through the engine's `error` — an interrupted session, a
+  // microphone already claimed, a session that has spent its four-hour capture
+  // budget — and rewriting one of those as "this part could not be
+  // transcribed" would tell the user something that did not happen.
   if (Object.values(LIVE_TRANSCRIPT_MESSAGE).includes(raw)) return raw;
+  if (Object.values(LISTEN_IN_MESSAGE).includes(raw)) return raw;
   if (name === "Error" && raw && isTransientRefineNotice(error)) return raw;
 
   return LIVE_TRANSCRIPT_MESSAGE.FAILED;

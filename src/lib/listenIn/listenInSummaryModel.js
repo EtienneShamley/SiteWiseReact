@@ -477,6 +477,52 @@ export function canAttemptSummary(summary, { now = Date.now(), policy = LISTEN_I
 }
 
 /**
+ * REWIND COVERAGE so a stretch of transcript is read again (Phase 8D.3).
+ *
+ * The one thing that needs this: a chunk that permanently FAILED was recorded
+ * as a hole — the summary read past it and said so in `missingSeqs` — and a
+ * later explicit Retry has now produced its words. Coverage only ever moves
+ * forward, so without this the retried speech would sit in the transcript and
+ * never reach the summary, and the summary would keep naming a gap that has
+ * been filled. Both would be untrue.
+ *
+ * It drops every part that read past `throughSeq` and rebuilds the interim
+ * result from what is left, so the windows after that point are summarised
+ * again from the corrected transcript. The user's own overview wording is NOT
+ * touched — it never is, except by an explicit Regenerate.
+ *
+ * Rewinding to a sequence at or after the current coverage is a no-op: nothing
+ * needs re-reading, and the summary is returned unchanged.
+ */
+export function rewindSummaryCoverage(summary, { throughSeq = -1, now = Date.now() } = {}) {
+  if (!summary) return summary;
+  const target = Number.isInteger(throughSeq) ? Math.max(-1, throughSeq) : -1;
+  if (summary.coveredThroughSeq <= target) return summary;
+  const parts = Object.freeze(summary.parts.filter((part) => part.toSeq <= target));
+  const result =
+    parts.length > 0
+      ? mergeSummaryResults(parts.map((part) => part.result))
+      : emptyListenInSummaryResult();
+  return withSummary(
+    summary,
+    {
+      parts,
+      result,
+      coveredThroughSeq: target,
+      missingSeqs: Object.freeze(summary.missingSeqs.filter((seq) => seq <= target)),
+      // What was consolidated described a meeting with a hole in it. It is no
+      // longer the final account, and the reduce will run again once the
+      // re-read windows have caught up.
+      final: false,
+      status: hasListenInSummaryContent(result)
+        ? LISTEN_IN_SUMMARY_STATUS.READY
+        : LISTEN_IN_SUMMARY_STATUS.IDLE,
+    },
+    now
+  );
+}
+
+/**
  * An explicit Try again: clear the backoff, the attempt count AND the interval
  * gate. The gate exists to stop an automatic loop spending in bursts; a person
  * who pressed a button is not that loop, and making them wait three minutes

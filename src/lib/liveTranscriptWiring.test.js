@@ -152,11 +152,18 @@ describe("5/12. one session, owned above the sidebar and the workspace", () => {
     expect(ENGINE).toMatch(/const stop = \(options = \{\}\) => endCapture\(/);
     expect(HOOK).toMatch(/start: useCallback\(\(options\) => \(engine \? engine\.start\(options\) : null\)/);
     expect(HOOK).toMatch(/stop: useCallback\(\(\) => \(engine \? engine\.stop\(\) : null\)/);
-    expect(DIALOG).toMatch(/if \(recording\) session\.stop\(\);\s*\n\s*else if \(!stopping\) session\.start\(\{ language: session\.language \}\);/);
+    // Phase 8D.3.1: the record control STOPS RECORDING on a live leg (the
+    // meeting stays open), starts the next leg of a stopped/interrupted
+    // meeting, or starts a new meeting when none is active. Completing the
+    // meeting is its own control. The user-facing words are "Stop recording"
+    // and "Start recording" — never "Pause".
+    expect(DIALOG).toMatch(/if \(recording\) session\.pause\(\);\s*\n\s*else if \(paused \|\| interrupted\) session\.resume\(\);\s*\n\s*else if \(!active\) session\.start\(\{ language: session\.language \}\);/);
     expect(DIALOG).toMatch(/aria-pressed=\{recording\}/);
     expect(DIALOG).toMatch(/aria-label=\{recordLabel\}/);
-    expect(DIALOG).toContain('const recordLabel = recording ? "Stop recording" : "Start recording";');
+    expect(DIALOG).toMatch(/const recordLabel = recording\s*\n\s*\? "Stop recording"/);
+    expect(DIALOG).not.toMatch(/"Pause recording"|"Resume recording"/);
     expect(DIALOG).toMatch(/danger: recording,/);
+    expect(DIALOG).toMatch(/session\.complete\(\);/);
   });
 
   test("8. chunked recording over the batch engine — chunks transcribed in order, each its own transcript segment", () => {
@@ -327,9 +334,10 @@ describe("10–13. with nowhere to insert, everything else still works and nothi
     // switch cannot reach it. The provider only holds the NEXT one's.
     expect(PROVIDER).not.toMatch(/session\.setLanguage|engine\.setLanguage/);
     expect(PROVIDER).toMatch(/const \[language, setLanguageState\] = useState/);
-    // Stop lives in the workspace, which is shell-level and always openable
-    // from the always-present sidebar row.
-    expect(DIALOG).toMatch(/if \(recording\) session\.stop\(\);/);
+    // Pause and Complete live in the workspace, which is shell-level and
+    // always openable from the always-present sidebar row.
+    expect(DIALOG).toMatch(/if \(recording\) session\.pause\(\);/);
+    expect(DIALOG).toMatch(/session\.complete\(\);/);
   });
 });
 

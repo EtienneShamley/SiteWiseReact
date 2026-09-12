@@ -10,8 +10,15 @@
 // failure this feature must not have. So the SESSION owns the recording and
 // the UI owns nothing: `LiveTranscriptContext` subscribes to this engine and
 // renders what it reports, and there is no code path anywhere in the view
-// layer that can stop a capture. Only `stop`, `finish`, `discard` and a real
-// interruption end one.
+// layer that can stop a capture. Only `pause`, `complete`, `discard`, the
+// duration policy and a real interruption end one.
+//
+// A MEETING IS NOT A MICROPHONE LEG (Phase 8D.3.1). The session is the
+// MEETING; `start`/`resume` open a recording leg and `pause` closes one, and
+// the meeting stays the active one — same id, chunks, transcript, summary,
+// sequence and capture budget — until `complete` ends it or `discard` throws
+// it away. Only then may `start` begin a new meeting; while any meeting is
+// open, `start` refuses and the caller attaches to the meeting instead.
 //
 // It is written against the conventions of the project's other background
 // engines (src/lib/cloud/cloudSync.js, assetUploadSync.js): a create/start/
@@ -55,20 +62,28 @@ import {
   beginLeg,
   captureEnded,
   createChunk,
+  canResume,
+  completeWithoutCapture,
   createSession,
   drainableChunks,
   failedChunks,
-  finishInterrupted,
   interrupt,
   isCapturing,
+  isSessionOpen,
   markFinished,
+  markLimitWarned,
+  normaliseSession,
+  pauseRecording,
   pendingChunks,
   requestStop,
   resumeRecording,
   takeSeq,
 } from "./listenInModel";
 import {
+  LISTEN_IN_DURATION_POLICY,
   LISTEN_IN_PERSISTENCE,
+  listenInDurationStatus,
+  listenInNextDurationCheckMs,
   resolveListenInPersistence,
 } from "./listenInPolicy";
 import { createListenInDurableStore, createListenInMemoryStore } from "./listenInStore";
@@ -80,6 +95,7 @@ import {
   hasUnsummarisedTranscript,
   listenInSummaryCoverage,
   nextSummaryWindow,
+  rewindSummaryCoverage,
   summaryMergeGroups,
   summaryRequestStarted,
   summaryRetryRequested,
@@ -185,6 +201,9 @@ export function createListenInEngine({
   // future read-only viewer). Capture and transcription are unaffected by it.
   summaryEnabled = true,
   chunkMs = LISTEN_IN_CHUNK_MS,
+  // The 2 h warning / 4 h hard stop, injected so both boundaries are provable
+  // in milliseconds rather than by waiting four hours.
+  durationPolicy = LISTEN_IN_DURATION_POLICY,
   maxAutoAttempts = LISTEN_IN_MAX_AUTO_ATTEMPTS,
   now = () => Date.now(),
   setTimer = (fn, ms) => setTimeout(fn, ms),
@@ -196,6 +215,30 @@ export function createListenInEngine({
     if (typeof window === "undefined" || !window.addEventListener) return () => {};
     window.addEventListener("online", fn);
     return () => window.removeEventListener("online", fn);
+  },
+  /**
+   * WAKING UP. A backgrounded tab throttles timers to about once a minute and
+   * a suspended laptop stops them altogether, so a timer alone cannot be
+   * trusted to notice a boundary — an app resumed at 4 h 15 m must act on the
+   * limit at once. These are the browser's own "you are being looked at
+   * again" signals, and they are wake-ups only: every decision is recomputed
+   * from the clock, never from the fact that an event fired.
+   */
+  addWakeListener = (fn) => {
+    if (typeof window === "undefined" || !window.addEventListener) return () => {};
+    const onVisible = () => {
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") fn();
+    };
+    window.addEventListener("focus", fn);
+    if (typeof document !== "undefined" && document.addEventListener) {
+      document.addEventListener("visibilitychange", onVisible);
+    }
+    return () => {
+      window.removeEventListener("focus", fn);
+      if (typeof document !== "undefined" && document.removeEventListener) {
+        document.removeEventListener("visibilitychange", onVisible);
+      }
+    };
   },
   getUserMedia = (constraints) => navigator.mediaDevices.getUserMedia(constraints),
   recorderSupported = isAudioRecordingSupported,
@@ -224,6 +267,13 @@ export function createListenInEngine({
   let recorder = null;
   let rollTimer = null;
   let mime = "";
+
+  // ---- duration policy ----
+  // The wake-up for the next boundary, and the ONE guard that makes the hard
+  // stop happen exactly once however many wake-ups arrive at the same moment.
+  let limitTimer = null;
+  let limitStopping = false;
+  let removeWake = null;
 
   // ---- drain ----
   let draining = null;
@@ -267,6 +317,11 @@ export function createListenInEngine({
       supported: recorderSupported(),
       pending: pendingChunks(chunks).length,
       failed: failedChunks(chunks).length,
+      // Whether `session` is THE ACTIVE MEETING (recording, paused,
+      // interrupted or completing) rather than a completed record kept on
+      // show for review. A completed meeting is not active: Start begins a
+      // new one, and a reload does not adopt it.
+      active: isSessionOpen(session),
       // The session's structured summary and what it actually covers. Both
       // are the ENGINE's, republished like everything else here, so closing
       // the window and coming back finds exactly this state.
@@ -274,6 +329,11 @@ export function createListenInEngine({
       summaryCoverage: listenInSummaryCoverage(session, chunks, summary, {
         maxAttempts: maxAutoAttempts,
       }),
+      // WHERE THIS SESSION STANDS AGAINST ITS FOUR-HOUR BUDGET. Derived from
+      // the session's own banked capture time at the moment the snapshot is
+      // built, exactly like the elapsed clock every view already reads, so a
+      // window that was closed for an hour reopens on the truth.
+      duration: listenInDurationStatus(session, { now: now(), policy: durationPolicy }),
     });
     return cached;
   }
@@ -397,12 +457,24 @@ export function createListenInEngine({
   function rollChunk() {
     const mr = recorder;
     if (!mr || mr.state !== "recording") return;
+    // THE CHUNK BOUNDARY IS WHERE THE DURATION POLICY IS CHEAPEST TO HONOUR.
+    // A session that has spent its four hours seals what it is holding and
+    // stops here, rather than opening a new chunk the stop would immediately
+    // close again as a fragment.
+    if (listenInDurationStatus(session, { now: now(), policy: durationPolicy }).exhausted) {
+      void enforceDurationPolicy();
+      return;
+    }
     try {
       mr.stop();
     } catch {
       return;
     }
     openRecorder();
+    // And it is the one wake-up that is guaranteed while capture is live, so
+    // the two-hour warning lands within a chunk of the boundary even in a tab
+    // whose timers the browser has throttled.
+    void enforceDurationPolicy();
   }
 
   /**
@@ -435,6 +507,72 @@ export function createListenInEngine({
       stream = null;
     }
     releaseMicrophone(MICROPHONE_OWNER.LISTEN_IN);
+  }
+
+  /* --------------------------- duration policy -------------------------- */
+  //
+  // THE 2 h WARNING AND THE 4 h HARD STOP, in ONE function with ONE guard.
+  //
+  // It is deliberately not a scheduled action. A `setTimeout` for four hours
+  // is a promise a browser does not keep: a backgrounded tab throttles timers
+  // to about once a minute, a suspended laptop stops them entirely, and a tab
+  // discarded and restored has none of them left. So the DECISION is always
+  // recomputed from the session's own banked capture time, and the timer below
+  // is only one of several wake-ups that ask the question — alongside every
+  // chunk roll, the browser's focus/visibility signals, coming back online,
+  // recovery at start-up and Resume. Whichever arrives first, the answer is
+  // the same, and `limitStopping` makes sure the stop happens exactly once
+  // however many arrive together.
+
+  function disarmLimitTimer() {
+    if (limitTimer !== null) {
+      clearTimer(limitTimer);
+      limitTimer = null;
+    }
+  }
+
+  /** Arm the next wake-up: the warning boundary, then the hard limit. */
+  function armLimitTimer() {
+    disarmLimitTimer();
+    if (stopped || !isCapturing(session)) return;
+    const wait = listenInNextDurationCheckMs(session, { now: now(), policy: durationPolicy });
+    if (wait === null) return;
+    limitTimer = setTimer(() => {
+      limitTimer = null;
+      void enforceDurationPolicy();
+    }, Math.max(0, wait));
+  }
+
+  /**
+   * Ask the policy where this session stands, and act on the answer.
+   *
+   * WARN: recording continues untouched. The mark is written to the SESSION,
+   * so it is stated once and survives the window being closed, the app being
+   * reloaded and the session being interrupted and resumed.
+   *
+   * STOP: the SAME path a deliberate Stop takes — `endCapture` seals the chunk
+   * in progress, releases the recorder, the tracks and the microphone claim,
+   * records `stopReason = "limit"` and moves the session to `finishing`. The
+   * drain and the summary then run to completion on their own, so nothing
+   * pending, failed or unsummarised is lost because the limit was reached.
+   */
+  async function enforceDurationPolicy() {
+    if (stopped || !isCapturing(session)) return;
+    const status = listenInDurationStatus(session, { now: now(), policy: durationPolicy });
+    if (status.exhausted) {
+      // Exactly once. Several wake-ups can land on the same overrun — a chunk
+      // roll, a focus event and the timer all firing as the laptop resumes —
+      // and a second stop would seal a recorder that is already gone.
+      if (limitStopping) return;
+      limitStopping = true;
+      disarmLimitTimer();
+      await endCapture({ reason: LISTEN_IN_STOP_REASON.LIMIT });
+      return;
+    }
+    if (status.shouldWarn && !status.warned) {
+      await saveSession(markLimitWarned(session, { now: now() }));
+    }
+    armLimitTimer();
   }
 
   /* ------------------------------- drain -------------------------------- */
@@ -559,6 +697,21 @@ export function createListenInEngine({
       });
       await data.releaseChunkAudio(owner, workspace, id, chunk.seq);
       await reloadChunks();
+      // A HOLE HAS BEEN FILLED. This sequence had permanently failed, the
+      // summary read past it and recorded it as missing, and a retry has now
+      // produced its words. Coverage only ever moves forward, so without this
+      // the recovered speech would sit in the transcript and never reach the
+      // summary — which would go on naming a gap that no longer exists. The
+      // summary is rewound to just before it and re-reads from there; nothing
+      // else changes, and a retry that failed again reaches none of this.
+      if (
+        trimmed &&
+        summary &&
+        Array.isArray(summary.missingSeqs) &&
+        summary.missingSeqs.includes(chunk.seq)
+      ) {
+        await saveSummary(rewindSummaryCoverage(summary, { throughSeq: chunk.seq - 1, now: now() }));
+      }
       emit();
     }
 
@@ -834,28 +987,44 @@ export function createListenInEngine({
   async function bootstrap() {
     if (started || stopped) return snapshot();
     started = true;
-    removeOnline = addOnlineListener(() => wakeDrain());
+    removeOnline = addOnlineListener(() => {
+      wakeDrain();
+      // A connection coming back is also a moment the app is awake again, and
+      // the session may have slept straight through its limit.
+      void enforceDurationPolicy();
+    });
+    // FOCUS AND VISIBILITY ARE THE WAKE-UPS A THROTTLED TIMER CANNOT BE. They
+    // never decide anything themselves — they only ask the question again.
+    removeWake = addWakeListener(() => {
+      void enforceDurationPolicy();
+    });
     let open = [];
     try {
       open = await data.listSessions(uid, workspaceId);
     } catch {
       open = [];
     }
+    // ACTIVE-MEETING DISCOVERY. Only an UNCOMPLETED meeting is adopted: a
+    // completed record — however recent — is never mistaken for the active
+    // one, and is never deleted to make this easier. Normal use cannot leave
+    // two open meetings (`start` refuses while one exists), but a header from
+    // an earlier build might, so the choice is deterministic: newest first,
+    // then by id, so two engines over the same store adopt the same meeting.
     const candidates = open
-      .filter(
-        (s) =>
-          s.state === LISTEN_IN_STATE.RECORDING ||
-          s.state === LISTEN_IN_STATE.STOPPING ||
-          s.state === LISTEN_IN_STATE.FINISHING ||
-          s.state === LISTEN_IN_STATE.INTERRUPTED
-      )
-      .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+      .filter((s) => isSessionOpen(s))
+      .sort(
+        (a, b) =>
+          (b.startedAt || 0) - (a.startedAt || 0) ||
+          String(a.sessionId).localeCompare(String(b.sessionId))
+      );
     const found = candidates[0];
     if (!found) {
       emit();
       return snapshot();
     }
-    session = found;
+    // Filled in for a header written before the duration fields existed, so a
+    // session recovered from this device is read exactly like a fresh one.
+    session = normaliseSession(found);
     // Its summary comes back with it. Reopening the window after a reload
     // shows the same summary at the same revision, because it was never the
     // window's in the first place.
@@ -867,13 +1036,29 @@ export function createListenInEngine({
       summary = null;
     }
     ensureSummary();
-    if (found.state === LISTEN_IN_STATE.RECORDING || found.state === LISTEN_IN_STATE.STOPPING) {
+    // The chunks are read BEFORE the session is interrupted, because the last
+    // one sealed is the evidence of when capture really ended.
+    await reloadChunks();
+    // A PAUSED meeting is not interrupted by a reload: no microphone was open
+    // when the process died, so nothing was lost and nothing went wrong. It
+    // comes back paused, exactly as it was left.
+    if (
+      session.state === LISTEN_IN_STATE.RECORDING ||
+      session.state === LISTEN_IN_STATE.STOPPING
+    ) {
       // Its unsealed final chunk died with the process; everything sealed is
       // here. Nothing is fabricated to stand in for what was lost.
-      await saveSession(interrupt(found, { now: now() }));
+      //
+      // AND THE DEAD TIME IS NOT BANKED AS CAPTURE. The process stopped
+      // recording when it died, not when somebody reopened the app, so the
+      // leg is closed at the last moment capture is KNOWN to have been live.
+      // Without this a crash at 22:00 recovered at 09:00 would charge the
+      // session eleven hours it never recorded and refuse to resume it.
+      await saveSession(
+        interrupt(session, { now: now(), capturedThrough: lastKnownCaptureAt(session, chunks) })
+      );
       error = new Error(LISTEN_IN_MESSAGE.INTERRUPTED);
     }
-    await reloadChunks();
     // A chunk recorded as TRANSCRIBING was mid-request when the process died.
     // No request is in flight any more — nothing can arrive for it — so it is
     // returned to SEALED and will be sent again. Its audio was never released
@@ -891,6 +1076,20 @@ export function createListenInEngine({
     wakeDrain();
     wakeSummary();
     return snapshot();
+  }
+
+  /**
+   * The last moment this session is KNOWN to have been capturing: the end of
+   * the newest sealed chunk, or the last time its header was written (which
+   * happens on every seal). Used only when closing a leg the engine did not
+   * watch end — never to extend one, because `closeLeg` clamps it to `now`.
+   */
+  function lastKnownCaptureAt(header, rows) {
+    let at = Number.isFinite(header.updatedAt) ? header.updatedAt : header.startedAt;
+    for (const row of rows || []) {
+      if (Number.isFinite(row.endedAt) && row.endedAt > at) at = row.endedAt;
+    }
+    return at;
   }
 
   /** Open the microphone for the CURRENT session (start or resume). */
@@ -925,9 +1124,20 @@ export function createListenInEngine({
     rollTimer = setInterval_(rollChunk, chunkMs);
   }
 
+  /**
+   * START A NEW MEETING. Refused while ANY meeting is still active —
+   * recording, paused, interrupted or completing — because the active meeting
+   * must be attached to, resumed or completed, never silently replaced.
+   * A completed meeting is not active: it stays on show until this call
+   * replaces it with the new one (its record is untouched in the store).
+   */
   async function start({ language = "auto", source = null, title = null } = {}) {
     if (stopped) return snapshot();
-    if (session && isCapturing(session)) return snapshot();
+    if (isSessionOpen(session)) {
+      error = new Error(LISTEN_IN_MESSAGE.MEETING_ACTIVE);
+      emit();
+      return snapshot();
+    }
     error = null;
     const at = now();
     const fresh = beginLeg(
@@ -953,8 +1163,10 @@ export function createListenInEngine({
     chunks = [];
     summary = null;
     session = fresh;
+    limitStopping = false;
     ensureSummary();
     await saveSession(fresh);
+    armLimitTimer();
     return snapshot();
   }
 
@@ -966,6 +1178,7 @@ export function createListenInEngine({
   async function endCapture({ reason = LISTEN_IN_STOP_REASON.USER, interrupted = false } = {}) {
     if (stopped) return snapshot();
     if (!session || !isCapturing(session)) return snapshot();
+    disarmLimitTimer();
     if (!interrupted) await saveSession(requestStop(session, { reason, now: now() }));
     // Seal on a deliberate stop; drop the unsealed audio on an interruption,
     // where the recorder is already unreliable.
@@ -983,11 +1196,46 @@ export function createListenInEngine({
 
   const stop = (options = {}) => endCapture({ reason: options.reason || LISTEN_IN_STOP_REASON.USER });
 
-  /** interrupted → recording, SAME session, sequence continues. */
+  /**
+   * PAUSE RECORDING. recording → paused.
+   *
+   * Ends the microphone LEG, not the meeting: the chunk in progress is sealed
+   * (it is real speech), the recorder, the tracks and the microphone claim are
+   * released, and the leg's time is banked against the meeting's budget. The
+   * session keeps its id, its chunks, its summary and its next sequence, and
+   * stays the active meeting. Nothing here is the completion path: the drain
+   * and the interim summary carry on exactly as they would mid-recording, and
+   * no consolidation is asked for.
+   */
+  async function pause() {
+    if (stopped) return snapshot();
+    if (!session || session.state !== LISTEN_IN_STATE.RECORDING) return snapshot();
+    disarmLimitTimer();
+    // Seal first: the recorder's own `onstop` writes the final chunk of this
+    // leg, and its `takeSeq` has advanced `session` by the time this returns.
+    releaseCapture({ seal: true });
+    await saveSession(pauseRecording(session, { now: now() }));
+    await reloadChunks();
+    emit();
+    wakeDrain();
+    return snapshot();
+  }
+
+  /** paused | interrupted → recording, SAME session, sequence continues. */
   async function resume() {
     if (stopped) return snapshot();
 
-    if (!session || session.state !== LISTEN_IN_STATE.INTERRUPTED) return snapshot();
+    if (!canResume(session)) return snapshot();
+    // A SESSION THAT HAS SPENT ITS FOUR HOURS IS NOT RESUMED. Reopening the
+    // microphone here would record something the policy stopped again within
+    // the same instant, so the refusal is BEFORE `openCapture` — the
+    // microphone is never claimed, never opened and never released — and the
+    // user is told what is left to do (Finish keeps everything captured).
+    if (listenInDurationStatus(session, { now: now(), policy: durationPolicy }).exhausted) {
+      error = new Error(LISTEN_IN_MESSAGE.LIMIT_EXHAUSTED);
+      emit();
+      return snapshot();
+    }
     error = null;
     try {
       await openCapture();
@@ -996,19 +1244,29 @@ export function createListenInEngine({
       emit();
       return snapshot();
     }
+    limitStopping = false;
     await saveSession(resumeRecording(session, { now: now() }));
+    armLimitTimer();
     return snapshot();
   }
 
-  /** interrupted → finishing: done recording, but the drain still runs. */
-  async function finish() {
+  /**
+   * COMPLETE THE MEETING. The meeting is over: capture ends for good (sealing
+   * the chunk in progress if one is live, NEVER reopening the microphone if
+   * none is), outstanding transcription drains, the summary is consolidated,
+   * and the session becomes `finished` — a completed record that is kept for
+   * review, export and whatever comes later, but is no longer the ACTIVE
+   * meeting: the next `start` begins a new one. Nothing is deleted; only
+   * `discard` deletes.
+   */
+  async function complete() {
     if (stopped) return snapshot();
 
     if (!session) return snapshot();
     if (isCapturing(session)) return endCapture({ reason: LISTEN_IN_STOP_REASON.USER });
-    if (session.state !== LISTEN_IN_STATE.INTERRUPTED) return snapshot();
+    if (!canResume(session)) return snapshot();
     error = null;
-    await saveSession(finishInterrupted(session, { now: now() }));
+    await saveSession(completeWithoutCapture(session, { now: now() }));
     wakeDrain();
     return snapshot();
   }
@@ -1022,6 +1280,8 @@ export function createListenInEngine({
     if (isCapturing(session)) releaseCapture({ seal: false });
     disarmRetry();
     disarmSummaryTimer();
+    disarmLimitTimer();
+    limitStopping = false;
     session = null;
     chunks = [];
     summary = null;
@@ -1127,8 +1387,11 @@ export function createListenInEngine({
     disarmRoll();
     disarmRetry();
     disarmSummaryTimer();
+    disarmLimitTimer();
     if (removeOnline) removeOnline();
     removeOnline = null;
+    if (removeWake) removeWake();
+    removeWake = null;
     if (isCapturing(session)) {
       // Seal first: `releaseCapture` runs the recorder's own `onstop`, which
       // writes the final chunk under this session's owner.
@@ -1150,9 +1413,13 @@ export function createListenInEngine({
     survivesReload: !!data.survivesReload,
     bootstrap,
     start,
+    /** End capture for good (the completion path while recording). */
     stop,
+    pause,
     resume,
-    finish,
+    complete,
+    /** The pre-8D.3.1 name for `complete`, kept for its callers. */
+    finish: complete,
     discard,
     retryFailed,
     retrySummary,

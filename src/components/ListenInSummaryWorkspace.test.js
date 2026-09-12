@@ -127,6 +127,29 @@ function sessionValue(over = {}) {
     supported: true,
     recording: false,
     interrupted: false,
+    // Phase 8D.3: the window reads the session's four-hour capture budget from
+    // the engine. The default stub is a session well inside it — Resume is
+    // offered for an interrupted one, and the duration banners are absent.
+    duration: {
+      capturedMs: 65000,
+      warnAfterMs: 2 * 60 * 60 * 1000,
+      maxMs: 4 * 60 * 60 * 1000,
+      shouldWarn: false,
+      warned: false,
+      exhausted: false,
+      remainingMs: 4 * 60 * 60 * 1000 - 65000,
+      untilWarningMs: 2 * 60 * 60 * 1000 - 65000,
+    },
+    limitWarned: false,
+    stoppedAtLimit: false,
+    canResume: false,
+    // 8D.3.1: the meeting's own lifecycle facts. The default stub is a
+    // completed meeting — not active, so the window offers Start.
+    active: false,
+    paused: false,
+    completing: false,
+    pause: jest.fn(),
+    complete: jest.fn(),
     finishing: false,
     finished: true,
     finishedWithIssues: false,
@@ -534,15 +557,27 @@ describe("7. the summary may be edited, and regeneration is explicit", () => {
 /* ============================== 8. the header =========================== */
 
 describe("8. the session header carries the state, the clock and the controls", () => {
-  test("recording shows Stop, the elapsed time and the state in words", () => {
-    mount(
+  test("recording shows Stop recording, Complete meeting, the elapsed time and the state in words", () => {
+    const value = mount(
       sessionValue({
         session: { ...CAPTURE, state: LISTEN_IN_STATE.RECORDING, legStartedAt: null, capturedMs: 65000 },
         recording: true,
+        active: true,
         finished: false,
       })
     );
-    expect(byText(/^Stop$/)).toBeDefined();
+    expect(byText(/^Stop recording$/)).toBeDefined();
+    expect(byText(/^Complete meeting$/)).toBeDefined();
+    // Stopping RECORDING is not completing the MEETING: the bare "Stop" of
+    // the old window is gone, and this control dispatches `pause`.
+    expect(byText(/^Stop$/)).toBeUndefined();
+    expect(byText(/^Pause recording$/)).toBeUndefined();
+    click(byText(/^Stop recording$/));
+    expect(value.pause).toHaveBeenCalled();
+    expect(value.stop).not.toHaveBeenCalled();
+    expect(value.complete).not.toHaveBeenCalled();
+    click(byText(/^Complete meeting$/));
+    expect(value.complete).toHaveBeenCalled();
     expect(text()).toContain("1:05");
     expect(text()).toMatch(/Recording…/);
     expect(document.querySelector("[data-listen-in-state]").getAttribute("data-listen-in-state")).toBe(
@@ -550,19 +585,74 @@ describe("8. the session header carries the state, the clock and the controls", 
     );
   });
 
-  test("an interrupted session offers Resume and Finish, and says why", () => {
+  test("an interrupted session offers Resume meeting and Complete meeting, and says why", () => {
     const value = mount(
       sessionValue({
         session: { ...CAPTURE, state: LISTEN_IN_STATE.INTERRUPTED },
         interrupted: true,
+        active: true,
+        canResume: true,
         finished: false,
       })
     );
-    click(byText(/^Resume$/));
+    click(byText(/^Resume meeting$/));
     expect(value.resume).toHaveBeenCalled();
-    click(byText(/^Finish$/));
-    expect(value.finish).toHaveBeenCalled();
+    click(byText(/^Complete meeting$/));
+    expect(value.complete).toHaveBeenCalled();
     expect(text()).toMatch(/stopped unexpectedly/);
+  });
+
+  test("a STOPPED meeting (internally `paused`) offers Start recording and Complete meeting, with no error banner", () => {
+    const value = mount(
+      sessionValue({
+        session: { ...CAPTURE, state: LISTEN_IN_STATE.PAUSED, legStartedAt: null, capturedMs: 65000 },
+        paused: true,
+        active: true,
+        canResume: true,
+        finished: false,
+      })
+    );
+    expect(text()).toMatch(/Stopped — start recording again, or complete the meeting\./);
+    // The user's own word is "Stopped"; "Paused" is internal and never shown.
+    expect(text()).not.toMatch(/Paused/);
+    // Stopping is not an interruption: nothing "stopped unexpectedly".
+    expect(text()).not.toMatch(/stopped unexpectedly/);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    // The next leg of the SAME meeting starts here — it is not a "resume".
+    expect(byText(/^Resume recording$/)).toBeUndefined();
+    click(byText(/^Start recording$/));
+    expect(value.resume).toHaveBeenCalled();
+    click(byText(/^Complete meeting$/));
+    expect(value.complete).toHaveBeenCalled();
+    // A stopped meeting holds no microphone, so Discard is allowed.
+    expect(byText(/^Discard$/).disabled).toBe(false);
+  });
+
+  test("a COMPLETING meeting offers only Close", () => {
+    mount(
+      sessionValue({
+        session: { ...CAPTURE, state: LISTEN_IN_STATE.FINISHING },
+        active: true,
+        completing: true,
+        finishing: true,
+        finished: false,
+      })
+    );
+    expect(byText(/^Close$/)).toBeDefined();
+    expect(byText(/^Stop recording$/)).toBeUndefined();
+    expect(byText(/^Resume/)).toBeUndefined();
+    expect(byText(/^Complete meeting$/)).toBeUndefined();
+    expect(byText(/^Start recording$/)).toBeUndefined();
+    expect(text()).toMatch(/Completing meeting/);
+  });
+
+  test("a COMPLETED meeting is reviewable and offers Start recording for a NEW meeting", () => {
+    mount(sessionValue({}));
+    expect(byText(/^Start recording$/)).toBeDefined();
+    expect(byText(/^Complete meeting$/)).toBeUndefined();
+    expect(byText(/^Export$/)).toBeDefined();
+    expect(byText(/^Copy$/)).toBeDefined();
+    expect(text()).toMatch(/Completed/);
   });
 
   test("Close says plainly that the recording continues", () => {

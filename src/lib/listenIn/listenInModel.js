@@ -12,8 +12,23 @@
 // and the window does not. A session is a record with a state, a sequence of
 // chunks and a clock; closing a view, navigating, collapsing the sidebar or
 // unmounting a provider are not events in this model at all, because they
-// cannot be. Only `start`, `stop`, `resume`, `finish`, `interrupt`, `discard`
-// and the outcome of transcribing a chunk move a session.
+// cannot be. Only `start`, `pause`, `resume`, `complete`, `interrupt`,
+// `discard` and the outcome of transcribing a chunk move a session.
+//
+// A MEETING IS NOT A MICROPHONE LEG (Phase 8D.3.1). One session is one
+// MEETING, and it may contain any number of RECORDING LEGS: the microphone is
+// opened by `start` or `resume`, closed by `pause`, by `complete`, by the
+// duration policy or by an interruption, and the meeting is the same meeting
+// throughout — same id, same chunks, same transcript, same summary, same
+// sequence numbering, same capture budget. Three user actions exist and are
+// never conflated:
+//
+//   CLOSE            hides the window. Not a state here at all.
+//   STOP RECORDING   ends the current leg and keeps the meeting active (the
+//                    `paused` state; "Stopped" to the user). Starting again
+//                    opens the next leg of the SAME meeting.
+//   COMPLETE         ends the meeting: capture over, transcription and summary
+//                    finalised, the record kept, and no longer the active one.
 //
 // A SESSION BELONGS TO AN ACCOUNT. Every record carries the authenticated
 // Firebase `uid` as well as the workspace, and every key begins with it —
@@ -39,16 +54,33 @@
  *
  *   idle        no session (the engine's resting state; never stored)
  *   recording   the microphone is open and chunks are being sealed
+ *   paused      the user STOPPED RECORDING: the microphone is released, the
+ *               leg is banked, and the MEETING is still the active one.
+ *               Starting again opens the next leg of the same meeting. The
+ *               user-facing word for this state is "Stopped" — `paused` is
+ *               the domain name and is never shown (see `listenInStatusLabel`).
  *   stopping    the final chunk is being sealed; the microphone is going away
- *   finishing   capture is over; outstanding chunks are still transcribing
- *   finished    capture is over and no transcription work remains
+ *   finishing   the meeting is COMPLETING: capture is over for good and
+ *               outstanding transcription / the final summary are running
+ *   finished    the meeting is COMPLETED: nothing remains to do. The record
+ *               is kept for review and export but is no longer active, and
+ *               the next Start begins a new meeting.
  *   interrupted capture ended without the user asking — a reload, a crash, a
  *               lost microphone. Sealed work is intact and the user chooses
- *               Resume or Finish.
+ *               Resume or Complete.
+ *
+ * The stored names `stopping` / `finishing` / `finished` predate the
+ * meeting-vs-leg correction and are kept as stored-data keys; the user-facing
+ * words are "Completing meeting…" and "Completed" (`listenInStatusLabel`).
+ *
+ *   recording ⇄ paused
+ *   recording → interrupted              (unexpected loss)
+ *   recording | paused | interrupted → stopping/finishing → finished
  */
 export const LISTEN_IN_STATE = Object.freeze({
   IDLE: "idle",
   RECORDING: "recording",
+  PAUSED: "paused",
   STOPPING: "stopping",
   FINISHING: "finishing",
   FINISHED: "finished",
@@ -56,9 +88,10 @@ export const LISTEN_IN_STATE = Object.freeze({
 });
 
 /**
- * Why capture ended. `LIMIT` is RESERVED for the later duration-policy phase
- * (2 h warning / 4 h hard stop) and is deliberately never produced here —
- * Phase 8D.1 imposes no duration cap of any kind.
+ * Why capture ended. `LIMIT` is the DURATION POLICY stopping a session that
+ * has spent its four hours of capture (Phase 8D.3); it is produced by the
+ * engine down exactly the same path a deliberate Stop takes, so a session that
+ * reached the limit is finished, exported and read like any other.
  */
 export const LISTEN_IN_STOP_REASON = Object.freeze({
   USER: "user",
@@ -82,7 +115,12 @@ export function isCapturing(session) {
   );
 }
 
-/** States in which a session is not finished with and must not be discarded. */
+/**
+ * THE ACTIVE MEETING: a session that is not completed. Recording, paused,
+ * interrupted and completing sessions are all the one current meeting of
+ * their account and workspace — opening Listen In attaches to it, and a new
+ * meeting may not be started over it. Only completion (or discard) ends that.
+ */
 export function isSessionOpen(session) {
   return (
     !!session &&
@@ -93,7 +131,18 @@ export function isSessionOpen(session) {
 
 /** A session the user could return to and continue recording. */
 export function canResume(session) {
-  return !!session && session.state === LISTEN_IN_STATE.INTERRUPTED;
+  return (
+    !!session &&
+    (session.state === LISTEN_IN_STATE.INTERRUPTED || session.state === LISTEN_IN_STATE.PAUSED)
+  );
+}
+
+/** A session whose meeting is over — completing or completed. */
+export function isCompleting(session) {
+  return (
+    !!session &&
+    (session.state === LISTEN_IN_STATE.STOPPING || session.state === LISTEN_IN_STATE.FINISHING)
+  );
 }
 
 /**
@@ -133,6 +182,11 @@ export function createSession({
     legStartedAt: null,
     state: LISTEN_IN_STATE.RECORDING,
     stopReason: null,
+    // When the two-hour warning was shown, or null while it has not been.
+    // ON THE SESSION rather than in a view so it is stated once: closing and
+    // reopening the Listen In window, or reloading the app entirely, finds the
+    // same session already warned and does not warn again.
+    limitWarnedAt: null,
     language,
     source: source || null,
     captureSource: LISTEN_IN_CAPTURE_SOURCE.MEDIA_RECORDER,
@@ -162,10 +216,24 @@ function withSession(session, patch, now) {
   });
 }
 
-/** Close the live recording leg, adding its wall-clock time to the total. */
-function closeLeg(session, now) {
+/**
+ * Close the live recording leg, banking the time it actually captured.
+ *
+ * `capturedThrough` is WHEN CAPTURE REALLY ENDED, for the one case where that
+ * is not `now`: a session recovered after a crash stopped recording whenever
+ * the process died, not at the moment somebody reopened the app. Banking the
+ * gap between the two would charge a session for hours in which no microphone
+ * was open — and would let an overnight crash exhaust a four-hour budget that
+ * was never spent. It is clamped to `now` so a stale or corrupt value can only
+ * ever shorten the leg, never invent capture time.
+ */
+function closeLeg(session, now, capturedThrough) {
   const legStartedAt = Number.isFinite(session.legStartedAt) ? session.legStartedAt : null;
-  const elapsed = legStartedAt !== null && Number.isFinite(now) ? Math.max(0, now - legStartedAt) : 0;
+  if (legStartedAt === null) return { capturedMs: session.capturedMs || 0, legStartedAt: null };
+  const end = Number.isFinite(capturedThrough)
+    ? Math.min(capturedThrough, Number.isFinite(now) ? now : capturedThrough)
+    : now;
+  const elapsed = Number.isFinite(end) ? Math.max(0, end - legStartedAt) : 0;
   return { capturedMs: (session.capturedMs || 0) + elapsed, legStartedAt: null };
 }
 
@@ -201,15 +269,21 @@ export function captureEnded(session, { now } = {}) {
  * the microphone went away. Sealed work is untouched; the session waits for
  * Resume or Finish. A session already finishing is left alone: its capture
  * was already over, so an interruption costs it nothing.
+ *
+ * `capturedThrough` names the last moment capture is KNOWN to have been live
+ * — the last sealed chunk, or the last time the header was written. A caller
+ * that is present when capture ends (a sign-out, a recorder error) omits it,
+ * because `now` is that moment; a caller recovering a session it did not watch
+ * die supplies it, so the dead time is not banked as capture (see `closeLeg`).
  */
-export function interrupt(session, { now } = {}) {
+export function interrupt(session, { now, capturedThrough = null } = {}) {
   if (session.state !== LISTEN_IN_STATE.RECORDING && session.state !== LISTEN_IN_STATE.STOPPING) {
     return session;
   }
   return withSession(
     session,
     {
-      ...closeLeg(session, now),
+      ...closeLeg(session, now, capturedThrough),
       state: LISTEN_IN_STATE.INTERRUPTED,
       stopReason: LISTEN_IN_STOP_REASON.INTERRUPTION,
     },
@@ -217,9 +291,26 @@ export function interrupt(session, { now } = {}) {
   );
 }
 
-/** interrupted → recording, continuing the SAME session and sequence. */
+/**
+ * PAUSE RECORDING. recording → paused: the leg is banked and the microphone
+ * is released, and NOTHING ELSE changes — same meeting, same id, same chunks,
+ * same summary, same next sequence, same capture budget. It is not a stop
+ * (`stopReason` stays null, `stoppedAt` stays null) and it is not an
+ * interruption (nothing went wrong), so neither the completion path nor the
+ * recovery banner has any business with it.
+ */
+export function pauseRecording(session, { now } = {}) {
+  if (session.state !== LISTEN_IN_STATE.RECORDING) return session;
+  return withSession(
+    session,
+    { ...closeLeg(session, now), state: LISTEN_IN_STATE.PAUSED, stopReason: null },
+    now
+  );
+}
+
+/** paused | interrupted → recording, continuing the SAME session and sequence. */
 export function resumeRecording(session, { now } = {}) {
-  if (session.state !== LISTEN_IN_STATE.INTERRUPTED) return session;
+  if (!canResume(session)) return session;
   return withSession(
     session,
     {
@@ -232,18 +323,27 @@ export function resumeRecording(session, { now } = {}) {
   );
 }
 
-/** interrupted → finishing: the user is done, without recording any more. */
-export function finishInterrupted(session, { now } = {}) {
-  if (session.state !== LISTEN_IN_STATE.INTERRUPTED) return session;
+/**
+ * COMPLETE a meeting that is not capturing: paused | interrupted → finishing.
+ * The microphone is NOT reopened — there is no leg to close — and the meeting
+ * goes straight to completing. (A recording meeting completes through
+ * `requestStop` → `captureEnded` instead, because its leg must be sealed.)
+ */
+export function completeWithoutCapture(session, { now } = {}) {
+  if (!canResume(session)) return session;
   return withSession(
     session,
     {
       state: LISTEN_IN_STATE.FINISHING,
+      stopReason: session.stopReason || LISTEN_IN_STOP_REASON.USER,
       stoppedAt: Number.isFinite(now) ? now : session.stoppedAt,
     },
     now
   );
 }
+
+/** The pre-8D.3.1 name for `completeWithoutCapture`, kept for its callers. */
+export const finishInterrupted = completeWithoutCapture;
 
 /** finishing → finished: no transcription work remains. */
 export function markFinished(session, { now } = {}) {
@@ -255,6 +355,39 @@ export function markFinished(session, { now } = {}) {
 export function takeSeq(session, { now } = {}) {
   const seq = session.nextSeq || 0;
   return { seq, session: withSession(session, { nextSeq: seq + 1 }, now) };
+}
+
+/**
+ * The two-hour warning has been shown. Recorded ONCE and never cleared for the
+ * life of the session: a session that is resumed after an interruption has
+ * still been recording for two hours, and telling the user again on every
+ * resume would be noise rather than information.
+ */
+export function markLimitWarned(session, { now } = {}) {
+  if (!session || Number.isFinite(session.limitWarnedAt)) return session;
+  return withSession(session, { limitWarnedAt: Number.isFinite(now) ? now : null }, now);
+}
+
+/**
+ * Fill in the duration fields a session written by an earlier build may not
+ * carry, so a record recovered from this device is read exactly like a fresh
+ * one. Additive and lossless — it never changes a value that is already there,
+ * and a session that needs nothing is returned unchanged so a reference
+ * comparison still says "no change".
+ */
+export function normaliseSession(session) {
+  if (!session) return session;
+  const capturedMs = Number.isFinite(session.capturedMs) ? session.capturedMs : 0;
+  const legStartedAt = Number.isFinite(session.legStartedAt) ? session.legStartedAt : null;
+  const limitWarnedAt = Number.isFinite(session.limitWarnedAt) ? session.limitWarnedAt : null;
+  if (
+    session.capturedMs === capturedMs &&
+    session.legStartedAt === legStartedAt &&
+    session.limitWarnedAt === limitWarnedAt
+  ) {
+    return session;
+  }
+  return Object.freeze({ ...session, capturedMs, legStartedAt, limitWarnedAt });
 }
 
 /** Start the clock on a new recording leg (used by start and by resume). */
@@ -508,11 +641,29 @@ export const LISTEN_IN_MESSAGE = Object.freeze({
   NO_USER: "Listen In needs a signed-in account before it can record.",
   NO_WORKSPACE: "Listen In needs a signed-in workspace before it can record.",
   INTERRUPTED:
-    "This Listen In session stopped unexpectedly — the tab was closed or reloaded while it was recording. Everything already captured is safe. Resume to keep recording, or Finish to wrap it up.",
+    "This Listen In meeting stopped unexpectedly — the tab was closed or reloaded while it was recording. Everything already captured is safe. Resume to keep recording, or Complete meeting to finish it.",
   RECORDING_ACTIVE:
     "Listen In is still recording. Stop it before signing out so nothing is lost.",
   SOME_FAILED:
     "Some of this session could not be transcribed. Its audio is kept so you can try those parts again.",
+  // THE TWO-HOUR WARNING. Shown once, while recording continues — it exists so
+  // the four-hour stop is never a surprise, not to ask the user to do anything.
+  DURATION_WARNING:
+    "Listen In has been recording for 2 hours. Recording will continue, but this session will stop automatically at 4 hours.",
+  // THE FOUR-HOUR STOP, after the fact. It says what happened AND that nothing
+  // was lost, because "stopped automatically" alone reads like a failure.
+  LIMIT_REACHED:
+    "Listen In reached its 4-hour limit and stopped recording. Everything captured is safe and the meeting is being completed now.",
+  // A meeting whose capture budget is already spent — stopped OR interrupted.
+  // Neither Start recording nor Resume is offered, so the sentence has to say
+  // why and what is left to do. Deliberately neutral about which control is
+  // missing, because the same sentence covers both states.
+  LIMIT_EXHAUSTED:
+    "This meeting has reached the 4-hour recording limit, so it cannot record any more. Complete the meeting to keep everything it captured.",
+  // Start pressed while a meeting is still active. The meeting is attached
+  // to, never replaced: a new one begins only after Complete or Discard.
+  MEETING_ACTIVE:
+    "A Listen In meeting is already in progress. Resume it, or complete it before starting a new one.",
   // Shown whenever this device cannot store a capture durably (no IndexedDB:
   // a private window, blocked site data, an unusual browser). Listen In still
   // records — refusing to capture a meeting because recovery is unavailable
@@ -537,28 +688,52 @@ export function needsRecoveryWarning({ engine = null, survivesReload = false } =
   return !!engine && !survivesReload;
 }
 
-/** The one status sentence for a session, in words — never colour alone. */
-export function listenInStatusLabel(session, chunks) {
+/**
+ * The one status sentence for a session, in words — never colour alone.
+ *
+ * `summary` is optional and is read for ONE distinction the chunks cannot
+ * make: a finishing session with no transcription left is still working if its
+ * summary has not been consolidated, and "Finishing…" would suggest it is
+ * nearly done when the user is actually waiting on the summary. The summary
+ * record is passed in rather than imported so this module stays the pure,
+ * dependency-free model it is (`listenInSummaryModel.js` imports THIS file).
+ */
+export function listenInStatusLabel(session, chunks, { summary = null } = {}) {
   if (!session) return "";
   const pending = pendingChunks(chunks).length;
   const failed = failedChunks(chunks).length;
+  const finalisingSummary =
+    !!summary && !summary.final && Array.isArray(summary.parts) && summary.parts.length > 0;
   switch (session.state) {
     case LISTEN_IN_STATE.RECORDING:
       return pending > 0 ? "Recording… transcribing earlier speech" : "Recording…";
-    case LISTEN_IN_STATE.STOPPING:
-      return "Stopping…";
-    case LISTEN_IN_STATE.FINISHING:
+    case LISTEN_IN_STATE.PAUSED:
+      // "Stopped", not "Paused": the USER stopped recording, and the internal
+      // state name is not their vocabulary. It is never an error — the meeting
+      // is open and starting again continues it.
       return pending > 0
-        ? pending === 1
-          ? "Finishing — 1 part still transcribing…"
-          : `Finishing — ${pending} parts still transcribing…`
-        : "Finishing…";
+        ? "Stopped — transcribing earlier speech. Start recording again, or complete the meeting."
+        : "Stopped — start recording again, or complete the meeting.";
+    case LISTEN_IN_STATE.STOPPING:
+      return "Completing meeting…";
+    case LISTEN_IN_STATE.FINISHING:
+      if (pending > 0) {
+        return pending === 1
+          ? "Completing meeting — 1 part still transcribing…"
+          : `Completing meeting — ${pending} parts still transcribing…`;
+      }
+      return finalisingSummary ? "Completing meeting — finalising summary…" : "Completing meeting…";
     case LISTEN_IN_STATE.INTERRUPTED:
-      return "Interrupted — resume or finish.";
+      return "Interrupted — resume or complete the meeting.";
     case LISTEN_IN_STATE.FINISHED:
-      if (failed > 0) return `Finished, with ${failed} ${failed === 1 ? "part" : "parts"} not transcribed.`;
-      return hasTranscript(chunks) ? "Finished." : "Finished — no speech was detected.";
+      if (failed > 0) return `Completed, with ${failed} ${failed === 1 ? "part" : "parts"} not transcribed.`;
+      return hasTranscript(chunks) ? "Completed." : "Completed — no speech was detected.";
     default:
       return "";
   }
+}
+
+/** Whether capture ended because the four-hour duration policy stopped it. */
+export function stoppedAtDurationLimit(session) {
+  return !!session && session.stopReason === LISTEN_IN_STOP_REASON.LIMIT;
 }

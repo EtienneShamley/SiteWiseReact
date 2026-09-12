@@ -24,6 +24,7 @@ import {
   isSessionOpen,
   listenInStatusLabel,
   markFinished,
+  pauseRecording,
   pendingChunks,
   requestStop,
   resumeRecording,
@@ -241,23 +242,39 @@ describe("the one status sentence", () => {
     const rec = beginLeg(session(), { now: T0 });
     expect(listenInStatusLabel(rec, [])).toBe("Recording…");
     expect(listenInStatusLabel(rec, [chunk(0)])).toBe("Recording… transcribing earlier speech");
-    expect(listenInStatusLabel(requestStop(rec, { now: T0 }), [])).toBe("Stopping…");
+    // 8D.3.1: the user-facing words are "Completing meeting…" / "Completed"
+    // for the stored `stopping` / `finishing` / `finished` states.
+    expect(listenInStatusLabel(requestStop(rec, { now: T0 }), [])).toBe("Completing meeting…");
     const fin = captureEnded(rec, { now: T0 });
-    expect(listenInStatusLabel(fin, [chunk(0)])).toBe("Finishing — 1 part still transcribing…");
-    expect(listenInStatusLabel(fin, [chunk(0), chunk(1)])).toBe("Finishing — 2 parts still transcribing…");
-    expect(listenInStatusLabel(interrupt(rec, { now: T0 }), [])).toBe("Interrupted — resume or finish.");
+    expect(listenInStatusLabel(fin, [chunk(0)])).toBe("Completing meeting — 1 part still transcribing…");
+    expect(listenInStatusLabel(fin, [chunk(0), chunk(1)])).toBe("Completing meeting — 2 parts still transcribing…");
+    expect(listenInStatusLabel(interrupt(rec, { now: T0 }), [])).toBe("Interrupted — resume or complete the meeting.");
+    // 8D.3.1 wording: the user STOPPED RECORDING. "Stopped", never "Paused" —
+    // that is the internal state name — and never presented as a failure.
+    const stoppedLeg = pauseRecording(rec, { now: T0 + 5000 });
+    expect(stoppedLeg.state).toBe(LISTEN_IN_STATE.PAUSED);
+    expect(listenInStatusLabel(stoppedLeg, [])).toBe(
+      "Stopped — start recording again, or complete the meeting."
+    );
+    expect(listenInStatusLabel(stoppedLeg, [chunk(0)])).toBe(
+      "Stopped — transcribing earlier speech. Start recording again, or complete the meeting."
+    );
+    for (const state of Object.values(LISTEN_IN_STATE)) {
+      const label = listenInStatusLabel({ ...rec, state }, []);
+      expect(label).not.toMatch(/Paused|paused/);
+    }
   });
 
   test("a finished session is honest about silence and about failures", () => {
     const done = markFinished(captureEnded(beginLeg(session(), { now: T0 }), { now: T0 }), { now: T0 });
     expect(listenInStatusLabel(done, [chunk(0, { state: CHUNK_STATE.TRANSCRIBED, text: "hi" })])).toBe(
-      "Finished."
+      "Completed."
     );
     expect(listenInStatusLabel(done, [chunk(0, { state: CHUNK_STATE.EMPTY })])).toBe(
-      "Finished — no speech was detected."
+      "Completed — no speech was detected."
     );
     expect(listenInStatusLabel(done, [chunk(0, { state: CHUNK_STATE.FAILED })])).toBe(
-      "Finished, with 1 part not transcribed."
+      "Completed, with 1 part not transcribed."
     );
   });
 });

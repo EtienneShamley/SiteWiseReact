@@ -25,9 +25,15 @@ import { isAudioRecordingSupported } from "../lib/audioRecording";
 import {
   LISTEN_IN_STATE,
   isCapturing,
+  isCompleting,
+  stoppedAtDurationLimit,
   transcriptSegments,
   transcriptText,
 } from "../lib/listenIn/listenInModel";
+import {
+  LISTEN_IN_DURATION_POLICY,
+  canResumeWithinBudget,
+} from "../lib/listenIn/listenInPolicy";
 import {
   hasSummaryToShow,
   listenInFinishedWithIssues,
@@ -50,6 +56,17 @@ const EMPTY_COVERAGE = Object.freeze({
   complete: false,
 });
 
+const EMPTY_DURATION = Object.freeze({
+  capturedMs: 0,
+  warnAfterMs: LISTEN_IN_DURATION_POLICY.warnAfterMs,
+  maxMs: LISTEN_IN_DURATION_POLICY.maxMs,
+  shouldWarn: false,
+  warned: false,
+  exhausted: false,
+  remainingMs: LISTEN_IN_DURATION_POLICY.maxMs,
+  untilWarningMs: LISTEN_IN_DURATION_POLICY.warnAfterMs,
+});
+
 const EMPTY = Object.freeze({
   uid: null,
   workspaceId: null,
@@ -62,6 +79,8 @@ const EMPTY = Object.freeze({
   supported: false,
   summary: null,
   summaryCoverage: EMPTY_COVERAGE,
+  duration: EMPTY_DURATION,
+  active: false,
 });
 
 /**
@@ -117,7 +136,32 @@ export default function useLiveTranscript({ uid = null, workspaceId = null } = {
     survivesReload: state.survivesReload,
     supported: isLiveTranscriptSupported(),
     recording: isCapturing(session),
+    // THE MEETING'S LIFECYCLE, distinct from the microphone's (8D.3.1).
+    // `active` is "this is the current, uncompleted meeting"; `paused` is a
+    // deliberate pause (no microphone, meeting still active); `interrupted`
+    // is an unexpected loss; `completing` is the meeting being finalised.
+    active: !!state.active,
+    paused: !!session && session.state === LISTEN_IN_STATE.PAUSED,
     interrupted: !!session && session.state === LISTEN_IN_STATE.INTERRUPTED,
+    completing: isCompleting(session),
+    // THE FOUR-HOUR BUDGET, as the engine reports it. The window and the
+    // sidebar read these rather than counting anything themselves, so what
+    // they show is what the policy actually enforced.
+    duration: state.duration || EMPTY_DURATION,
+    /** The two-hour warning has been shown for this session. */
+    limitWarned: !!(session && Number.isFinite(session.limitWarnedAt)),
+    /** Capture ended because the duration policy stopped it, not the user. */
+    stoppedAtLimit: stoppedAtDurationLimit(session),
+    /**
+     * Whether Resume may be offered at all. An interrupted session that has
+     * used its whole budget can only be finished, and the window must not show
+     * a control that would be refused.
+     */
+    canResume:
+      !!session &&
+      (session.state === LISTEN_IN_STATE.INTERRUPTED ||
+        session.state === LISTEN_IN_STATE.PAUSED) &&
+      canResumeWithinBudget(session, { now: Date.now() }),
     finishing: !!session && session.state === LISTEN_IN_STATE.FINISHING,
     finished: !!session && session.state === LISTEN_IN_STATE.FINISHED,
     finishedWithIssues: listenInFinishedWithIssues(session, state.chunks),
@@ -133,8 +177,13 @@ export default function useLiveTranscript({ uid = null, workspaceId = null } = {
     hasSummary: hasSummaryToShow(summary),
     start: useCallback((options) => (engine ? engine.start(options) : null), [engine]),
     stop: useCallback(() => (engine ? engine.stop() : null), [engine]),
+    /** Stop recording: end the microphone leg, keep the meeting active. */
+    pause: useCallback(() => (engine ? engine.pause() : null), [engine]),
     resume: useCallback(() => (engine ? engine.resume() : null), [engine]),
-    finish: useCallback(() => (engine ? engine.finish() : null), [engine]),
+    /** Complete the meeting: finalise it and clear it as the active meeting. */
+    complete: useCallback(() => (engine ? engine.complete() : null), [engine]),
+    /** The pre-8D.3.1 name for `complete`. */
+    finish: useCallback(() => (engine ? engine.complete() : null), [engine]),
     discard: useCallback(() => (engine ? engine.discard() : null), [engine]),
     retryFailed: useCallback(() => (engine ? engine.retryFailed() : null), [engine]),
     retrySummary: useCallback(() => (engine ? engine.retrySummary() : null), [engine]),

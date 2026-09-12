@@ -315,18 +315,127 @@ describe("5. navigating around the application does not stop the capture", () =>
   });
 });
 
-describe("6. explicit Stop is the normal way a capture ends", () => {
-  test("Stop, and only Stop, ends it — from the window or from anywhere else", async () => {
+describe("6. explicit Complete meeting is the normal way a meeting ends", () => {
+  test("Complete, and only Complete, ends it — from the window or from anywhere else", async () => {
     mount();
     await startCapture();
     await act(async () => {
-      await windowApi.stop();
+      await windowApi.complete();
     });
     await flush();
     expect(currentMicrophoneOwner()).toBeNull();
     expect(tracks[0].stop).toHaveBeenCalled();
     expect(sidebarApi.recording).toBe(false);
     expect(["finishing", "finished"]).toContain(sidebarApi.session.state);
+  });
+});
+
+/* ================= 8D.3.1: three actions, never conflated ================ */
+
+describe("Close, Stop recording and Complete meeting are three different things", () => {
+  test("1/2/4. CLOSE: the recorder keeps rolling and chunks keep transcribing with no window mounted", async () => {
+    mount();
+    await startCapture();
+    const id = windowApi.session.sessionId;
+    closeWindow();
+    await flush();
+    expect(at("window")).toBeNull();
+    // The REAL chunk roll fires (its interval is the engine's own) — here it
+    // is driven by stopping the live recorder the way the roll would.
+    const recorder = FakeMediaRecorder.instances[FakeMediaRecorder.instances.length - 1];
+    expect(recorder.state).toBe("recording");
+    await act(async () => {
+      recorder.stop();
+    });
+    await flush();
+    // A chunk was sealed AND transcribed while the window did not exist, and
+    // the microphone was never released.
+    expect(sidebarApi.session.sessionId).toBe(id);
+    expect(sidebarApi.chunks.length).toBeGreaterThanOrEqual(1);
+    expect(sidebarApi.chunks[0].text).toBe("captured words");
+    expect(sidebarApi.recording).toBe(true);
+    expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.LISTEN_IN);
+    expect(tracks[0].stop).not.toHaveBeenCalled();
+    // 5. and the summary followed, still with no window.
+    expect(summaryCalls.length).toBeGreaterThanOrEqual(1);
+    expect(sidebarApi.summaryText).toMatch(/summary of window/);
+    openWindow();
+    await flush();
+    expect(windowApi.session.sessionId).toBe(id);
+    expect(windowApi.transcript).toBe("captured words");
+  });
+
+  test("STOP RECORDING: the microphone goes, the meeting stays — same id, still active, not interrupted", async () => {
+    mount();
+    await startCapture();
+    const id = windowApi.session.sessionId;
+    await act(async () => {
+      await windowApi.pause();
+    });
+    await flush();
+    expect(currentMicrophoneOwner()).toBeNull();
+    expect(tracks[0].stop).toHaveBeenCalled();
+    expect(sidebarApi.recording).toBe(false);
+    expect(sidebarApi.paused).toBe(true);
+    expect(sidebarApi.interrupted).toBe(false);
+    expect(sidebarApi.active).toBe(true);
+    expect(sidebarApi.canResume).toBe(true);
+    expect(sidebarApi.session.sessionId).toBe(id);
+    expect(sidebarApi.session.state).toBe(LISTEN_IN_STATE.PAUSED);
+    expect(sidebarApi.error).toBeNull();
+    // Close while paused changes nothing either.
+    closeWindow();
+    await flush();
+    openWindow();
+    await flush();
+    expect(windowApi.session.sessionId).toBe(id);
+    expect(windowApi.paused).toBe(true);
+    // Starting again from the reopened window is the SAME meeting on a new
+    // microphone — a second leg, not a second meeting.
+    await act(async () => {
+      await windowApi.resume();
+    });
+    await flush();
+    expect(windowApi.session.sessionId).toBe(id);
+    expect(windowApi.recording).toBe(true);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
+  test("COMPLETE: the meeting is no longer active, and the next Start is a new meeting", async () => {
+    mount();
+    await startCapture();
+    const first = windowApi.session.sessionId;
+    await act(async () => {
+      await windowApi.complete();
+    });
+    await flush();
+    await flush();
+    expect(windowApi.session.state).toBe(LISTEN_IN_STATE.FINISHED);
+    expect(windowApi.active).toBe(false);
+    expect(windowApi.session.sessionId).toBe(first);
+    // Still on show for review with its transcript and summary.
+    expect(windowApi.transcript).toBe("captured words");
+    expect(windowApi.summary.final).toBe(true);
+    await startCapture();
+    expect(windowApi.session.sessionId).not.toBe(first);
+    expect(windowApi.active).toBe(true);
+    // Meeting A was kept, not deleted.
+    expect((await store.getSession(UID, WS, first)).state).toBe(LISTEN_IN_STATE.FINISHED);
+  });
+
+  test("Start while a meeting is stopped attaches to it and creates nothing", async () => {
+    mount();
+    await startCapture();
+    const id = windowApi.session.sessionId;
+    await act(async () => {
+      await windowApi.pause();
+    });
+    await flush();
+    await startCapture();
+    expect(windowApi.session.sessionId).toBe(id);
+    expect(windowApi.session.state).toBe(LISTEN_IN_STATE.PAUSED);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
+    expect((await store.listSessions(UID, WS)).length).toBe(1);
   });
 });
 

@@ -18,7 +18,26 @@
 // anywhere else; clicking the sidebar row brings them back to exactly the same
 // session in exactly the same state.
 //
-//   Listen In                         0:42  Recording…     Language ▾  [Stop] [Close]
+//   Listen In      0:42  Recording…   Language ▾  [Stop recording] [Complete meeting] [Close]
+//
+// THREE ACTIONS, NEVER CONFLATED (Phase 8D.3.1). CLOSE hides this window and
+// is not part of the meeting's lifecycle at all. STOP RECORDING ends the
+// microphone leg and keeps the meeting active — same id, transcript, summary,
+// sequence and capture budget — so Start recording opens the next leg of the
+// SAME meeting. COMPLETE MEETING ends the meeting: capture over, transcription
+// and summary finalised, the record kept for review and export, and no longer
+// the active meeting, so the next Start begins a new one. Discard remains the
+// only thing that deletes.
+//
+// The user-facing workflow therefore reads:
+//
+//   Start recording → Stop recording → Start recording → … → Complete meeting
+//
+// Every one of those legs belongs to the same meeting. The internal state is
+// still `paused` (`listenInModel.js`) — that is the domain name for "the user
+// deliberately stopped the microphone and the meeting is still open" — and it
+// is never shown to anybody. Only a genuine INTERRUPTION (a crash, a reload,
+// a lost device) is recovery, and only that offers "Resume meeting".
 //   ─────────────────────────────────────────────────────────────────────────
 //   [ Summary ] [ Transcript ]                                       [Export]
 //   ─────────────────────────────────────────────────────────────────────────
@@ -381,8 +400,20 @@ export default function LiveTranscriptDialog() {
   const capture = session?.session || null;
   const recording = !!session?.recording;
   const stopping = capture ? capture.state === LISTEN_IN_STATE.STOPPING : false;
+  // THE MEETING'S OWN STATE, read from the engine and never inferred from the
+  // microphone: a paused meeting holds no microphone and is still the active
+  // meeting; a completing one is being finalised and takes no action at all.
+  const active = !!session?.active;
+  const paused = !!session?.paused;
   const interrupted = !!session?.interrupted;
   const finishing = !!session?.finishing;
+  const completing = !!session?.completing;
+  // THE FOUR-HOUR BUDGET. All three come from the engine's snapshot: this
+  // window counts nothing itself, so closing it for an hour and reopening
+  // shows the state the policy actually enforced rather than a fresh guess.
+  const limitWarned = !!session?.limitWarned;
+  const stoppedAtLimit = !!session?.stoppedAtLimit;
+  const canResume = !!session?.canResume;
   const failed = session?.failed || 0;
   const transcript = session?.transcript || "";
   const ready = transcript.trim().length > 0;
@@ -418,12 +449,24 @@ export default function LiveTranscriptDialog() {
     return () => document.removeEventListener("keydown", onKey);
   }, [open, closeWorkspace]);
 
-  // The ONE deliberate end of a capture. Nothing else in this file stops one.
+  // THE RECORD CONTROL: stop a live leg, start the next leg of a meeting that
+  // is stopped or interrupted, or start a new meeting when none is active. It
+  // never completes one — that is a separate, named control — and stopping a
+  // leg never ends the meeting. Nothing else in this file touches the
+  // microphone.
   const handleToggleRecording = useCallback(() => {
-    if (!session) return;
-    if (recording) session.stop();
-    else if (!stopping) session.start({ language: session.language });
-  }, [session, recording, stopping]);
+    if (!session || completing) return;
+    if (recording) session.pause();
+    else if (paused || interrupted) session.resume();
+    else if (!active) session.start({ language: session.language });
+  }, [session, recording, paused, interrupted, active, completing]);
+
+  // COMPLETE MEETING: the one explicit end of a meeting. Safe from any state
+  // — it seals and releases a live microphone, and never reopens a closed one.
+  const handleComplete = useCallback(() => {
+    if (!session || completing) return;
+    session.complete();
+  }, [session, completing]);
 
   const blocks = useMemo(
     () => transcriptBlocks(capture, session?.chunks || []),
@@ -467,7 +510,8 @@ export default function LiveTranscriptDialog() {
   );
 
   // Destructive and explicit: throws the whole session away. Refused while
-  // capture is live — Stop first — so one mis-click cannot lose a meeting.
+  // capture is live — stop recording first — so one mis-click cannot lose a
+  // meeting.
   const handleDiscard = useCallback(() => {
     if (!session || recording || stopping) return;
     session.discard();
@@ -479,10 +523,30 @@ export default function LiveTranscriptDialog() {
 
   const recoveryUnavailable = needsRecoveryWarning(session);
   const canExport = ready || hasSummary;
-  const statusLabel = listenInStatusLabel(capture, session.chunks);
+  // The summary is passed so a session with nothing left to transcribe says
+  // "Finalising summary…" rather than "Finishing…" while it still has work.
+  const statusLabel = listenInStatusLabel(capture, session.chunks, { summary });
   const errorMessage = session.error ? liveTranscriptErrorMessage(session.error) : "";
-  const recordLabel = recording ? "Stop recording" : "Start recording";
+  // STOP RECORDING ends a leg; START RECORDING opens the next one, of the
+  // SAME meeting. Only a genuine interruption is "resumed" — that is recovery
+  // from something going wrong, and it is the one state whose wording says so.
+  const recordLabel = recording
+    ? "Stop recording"
+    : interrupted
+    ? "Resume meeting"
+    : "Start recording";
   const busy = stopping;
+  // The record control is shown whenever it has something to do: a live leg
+  // to stop, a meeting to carry on (while its budget allows), or no active
+  // meeting so a new one may start. A completing meeting offers nothing.
+  const showRecordControl =
+    !completing && (recording || ((paused || interrupted) && canResume) || !active);
+  // AN OPEN MEETING THAT MAY NOT RECORD AGAIN — stopped or interrupted, with
+  // its four hours spent. `showRecordControl` is false for it, and a window
+  // offering only [Complete meeting] [Close] with no reason is a dead end, so
+  // the limit is stated. The policy itself is untouched: this explains a
+  // refusal that has already happened, it does not cause or lift one.
+  const budgetExhausted = (paused || interrupted) && !canResume;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4">
@@ -529,26 +593,12 @@ export default function LiveTranscriptDialog() {
             />
           </label>
 
-          {/* Resume / Finish belong to an INTERRUPTED session and appear only
-              for one; Stop / Start is the single record control otherwise. */}
-          {interrupted ? (
-            <>
-              <button
-                type="button"
-                className={actionButtonClass({ primary: true, className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
-                onClick={() => session.resume()}
-              >
-                Resume
-              </button>
-              <button
-                type="button"
-                className={actionButtonClass({ className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
-                onClick={() => session.finish()}
-              >
-                Finish
-              </button>
-            </>
-          ) : (
+          {/* THE RECORD CONTROL — Stop recording while a leg is live, Start
+              recording for a stopped meeting or Resume meeting for an
+              interrupted one (only while its budget allows: a control the
+              engine would refuse must not be shown), and Start recording when
+              no meeting is active. Red while the microphone is live. */}
+          {showRecordControl && (
             <button
               type="button"
               className={iconButtonClass({
@@ -560,22 +610,50 @@ export default function LiveTranscriptDialog() {
               aria-pressed={recording}
               aria-label={recordLabel}
               title={session.supported ? recordLabel : LIVE_TRANSCRIPT_MESSAGE.UNSUPPORTED}
+              data-listen-in-control="record"
             >
               {recording ? <FaStop aria-hidden="true" /> : <FaMicrophone aria-hidden="true" />}
-              <span>{recording ? "Stop" : "Start recording"}</span>
+              <span>{recordLabel}</span>
             </button>
           )}
 
+          {/* COMPLETE MEETING — the one explicit end of the active meeting.
+              Present for a recording, paused or interrupted meeting; absent
+              once completing, because there is nothing left to ask for. */}
+          {active && !completing && (
+            <button
+              type="button"
+              className={actionButtonClass({ className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
+              onClick={handleComplete}
+              title="Finish this meeting: stop recording, finalise the transcript and summary, and keep it for review and export"
+              data-listen-in-control="complete"
+            >
+              Complete meeting
+            </button>
+          )}
+
+          {/* CLOSE — the window only. It is outside the meeting's lifecycle:
+              a live microphone stays live, a paused meeting stays paused, a
+              completing one keeps completing. */}
           <button
             type="button"
             className={actionButtonClass({ className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
             onClick={session.closeWorkspace}
-            aria-label={recording ? "Close Listen In (recording continues)" : "Close Listen In"}
+            aria-label={
+              recording
+                ? "Close Listen In (recording continues)"
+                : active
+                ? "Close Listen In (the meeting stays open)"
+                : "Close Listen In"
+            }
             title={
               recording
                 ? "Close — recording continues in the background. Reopen it from Listen In in the sidebar."
+                : active
+                ? "Close — the meeting stays open. Reopen it from Listen In in the sidebar."
                 : "Close"
             }
+            data-listen-in-control="close"
           >
             Close
           </button>
@@ -641,14 +719,51 @@ export default function LiveTranscriptDialog() {
           </div>
         )}
 
-        {/* RECOVERY. A session found interrupted at start-up keeps everything
-            it had sealed and waits here for an explicit choice; the controls
-            are in the header above. Nothing is decided for the user and no
-            missing audio is invented. */}
-        {interrupted && (
-          <div className="px-4 py-2 border-b border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 shrink-0">
+        {/* THE TWO-HOUR WARNING. Recording CONTINUES — nothing here stops,
+            pauses or discards anything — and it is shown once and stays for
+            the rest of the session, so closing this window and coming back
+            does not re-announce it and does not hide it either. */}
+        {limitWarned && !stoppedAtLimit && (
+          <div
+            className="px-4 py-2 border-b border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 shrink-0"
+            data-listen-in-duration="warning"
+          >
             <p role="status" className="text-xs text-amber-800 dark:text-amber-200">
-              {LISTEN_IN_MESSAGE.INTERRUPTED}
+              {LISTEN_IN_MESSAGE.DURATION_WARNING}
+            </p>
+          </div>
+        )}
+
+        {/* THE FOUR-HOUR STOP, after it happened. No action is required and
+            none is offered: the meeting is already completing on its own. */}
+        {stoppedAtLimit && (
+          <div
+            className="px-4 py-2 border-b border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 shrink-0"
+            data-listen-in-duration="limit"
+          >
+            <p role="status" className="text-xs text-amber-800 dark:text-amber-200">
+              {LISTEN_IN_MESSAGE.LIMIT_REACHED}
+            </p>
+          </div>
+        )}
+
+        {/* RECOVERY, and the SPENT BUDGET. A meeting found interrupted at
+            start-up keeps everything it had sealed and waits here for an
+            explicit choice; the controls are in the header above. Nothing is
+            decided for the user and no missing audio is invented.
+
+            A meeting that may not record again — stopped or interrupted, its
+            four hours spent — says THAT instead, because neither Start
+            recording nor Resume is one of its choices and the reason must not
+            be left to guesswork. One region, one sentence, whichever state
+            the meeting is in. */}
+        {(interrupted || budgetExhausted) && (
+          <div
+            className="px-4 py-2 border-b border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 shrink-0"
+            data-listen-in-duration={budgetExhausted ? "exhausted" : undefined}
+          >
+            <p role="status" className="text-xs text-amber-800 dark:text-amber-200">
+              {budgetExhausted ? LISTEN_IN_MESSAGE.LIMIT_EXHAUSTED : LISTEN_IN_MESSAGE.INTERRUPTED}
             </p>
           </div>
         )}
@@ -702,7 +817,7 @@ export default function LiveTranscriptDialog() {
             })}
             onClick={handleDiscard}
             disabled={recording || stopping || (!ready && !hasSummary && !finishing)}
-            title={recording ? "Stop recording before discarding" : "Discard this session and everything it captured"}
+            title={recording ? "Stop recording before discarding" : "Discard this meeting and everything it captured"}
           >
             Discard
           </button>

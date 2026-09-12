@@ -639,16 +639,28 @@ export default function Sidebar({
               aria-haspopup="dialog"
               aria-label={
                 liveTranscript.recording
-                  ? `Listen In — recording, ${listenInElapsedLabel}`
+                  ? liveTranscript.limitWarned
+                    ? `Listen In — recording, ${listenInElapsedLabel}, 2 hours recorded; stops automatically at 4 hours`
+                    : `Listen In — recording, ${listenInElapsedLabel}`
+                  : liveTranscript.finishing
+                  ? "Listen In — completing meeting"
+                  : liveTranscript.paused
+                  ? "Listen In — recording stopped, meeting still open"
                   : liveTranscript.interrupted
                   ? "Listen In — interrupted"
                   : "Listen In"
               }
               title={
                 liveTranscript.recording
-                  ? `Listen In — recording ${listenInElapsedLabel}. Click to reopen the session.`
+                  ? liveTranscript.limitWarned
+                    ? `Listen In — recording ${listenInElapsedLabel}. This session stops automatically at 4 hours. Click to reopen it.`
+                    : `Listen In — recording ${listenInElapsedLabel}. Click to reopen the session.`
+                  : liveTranscript.finishing
+                  ? "Listen In — recording has stopped and the meeting is being completed. Click to reopen it."
+                  : liveTranscript.paused
+                  ? "Listen In — recording is stopped and the meeting is still open. Click to start recording again or complete it."
                   : liveTranscript.interrupted
-                  ? "Listen In — this session was interrupted. Click to resume or finish it."
+                  ? "Listen In — this meeting was interrupted. Click to resume or complete it."
                   : collapsed
                   ? "Listen In"
                   : "Capture a meeting or conversation and transcribe it"
@@ -657,10 +669,15 @@ export default function Sidebar({
               data-listen-in-state={
                 liveTranscript.recording
                   ? "recording"
+                  : liveTranscript.finishing
+                  ? "finishing"
+                  : liveTranscript.paused
+                  ? "paused"
                   : liveTranscript.interrupted
                   ? "interrupted"
                   : "idle"
               }
+              data-listen-in-duration={liveTranscript.limitWarned ? "warning" : undefined}
             >
               <FaMicrophone className="shrink-0" aria-hidden="true" />
               {!collapsed && <span className="flex-1 truncate">Listen In</span>}
@@ -677,14 +694,45 @@ export default function Sidebar({
                     <>
                       <span className="h-2 w-2 rounded-full bg-red-600 dark:bg-red-400 nw-listen-in-dot" />
                       {listenInElapsedLabel}
+                      {/* The two-hour mark, stated without turning the row
+                          into an alert: capture is still live and still red,
+                          and this only says a limit is coming. The accessible
+                          name above carries the same fact in full. */}
+                      {liveTranscript.limitWarned && (
+                        <span className="text-amber-600 dark:text-amber-400">4h max</span>
+                      )}
                     </>
                   )}
                 </span>
               )}
-              {!liveTranscript.recording && liveTranscript.interrupted && !collapsed && (
+              {/* Capture has ended but the meeting has not: the red recording
+                  state is gone (the microphone really is released) and the row
+                  says an unfinished meeting still exists — being completed,
+                  deliberately stopped, or interrupted. The accessible name
+                  above carries the same word. The INTERNAL state is still
+                  `paused`; the user-facing word for it is "Stopped". */}
+              {!liveTranscript.recording && liveTranscript.finishing && !collapsed && (
                 <span className="ml-auto text-[11px] text-amber-600 dark:text-amber-400" aria-hidden="true">
-                  Paused
+                  Completing
                 </span>
+              )}
+              {!liveTranscript.recording && liveTranscript.paused && !collapsed && (
+                <span className="ml-auto text-[11px] text-amber-600 dark:text-amber-400" aria-hidden="true">
+                  Stopped
+                </span>
+              )}
+              {!liveTranscript.recording && !liveTranscript.finishing && liveTranscript.interrupted && !collapsed && (
+                <span className="ml-auto text-[11px] text-amber-600 dark:text-amber-400" aria-hidden="true">
+                  Interrupted
+                </span>
+              )}
+              {/* In the rail, an unfinished meeting that is not recording still
+                  needs a mark, or a stopped meeting would look like no meeting. */}
+              {!liveTranscript.recording && liveTranscript.active && collapsed && (
+                <span
+                  className="absolute top-1 right-1 h-2.5 w-2.5 rounded-full bg-amber-500 ring-2 ring-white dark:ring-gray-950"
+                  aria-hidden="true"
+                />
               )}
             </button>
           </nav>

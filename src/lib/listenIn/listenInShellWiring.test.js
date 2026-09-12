@@ -61,9 +61,15 @@ describe("A. the session lives outside React, and no view can end it", () => {
     expect(APP).not.toMatch(/\.stop\(\)|\.discard\(\)/);
   });
 
-  test("the window dispatches Stop from its own control and from nowhere else", () => {
-    expect((DIALOG.match(/session\.stop\(\)/g) || []).length).toBe(1);
+  test("the window dispatches Pause and Complete from their own controls and from nowhere else", () => {
+    // 8D.3.1: the window never ends a capture for good through the record
+    // control — it pauses. Completing is ONE named control. Nothing here
+    // calls the engine's low-level `stop`.
+    expect((DIALOG.match(/session\.stop\(\)/g) || []).length).toBe(0);
+    expect((DIALOG.match(/session\.pause\(\)/g) || []).length).toBe(1);
+    expect((DIALOG.match(/session\.complete\(\)/g) || []).length).toBe(1);
     expect(DIALOG).toMatch(/const handleToggleRecording = useCallback\(\(\) => \{/);
+    expect(DIALOG).toMatch(/const handleComplete = useCallback\(\(\) => \{/);
     // Its Close is the provider's close, which is a boolean.
     expect(DIALOG).toMatch(/onClick=\{session\.closeWorkspace\}/);
     // It holds no recorder, no microphone and no transport of its own.
@@ -215,7 +221,7 @@ describe("D. the account is part of every identity, structurally", () => {
     // …and the guard sits BEFORE the claim, not after it.
     expect(open.indexOf("if (stopped)")).toBeLessThan(open.indexOf("claimMicrophone"));
     // Every public mutator refuses on a stopped engine.
-    for (const fn of ["async function resume()", "async function finish()", "async function discard()", "async function retryFailed()"]) {
+    for (const fn of ["async function pause()", "async function resume()", "async function complete()", "async function discard()", "async function retryFailed()"]) {
       const body = ENGINE.slice(ENGINE.indexOf(fn), ENGINE.indexOf(fn) + 220);
       expect(body).toMatch(/if \(stopped\) return snapshot\(\);/);
     }
@@ -341,5 +347,155 @@ describe("F. the summary belongs to the engine, and the route has one client", (
     const run = ENGINE.slice(ENGINE.indexOf("async function runSummary()"), ENGINE.indexOf("async function bootstrap()"));
     // The summary loop never stops, interrupts, discards or releases anything.
     expect(run).not.toMatch(/releaseCapture|endCapture|interrupt\(|discard\(|stop\(/);
+  });
+});
+
+/* ========================================================================= */
+
+describe("G. the duration policy lives in ONE place, and the shell only reports it", () => {
+  const POLICY = withoutComments(read("lib/listenIn/listenInPolicy.js"));
+  const DICTATION = withoutComments(read("lib/quickAddDictation.js"));
+
+  test("33/34. both boundaries are written down once, in the policy module", () => {
+    expect(POLICY).toMatch(/export const LISTEN_IN_WARN_AFTER_MS = 2 \* 60 \* 60 \* 1000;/);
+    expect(POLICY).toMatch(/export const LISTEN_IN_MAX_CAPTURE_MS = 4 \* 60 \* 60 \* 1000;/);
+    // Nothing else invents a duration boundary of its own.
+    for (const source of [ENGINE, DIALOG, SIDEBAR, HOOK, PROVIDER]) {
+      expect(source).not.toMatch(/60 \* 60 \* 1000/);
+    }
+  });
+
+  test("the ENGINE enforces it — no view file stops a capture on a clock", () => {
+    // One enforcement function, and the stop it makes is the same `endCapture`
+    // a deliberate Stop uses.
+    expect((ENGINE.match(/async function enforceDurationPolicy\(\)/g) || []).length).toBe(1);
+    const enforce = ENGINE.slice(
+      ENGINE.indexOf("async function enforceDurationPolicy()"),
+      ENGINE.indexOf("function disarmRetry()")
+    );
+    expect(enforce).toMatch(/endCapture\(\{ reason: LISTEN_IN_STOP_REASON\.LIMIT \}\)/);
+    expect(enforce).toMatch(/if \(limitStopping\) return;/);
+    // The view layer holds no boundary, no timer and no stop of its own.
+    for (const source of [DIALOG, SIDEBAR, HOOK, PROVIDER]) {
+      expect(source).not.toMatch(/LISTEN_IN_MAX_CAPTURE_MS|enforceDurationPolicy|LIMIT_REACHED_STOP/);
+    }
+    expect(DIALOG).not.toMatch(/setInterval\([^)]*stop/);
+  });
+
+  test("the decision is recomputed from the clock — a timer is only a wake-up", () => {
+    // `listenInDurationStatus` reads the session's banked capture time, and
+    // every wake-up path calls the same enforcement rather than acting itself.
+    expect(POLICY).toMatch(/elapsedMs\(session, now\)/);
+    expect(ENGINE).toMatch(/addWakeListener/);
+    const bootstrap = ENGINE.slice(
+      ENGINE.indexOf("async function bootstrap()"),
+      ENGINE.indexOf("function lastKnownCaptureAt(")
+    );
+    expect(bootstrap).toMatch(/removeWake = addWakeListener/);
+    expect(bootstrap).toMatch(/void enforceDurationPolicy\(\)/);
+  });
+
+  test("30/31. the sidebar reports recording, finishing and the warning — never decides", () => {
+    // Capture ending removes the red state, because the state is `recording`.
+    expect(CAPTURE_GROUP).toMatch(/liveTranscript\.recording \? "nw-listen-in-live" : ""/);
+    // Completing is its own reported state, in words and in the attribute —
+    // and so are paused and interrupted, which are NOT the same thing.
+    expect(CAPTURE_GROUP).toMatch(/liveTranscript\.finishing/);
+    expect(CAPTURE_GROUP).toMatch(/>\s*Completing\s*</);
+    expect(CAPTURE_GROUP).toMatch(/"Listen In — completing meeting"/);
+    // The user-facing word for the intentional state is "Stopped"; the
+    // internal state name `paused` is never rendered.
+    expect(CAPTURE_GROUP).toMatch(/>\s*Stopped\s*</);
+    expect(CAPTURE_GROUP).not.toMatch(/>\s*Paused\s*</);
+    expect(CAPTURE_GROUP).toMatch(/>\s*Interrupted\s*</);
+    expect(CAPTURE_GROUP).toMatch(/liveTranscript\.paused\s*\n?\s*\? "paused"/);
+    // The warning is concise and additive, and is in the accessible name too.
+    expect(CAPTURE_GROUP).toMatch(/data-listen-in-duration=\{liveTranscript\.limitWarned \? "warning" : undefined\}/);
+    expect(CAPTURE_GROUP).toMatch(/stops automatically at 4 hours/);
+    // The sidebar still cannot end anything.
+    expect(SIDEBAR).not.toMatch(/liveTranscript\??\.(stop|finish|complete|pause|discard|resume)\(/);
+  });
+
+  test("35. Quick Add Dictation is untouched by any of it", () => {
+    expect(DICTATION).not.toMatch(/LISTEN_IN_MAX_CAPTURE_MS|LISTEN_IN_WARN_AFTER_MS|limitWarnedAt/);
+    expect(DICTATION).not.toMatch(/listenInPolicy|listenInDurationStatus/);
+  });
+});
+
+/* ========================================================================= */
+
+describe("H. the user-facing vocabulary for a recording leg (Phase 8D.3.1)", () => {
+  const MODEL = withoutComments(read("lib/listenIn/listenInModel.js"));
+  // Every file that can put a word in front of somebody.
+  const SURFACES = { DIALOG, SIDEBAR, HOOK, PROVIDER, MODEL };
+
+  test("7. NO surface says \"Pause recording\" — stopping a leg is \"Stop recording\"", () => {
+    for (const [name, source] of Object.entries(SURFACES)) {
+      expect([name, /Pause recording/.test(source)]).toEqual([name, false]);
+    }
+    expect(DIALOG).toMatch(/const recordLabel = recording\s*\n\s*\? "Stop recording"/);
+    // …and the icon matches the word.
+    expect(DIALOG).toMatch(/import \{ FaMicrophone, FaStop \} from "react-icons\/fa"/);
+    expect(DIALOG).toMatch(/recording \? <FaStop aria-hidden="true" \/>/);
+    expect(DIALOG).not.toMatch(/FaPause/);
+  });
+
+  test("8. the intentionally stopped state offers \"Start recording\", never \"Resume recording\"", () => {
+    for (const [name, source] of Object.entries(SURFACES)) {
+      expect([name, /Resume recording/.test(source)]).toEqual([name, false]);
+    }
+    // The label falls through to "Start recording" for a stopped meeting:
+    // only `interrupted` is singled out, and everything else starts.
+    const label = DIALOG.slice(
+      DIALOG.indexOf("const recordLabel = recording"),
+      DIALOG.indexOf("const busy = stopping;")
+    );
+    expect(label).toMatch(/: interrupted\s*\n\s*\? "Resume meeting"\s*\n\s*: "Start recording";/);
+    expect(label).not.toMatch(/paused/);
+  });
+
+  test("9. an unexpected INTERRUPTION is still recovery, and still says Resume", () => {
+    expect(DIALOG).toMatch(/"Resume meeting"/);
+    expect(MODEL).toMatch(/INTERRUPTED:\s*\n?\s*"This Listen In meeting stopped unexpectedly/);
+    // The RECOVERY sentence belongs to `interrupted` alone — a stopped meeting
+    // never shows it, so a deliberate stop is never dressed up as a crash —
+    // and neither is ever an alert region.
+    expect(DIALOG).toMatch(/budgetExhausted \? LISTEN_IN_MESSAGE\.LIMIT_EXHAUSTED : LISTEN_IN_MESSAGE\.INTERRUPTED/);
+    expect(DIALOG).not.toMatch(/\{paused && [\s\S]{0,80}role="alert"/);
+  });
+
+  test("a meeting that may not record again SAYS SO, whether it is stopped or interrupted", () => {
+    // The control is hidden and the reason is shown by the SAME condition, so
+    // neither state can lose one without losing the other.
+    expect(DIALOG).toMatch(
+      /const showRecordControl =\s*\n\s*!completing && \(recording \|\| \(\(paused \|\| interrupted\) && canResume\) \|\| !active\);/
+    );
+    expect(DIALOG).toMatch(/const budgetExhausted = \(paused \|\| interrupted\) && !canResume;/);
+    expect(DIALOG).toMatch(/\{\(interrupted \|\| budgetExhausted\) && \(/);
+    expect(DIALOG).toMatch(/data-listen-in-duration=\{budgetExhausted \? "exhausted" : undefined\}/);
+    // ONE canonical sentence, neutral about which control is missing so it is
+    // true in both states, and it names the one thing left to do.
+    expect(MODEL).toMatch(/LIMIT_EXHAUSTED:\s*\n?\s*"This meeting has reached the 4-hour recording limit/);
+    expect(MODEL).toMatch(/LIMIT_EXHAUSTED:[\s\S]{0,220}Complete the meeting to keep everything it captured\./);
+    expect(MODEL).not.toMatch(/LIMIT_EXHAUSTED:[\s\S]{0,220}cannot be resumed/);
+    // Explaining a refusal is not lifting one: the policy is still the
+    // engine's, and the window neither records nor decides anything here.
+    expect(DIALOG).not.toMatch(/LISTEN_IN_MAX_CAPTURE_MS|listenInDurationStatus|canResumeWithinBudget/);
+  });
+
+  test("the word shown for the intentional state is \"Stopped\"; `paused` stays internal", () => {
+    // The status sentence and the sidebar chip both say Stopped.
+    expect(MODEL).toMatch(/"Stopped — start recording again, or complete the meeting\."/);
+    expect(CAPTURE_GROUP).toMatch(/>\s*Stopped\s*</);
+    // The internal name is still `paused` — the state, the engine call and the
+    // published flag are unchanged, because only the wording moved.
+    expect(MODEL).toMatch(/PAUSED: "paused"/);
+    expect(ENGINE).toMatch(/async function pause\(\)/);
+    expect(HOOK).toMatch(/paused: !!session && session\.state === LISTEN_IN_STATE\.PAUSED/);
+    // …and no rendered string anywhere exposes it.
+    for (const source of [DIALOG, SIDEBAR]) {
+      expect(source).not.toMatch(/>\s*Paused\s*</);
+      expect(source).not.toMatch(/"[^"]*\bPaused\b[^"]*"/);
+    }
   });
 });
