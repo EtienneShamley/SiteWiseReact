@@ -217,9 +217,19 @@ describe("numeric settings", () => {
     const config = loadServerConfig({});
     expect(config.port).toBe(5050);
     expect(config.trustProxy).toBe(0);
-    expect(config.rateLimits).toEqual({ windowMs: 600000, refine: 30, transcribe: 60, ipMultiplier: 4 });
+    expect(config.rateLimits).toEqual({
+      windowMs: 600000,
+      refine: 30,
+      transcribe: 60,
+      listenInSummary: 20,
+      ipMultiplier: 4,
+    });
     expect(IP_LIMIT_MULTIPLIER).toBe(4);
-    expect(config.limits).toEqual({ refineJsonBytes: 262144, transcribeAudioBytes: 26214400 });
+    expect(config.limits).toEqual({
+      refineJsonBytes: 262144,
+      transcribeAudioBytes: 26214400,
+      listenInSummaryJsonBytes: 131072,
+    });
   });
 
   test("overrides are whole numbers within range; anything else fails start-up", () => {

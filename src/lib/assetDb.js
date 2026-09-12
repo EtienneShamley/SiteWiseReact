@@ -70,7 +70,7 @@
 // swallows an error or reports a write that did not land.
 
 export const ASSET_DB_NAME = "notewise-assets";
-export const ASSET_DB_VERSION = 5;
+export const ASSET_DB_VERSION = 6;
 
 export const ASSET_STORE = "assets";
 export const ASSET_UPLOAD_QUEUE_STORE = "assetUploadQueue";
@@ -81,6 +81,11 @@ export const ASSET_GC_RUN_STORE = "assetGcRuns";
 // everything that reads or writes them lives in src/lib/listenIn/.
 export const LISTEN_IN_SESSION_STORE = "listenInSessions";
 export const LISTEN_IN_CHUNK_STORE = "listenInChunks";
+// The session's structured summary (Phase 8D.2). Its own store rather than a
+// field on the header: a header is read by every listing and must stay small,
+// while a summary grows with the meeting and is read only when a session is
+// opened.
+export const LISTEN_IN_SUMMARY_STORE = "listenInSummaries";
 
 /** The compound key path every workspace-and-asset store uses. */
 export const WORKSPACE_ASSET_KEY_PATH = ["workspaceId", "assetId"];
@@ -101,6 +106,8 @@ export const LISTEN_IN_SESSION_KEY_PATH = ["uid", "workspaceId", "sessionId"];
  *  contiguous, correctly ordered key range (IndexedDB sorts arrays
  *  element-wise, and a number sorts before a string or an array). */
 export const LISTEN_IN_CHUNK_KEY_PATH = ["uid", "workspaceId", "sessionId", "seq"];
+/** One summary per session, under the same identity key as its session. */
+export const LISTEN_IN_SUMMARY_KEY_PATH = ["uid", "workspaceId", "sessionId"];
 
 let dbPromise = null;
 
@@ -145,9 +152,14 @@ export function openAssetDb() {
       // refused every write for the whole of v4 and they cannot contain a
       // record. Nothing else in this upgrade removes anything, and nothing
       // here touches an asset store.
+      //
+      // v6 ADDS `listenInSummaries` and changes nothing else. It arrives
+      // through the same loop because it carries the same identity key path,
+      // and "create what is missing" is correct for it from any version.
       for (const [name, keyPath] of [
         [LISTEN_IN_SESSION_STORE, LISTEN_IN_SESSION_KEY_PATH],
         [LISTEN_IN_CHUNK_STORE, LISTEN_IN_CHUNK_KEY_PATH],
+        [LISTEN_IN_SUMMARY_STORE, LISTEN_IN_SUMMARY_KEY_PATH],
       ]) {
         const existing = db.objectStoreNames.contains(name);
         if (existing) {

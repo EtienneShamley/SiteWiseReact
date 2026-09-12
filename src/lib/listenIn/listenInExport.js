@@ -16,6 +16,14 @@
 //   HTML  buildFreeformHtmlFile({ title, html })
 //   MD    buildFreeformMarkdownFile({ title, html })
 //
+// Since Phase 8D.2 the SUMMARY it carries is the session's structured one —
+// an overview plus key points, decisions, action items, risks and follow-ups —
+// derived ONCE by `listenInSummaryDocument` so that every format renders the
+// same document. An empty section is omitted rather than printed as "None",
+// an action item shows an owner or a due date only where the transcript
+// actually stated one, and a summary that does not cover the whole recording
+// says so in the file itself.
+//
 // So the whole job here is to turn a session into ONE piece of document HTML,
 // and everything the rest of the application already knows about page
 // geometry, Word fidelity, image resolution and Markdown conversion applies
@@ -27,6 +35,10 @@
 // Pure: no React, no DOM, no network, no storage, no Blob building. The
 // caller hands the strings to the producers.
 import { sortBySeq, CHUNK_STATE } from "./listenInModel";
+import {
+  LISTEN_IN_SUMMARY_SECTION,
+  LISTEN_IN_SUMMARY_SECTION_LABEL,
+} from "../listenInSummaryContract";
 
 // Local by design, as in src/lib/templateExportHtml.js: this module is the
 // only place a Listen In session becomes markup, and the project deliberately
@@ -172,7 +184,7 @@ export function listenInTranscriptParagraphs(chunks) {
     .filter(Boolean);
 }
 
-/** The summary as paragraphs. The generator returns plain text with blank-line breaks. */
+/** The summary's overview as paragraphs. Plain text with blank-line breaks. */
 export function listenInSummaryParagraphs(summary) {
   const text = summary && typeof summary.text === "string" ? summary.text : "";
   return text
@@ -180,6 +192,73 @@ export function listenInSummaryParagraphs(summary) {
     .split(/\n{2,}/)
     .map((p) => p.trim())
     .filter(Boolean);
+}
+
+/**
+ * One action item as ONE readable line.
+ *
+ * Owner and due date appear ONLY when the transcript actually stated them
+ * (src/lib/listenInSummaryContract.js normalises an absent one to null). An
+ * exported document must never show a task as owned by somebody, or due on a
+ * date, because a model filled a field in — so an item with neither is just
+ * the task, with nothing appended.
+ */
+export function listenInActionItemLine(item) {
+  if (!item || typeof item.task !== "string") return "";
+  const task = item.task.trim();
+  if (!task) return "";
+  const detail = [];
+  if (item.owner) detail.push(item.owner);
+  if (item.dueDate) detail.push(`due ${item.dueDate}`);
+  return detail.length ? `${task} (${detail.join(", ")})` : task;
+}
+
+/**
+ * A session's summary as an ORDERED DOCUMENT: the overview, then each
+ * structured section that actually has content, then — when the summary does
+ * not cover the whole recording — the one sentence that says so.
+ *
+ * One derivation for every format, so the PDF, the Word document, the
+ * Markdown, the HTML and the plain text cannot disagree about what the summary
+ * contains. An empty section is OMITTED rather than printed as "None": a
+ * heading with nothing under it reads as a finding, and there was none.
+ *
+ * The `summary` it takes is the presentation shape the window builds
+ * (`{ text, result, note }`); the older `{ text }` shape still works and
+ * simply produces the overview alone.
+ */
+export function listenInSummaryDocument(summary) {
+  const result = summary && summary.result ? summary.result : null;
+  const sections = [];
+  if (result) {
+    for (const key of [
+      LISTEN_IN_SUMMARY_SECTION.KEY_POINTS,
+      LISTEN_IN_SUMMARY_SECTION.DECISIONS,
+      LISTEN_IN_SUMMARY_SECTION.ACTION_ITEMS,
+      LISTEN_IN_SUMMARY_SECTION.RISKS,
+      LISTEN_IN_SUMMARY_SECTION.FOLLOW_UPS,
+    ]) {
+      const raw = Array.isArray(result[key]) ? result[key] : [];
+      const items =
+        key === LISTEN_IN_SUMMARY_SECTION.ACTION_ITEMS
+          ? raw.map(listenInActionItemLine).filter(Boolean)
+          : raw.map((v) => String(v || "").trim()).filter(Boolean);
+      if (items.length) sections.push({ key, heading: LISTEN_IN_SUMMARY_SECTION_LABEL[key], items });
+    }
+  }
+  return {
+    paragraphs: listenInSummaryParagraphs(summary),
+    sections,
+    // Stated plainly in the document itself, not only on screen: a file that
+    // looks like a complete record of a meeting must say when it is not.
+    note: summary && typeof summary.note === "string" ? summary.note.trim() : "",
+  };
+}
+
+/** Whether a summary holds anything a file could carry. */
+export function hasListenInSummaryDocument(summary) {
+  const doc = listenInSummaryDocument(summary);
+  return doc.paragraphs.length > 0 || doc.sections.length > 0;
 }
 
 function sectionsFor(content) {
@@ -213,14 +292,15 @@ export function buildListenInExportHtml({
 
   if (want.summary) {
     parts.push("<h2>Summary</h2>");
-    const paragraphs = listenInSummaryParagraphs(summary);
-    if (paragraphs.length === 0) {
+    const doc = listenInSummaryDocument(summary);
+    if (doc.note) parts.push(`<p><em>${escapeHtml(doc.note)}</em></p>`);
+    if (doc.paragraphs.length === 0 && doc.sections.length === 0) {
       parts.push("<p>No summary has been generated for this session.</p>");
     } else {
-      for (const p of paragraphs) {
-        // The generator emits "- " bullet lines; keep them as a real list so
-        // Word, PDF and Markdown each render a list rather than a paragraph
-        // that happens to start with a hyphen.
+      for (const p of doc.paragraphs) {
+        // The overview may still arrive with "- " bullet lines; keep them as a
+        // real list so Word, PDF and Markdown each render a list rather than a
+        // paragraph that happens to start with a hyphen.
         const lines = p.split("\n").map((l) => l.trim()).filter(Boolean);
         if (lines.length > 1 && lines.every((l) => /^[-*•]\s+/.test(l))) {
           parts.push(
@@ -229,6 +309,11 @@ export function buildListenInExportHtml({
         } else {
           parts.push(`<p>${lines.map(escapeHtml).join("<br />")}</p>`);
         }
+      }
+      // The structured sections, in the order the contract defines them.
+      for (const section of doc.sections) {
+        parts.push(`<h3>${escapeHtml(section.heading)}</h3>`);
+        parts.push(`<ul>${section.items.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>`);
       }
     }
   }
@@ -274,9 +359,17 @@ export function buildListenInPlainText({
 
   if (want.summary) {
     out.push("", "Summary", "-------");
-    const paragraphs = listenInSummaryParagraphs(summary);
-    if (paragraphs.length === 0) out.push("", "No summary has been generated for this session.");
-    else for (const p of paragraphs) out.push("", p);
+    const doc = listenInSummaryDocument(summary);
+    if (doc.note) out.push("", doc.note);
+    if (doc.paragraphs.length === 0 && doc.sections.length === 0) {
+      out.push("", "No summary has been generated for this session.");
+    } else {
+      for (const p of doc.paragraphs) out.push("", p);
+      for (const section of doc.sections) {
+        out.push("", section.heading, "-".repeat(section.heading.length));
+        for (const item of section.items) out.push(`- ${item}`);
+      }
+    }
   }
 
   if (want.transcript) {

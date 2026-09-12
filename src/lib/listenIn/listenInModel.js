@@ -383,8 +383,8 @@ export function sortBySeq(chunks) {
 }
 
 /**
- * The transcript as ordered SEGMENTS — the shape the 8D.2 workspace will
- * render. Chunks that produced no words are omitted; a failed chunk is kept
+ * The transcript as ordered SEGMENTS — the shape the 8D.2 workspace renders
+ * (through `transcriptBlocks` below). Chunks that produced no words are omitted; a failed chunk is kept
  * and marked, because a gap the user cannot see would be a lie about what was
  * captured.
  */
@@ -402,6 +402,84 @@ export function transcriptSegments(session, chunks) {
       speaker: c.speaker,
       recovered: !!c.recovered,
     }));
+}
+
+/**
+ * What one block of the rendered transcript IS. A transcript is not only
+ * words: a part that could not be transcribed and a part still being
+ * transcribed are both real facts about the recording, and a reader who cannot
+ * see them is being told the meeting is complete when it is not.
+ */
+export const TRANSCRIPT_BLOCK = Object.freeze({
+  /** Consecutive transcribed segments, grouped into one readable paragraph. */
+  TEXT: "text",
+  /** One or more segments that permanently failed — a hole, named in place. */
+  GAP: "gap",
+  /** Segments still sealed or in flight. Never guessed words. */
+  PENDING: "pending",
+});
+
+/**
+ * THE TRANSCRIPT AS IT IS READ (Phase 8D.2).
+ *
+ * The canonical ordered segments, grouped for reading: consecutive transcribed
+ * segments become one paragraph (a 30-second chunk is a sentence or two, and a
+ * paragraph per chunk reads as a list rather than as speech), while a failed
+ * or still-pending run breaks the grouping and becomes its own visible block.
+ * Each block carries the elapsed offset of where it begins, so a reader can
+ * place it in the meeting without a wall clock.
+ *
+ * DERIVED on every read, like every other transcript view here, so what is
+ * rendered cannot disagree with what was captured. `groupSize` is the number
+ * of segments allowed in one paragraph — four chunks is about two minutes.
+ */
+export function transcriptBlocks(session, chunks, { groupSize = 4 } = {}) {
+  const blocks = [];
+  let open = null;
+  const flush = () => {
+    if (open) blocks.push(open);
+    open = null;
+  };
+  for (const segment of transcriptSegments(session, chunks)) {
+    if (segment.state === CHUNK_STATE.TRANSCRIBED) {
+      const text = String(segment.text || "").trim();
+      if (!text) continue;
+      if (open && open.kind === TRANSCRIPT_BLOCK.TEXT && open.seqs.length < groupSize) {
+        open.text = `${open.text} ${text}`;
+        open.seqs.push(segment.seq);
+        open.endSeq = segment.seq;
+        continue;
+      }
+      flush();
+      open = {
+        kind: TRANSCRIPT_BLOCK.TEXT,
+        startSeq: segment.seq,
+        endSeq: segment.seq,
+        seqs: [segment.seq],
+        offsetMs: segment.offsetMs,
+        text,
+      };
+      continue;
+    }
+    const kind =
+      segment.state === CHUNK_STATE.FAILED ? TRANSCRIPT_BLOCK.GAP : TRANSCRIPT_BLOCK.PENDING;
+    if (open && open.kind === kind) {
+      open.seqs.push(segment.seq);
+      open.endSeq = segment.seq;
+      continue;
+    }
+    flush();
+    open = {
+      kind,
+      startSeq: segment.seq,
+      endSeq: segment.seq,
+      seqs: [segment.seq],
+      offsetMs: segment.offsetMs,
+      text: "",
+    };
+  }
+  flush();
+  return blocks;
 }
 
 /**

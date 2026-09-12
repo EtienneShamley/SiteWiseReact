@@ -17,6 +17,7 @@ import {
   ASSET_GC_RUN_STORE,
   LISTEN_IN_CHUNK_STORE,
   LISTEN_IN_SESSION_STORE,
+  LISTEN_IN_SUMMARY_STORE,
   ASSET_REMOTE_INDEX_STORE,
   ASSET_STORE,
   ASSET_UPLOAD_QUEUE_STORE,
@@ -82,13 +83,16 @@ const ALL_STORES = [
   // to them was refused by listenInPolicy.js for the whole of v4).
   LISTEN_IN_SESSION_STORE,
   LISTEN_IN_CHUNK_STORE,
+  // v6 (Phase 8D.2). The session's structured summary, under the same identity
+  // key path as its session, added purely additively.
+  LISTEN_IN_SUMMARY_STORE,
 ].sort();
 
 describe("the v1 → current upgrade is additive", () => {
   test("the database opens at the current version with every store beside `assets`", async () => {
     // The first read through the module performs the upgrade.
     await listAssetIds();
-    expect(ASSET_DB_VERSION).toBe(5);
+    expect(ASSET_DB_VERSION).toBe(6);
     expect(await assetDbStoreNames()).toEqual(ALL_STORES);
   });
 

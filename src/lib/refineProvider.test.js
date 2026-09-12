@@ -276,27 +276,40 @@ describe("15-16. only the Refine route's model changed", () => {
     expect(transcribe).not.toContain("refineContract");
   });
 
-  test("15. no other route or module names a chat model", () => {
+  test("15. the only other route that names a chat model names the SAME one", () => {
+    // Phase 8D.2 added a SECOND chat-completions route — the Listen In summary
+    // — because a multi-hour transcript does not fit the refine contract. It
+    // is allowed to exist; what must not happen is the two drifting onto
+    // different models by accident, so it is pinned to the same id here rather
+    // than merely permitted.
     const fs = require("fs");
     const path = require("path");
     const routesDir = path.join(__dirname, "..", "..", "routes");
+    const summaryRoute = require(path.join(routesDir, "listenInSummary.js"));
+    expect(summaryRoute.LISTEN_IN_SUMMARY_MODEL).toBe(refineRoute.REFINE_MODEL);
     for (const file of fs.readdirSync(routesDir)) {
-      if (file === "refine.js" || file === "transcribe.js") continue;
+      if (file === "refine.js" || file === "transcribe.js" || file === "listenInSummary.js") continue;
       const source = fs.readFileSync(path.join(routesDir, file), "utf8");
       expect(source).not.toContain("chat.completions");
     }
   });
 
-  test("16. Live transcript's Summarise deliberately reuses this same route and contract", () => {
-    // It sends the internal meeting-notes preset through the SAME endpoint, so
-    // it moves to the new model with everything else — by design, not by
-    // accident. (2026-08-18: the caller moved from the retired useListenIn
-    // hook to the Live Transcript workspace's explicit Summarise action.)
+  test("16. Listen In no longer summarises through /api/refine — it has its own route", () => {
+    // SUPERSEDED BY PHASE 8D.2. Listen In used to send the internal
+    // meeting-notes preset through this endpoint on an explicit Summarise
+    // press. It cannot any more: a two-hour meeting is ~110 000 characters and
+    // the refine contract caps its input at 20 000, so the summary moved to
+    // its own route with bounded windows and a structured contract. The window
+    // no longer imports Refine at all.
     const dialog = require("fs").readFileSync(`${__dirname}/../components/LiveTranscriptDialog.js`, "utf8");
-    expect(dialog).toContain("style: MEETING_NOTES_STYLE");
-    expect(dialog).toContain("refineText({");
+    expect(dialog).not.toContain("MEETING_NOTES_STYLE");
+    expect(dialog).not.toContain("refineText");
+    expect(dialog).not.toContain("useRefine");
+    // The meeting-notes preset itself is UNCHANGED and still allowlisted — it
+    // is left in place deliberately rather than removed as "unused" (see the
+    // finding reported with this phase).
     expect(REFINE_MODE_PROMPTS[REFINE_MODE.MEETING]).toContain("MODE: MEETING NOTES");
-    // …and it is the only caller that uses that preset.
+    // Refine's own client and endpoint are untouched.
     const client = require("fs").readFileSync(`${__dirname}/refineClient.js`, "utf8");
     expect(client).toContain("/api/refine");
   });

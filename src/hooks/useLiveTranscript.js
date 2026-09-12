@@ -25,13 +25,30 @@ import { isAudioRecordingSupported } from "../lib/audioRecording";
 import {
   LISTEN_IN_STATE,
   isCapturing,
+  transcriptSegments,
   transcriptText,
 } from "../lib/listenIn/listenInModel";
+import {
+  hasSummaryToShow,
+  listenInFinishedWithIssues,
+  summaryDisplayText,
+} from "../lib/listenIn/listenInSummaryModel";
 
 /** Whether this browser can record audio at all. */
 export function isLiveTranscriptSupported() {
   return isAudioRecordingSupported();
 }
+
+const EMPTY_COVERAGE = Object.freeze({
+  transcribedThroughSeq: -1,
+  summaryThroughSeq: -1,
+  pendingCount: 0,
+  failedCount: 0,
+  missingSeqs: [],
+  behind: false,
+  capturing: false,
+  complete: false,
+});
 
 const EMPTY = Object.freeze({
   uid: null,
@@ -43,6 +60,8 @@ const EMPTY = Object.freeze({
   failed: 0,
   survivesReload: false,
   supported: false,
+  summary: null,
+  summaryCoverage: EMPTY_COVERAGE,
 });
 
 /**
@@ -86,6 +105,7 @@ export default function useLiveTranscript({ uid = null, workspaceId = null } = {
   // session. Unmounting this hook must cost a recording nothing.
 
   const session = state.session;
+  const summary = state.summary || null;
   return {
     engine,
     state,
@@ -99,13 +119,33 @@ export default function useLiveTranscript({ uid = null, workspaceId = null } = {
     recording: isCapturing(session),
     interrupted: !!session && session.state === LISTEN_IN_STATE.INTERRUPTED,
     finishing: !!session && session.state === LISTEN_IN_STATE.FINISHING,
+    finished: !!session && session.state === LISTEN_IN_STATE.FINISHED,
+    finishedWithIssues: listenInFinishedWithIssues(session, state.chunks),
     transcript: transcriptText(state.chunks),
+    // The ordered transcript as SEGMENTS — what the Transcript view renders.
+    // Derived here from the same chunks, never stored, so what is read can
+    // never disagree with what was captured.
+    segments: transcriptSegments(session, state.chunks),
+    // The session's summary, exactly as the engine holds it.
+    summary,
+    summaryCoverage: state.summaryCoverage || EMPTY_COVERAGE,
+    summaryText: summaryDisplayText(summary),
+    hasSummary: hasSummaryToShow(summary),
     start: useCallback((options) => (engine ? engine.start(options) : null), [engine]),
     stop: useCallback(() => (engine ? engine.stop() : null), [engine]),
     resume: useCallback(() => (engine ? engine.resume() : null), [engine]),
     finish: useCallback(() => (engine ? engine.finish() : null), [engine]),
     discard: useCallback(() => (engine ? engine.discard() : null), [engine]),
     retryFailed: useCallback(() => (engine ? engine.retryFailed() : null), [engine]),
+    retrySummary: useCallback(() => (engine ? engine.retrySummary() : null), [engine]),
+    regenerateSummary: useCallback(
+      (options) => (engine ? engine.regenerateSummary(options) : null),
+      [engine]
+    ),
+    editSummaryText: useCallback(
+      (text) => (engine ? engine.editSummaryText(text) : null),
+      [engine]
+    ),
     clearError: useCallback(() => (engine ? engine.clearError() : null), [engine]),
   };
 }

@@ -36,6 +36,7 @@ const { createFirebaseIdTokenVerifier } = require("./firebaseAdmin");
 const { requireFirebaseUser, requireVerifiedEmail } = require("./auth");
 const refineRouter = require("../routes/refine");
 const transcribeRouter = require("../routes/transcribe");
+const listenInSummaryRouter = require("../routes/listenInSummary");
 
 // Stable application errors for everything that is not a route's own
 // business logic. Messages are generic on purpose.
@@ -292,8 +293,24 @@ function createApp(config, deps = {}) {
     "/api/transcribe",
     ...providerRoutePolicy(config, verifyIdToken, config.rateLimits.transcribe, "transcribe", logger)
   );
+  // The Listen In summary (Phase 8D.2). Its own policy chain with its own
+  // budget and its own body limit, because it is a third cost profile — one
+  // completion over a bounded transcript window, run automatically while a
+  // meeting is under way — and must never inherit a limit sized for Refine.
+  app.use(
+    "/api/listen-in/summary",
+    ...providerRoutePolicy(
+      config,
+      verifyIdToken,
+      config.rateLimits.listenInSummary,
+      "listen_in_summary",
+      logger
+    ),
+    express.json({ limit: config.limits.listenInSummaryJsonBytes })
+  );
   app.use("/api", refineRouter);
   app.use("/api", transcribeRouter);
+  app.use("/api", listenInSummaryRouter);
 
   app.use((_req, res) => send(res, APP_ERROR.NOT_FOUND));
   app.use(errorContract(logger));

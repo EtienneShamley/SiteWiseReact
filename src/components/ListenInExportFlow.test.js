@@ -27,10 +27,6 @@ import { resetMicrophoneOwnershipForTests } from "../lib/microphoneOwnership";
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
-jest.mock("../hooks/useRefine", () => ({
-  useRefine: () => ({ refineText: jest.fn(async () => ({ ok: true, refined: "A tidy summary." })) }),
-}));
-
 const WS = "ws-export";
 const UID = "uid-export";
 
@@ -42,6 +38,15 @@ const CHUNKS = [
   { seq: 0, state: CHUNK_STATE.TRANSCRIBED, text: "First thing said." },
   { seq: 1, state: CHUNK_STATE.TRANSCRIBED, text: "Second thing said." },
 ];
+
+const SUMMARY_RESULT = {
+  summaryText: "A tidy summary.",
+  keyPoints: ["The first point."],
+  decisions: [],
+  actionItems: [],
+  risks: [],
+  followUps: [],
+};
 
 /** A session snapshot the window can render without recording anything. */
 function stubSession(overrides = {}) {
@@ -57,13 +62,44 @@ function stubSession(overrides = {}) {
     recording: false,
     interrupted: false,
     finishing: false,
+    finished: true,
+    finishedWithIssues: false,
     transcript: "First thing said. Second thing said.",
+    segments: CHUNKS.map((c) => ({ ...c, offsetMs: c.seq * 30000 })),
+    // The 8D.2 summary, exactly as the engine publishes it.
+    summary: {
+      status: "ready",
+      revision: 1,
+      result: SUMMARY_RESULT,
+      parts: [{ fromSeq: 0, toSeq: 1, result: SUMMARY_RESULT }],
+      coveredThroughSeq: 1,
+      missingSeqs: [],
+      final: true,
+      userSummaryText: null,
+      lastErrorOutcome: null,
+      lastErrorMessage: null,
+    },
+    summaryCoverage: {
+      transcribedThroughSeq: 1,
+      summaryThroughSeq: 1,
+      pendingCount: 0,
+      failedCount: 0,
+      missingSeqs: [],
+      behind: false,
+      capturing: false,
+      complete: true,
+    },
+    summaryText: "A tidy summary.",
+    hasSummary: true,
     start: jest.fn(),
     stop: jest.fn(),
     resume: jest.fn(),
     finish: jest.fn(),
     discard: jest.fn(),
     retryFailed: jest.fn(),
+    retrySummary: jest.fn(),
+    regenerateSummary: jest.fn(),
+    editSummaryText: jest.fn(),
     clearError: jest.fn(),
     ...overrides,
   };
@@ -126,11 +162,12 @@ describe("1/2. Listen In no longer offers to insert into a note", () => {
     expect(document.body.textContent).not.toMatch(/Insert/);
   });
 
-  test("the summary card offers no insertion either", async () => {
+  test("the automatic summary is shown with no Summarise button and no insertion", async () => {
     mountWindow();
     await flush();
-    click(byText(/^Summarise$/));
-    await flush();
+    // 8D.2: the summary is already there — it was generated automatically, not
+    // by a button the user had to find and press after a two-hour meeting.
+    expect(byText(/^Summarise$/)).toBeUndefined();
     expect(document.body.textContent).toMatch(/A tidy summary\./);
     expect(byText(/Insert summary/)).toBeUndefined();
   });
@@ -153,7 +190,16 @@ describe("3/4. one Export action, and the per-format buttons are gone", () => {
   });
 
   test("Export is disabled when the session holds nothing to export", async () => {
-    mountWindow(stubSession({ chunks: [], transcript: "" }));
+    mountWindow(
+      stubSession({
+        chunks: [],
+        transcript: "",
+        segments: [],
+        summary: null,
+        summaryText: "",
+        hasSummary: false,
+      })
+    );
     await flush();
     expect(byText(/^Export$/).disabled).toBe(true);
   });
@@ -183,7 +229,7 @@ describe("5/6. the chooser offers three content choices and five formats", () =>
           onClose={() => {}}
           session={{ title: "Listen In — test" }}
           chunks={CHUNKS}
-          summary={{ text: "A tidy summary." }}
+          summary={{ text: "A tidy summary.", result: SUMMARY_RESULT, note: "" }}
           hasSummary
           hasTranscript
           {...props}
@@ -231,7 +277,7 @@ describe("7/8/9/10. the build reaches the canonical producers with the right doc
   });
 
   const session = { title: "Listen In — test" };
-  const summary = { text: "A tidy summary." };
+  const summary = { text: "A tidy summary.", result: SUMMARY_RESULT, note: "" };
 
   test("10. each format reaches its OWN canonical producer, and only that one", async () => {
     for (const [format, key] of [

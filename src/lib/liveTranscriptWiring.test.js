@@ -188,13 +188,14 @@ describe("5/12. one session, owned above the sidebar and the workspace", () => {
     expect(TRANSPORT).toContain('e?.name === "AbortError" ? "Request timed out" : "Network error"');
   });
 
-  test("11. an empty session is handled: Export and Copy disabled, an honest EMPTY message", () => {
-    // A session with nothing in it cannot be exported or copied. There is no
-    // "insert" branch any more: a Listen In result is exported, not pushed
-    // into whichever note happens to be open.
+  test("11. an empty session is handled: Export disabled, an honest EMPTY message on Copy", () => {
+    // A session with nothing in it cannot be exported. There is no "insert"
+    // branch any more: a Listen In result is exported, not pushed into
+    // whichever note happens to be open. (Rendered coverage of both states is
+    // in ListenInSummaryWorkspace.test.js and ListenInExportFlow.test.js.)
     expect(DIALOG).toMatch(/disabled=\{!canExport\}/);
-    expect(DIALOG).toMatch(/const canExport = ready \|\| hasSummaryText;/);
-    expect(DIALOG).toMatch(/if \(!ready\) \{\s*\n\s*notice\.showError\(LIVE_TRANSCRIPT_MESSAGE\.EMPTY\);\s*\n\s*return;/);
+    expect(DIALOG).toMatch(/const canExport = ready \|\| hasSummary;/);
+    expect(DIALOG).toMatch(/notice\.showError\(LIVE_TRANSCRIPT_MESSAGE\.EMPTY\);/);
   });
 });
 
@@ -264,27 +265,27 @@ describe("10–13. with nowhere to insert, everything else still works and nothi
     // …but the window offers no way to use it.
     expect(DIALOG).not.toMatch(/Insert into note|Insert summary/);
     expect(DIALOG).not.toMatch(/handleInsert|insertTranscript|canInsert|insertReason/);
-    // Its only remaining read of the target is the note's NAME, for context in
-    // the header — nothing that writes.
-    expect(DIALOG).toMatch(/const noteTitle = session\?\.insertTarget\?\.noteTitle \|\| "";/);
+    // Since 8D.2 the window does not read the insert target AT ALL: the note's
+    // title was the last thing it used it for, and a Listen In session is not
+    // that note's document.
+    expect(DIALOG).not.toMatch(/insertTarget/);
   });
 
-  test("11. record, stop, edit, copy, export, summarise and clear are NOT gated on a destination", () => {
+  test("11. record, stop, copy, export and discard are NOT gated on a destination", () => {
     for (const marker of [
       "onClick={handleToggleRecording}",
-      // The transcript is DERIVED from the ordered chunks (8D.1), so the
-      // pre-8D.2 window renders it read-only rather than editing a string.
-      "readOnly",
       "onClick={handleCopy}",
       // ONE Export action, opening the chooser — not a button per format.
       "onClick={() => setExportOpen(true)}",
-      "onClick={handleSummarise}",
-      "onClick={handleClear}",
+      "onClick={handleDiscard}",
     ]) {
       expect(DIALOG).toContain(marker);
     }
+    // 8D.2: summarisation is AUTOMATIC, so there is no Summarise handler to
+    // gate on anything at all (see ListenInSummaryWorkspace.test.js).
+    expect(DIALOG).not.toMatch(/handleSummarise|>Summarise</);
     // Their disabled conditions mention readiness/recording — never a note.
-    for (const handler of ["handleCopy", "handleSummarise", "handleToggleRecording", "handleClear"]) {
+    for (const handler of ["handleCopy", "handleToggleRecording", "handleDiscard"]) {
       const from = DIALOG.indexOf(`const ${handler} = useCallback(`);
       expect(from).toBeGreaterThan(-1);
       // Up to the next top-level declaration — the banner comments are
@@ -369,10 +370,12 @@ describe("17–21. insertion is the shared editor path — a normal transaction,
 /* ============================ 22–24. Copy / export ======================= */
 
 describe("22–24. copy and export", () => {
-  test("22. Copy uses the clipboard API with a selection fallback and reports the outcome", () => {
+  test("22. Copy uses the clipboard API and reports the outcome for the view it copied", () => {
     expect(DIALOG).toMatch(/await navigator\.clipboard\.writeText\(text\);/);
-    expect(DIALOG).toMatch(/document\.execCommand\("copy"\)/);
-    expect(DIALOG).toContain('notice.showInfo("Transcript copied.");');
+    // 8D.2: Copy copies the view the user is reading, and says which. The
+    // old textarea selection fallback went with the textarea — there is no
+    // editable transcript field to select from any more.
+    expect(DIALOG).toMatch(/"Summary copied\." : "Transcript copied\."/);
   });
 
   test("23/24. ONE Export action opening a chooser — and no second export architecture", () => {
@@ -544,7 +547,10 @@ describe("accessibility and data flow", () => {
     expect(DIALOG).toContain("aria-labelledby={titleId}");
     expect(DIALOG).toMatch(/<span role="status" aria-live="polite" className="text-xs text-gray-500 dark:text-gray-400">\s*\n\s*\{statusLabel\}/);
     expect(DIALOG).toMatch(/if \(e\.key === "Escape"\) closeWorkspace\?\.\(\);/);
-    expect(DIALOG).toMatch(/<label htmlFor=\{textareaId\}/);
+    // 8D.2: the two views are a labelled group of toggle buttons carrying
+    // `aria-pressed`, not an ARIA tablist (docs/DESIGN_SYSTEM.md).
+    expect(DIALOG).toMatch(/role="group" aria-label="Listen In view"/);
+    expect(DIALOG).toMatch(/aria-pressed=\{view === value\}/);
     expect(DIALOG).not.toMatch(/focus-trap|inert=/);
     // The status label is a sentence per state, never per word.
     expect(MODEL).toMatch(/export function liveTranscriptStatusLabel\(state\)/);

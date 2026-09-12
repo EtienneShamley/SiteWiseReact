@@ -20,6 +20,9 @@ import {
   listenInExportMeta,
   listenInExportTitle,
   listenInTranscriptParagraphs,
+  listenInActionItemLine,
+  listenInSummaryDocument,
+  hasListenInSummaryDocument,
 } from "./listenInExport";
 import { CHUNK_STATE } from "./listenInModel";
 
@@ -210,5 +213,154 @@ describe("bullets, metadata and escaping", () => {
       content: LISTEN_IN_EXPORT_CONTENT.BOTH,
     });
     expect(noTranscript).toMatch(/No speech was transcribed/);
+  });
+});
+
+/* ===================== the STRUCTURED summary (8D.2) ===================== */
+//
+// Since Phase 8D.2 the summary a session carries is structured meeting
+// intelligence, not one block of text, and an export must contain the whole of
+// it — derived once so the PDF, the Word document, the Markdown, the HTML and
+// the plain text cannot disagree.
+
+const STRUCTURED = {
+  text: "The team walked the site.\n\nCosts were reviewed.",
+  result: {
+    summaryText: "The team walked the site.\n\nCosts were reviewed.",
+    keyPoints: ["Three boreholes were logged."],
+    decisions: ["The survey moves to Friday."],
+    actionItems: [
+      { task: "Send the borehole logs", owner: "Priya", dueDate: "Friday", sourceSeq: 1 },
+      { task: "Chase the rig quote", owner: null, dueDate: null, sourceSeq: null },
+    ],
+    risks: ["Rain may stop work."],
+    followUps: [],
+  },
+  note: "",
+};
+
+describe("a structured summary is exported in full", () => {
+  test("every non-empty section appears, under its heading, in the fixed order", () => {
+    const out = buildListenInExportHtml({
+      session: SESSION,
+      chunks: CHUNKS,
+      summary: STRUCTURED,
+      content: LISTEN_IN_EXPORT_CONTENT.SUMMARY,
+    });
+    expect(out).toContain("The team walked the site.");
+    for (const heading of ["Key points", "Decisions", "Action items", "Risks and issues"]) {
+      expect(out).toContain(`<h3>${heading}</h3>`);
+    }
+    expect(out.indexOf("Key points")).toBeLessThan(out.indexOf("Decisions"));
+    expect(out.indexOf("Decisions")).toBeLessThan(out.indexOf("Action items"));
+    expect(out.indexOf("Action items")).toBeLessThan(out.indexOf("Risks and issues"));
+    // An EMPTY section is omitted rather than printed as a finding of none.
+    expect(out).not.toContain("Follow-ups");
+  });
+
+  test("AN OWNER OR A DUE DATE APPEARS ONLY WHERE ONE WAS STATED", () => {
+    const out = buildListenInExportHtml({
+      session: SESSION,
+      chunks: CHUNKS,
+      summary: STRUCTURED,
+      content: LISTEN_IN_EXPORT_CONTENT.SUMMARY,
+    });
+    expect(out).toContain("Send the borehole logs (Priya, due Friday)");
+    expect(out).toContain("<li>Chase the rig quote</li>");
+    expect(out).not.toMatch(/TBD|unknown|N\/A|due null/i);
+  });
+
+  test("one action item is rendered as one readable line", () => {
+    expect(listenInActionItemLine({ task: "Do it", owner: "Sam", dueDate: "Monday" })).toBe(
+      "Do it (Sam, due Monday)"
+    );
+    expect(listenInActionItemLine({ task: "Do it", owner: "Sam", dueDate: null })).toBe("Do it (Sam)");
+    expect(listenInActionItemLine({ task: "Do it", owner: null, dueDate: "Monday" })).toBe(
+      "Do it (due Monday)"
+    );
+    expect(listenInActionItemLine({ task: "Do it", owner: null, dueDate: null })).toBe("Do it");
+    expect(listenInActionItemLine({ task: "  " })).toBe("");
+    expect(listenInActionItemLine(null)).toBe("");
+  });
+
+  test("plain text carries the same sections with no markup at all", () => {
+    const out = buildListenInPlainText({
+      session: SESSION,
+      chunks: CHUNKS,
+      summary: STRUCTURED,
+      content: LISTEN_IN_EXPORT_CONTENT.SUMMARY,
+    });
+    expect(out).toContain("Key points");
+    expect(out).toContain("- Three boreholes were logged.");
+    expect(out).toContain("- Send the borehole logs (Priya, due Friday)");
+    expect(out).not.toMatch(/<[a-z]/i);
+  });
+
+  test("Summary + Transcript keeps the summary FIRST, structure and all", () => {
+    const out = buildListenInExportHtml({
+      session: SESSION,
+      chunks: CHUNKS,
+      summary: STRUCTURED,
+      content: LISTEN_IN_EXPORT_CONTENT.BOTH,
+    });
+    expect(out.indexOf("Key points")).toBeLessThan(out.indexOf("<h2>Transcript</h2>"));
+    expect(out.indexOf("Risks and issues")).toBeLessThan(out.indexOf("First thing said."));
+  });
+
+  test("INCOMPLETE COVERAGE IS STATED IN THE FILE, not only on screen", () => {
+    const note = "This summary does not cover the whole recording: One part could not be transcribed.";
+    const html5 = buildListenInExportHtml({
+      session: SESSION,
+      chunks: CHUNKS,
+      summary: { ...STRUCTURED, note },
+      content: LISTEN_IN_EXPORT_CONTENT.SUMMARY,
+    });
+    expect(html5).toContain(note);
+    const txt = buildListenInPlainText({
+      session: SESSION,
+      chunks: CHUNKS,
+      summary: { ...STRUCTURED, note },
+      content: LISTEN_IN_EXPORT_CONTENT.SUMMARY,
+    });
+    expect(txt).toContain(note);
+  });
+
+  test("the old text-only summary shape still exports, unchanged", () => {
+    const out = buildListenInExportHtml({
+      session: SESSION,
+      chunks: CHUNKS,
+      summary: SUMMARY,
+      content: LISTEN_IN_EXPORT_CONTENT.SUMMARY,
+    });
+    expect(out).toContain("The slab was poured.");
+    expect(out).toContain("<li>Order rebar</li>");
+  });
+
+  test("the derivation is one document, and knows when there is nothing in it", () => {
+    const doc = listenInSummaryDocument(STRUCTURED);
+    expect(doc.paragraphs).toEqual(["The team walked the site.", "Costs were reviewed."]);
+    expect(doc.sections.map((s) => s.heading)).toEqual([
+      "Key points",
+      "Decisions",
+      "Action items",
+      "Risks and issues",
+    ]);
+    expect(hasListenInSummaryDocument(STRUCTURED)).toBe(true);
+    expect(hasListenInSummaryDocument(null)).toBe(false);
+    expect(hasListenInSummaryDocument({ text: "", result: null })).toBe(false);
+  });
+
+  test("spoken text in a structured section cannot inject markup", () => {
+    const out = buildListenInExportHtml({
+      session: SESSION,
+      chunks: [],
+      summary: {
+        text: "ok",
+        result: { ...STRUCTURED.result, risks: ["<script>alert(1)</script>"], actionItems: [] },
+      },
+      content: LISTEN_IN_EXPORT_CONTENT.SUMMARY,
+    });
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;script&gt;");
   });
 });

@@ -19,7 +19,7 @@
 // listener set that a throwing subscriber cannot break, and an immutable
 // snapshot published on every change.
 //
-// TWO INDEPENDENT LOOPS, AND THAT IS THE POINT:
+// THREE INDEPENDENT LOOPS, AND THAT IS THE POINT:
 //
 //   CAPTURE   the microphone → a MediaRecorder that is closed and reopened
 //             every LISTEN_IN_CHUNK_MS, so each chunk is a COMPLETE audio
@@ -28,11 +28,21 @@
 //             chunk is written to the store and the drain is woken.
 //   DRAIN     reads sealed chunks in sequence order, one at a time, and
 //             writes each transcript back onto its own chunk row.
+//   SUMMARY   (Phase 8D.2) reads SETTLED transcript in bounded windows and
+//             keeps the session's structured summary up to date, then
+//             consolidates it once the session is finished.
 //
-// CAPTURE NEVER WAITS FOR THE DRAIN. Recording does not pause, slow or stop
-// because a transcription is in flight, retrying, or failing; going offline
-// mid-meeting costs nothing but a backlog. That is the whole reason the two
-// are separate loops rather than one pipeline.
+// CAPTURE NEVER WAITS FOR THE DRAIN, AND NEITHER OF THEM WAITS FOR THE
+// SUMMARY. Recording does not pause, slow or stop because a transcription or
+// a summary is in flight, retrying, or failing; going offline mid-meeting
+// costs nothing but a backlog. A SUMMARY FAILURE CANNOT END A CAPTURE — it is
+// recorded on the summary record and nothing else — which is the whole reason
+// these are separate loops rather than one pipeline.
+//
+// PRIORITY IS EXPLICIT: capture first, transcription second, summary last.
+// The summary only ever reads transcript the drain has already settled, and it
+// is the one loop that may be skipped entirely without losing anything the
+// user said.
 //
 // ONE ENGINE PER WORKSPACE, held in a module-level registry below, so the
 // engine outlives every component that looks at it.
@@ -62,6 +72,27 @@ import {
   resolveListenInPersistence,
 } from "./listenInPolicy";
 import { createListenInDurableStore, createListenInMemoryStore } from "./listenInStore";
+import {
+  LISTEN_IN_SUMMARY_POLICY,
+  appendSummaryPart,
+  canAttemptSummary,
+  createSessionSummary,
+  hasUnsummarisedTranscript,
+  listenInSummaryCoverage,
+  nextSummaryWindow,
+  summaryMergeGroups,
+  summaryRequestStarted,
+  summaryRetryRequested,
+  withFinalSummary,
+  withSummaryFailure,
+  withUserSummaryText,
+} from "./listenInSummaryModel";
+import { requestListenInSummary } from "./listenInSummaryClient";
+import {
+  LISTEN_IN_SUMMARY_MODE,
+  MAX_SUMMARY_MERGE_PARTS,
+  emptyListenInSummaryResult,
+} from "../listenInSummaryContract";
 import {
   SPEECH_AUDIO_BITS_PER_SECOND,
   audioRecorderOptions,
@@ -146,6 +177,13 @@ export function createListenInEngine({
   store = null,
   persistence = resolveListenInPersistence(),
   transcribe = transcribeAudioBlob,
+  // The SUMMARY transport, injected exactly as `transcribe` is, so the whole
+  // summary loop is provable without a network, a provider or a model.
+  summarise = requestListenInSummary,
+  summaryPolicy = LISTEN_IN_SUMMARY_POLICY,
+  // A switch for surfaces that must not spend on summarisation (a test, a
+  // future read-only viewer). Capture and transcription are unaffected by it.
+  summaryEnabled = true,
   chunkMs = LISTEN_IN_CHUNK_MS,
   maxAutoAttempts = LISTEN_IN_MAX_AUTO_ATTEMPTS,
   now = () => Date.now(),
@@ -193,6 +231,16 @@ export function createListenInEngine({
   let retryTimer = null;
   let removeOnline = null;
 
+  // ---- summary ----
+  let summary = null; // the session's summary record, or null
+  let summarising = null;
+  let summaryAgain = false;
+  let summaryTimer = null;
+  // An explicit Regenerate asks for a consolidation NOW rather than waiting
+  // for the session to end. Engine-local and deliberately not persisted: it is
+  // one user action in flight, not a fact about the session.
+  let regenerateWanted = false;
+
   /* ------------------------------ events -------------------------------- */
 
   // The published snapshot is CACHED and only rebuilt when something actually
@@ -219,6 +267,13 @@ export function createListenInEngine({
       supported: recorderSupported(),
       pending: pendingChunks(chunks).length,
       failed: failedChunks(chunks).length,
+      // The session's structured summary and what it actually covers. Both
+      // are the ENGINE's, republished like everything else here, so closing
+      // the window and coming back finds exactly this state.
+      summary: summary ? { ...summary } : null,
+      summaryCoverage: listenInSummaryCoverage(session, chunks, summary, {
+        maxAttempts: maxAutoAttempts,
+      }),
     });
     return cached;
   }
@@ -509,6 +564,10 @@ export function createListenInEngine({
 
     if (soonest !== null) scheduleRetry(soonest);
     await settleIfFinishing();
+    // The transcript may have moved, or the session may just have finished.
+    // Either is the summary loop's cue — and it is woken LAST, after every
+    // transcription decision, so it can only ever read settled work.
+    wakeSummary();
   }
 
   /**
@@ -521,6 +580,247 @@ export function createListenInEngine({
     if (!session || session.state !== LISTEN_IN_STATE.FINISHING) return;
     if (drainableChunks(chunks, { maxAttempts: maxAutoAttempts }).length > 0) return;
     await saveSession(markFinished(session, { now: now() }));
+  }
+
+  /* ------------------------------ summary ------------------------------- */
+  //
+  // THE THIRD LOOP. It reads SETTLED transcript in bounded windows, keeps the
+  // session's structured summary current, and consolidates it once the session
+  // is finished. It never touches the recorder, the microphone, a chunk's
+  // audio or the session's state, and nothing it can do — a failure, a
+  // timeout, an exhausted backoff, being switched off entirely — changes what
+  // is being captured.
+
+  async function saveSummary(next) {
+    summary = next;
+    try {
+      if (typeof data.putSummary === "function") await data.putSummary(next);
+    } catch {
+      // The capture and its transcript are what matter. A summary that could
+      // not be written is regenerated; it is never a reason to lose anything.
+    }
+    emit();
+  }
+
+  /** Every session has a summary record from the moment it exists. */
+  function ensureSummary() {
+    if (!session || summary) return;
+    summary = createSessionSummary({
+      uid: session.uid,
+      workspaceId: session.workspaceId,
+      sessionId: session.sessionId,
+      now: now(),
+    });
+  }
+
+  function disarmSummaryTimer() {
+    if (summaryTimer !== null) {
+      clearTimer(summaryTimer);
+      summaryTimer = null;
+    }
+  }
+
+  function scheduleSummary(delayMs) {
+    if (stopped) return;
+    disarmSummaryTimer();
+    summaryTimer = setTimer(() => {
+      summaryTimer = null;
+      wakeSummary();
+    }, Math.max(0, delayMs));
+  }
+
+  /** Wake the summary loop. Coalesced exactly as the drain is. */
+  function wakeSummary() {
+    if (stopped || !summaryEnabled) return;
+    if (summarising) {
+      summaryAgain = true;
+      return;
+    }
+    summarising = runSummary()
+      .catch(() => {})
+      .then(() => {
+        summarising = null;
+        if (summaryAgain) {
+          summaryAgain = false;
+          wakeSummary();
+        }
+      });
+  }
+
+  /** The transcript sequences in a window that produced no words at all. */
+  function missingSeqsIn(fromSeq, toSeq) {
+    return chunks
+      .filter((c) => c.seq >= fromSeq && c.seq <= toSeq && c.state === CHUNK_STATE.FAILED)
+      .map((c) => c.seq);
+  }
+
+  /**
+   * REDUCE the parts to ONE final summary.
+   *
+   * Parts are consolidated in bounded groups until at most one group remains,
+   * then ONE request produces the finished account of the meeting. A normal
+   * meeting is therefore a single request here; only one long enough to
+   * produce more than `MAX_SUMMARY_MERGE_PARTS` windows needs a second stage,
+   * and no request ever grows with the length of the meeting.
+   *
+   * @returns {Promise<{ok: true, result: object} | {ok: false, failure: object}>}
+   */
+  async function reduceSummaryParts(id) {
+    let level = summary.parts.map((part) => part.result);
+    // Stage one: fold groups down until one request can take them all.
+    while (level.length > MAX_SUMMARY_MERGE_PARTS) {
+      const next = [];
+      for (const group of summaryMergeGroups(level, MAX_SUMMARY_MERGE_PARTS)) {
+        if (group.length === 1) {
+          next.push(group[0]);
+          continue;
+        }
+        const merged = await summarise({ mode: LISTEN_IN_SUMMARY_MODE.MERGE, parts: group });
+        if (stopped || !session || session.sessionId !== id) return { ok: false, failure: null };
+        if (!merged.ok) return { ok: false, failure: merged };
+        next.push(merged.result);
+      }
+      // No progress is possible (every group was a singleton): stop rather
+      // than loop forever on a shape that cannot reduce further.
+      if (next.length >= level.length) break;
+      level = next;
+    }
+    const final = await summarise({
+      mode: LISTEN_IN_SUMMARY_MODE.FINAL,
+      parts: level.slice(0, MAX_SUMMARY_MERGE_PARTS),
+    });
+    if (stopped || !session || session.sessionId !== id) return { ok: false, failure: null };
+    if (!final.ok) return { ok: false, failure: final };
+    return { ok: true, result: final.result };
+  }
+
+  /**
+   * One pass of the summary loop.
+   *
+   * Windows are summarised one at a time, newest transcript last, until there
+   * is nothing left that is worth a request. A finished session is then
+   * consolidated. Every step re-checks that the session is still the one it
+   * started on, so a discard, a sign-out or a new session mid-request lands
+   * nothing.
+   */
+  async function runSummary() {
+    if (!summaryEnabled || stopped || !session) return;
+    ensureSummary();
+    if (!summary) return;
+    const id = session.sessionId;
+    // A finished session summarises whatever is left, however small: the last
+    // ninety seconds of a meeting still belong in its summary.
+    const finished = session.state === LISTEN_IN_STATE.FINISHED;
+
+    if (!canAttemptSummary(summary, { now: now(), policy: summaryPolicy })) {
+      const wait = summary.nextAttemptAt - now();
+      if (wait > 0) scheduleSummary(wait);
+      return;
+    }
+
+    // MAP. Bounded, and bounded again per pass: a huge backlog is summarised
+    // over several passes rather than in one unbroken run of requests.
+    for (let i = 0; i < 8; i += 1) {
+      if (stopped || !session || session.sessionId !== id) return;
+      const window = nextSummaryWindow({
+        chunks,
+        summary,
+        force: finished,
+        now: now(),
+        policy: summaryPolicy,
+        maxAttempts: maxAutoAttempts,
+      });
+      if (!window) break;
+
+      // Silence, or chunks that permanently failed: the summary really has
+      // read that far, so coverage advances — and NOTHING is spent, because
+      // there is nothing in it to summarise and nothing to invent.
+      if (window.silent) {
+        await saveSummary(
+          appendSummaryPart(summary, {
+            part: null,
+            fromSeq: window.fromSeq,
+            toSeq: window.toSeq,
+            missingSeqs: missingSeqsIn(window.fromSeq, window.toSeq),
+            now: now(),
+          })
+        );
+        continue;
+      }
+
+      if (!isOnline()) {
+        // Offline is not a failure and must not burn an attempt. The
+        // transcript is safe, the capture is unaffected, and the window is
+        // still there when the connection returns.
+        scheduleSummary(summaryPolicy.retryBackoffMs[0]);
+        return;
+      }
+
+      await saveSummary(summaryRequestStarted(summary, { now: now() }));
+      const outcome = await summarise({
+        mode: LISTEN_IN_SUMMARY_MODE.WINDOW,
+        segments: window.segments,
+      });
+      if (stopped || !session || session.sessionId !== id) return;
+      if (!outcome.ok) {
+        await saveSummary(
+          withSummaryFailure(summary, {
+            outcome: outcome.outcome,
+            message: outcome.message,
+            now: now(),
+            policy: summaryPolicy,
+          })
+        );
+        if (summary.nextAttemptAt > now()) scheduleSummary(summary.nextAttemptAt - now());
+        return;
+      }
+      await saveSummary(
+        appendSummaryPart(summary, {
+          part: outcome.result,
+          fromSeq: window.fromSeq,
+          toSeq: window.toSeq,
+          missingSeqs: missingSeqsIn(window.fromSeq, window.toSeq),
+          now: now(),
+        })
+      );
+    }
+
+    // REDUCE. Once capture and transcription are genuinely over — or when the
+    // user asked for it explicitly — and only once every window has been read.
+    const wantsReduce = finished || regenerateWanted;
+    regenerateWanted = false;
+    if (!wantsReduce || summary.final) return;
+    if (hasUnsummarisedTranscript({ chunks, summary, maxAttempts: maxAutoAttempts })) return;
+    if (summary.parts.length === 0) {
+      // A session with no words in it. It is final — there is nothing more
+      // coming — and it claims nothing, rather than inventing an account of a
+      // meeting that produced no transcript.
+      await saveSummary(
+        withFinalSummary(summary, { result: emptyListenInSummaryResult(), now: now() })
+      );
+      return;
+    }
+    if (!isOnline()) {
+      scheduleSummary(summaryPolicy.retryBackoffMs[0]);
+      return;
+    }
+    await saveSummary(summaryRequestStarted(summary, { now: now() }));
+    const reduced = await reduceSummaryParts(id);
+    if (stopped || !session || session.sessionId !== id) return;
+    if (!reduced.ok) {
+      if (!reduced.failure) return;
+      await saveSummary(
+        withSummaryFailure(summary, {
+          outcome: reduced.failure.outcome,
+          message: reduced.failure.message,
+          now: now(),
+          policy: summaryPolicy,
+        })
+      );
+      if (summary.nextAttemptAt > now()) scheduleSummary(summary.nextAttemptAt - now());
+      return;
+    }
+    await saveSummary(withFinalSummary(summary, { result: reduced.result, now: now() }));
   }
 
   /* ------------------------------ lifecycle ----------------------------- */
@@ -556,6 +856,17 @@ export function createListenInEngine({
       return snapshot();
     }
     session = found;
+    // Its summary comes back with it. Reopening the window after a reload
+    // shows the same summary at the same revision, because it was never the
+    // window's in the first place.
+    try {
+      if (typeof data.getSummary === "function") {
+        summary = await data.getSummary(found.uid, found.workspaceId, found.sessionId);
+      }
+    } catch {
+      summary = null;
+    }
+    ensureSummary();
     if (found.state === LISTEN_IN_STATE.RECORDING || found.state === LISTEN_IN_STATE.STOPPING) {
       // Its unsealed final chunk died with the process; everything sealed is
       // here. Nothing is fabricated to stand in for what was lost.
@@ -578,6 +889,7 @@ export function createListenInEngine({
     await reloadChunks();
     emit();
     wakeDrain();
+    wakeSummary();
     return snapshot();
   }
 
@@ -639,6 +951,9 @@ export function createListenInEngine({
       return snapshot();
     }
     chunks = [];
+    summary = null;
+    session = fresh;
+    ensureSummary();
     await saveSession(fresh);
     return snapshot();
   }
@@ -706,8 +1021,10 @@ export function createListenInEngine({
     const { uid: owner, workspaceId: w, sessionId: id } = session;
     if (isCapturing(session)) releaseCapture({ seal: false });
     disarmRetry();
+    disarmSummaryTimer();
     session = null;
     chunks = [];
+    summary = null;
     error = null;
     try {
       await data.deleteSession(owner, w, id);
@@ -733,6 +1050,48 @@ export function createListenInEngine({
     await reloadChunks();
     emit();
     wakeDrain();
+    return snapshot();
+  }
+
+  /**
+   * TRY AGAIN, explicitly. Clears the backoff and the attempt count so a
+   * summary that gave up after repeated failures can be asked for again.
+   */
+  async function retrySummary() {
+    if (stopped || !session || !summary) return snapshot();
+    await saveSummary(summaryRetryRequested(summary, { now: now() }));
+    wakeSummary();
+    return snapshot();
+  }
+
+  /**
+   * REGENERATE, explicitly.
+   *
+   * This is the ONLY thing that replaces a summary the user has edited, and it
+   * is deliberately an explicit action rather than something a later window
+   * does behind them: the generated structured facts keep updating on their
+   * own, but a person's own wording is never overwritten without them asking.
+   * It re-consolidates the EXISTING parts — the transcript is not re-read, so
+   * a regeneration costs one request, not the whole meeting again.
+   */
+  async function regenerateSummary({ keepUserText = false } = {}) {
+    if (stopped || !session || !summary) return snapshot();
+    let next = summaryRetryRequested(summary, { now: now() });
+    if (!keepUserText) next = withUserSummaryText(next, null, { now: now() });
+    regenerateWanted = true;
+    await saveSummary(Object.freeze({ ...next, final: false }));
+    wakeSummary();
+    return snapshot();
+  }
+
+  /**
+   * The user rewrote the overview. Their words are stored beside the generated
+   * result, never over it, and they win everywhere the summary is read or
+   * exported. Passing null gives the generated overview back.
+   */
+  async function editSummaryText(text) {
+    if (stopped || !session || !summary) return snapshot();
+    await saveSummary(withUserSummaryText(summary, text, { now: now() }));
     return snapshot();
   }
 
@@ -767,6 +1126,7 @@ export function createListenInEngine({
     touch();
     disarmRoll();
     disarmRetry();
+    disarmSummaryTimer();
     if (removeOnline) removeOnline();
     removeOnline = null;
     if (isCapturing(session)) {
@@ -795,10 +1155,15 @@ export function createListenInEngine({
     finish,
     discard,
     retryFailed,
+    retrySummary,
+    regenerateSummary,
+    editSummaryText,
     clearError,
     shutdown,
     /** Drain now — used by tests and by an explicit refresh. */
     flush: () => (draining ? draining : runDrain()),
+    /** Run the summary loop now — used by tests and by an explicit refresh. */
+    flushSummary: () => (summarising ? summarising : runSummary()),
     getSnapshot: snapshot,
     subscribe(listener) {
       if (typeof listener !== "function") return () => {};

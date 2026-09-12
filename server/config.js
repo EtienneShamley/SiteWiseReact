@@ -71,6 +71,14 @@ const FIREBASE_AUTH_EMULATOR_VARIABLE = "FIREBASE_AUTH_EMULATOR_HOST";
 // ~30 s of Opus (well under 1 MB); 25 MB is the provider's own file ceiling.
 const REFINE_JSON_LIMIT_BYTES = 256 * 1024;
 const TRANSCRIBE_AUDIO_LIMIT_BYTES = 25 * 1024 * 1024;
+// The Listen In summary body is bounded by its own contract
+// (src/lib/listenInSummaryContract.js): at most 12 000 characters of
+// transcript in a window request, or twelve previously produced structured
+// summaries in a merge — both comfortably under 64 KB once JSON-escaped. 128
+// KB rejects nothing legitimate while stopping anything larger before it is
+// parsed. It is deliberately NOT the refine limit: the two routes bound
+// different things and must be able to move apart.
+const LISTEN_IN_SUMMARY_JSON_LIMIT_BYTES = 128 * 1024;
 
 // Rate limits: requests per VERIFIED USER per window. Refine and transcription
 // are NOT given one shared number because they cost differently: a Refine
@@ -85,6 +93,15 @@ const TRANSCRIBE_AUDIO_LIMIT_BYTES = 25 * 1024 * 1024;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_REFINE_LIMIT = 30; // per 10 minutes per user
 const DEFAULT_TRANSCRIBE_LIMIT = 60; // per 10 minutes per user (≈ 20 needed by one live session)
+// The Listen In summary is a THIRD cost profile and gets its own budget: one
+// chat completion over at most 12 000 characters, run automatically while a
+// meeting is under way. A session summarises a window roughly every ten to
+// fifteen minutes of speech plus a small number of consolidation requests at
+// the end, so a four-hour meeting spends about twenty-five requests IN TOTAL —
+// spread over four hours, never in one window. 20 per 10 minutes therefore
+// leaves large headroom for retries and a second device while still bounding
+// what an automatic, unattended loop can spend.
+const DEFAULT_LISTEN_IN_SUMMARY_LIMIT = 20; // per 10 minutes per user
 const IP_LIMIT_MULTIPLIER = 4;
 
 class ServerConfigError extends Error {
@@ -252,6 +269,11 @@ function loadServerConfig(env = process.env) {
     min: 1,
     max: 100000,
   });
+  const listenInSummaryLimit = parseInteger(env, "RATE_LIMIT_LISTEN_IN_SUMMARY", {
+    fallback: DEFAULT_LISTEN_IN_SUMMARY_LIMIT,
+    min: 1,
+    max: 100000,
+  });
 
   return Object.freeze({
     mode,
@@ -270,11 +292,13 @@ function loadServerConfig(env = process.env) {
       windowMs: RATE_LIMIT_WINDOW_MS,
       refine: refineLimit,
       transcribe: transcribeLimit,
+      listenInSummary: listenInSummaryLimit,
       ipMultiplier: IP_LIMIT_MULTIPLIER,
     }),
     limits: Object.freeze({
       refineJsonBytes: REFINE_JSON_LIMIT_BYTES,
       transcribeAudioBytes: TRANSCRIBE_AUDIO_LIMIT_BYTES,
+      listenInSummaryJsonBytes: LISTEN_IN_SUMMARY_JSON_LIMIT_BYTES,
     }),
   });
 }
@@ -309,8 +333,8 @@ function describeServerConfig(config) {
     `allowed origins (${originSource}): ${origins}`,
     `authentication: ${authState}`,
     `AI routes: ${aiState}`,
-    `rate limits per user per ${config.rateLimits.windowMs / 60000} min: refine ${config.rateLimits.refine}, transcribe ${config.rateLimits.transcribe} (per IP ×${config.rateLimits.ipMultiplier})`,
-    `request limits: refine JSON ${config.limits.refineJsonBytes} bytes, audio ${config.limits.transcribeAudioBytes} bytes`,
+    `rate limits per user per ${config.rateLimits.windowMs / 60000} min: refine ${config.rateLimits.refine}, transcribe ${config.rateLimits.transcribe}, listen-in summary ${config.rateLimits.listenInSummary} (per IP ×${config.rateLimits.ipMultiplier})`,
+    `request limits: refine JSON ${config.limits.refineJsonBytes} bytes, audio ${config.limits.transcribeAudioBytes} bytes, listen-in summary JSON ${config.limits.listenInSummaryJsonBytes} bytes`,
   ].join("\n  ");
 }
 
@@ -324,9 +348,11 @@ module.exports = {
   IP_LIMIT_MULTIPLIER,
   REFINE_JSON_LIMIT_BYTES,
   TRANSCRIBE_AUDIO_LIMIT_BYTES,
+  LISTEN_IN_SUMMARY_JSON_LIMIT_BYTES,
   RATE_LIMIT_WINDOW_MS,
   DEFAULT_REFINE_LIMIT,
   DEFAULT_TRANSCRIBE_LIMIT,
+  DEFAULT_LISTEN_IN_SUMMARY_LIMIT,
   ServerConfigError,
   normalizeOrigin,
   loadServerConfig,

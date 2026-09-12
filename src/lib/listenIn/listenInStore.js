@@ -24,6 +24,8 @@
 //   getChunkAudio(uid, workspaceId, sessionId, seq)
 //   listChunks(uid, workspaceId, sessionId)  metadata + text, seq order, NO audio
 //   releaseChunkAudio(uid, w, s, seq)        drop the bytes, keep the row
+//   putSummary(summary)                      upsert the session's summary
+//   getSummary(uid, workspaceId, sessionId)
 //   deleteSession(uid, workspaceId, sessionId)
 //
 // EVERY OPERATION NAMES THE ACCOUNT. There is no call that reads, changes or
@@ -48,6 +50,7 @@
 import {
   LISTEN_IN_CHUNK_STORE,
   LISTEN_IN_SESSION_STORE,
+  LISTEN_IN_SUMMARY_STORE,
   assetDbTransaction,
   listenInOwnerKeyRange,
   listenInSessionKeyRange,
@@ -163,15 +166,38 @@ export function createListenInDurableStore() {
       return this.patchChunk(uid, workspaceId, sessionId, seq, { releaseAudio: true });
     },
 
-    /** Everything: the header, every chunk row, every retained blob. */
+    /**
+     * The session's structured summary (Phase 8D.2). One row per session, in
+     * its own store so a listing of headers never drags a meeting's summary
+     * with it. Written by the engine's summary loop only; it holds derived
+     * text, never audio.
+     */
+    async putSummary(summary) {
+      requireIds(summary.uid, summary.workspaceId, summary.sessionId);
+      await assetDbTransaction(LISTEN_IN_SUMMARY_STORE, "readwrite", (stores) => {
+        stores[LISTEN_IN_SUMMARY_STORE].put({ ...summary });
+      });
+      return summary;
+    },
+
+    async getSummary(uid, workspaceId, sessionId) {
+      requireIds(uid, workspaceId, sessionId);
+      const row = await assetDbTransaction(LISTEN_IN_SUMMARY_STORE, "readonly", (stores) =>
+        stores[LISTEN_IN_SUMMARY_STORE].get([uid, workspaceId, sessionId])
+      );
+      return row || null;
+    },
+
+    /** Everything: the header, every chunk row, every retained blob, the summary. */
     async deleteSession(uid, workspaceId, sessionId) {
       requireIds(uid, workspaceId, sessionId);
       await assetDbTransaction(
-        [LISTEN_IN_SESSION_STORE, LISTEN_IN_CHUNK_STORE],
+        [LISTEN_IN_SESSION_STORE, LISTEN_IN_CHUNK_STORE, LISTEN_IN_SUMMARY_STORE],
         "readwrite",
         (stores) => {
           stores[LISTEN_IN_SESSION_STORE].delete([uid, workspaceId, sessionId]);
           stores[LISTEN_IN_CHUNK_STORE].delete(listenInSessionKeyRange(uid, workspaceId, sessionId));
+          stores[LISTEN_IN_SUMMARY_STORE].delete([uid, workspaceId, sessionId]);
         }
       );
     },
@@ -190,6 +216,7 @@ export function createListenInDurableStore() {
 export function createListenInMemoryStore() {
   const sessions = new Map(); // "uid\u0000w\u0000s" → header
   const chunks = new Map(); // "uid\u0000w\u0000s\u0000seq" → row (audio included)
+  const summaries = new Map(); // "uid\u0000w\u0000s" → the session's summary
   // The uid is part of the key here for the same reason it is part of the
   // IndexedDB key path: the boundary must hold in BOTH implementations, or the
   // durable tests would be proving a property the memory store does not have.
@@ -262,9 +289,24 @@ export function createListenInMemoryStore() {
       return this.patchChunk(uid, workspaceId, sessionId, seq, { releaseAudio: true });
     },
 
+    async putSummary(summary) {
+      requireIds(summary.uid, summary.workspaceId, summary.sessionId);
+      summaries.set(sessionKey(summary.uid, summary.workspaceId, summary.sessionId), {
+        ...summary,
+      });
+      return summary;
+    },
+
+    async getSummary(uid, workspaceId, sessionId) {
+      requireIds(uid, workspaceId, sessionId);
+      const row = summaries.get(sessionKey(uid, workspaceId, sessionId));
+      return row ? { ...row } : null;
+    },
+
     async deleteSession(uid, workspaceId, sessionId) {
       requireIds(uid, workspaceId, sessionId);
       sessions.delete(sessionKey(uid, workspaceId, sessionId));
+      summaries.delete(sessionKey(uid, workspaceId, sessionId));
       for (const key of [...chunks.keys()]) {
         const row = chunks.get(key);
         if (row.uid === uid && row.workspaceId === workspaceId && row.sessionId === sessionId) {

@@ -82,6 +82,8 @@ const WS = "ws-lifecycle";
 const UID = "uid-lifecycle";
 let store;
 let tracks;
+let summaryCalls;
+let summaryGate;
 
 beforeEach(() => {
   resetMicrophoneOwnershipForTests();
@@ -95,9 +97,32 @@ beforeEach(() => {
   });
   // One engine for the workspace, with its externals injected. The components
   // below look it up by workspace exactly as the provider does.
+  summaryCalls = [];
+  summaryGate = null;
   getListenInEngine(UID, WS, {
     store,
     transcribe: async () => "captured words",
+    // Phase 8D.2: the summary loop is the engine's third loop. It is injected
+    // here so the tests below can leave a summary IN FLIGHT while the window
+    // is closed and unmounted.
+    summarise: async (request) => {
+      summaryCalls.push(request);
+      if (summaryGate) await summaryGate;
+      return {
+        ok: true,
+        result: {
+          summaryText: `summary of ${request.mode}`,
+          keyPoints: [],
+          decisions: [],
+          actionItems: [],
+          risks: [],
+          followUps: [],
+        },
+      };
+    },
+    // Every window is worth summarising in these tests; the batching policy
+    // itself is proved in listenInSummaryModel.test.js.
+    summaryPolicy: { minWindowChars: 1, maxWindowChars: 12000, minIntervalMs: 0, retryBackoffMs: [1], maxAutoAttempts: 4 },
     recorderSupported: () => true,
   });
 });
@@ -126,6 +151,8 @@ function ListenInWindow({ onApi }) {
       <span data-testid="elapsed">
         {session.session ? formatElapsed(elapsedMs(session.session, Date.now())) : ""}
       </span>
+      <span data-testid="summary">{session.summaryText}</span>
+      <span data-testid="summary-status">{session.summary ? session.summary.status : "none"}</span>
     </div>
   );
 }
@@ -605,5 +632,109 @@ describe("an authenticated identity change stops the previous account's capture"
     probe.teardown();
     await flush();
     expect(currentMicrophoneOwner()).toBeNull();
+  });
+});
+
+/* ============ the SUMMARY is the session's too (Phase 8D.2) ============== */
+//
+// 8D.1 proved that closing the window cannot end a capture. 8D.2 adds a second
+// long-running thing to the session — its structured summary — and the same
+// rule has to hold for it: closing the window while a summary is being
+// generated must not interrupt it, and reopening must find the same summary in
+// the same state rather than starting again.
+
+describe("closing the window while summarising does not interrupt the engine", () => {
+  test("a summary in flight completes with no window mounted, and the reopened window shows it", async () => {
+    let release;
+    summaryGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    mount();
+    await startCapture();
+
+    // A chunk is sealed and transcribed, so the summary loop has work.
+    FakeMediaRecorder.instances[FakeMediaRecorder.instances.length - 1].stop();
+    await flush();
+    const engine = getListenInEngine(UID, WS);
+    await act(async () => {
+      await engine.flush();
+    });
+    await flush();
+    const inFlight = engine.flushSummary();
+    await flush();
+    expect(summaryCalls.length).toBeGreaterThan(0);
+    expect(windowApi.summary.status).toBe("generating");
+
+    // THE WINDOW GOES AWAY MID-REQUEST.
+    closeWindow();
+    await flush();
+    expect(at("window")).toBeNull();
+
+    // The request finishes anyway, into the session.
+    release();
+    await act(async () => {
+      await inFlight;
+    });
+    await flush();
+    expect(engine.getSnapshot().summary.result.summaryText).toBe("summary of window");
+    // And the capture never noticed any of it.
+    expect(sidebarApi.recording).toBe(true);
+    expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.LISTEN_IN);
+
+    // REOPENING SHOWS THE SAME SUMMARY — not a new one, and not nothing.
+    openWindow();
+    await flush();
+    expect(at("summary").textContent).toBe("summary of window");
+    expect(windowApi.summary.revision).toBe(1);
+    expect(windowApi.session.sessionId).toBe(sidebarApi.session.sessionId);
+  });
+
+  test("unmounting the whole view layer leaves the summary on the session", async () => {
+    mount();
+    await startCapture();
+    FakeMediaRecorder.instances[FakeMediaRecorder.instances.length - 1].stop();
+    await flush();
+    const engine = getListenInEngine(UID, WS);
+    await act(async () => {
+      await engine.flush();
+      await engine.flushSummary();
+    });
+    await flush();
+    const before = engine.getSnapshot().summary.revision;
+    expect(before).toBeGreaterThan(0);
+
+    unmountShell();
+    await flush();
+    // The session, its transcript and its summary are all exactly where they
+    // were; nothing in the view layer owns any of them.
+    const after = getListenInEngine(UID, WS).getSnapshot();
+    expect(after.summary.revision).toBe(before);
+    expect(after.summary.result.summaryText).toBe("summary of window");
+    expect(after.session.state).toBe(LISTEN_IN_STATE.RECORDING);
+  });
+
+  test("the summary is never generated more than once for the same transcript", async () => {
+    mount();
+    await startCapture();
+    FakeMediaRecorder.instances[FakeMediaRecorder.instances.length - 1].stop();
+    await flush();
+    const engine = getListenInEngine(UID, WS);
+    await act(async () => {
+      await engine.flush();
+      await engine.flushSummary();
+    });
+    await flush();
+    const calls = summaryCalls.length;
+
+    // Closing and reopening the window many times is a VIEW event and costs
+    // nothing: no request, no revision, no regeneration.
+    for (let i = 0; i < 4; i += 1) {
+      closeWindow();
+      await flush();
+      openWindow();
+      await flush();
+    }
+    expect(summaryCalls.length).toBe(calls);
+    expect(windowApi.summary.revision).toBe(1);
   });
 });

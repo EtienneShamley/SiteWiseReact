@@ -256,8 +256,9 @@ describe("E. the durable store is reached only through the policy, and never by 
       }
     };
     walk(SRC);
+    // All THREE stores, the summary one included since 8D.2.
     const users = files
-      .filter((f) => /LISTEN_IN_(SESSION|CHUNK)_STORE/.test(fs.readFileSync(f, "utf8")))
+      .filter((f) => /LISTEN_IN_(SESSION|CHUNK|SUMMARY)_STORE/.test(fs.readFileSync(f, "utf8")))
       .map((f) => path.basename(f))
       .sort();
     // The schema owner and the one module that reads/writes them. No asset
@@ -269,5 +270,76 @@ describe("E. the durable store is reached only through the policy, and never by 
     expect(ENGINE).not.toMatch(/firebase|Storage|uploadBytes|assetUploadQueue|cloudSync/i);
     const STORE = withoutComments(read("lib/listenIn/listenInStore.js"));
     expect(STORE).not.toMatch(/firebase|uploadBytes|assetUploadQueue/i);
+  });
+});
+
+/* ============ F. the SUMMARY loop is the engine's (Phase 8D.2) =========== */
+//
+// The summary is a second long-running thing attached to a session, so the
+// same ownership rule as the capture applies to it: it lives in the engine,
+// the view only reads it, and no component can start, stop or lose one.
+// Behaviour is proved in listenInSummaryEngine.test.js and the rendered
+// suites; what is left here is WHERE the code lives.
+
+describe("F. the summary belongs to the engine, and the route has one client", () => {
+  const SUMMARY_MODEL = withoutComments(read("lib/listenIn/listenInSummaryModel.js"));
+  const SUMMARY_CLIENT = withoutComments(read("lib/listenIn/listenInSummaryClient.js"));
+
+  test("the summary loop runs in the engine, beside the capture and the drain", () => {
+    expect(ENGINE).toMatch(/async function runSummary\(\)/);
+    expect(ENGINE).toMatch(/function wakeSummary\(\)/);
+    expect(ENGINE).toMatch(/summarise = requestListenInSummary/);
+    // It is still not React.
+    expect(ENGINE).not.toMatch(/useState|useEffect|useCallback|from "react"/);
+  });
+
+  test("NO view file generates, merges or finalises a summary", () => {
+    for (const source of [HOOK, PROVIDER, DIALOG]) {
+      expect(source).not.toMatch(/requestListenInSummary|listenInSummaryClient/);
+      expect(source).not.toMatch(/\/api\/listen-in/);
+      expect(source).not.toMatch(/nextSummaryWindow|appendSummaryPart|mergeSummaryResults/);
+    }
+    // The window dispatches intents and nothing else.
+    expect(DIALOG).toMatch(/session\.regenerateSummary\(\)/);
+    expect(DIALOG).toMatch(/session\.editSummaryText\(value\)/);
+    expect(DIALOG).toMatch(/session\.retrySummary\(\)/);
+  });
+
+  test("exactly ONE module in the browser talks to the summary route", () => {
+    const files = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.js$/.test(entry.name) && !/\.test\.js$/.test(entry.name)) files.push(full);
+      }
+    };
+    walk(SRC);
+    const callers = files
+      .filter((f) => /\/api\/listen-in\/summary/.test(fs.readFileSync(f, "utf8")))
+      .map((f) => path.basename(f))
+      .sort();
+    expect(callers).toEqual(["listenInSummaryClient.js"]);
+    // …and it attaches identity the same way every other backend call does.
+    expect(SUMMARY_CLIENT).toMatch(/authorizedFetch/);
+    expect(SUMMARY_CLIENT).not.toMatch(/openai|api\.openai|Bearer /);
+  });
+
+  test("NO AUDIO can reach the summary route", () => {
+    expect(SUMMARY_CLIENT).not.toMatch(/Blob|FormData|audio|getChunkAudio/i);
+    // The engine's summary path sends transcript text only.
+    const run = ENGINE.slice(ENGINE.indexOf("async function runSummary()"), ENGINE.indexOf("async function bootstrap()"));
+    expect(run).not.toMatch(/getChunkAudio|Blob|FormData/);
+    expect(run).toMatch(/segments: window\.segments/);
+  });
+
+  test("the pure model holds no React, no storage and no network", () => {
+    expect(SUMMARY_MODEL).not.toMatch(/from "react"|useState|indexedDB|fetch\(|localStorage/);
+  });
+
+  test("a summary failure has no path to the capture at all", () => {
+    const run = ENGINE.slice(ENGINE.indexOf("async function runSummary()"), ENGINE.indexOf("async function bootstrap()"));
+    // The summary loop never stops, interrupts, discards or releases anything.
+    expect(run).not.toMatch(/releaseCapture|endCapture|interrupt\(|discard\(|stop\(/);
   });
 });
