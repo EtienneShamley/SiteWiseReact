@@ -975,3 +975,42 @@
     transition: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   LISTEN IN — the live-capture accent on the sidebar's Capture row (8D.1).
+
+   The row must be unmistakable while a meeting is being recorded, INCLUDING
+   when its window is closed and the user is working somewhere else entirely.
+   Colour is never the only signal: the button's accessible name, its title and
+   (at full width) the word-free but ticking elapsed clock all carry it too, and
+   `data-listen-in-state` carries it for tests and for styling.
+--------------------------------------------------------------------------- */
+.nw-listen-in-live {
+  outline: 2px solid rgb(220 38 38);
+  outline-offset: -2px;
+  background-color: rgb(254 242 242);
+}
+.dark .nw-listen-in-live {
+  outline-color: rgb(248 113 113);
+  background-color: rgb(69 10 10 / 0.5);
+}
+
+/* A slow pulse reads as "live" without demanding attention. Reduced-motion
+   users get the same solid dot, which is the signal; the motion is decoration. */
+.nw-listen-in-dot {
+  animation: nw-listen-in-pulse 2s ease-in-out infinite;
+}
+@keyframes nw-listen-in-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nw-listen-in-dot {
+    animation: none;
+  }
+}

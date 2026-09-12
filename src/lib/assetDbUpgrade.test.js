@@ -15,6 +15,8 @@ import {
   ASSET_DB_VERSION,
   ASSET_GC_OBSERVATION_STORE,
   ASSET_GC_RUN_STORE,
+  LISTEN_IN_CHUNK_STORE,
+  LISTEN_IN_SESSION_STORE,
   ASSET_REMOTE_INDEX_STORE,
   ASSET_STORE,
   ASSET_UPLOAD_QUEUE_STORE,
@@ -73,13 +75,20 @@ const ALL_STORES = [
   ASSET_UPLOAD_QUEUE_STORE,
   ASSET_GC_OBSERVATION_STORE,
   ASSET_GC_RUN_STORE,
+  // v4/v5 (Phase 8D.1). Listen In's two stores live in this database because
+  // it has the project's one opener — they are NOT assets, and no asset code
+  // path reads them. Creating them writes nothing, and v5 recreates them with
+  // the account in the key path (they can only ever be empty, because writing
+  // to them was refused by listenInPolicy.js for the whole of v4).
+  LISTEN_IN_SESSION_STORE,
+  LISTEN_IN_CHUNK_STORE,
 ].sort();
 
 describe("the v1 → current upgrade is additive", () => {
   test("the database opens at the current version with every store beside `assets`", async () => {
     // The first read through the module performs the upgrade.
     await listAssetIds();
-    expect(ASSET_DB_VERSION).toBe(3);
+    expect(ASSET_DB_VERSION).toBe(5);
     expect(await assetDbStoreNames()).toEqual(ALL_STORES);
   });
 
@@ -151,7 +160,7 @@ describe("the v2 → current upgrade is additive", () => {
     });
   });
 
-  test("the database opens at the current version with the two GC stores added", async () => {
+  test("the database opens at the current version with the later stores added", async () => {
     await listAssetIds();
     expect(await assetDbStoreNames()).toEqual(ALL_STORES);
   });

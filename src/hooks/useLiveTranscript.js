@@ -1,264 +1,111 @@
 // src/hooks/useLiveTranscript.js
 //
-// The Live Transcript SESSION: microphone → segmented MediaRecorder →
-// sequential batch transcription → the pure session model
-// (src/lib/liveTranscript.js). One instance lives in LiveTranscriptProvider
-// for the whole application, so the session survives closing the workspace
-// dialog, collapsing the sidebar, switching note views and resizing.
+// THE REACT ADAPTER for Listen In (Phase 8D.1) — a SUBSCRIBER, not an owner.
 //
-// What leaves the browser: ONLY the recorded audio segments, posted to this
-// application's own backend (`/api/transcribe`, src/hooks/useTranscription.js)
-// which forwards them to the configured transcription provider and returns
-// text. Nothing here stores audio: a segment Blob lives in memory until its
-// transcription resolves and is then dropped. The transcript text lives in
-// React state only — it reaches a note solely through an explicit "Insert into
-// note", and a file solely through an explicit export.
+// This hook used to be the whole feature: it held the microphone, the
+// MediaRecorder, the segment timer and the transcript in component state. It
+// no longer holds any of them. The session now lives in a plain
+// application-level engine (src/lib/listenIn/listenInEngine.js) kept in a
+// module-level registry OUTSIDE React, and this hook only reads it.
 //
-// Recording never touches a note, a template, a version, a section document
-// or the editors: this hook has no access to any of them.
+// That inversion is the point of the phase. While the session lived here, any
+// unmount of the component tree above it — closing a dialog that happened to
+// own it, a provider remounting, a route change — could end a recording. Now
+// there is no code path in the view layer that can: unmounting this hook
+// removes a listener and nothing else, and the capture carries on.
+//
+// The file keeps its name and its default export so its one consumer
+// (src/context/LiveTranscriptContext.js) is unchanged in shape. "Live
+// transcript" remains the internal technical name; the product feature is
+// Listen In.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useTranscription } from "./useTranscription";
+import { useSyncExternalStore } from "react";
+import { applyListenInIdentity, getListenInEngine } from "../lib/listenIn/listenInEngine";
+import { isAudioRecordingSupported } from "../lib/audioRecording";
 import {
-  LIVE_TRANSCRIPT_MESSAGE,
-  SEGMENT_MS,
-  beginRecording,
-  clearTranscript,
-  createLiveTranscriptState,
-  editTranscript,
-  enqueueSegment,
-  recorderReleased,
-  requestStop,
-  segmentDone,
-  segmentFailed,
-  segmentTranscribing,
-  setSessionError,
-} from "../lib/liveTranscript";
-import {
-  TRANSCRIPTION_LANGUAGE_AUTO,
-  normalizeTranscriptionLanguage,
-} from "../lib/transcriptionLanguage";
-// The recording facts shared with Quick Add dictation (src/hooks/useDictation.js):
-// the container negotiation, the support check and the one-recorder-at-a-time
-// microphone claim. Nothing above this line is shared — the session, the
-// segments and the insert action stay this feature's own.
-import { isAudioRecordingSupported, pickSupportedMime } from "../lib/audioRecording";
-import {
-  MICROPHONE_OWNER,
-  claimMicrophone,
-  releaseMicrophone,
-} from "../lib/microphoneOwnership";
+  LISTEN_IN_STATE,
+  isCapturing,
+  transcriptText,
+} from "../lib/listenIn/listenInModel";
 
 /** Whether this browser can record audio at all. */
 export function isLiveTranscriptSupported() {
   return isAudioRecordingSupported();
 }
 
-function microphoneInUseError() {
-  return new Error(LIVE_TRANSCRIPT_MESSAGE.MIC_IN_USE);
-}
+const EMPTY = Object.freeze({
+  uid: null,
+  workspaceId: null,
+  session: null,
+  chunks: [],
+  error: null,
+  pending: 0,
+  failed: 0,
+  survivesReload: false,
+  supported: false,
+});
 
-function unsupportedError() {
-  const err = new Error(LIVE_TRANSCRIPT_MESSAGE.UNSUPPORTED);
-  err.name = "NotSupportedError";
-  return err;
-}
+/**
+ * Subscribe to the engine of this ACCOUNT'S workspace. Both halves of the
+ * identity are required: signed out, or rendered above the data scope, there
+ * is no engine and the hook reports an empty, inert snapshot rather than
+ * inventing one — and a change of EITHER uid or workspace swaps the engine, so
+ * one account can never be handed another's session.
+ */
+export default function useLiveTranscript({ uid = null, workspaceId = null } = {}) {
+  const engineRef = useRef(null);
+  const current = engineRef.current;
+  const matches = current && current.uid === uid && current.workspaceId === workspaceId;
+  if (!matches) {
+    // The signed-in account changed under this hook. `AuthContext` already
+    // acts on the auth state itself, and this is the same call again — it is
+    // idempotent — so the boundary holds even if a uid reaches the view layer
+    // by some path that did not come through an auth snapshot.
+    if (!current || current.uid !== uid) applyListenInIdentity(uid);
+    engineRef.current = uid && workspaceId ? getListenInEngine(uid, workspaceId) : null;
+  }
+  const engine = engineRef.current;
 
-let segmentSeq = 0;
-const nextSegmentId = () => `seg-${Date.now().toString(36)}-${(segmentSeq += 1)}`;
-
-export default function useLiveTranscript({ segmentMs = SEGMENT_MS } = {}) {
-  const [state, setState] = useState(createLiveTranscriptState);
-  const [language, setLanguageState] = useState(TRANSCRIPTION_LANGUAGE_AUTO);
-  const languageRef = useRef(language);
-  languageRef.current = language;
-
-  const { transcribeBlob } = useTranscription();
-
-  const streamRef = useRef(null);
-  const recorderRef = useRef(null);
-  const chunksRef = useRef([]);
-  const cycleTimerRef = useRef(null);
-  // Sequential transcription queue: segments are transcribed in the order they
-  // were recorded, so their text lands in the transcript in speaking order.
-  const queueRef = useRef(Promise.resolve());
-  const mountedRef = useRef(true);
-  const mimeRef = useRef("");
-
-  useEffect(() => {
-    mountedRef.current = true;
-    mimeRef.current = pickSupportedMime();
-    return () => {
-      mountedRef.current = false;
-      if (cycleTimerRef.current) clearInterval(cycleTimerRef.current);
-      const mr = recorderRef.current;
-      try {
-        if (mr && mr.state === "recording") mr.stop();
-      } catch {
-        // already stopped
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
-      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
-    };
-  }, []);
-
-  const safeSet = useCallback((update) => {
-    if (!mountedRef.current) return;
-    setState(update);
-  }, []);
-
-  // A closed segment: hand its audio to the transcriber, in order.
-  const enqueue = useCallback(
-    (blob) => {
-      const id = nextSegmentId();
-      if (!blob || blob.size === 0) {
-        // Silence / nothing captured for this cycle: counted, no text.
-        safeSet((s) => segmentDone(enqueueSegment(s, { id }), { id, text: "" }));
-        return;
-      }
-      safeSet((s) => enqueueSegment(s, { id }));
-      queueRef.current = queueRef.current.then(async () => {
-        safeSet((s) => segmentTranscribing(s, { id }));
-        try {
-          const text = await transcribeBlob(blob, languageRef.current || TRANSCRIPTION_LANGUAGE_AUTO);
-          safeSet((s) => segmentDone(s, { id, text }));
-        } catch (e) {
-          safeSet((s) => segmentFailed(s, { id, error: e instanceof Error ? e : new Error("Transcription failed") }));
-        }
-      });
-    },
-    [safeSet, transcribeBlob]
+  const subscribe = useCallback(
+    (onChange) => (engine ? engine.subscribe(onChange) : () => {}),
+    [engine]
   );
+  const getSnapshot = useCallback(() => (engine ? engine.getSnapshot() : EMPTY), [engine]);
+  const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
-  // Start a recorder on the live stream. Its `onstop` closes the segment.
-  const startSegmentRecorder = useCallback(() => {
-    const stream = streamRef.current;
-    if (!stream) return false;
-    const opts = mimeRef.current ? { mimeType: mimeRef.current } : undefined;
-    let mr;
-    try {
-      mr = new MediaRecorder(stream, opts);
-    } catch (e) {
-      safeSet((s) => setSessionError(s, e));
-      return false;
-    }
-    const chunks = [];
-    chunksRef.current = chunks;
-    mr.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunks.push(e.data);
-    };
-    mr.onerror = (e) => safeSet((s) => setSessionError(s, e.error || e));
-    mr.onstop = () => {
-      const type = mimeRef.current || mr.mimeType || "audio/webm";
-      enqueue(new Blob(chunks, { type }));
-    };
-    mr.start();
-    recorderRef.current = mr;
-    return true;
-  }, [enqueue, safeSet]);
+  // Adopt whatever the workspace left behind — once per engine. Recovery is
+  // the engine's; this only asks for it at the first moment a UI exists.
+  const [bootstrapped, setBootstrapped] = useState(false);
+  useEffect(() => {
+    if (!engine || bootstrapped) return;
+    setBootstrapped(true);
+    void engine.bootstrap();
+  }, [engine, bootstrapped]);
 
-  // Close the current segment and open the next on the same stream.
-  const cycleSegment = useCallback(() => {
-    const mr = recorderRef.current;
-    if (!mr || mr.state !== "recording") return;
-    try {
-      mr.stop();
-    } catch {
-      return;
-    }
-    startSegmentRecorder();
-  }, [startSegmentRecorder]);
+  // NOTE: there is deliberately NO cleanup that stops, finishes or discards a
+  // session. Unmounting this hook must cost a recording nothing.
 
-  const start = useCallback(async () => {
-    if (!isLiveTranscriptSupported()) {
-      safeSet((s) => setSessionError(s, unsupportedError()));
-      return false;
-    }
-    // One recorder at a time: a Quick Add dictation in progress keeps the
-    // microphone until the user stops or discards it there.
-    if (!claimMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT).ok) {
-      safeSet((s) => setSessionError(s, microphoneInUseError()));
-      return false;
-    }
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e) {
-      safeSet((s) => setSessionError(s, e));
-      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
-      return false;
-    }
-    if (!mountedRef.current) {
-      stream.getTracks().forEach((t) => t.stop());
-      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
-      return false;
-    }
-    streamRef.current = stream;
-    safeSet((s) => beginRecording(s, { now: Date.now() }));
-    if (!startSegmentRecorder()) {
-      stream.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
-      safeSet((s) => recorderReleased(s));
-      return false;
-    }
-    if (cycleTimerRef.current) clearInterval(cycleTimerRef.current);
-    cycleTimerRef.current = setInterval(cycleSegment, segmentMs);
-    return true;
-  }, [safeSet, startSegmentRecorder, cycleSegment, segmentMs]);
-
-  const stop = useCallback(() => {
-    if (cycleTimerRef.current) {
-      clearInterval(cycleTimerRef.current);
-      cycleTimerRef.current = null;
-    }
-    const mr = recorderRef.current;
-    const stream = streamRef.current;
-    safeSet((s) => requestStop(s));
-    const release = () => {
-      if (stream) stream.getTracks().forEach((t) => t.stop());
-      if (streamRef.current === stream) streamRef.current = null;
-      recorderRef.current = null;
-      releaseMicrophone(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
-      safeSet((s) => recorderReleased(s));
-    };
-    if (mr && mr.state === "recording") {
-      const previous = mr.onstop;
-      mr.onstop = (ev) => {
-        try {
-          if (typeof previous === "function") previous(ev);
-        } finally {
-          release();
-        }
-      };
-      try {
-        mr.stop();
-      } catch {
-        release();
-      }
-    } else {
-      release();
-    }
-  }, [safeSet]);
-
-  const clear = useCallback(() => safeSet((s) => clearTranscript(s)), [safeSet]);
-  const edit = useCallback((text) => safeSet((s) => editTranscript(s, text)), [safeSet]);
-  const clearError = useCallback(() => safeSet((s) => setSessionError(s, null)), [safeSet]);
-  const setLanguage = useCallback((value) => {
-    setLanguageState(normalizeTranscriptionLanguage(value));
-  }, []);
-
+  const session = state.session;
   return {
+    engine,
     state,
-    language,
-    setLanguage,
-    start,
-    stop,
-    clear,
-    edit,
-    clearError,
+    session,
+    chunks: state.chunks,
+    error: state.error,
+    pending: state.pending,
+    failed: state.failed,
+    survivesReload: state.survivesReload,
     supported: isLiveTranscriptSupported(),
+    recording: isCapturing(session),
+    interrupted: !!session && session.state === LISTEN_IN_STATE.INTERRUPTED,
+    finishing: !!session && session.state === LISTEN_IN_STATE.FINISHING,
+    transcript: transcriptText(state.chunks),
+    start: useCallback((options) => (engine ? engine.start(options) : null), [engine]),
+    stop: useCallback(() => (engine ? engine.stop() : null), [engine]),
+    resume: useCallback(() => (engine ? engine.resume() : null), [engine]),
+    finish: useCallback(() => (engine ? engine.finish() : null), [engine]),
+    discard: useCallback(() => (engine ? engine.discard() : null), [engine]),
+    retryFailed: useCallback(() => (engine ? engine.retryFailed() : null), [engine]),
+    clearError: useCallback(() => (engine ? engine.clearError() : null), [engine]),
   };
 }

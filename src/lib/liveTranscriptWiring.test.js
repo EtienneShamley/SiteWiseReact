@@ -41,6 +41,9 @@ const LANGUAGE = withoutComments(read("lib/transcriptionLanguage.js"));
 const TRANSPORT = withoutComments(read("hooks/useTranscription.js"));
 const ROUTE = withoutComments(read("../routes/transcribe.js"));
 const VOICE_LANGUAGE_SELECT = withoutComments(read("components/VoiceLanguageSelect.js"));
+// Phase 8D.1: the capture moved out of the hook into a plain engine.
+const ENGINE = withoutComments(read("lib/listenIn/listenInEngine.js"));
+const LISTEN_IN_MODEL = withoutComments(read("lib/listenIn/listenInModel.js"));
 
 const NOTE_MAIN = MAIN_AREA.slice(
   MAIN_AREA.lastIndexOf('<main className="flex-1 min-w-0 h-full min-h-0 flex flex-col p-4 gap-3">')
@@ -61,20 +64,27 @@ describe("1–4. Live transcript in the sidebar's CAPTURE group, both widths, dr
     expect(thisNote).toBeLessThan(capture);
     expect(capture).toBeLessThan(workspace);
     expect(CAPTURE_GROUP).toMatch(/<SidebarGroupHeading>Capture<\/SidebarGroupHeading>/);
-    expect(CAPTURE_GROUP).toMatch(/\{!collapsed && <span className="flex-1 truncate">Live transcript<\/span>\}/);
+    // The product feature is LISTEN IN (Phase 8D.1); "live-transcript" survives
+    // only as the internal hook/data-attribute name, which is deliberate.
+    expect(CAPTURE_GROUP).toMatch(/\{!collapsed && <span className="flex-1 truncate">Listen In<\/span>\}/);
+    expect(CAPTURE_GROUP).not.toMatch(/>Live transcript</);
     expect(CAPTURE_GROUP).toContain('data-nw-capture="live-transcript"');
   });
 
   test("2/3. the rail keeps the row as a microphone icon with tooltip + accessible name and a worded recording state", () => {
     expect(CAPTURE_GROUP).toMatch(/<FaMicrophone className="shrink-0" aria-hidden="true" \/>/);
-    expect(CAPTURE_GROUP).toMatch(/aria-label=\{liveTranscript\.recording \? "Live transcript — recording" : "Live transcript"\}/);
-    expect(CAPTURE_GROUP).toMatch(/collapsed\s*\n\s*\? liveTranscript\.recording \? "Live transcript — recording" : "Live transcript"/);
+    // The accessible name carries the live state AND the elapsed time, so the
+    // recording is never signalled by colour alone.
+    expect(CAPTURE_GROUP).toMatch(/`Listen In — recording, \$\{listenInElapsedLabel\}`/);
+    expect(CAPTURE_GROUP).toMatch(/: "Listen In"/);
+    expect(CAPTURE_GROUP).toMatch(/data-listen-in-state=/);
     // Open state = the workspace's own open state; a dialog trigger.
     expect(CAPTURE_GROUP).toContain("open: liveTranscript.open,");
     expect(CAPTURE_GROUP).toContain('aria-haspopup="dialog"');
     // Rail: a red dot; expanded: a red dot + the word "Recording".
-    expect(CAPTURE_GROUP).toMatch(/absolute top-1 right-1 h-2 w-2 rounded-full bg-red-600/);
-    expect(CAPTURE_GROUP).toMatch(/Recording\s*\n\s*<\/>/);
+    expect(CAPTURE_GROUP).toMatch(/absolute top-1 right-1 h-2\.5 w-2\.5 rounded-full bg-red-600/);
+    expect(CAPTURE_GROUP).toMatch(/nw-listen-in-live/);
+    expect(CAPTURE_GROUP).toMatch(/\{listenInElapsedLabel\}/);
   });
 
   test("4. choosing it from the narrow-viewport drawer opens the workspace and closes the drawer", () => {
@@ -135,44 +145,56 @@ describe("5/12. one session, owned above the sidebar and the workspace", () => {
     expect(close).not.toMatch(/stop\(|clear\(/);
   });
 
-  test("6/7. start/stop are the session's; the workspace's one record control drives them with a live pressed state", () => {
-    expect(HOOK).toMatch(/const start = useCallback\(async \(\) => \{/);
-    expect(HOOK).toMatch(/const stop = useCallback\(\(\) => \{/);
-    expect(DIALOG).toMatch(/if \(recording\) session\.stop\(\);\s*\n\s*else if \(!stopping\) session\.start\(\);/);
+  test("6/7. start/stop are the ENGINE's; the window's one record control drives them with a live pressed state", () => {
+    // Phase 8D.1: start/stop live in the engine outside React. The hook only
+    // forwards them, and the window only dispatches.
+    expect(ENGINE).toMatch(/async function start\(\{ language = "auto"/);
+    expect(ENGINE).toMatch(/const stop = \(options = \{\}\) => endCapture\(/);
+    expect(HOOK).toMatch(/start: useCallback\(\(options\) => \(engine \? engine\.start\(options\) : null\)/);
+    expect(HOOK).toMatch(/stop: useCallback\(\(\) => \(engine \? engine\.stop\(\) : null\)/);
+    expect(DIALOG).toMatch(/if \(recording\) session\.stop\(\);\s*\n\s*else if \(!stopping\) session\.start\(\{ language: session\.language \}\);/);
     expect(DIALOG).toMatch(/aria-pressed=\{recording\}/);
     expect(DIALOG).toMatch(/aria-label=\{recordLabel\}/);
     expect(DIALOG).toContain('const recordLabel = recording ? "Stop recording" : "Start recording";');
     expect(DIALOG).toMatch(/danger: recording,/);
   });
 
-  test("8. segmented recording over the batch engine — segments transcribed in order, text appended as FINAL", () => {
-    expect(HOOK).toMatch(/cycleTimerRef\.current = setInterval\(cycleSegment, segmentMs\);/);
-    expect(HOOK).toMatch(/queueRef\.current = queueRef\.current\.then\(async \(\) => \{/);
-    expect(HOOK).toMatch(/safeSet\(\(s\) => segmentDone\(s, \{ id, text \}\)\);/);
-    expect(MODEL).toMatch(/transcript: appendTranscriptText\(state\.transcript, trimmed\),/);
-    // No invented interim words anywhere: the transcript is only ever set by
-    // segmentDone (append) or the user's own edit.
-    expect(MODEL.match(/transcript:/g).length).toBe(3); // create, segmentDone, editTranscript
-    expect(HOOK).not.toMatch(/interim|partial/i);
+  test("8. chunked recording over the batch engine — chunks transcribed in order, each its own transcript segment", () => {
+    // The recorder is closed and reopened on a timer, so every chunk is a
+    // COMPLETE container; the drain then transcribes them in sequence order.
+    expect(ENGINE).toMatch(/rollTimer = setInterval_\(rollChunk, chunkMs\);/);
+    expect(ENGINE).toMatch(/mr\.stop\(\);\s*\n\s*\} catch \{\s*\n\s*return;\s*\n\s*\}\s*\n\s*openRecorder\(\);/);
+    expect(ENGINE).toMatch(/for \(const chunk of drainableChunks\(chunks, \{ maxAttempts: maxAutoAttempts \}\)\)/);
+    // There is no canonical transcript STRING: the ordered chunks are the
+    // transcript, and the joined form is derived on every read.
+    expect(LISTEN_IN_MODEL).toMatch(/export function transcriptText\(chunks\)/);
+    expect(LISTEN_IN_MODEL).toMatch(/export function transcriptSegments\(session, chunks\)/);
+    // No invented interim words anywhere.
+    expect(ENGINE).not.toMatch(/interim|partial/i);
   });
 
-  test("9/10. permission denial, no device, unsupported browser and provider failure land in the session error and the workspace alert", () => {
-    expect(HOOK).toMatch(/if \(!isLiveTranscriptSupported\(\)\) \{\s*\n\s*safeSet\(\(s\) => setSessionError\(s, unsupportedError\(\)\)\);/);
-    expect(HOOK).toMatch(/stream = await navigator\.mediaDevices\.getUserMedia\(\{ audio: true \}\);\s*\n\s*\} catch \(e\) \{\s*\n\s*safeSet\(\(s\) => setSessionError\(s, e\)\);/);
-    expect(HOOK).toMatch(/segmentFailed\(s, \{ id, error:/);
-    expect(DIALOG).toContain("liveTranscriptErrorMessage(state.error)");
+  test("9/10. permission denial, no device, unsupported browser and provider failure land in the session error and the window alert", () => {
+    expect(ENGINE).toMatch(/if \(!recorderSupported\(\)\) \{/);
+    expect(ENGINE).toMatch(/opened = await getUserMedia\(\{ audio: true \}\);/);
+    expect(ENGINE).toMatch(/releaseMicrophone\(MICROPHONE_OWNER\.LISTEN_IN\);\s*\n\s*throw e;/);
+    expect(ENGINE).toMatch(/state: CHUNK_STATE\.FAILED,/);
+    expect(DIALOG).toContain("liveTranscriptErrorMessage(session.error)");
     expect(DIALOG).toMatch(/role="alert"/);
     expect(DIALOG).toMatch(/disabled=\{busy \|\| !session\.supported\}/);
-    // A failed start never leaves the app "recording": beginRecording is only
-    // reached after getUserMedia resolved.
-    const start = HOOK.slice(HOOK.indexOf("const start = useCallback("), HOOK.indexOf("const stop = useCallback("));
-    expect(start.indexOf("getUserMedia")).toBeLessThan(start.indexOf("beginRecording"));
+    // A failed start never leaves the app "recording": the session header is
+    // only saved after the microphone actually opened.
+    const start = ENGINE.slice(ENGINE.indexOf("async function start("), ENGINE.indexOf("async function endCapture("));
+    expect(start.indexOf("await openCapture()")).toBeLessThan(start.indexOf("await saveSession(fresh)"));
     expect(TRANSPORT).toContain('e?.name === "AbortError" ? "Request timed out" : "Network error"');
   });
 
-  test("11. an empty transcript is handled: actions disabled, an honest EMPTY message, no insertion", () => {
-    expect(DIALOG).toMatch(/disabled=\{!ready \|\| !canInsert\}/);
-    expect(DIALOG).toMatch(/if \(!session \|\| !ready\) \{\s*\n\s*notice\.showError\(LIVE_TRANSCRIPT_MESSAGE\.EMPTY\);\s*\n\s*return;/);
+  test("11. an empty session is handled: Export and Copy disabled, an honest EMPTY message", () => {
+    // A session with nothing in it cannot be exported or copied. There is no
+    // "insert" branch any more: a Listen In result is exported, not pushed
+    // into whichever note happens to be open.
+    expect(DIALOG).toMatch(/disabled=\{!canExport\}/);
+    expect(DIALOG).toMatch(/const canExport = ready \|\| hasSummaryText;/);
+    expect(DIALOG).toMatch(/if \(!ready\) \{\s*\n\s*notice\.showError\(LIVE_TRANSCRIPT_MESSAGE\.EMPTY\);\s*\n\s*return;/);
   });
 });
 
@@ -195,15 +217,23 @@ describe("13–16. transcription language: real auto-detect, explicit choice, no
   });
 
   test("14. an explicit language is passed for EVERY segment through the transport", () => {
-    expect(HOOK).toContain("transcribeBlob(blob, languageRef.current || TRANSCRIPTION_LANGUAGE_AUTO)");
+    // Each chunk carries the language the SESSION started in, so a long
+    // capture is transcribed consistently end to end.
+    expect(ENGINE).toContain("transcribe(audio, chunk.language || session.language)");
+    expect(LISTEN_IN_MODEL).toMatch(/language: language \|\| null,/);
     expect(TRANSPORT).toContain('form.append("language", language);');
     expect(VOICE_LANGUAGE_SELECT).toContain("TRANSCRIPTION_LANGUAGES.map");
     expect(VOICE_LANGUAGE_SELECT).toContain('aria-label="Transcription language"');
     expect(DIALOG).toMatch(/<VoiceLanguageSelect\s*\n\s*value=\{session\.language\}\s*\n\s*onChange=\{session\.chooseLanguage\}/);
   });
 
-  test("15. the open note's remembered TRANSCRIPTION language seeds an empty session, never a live one", () => {
-    expect(PROVIDER).toMatch(/if \(!currentNoteId \|\| !sessionEmpty\) return;\s*\n\s*setLanguage\(loadTranscriptionLanguage\(currentNoteId\)\);/);
+  test("15. the open note's remembered TRANSCRIPTION language seeds the NEXT session, never a live one", () => {
+    // The provider holds the language for the next capture only; a running
+    // session's language was snapshotted into its own header at start, so a
+    // note switch can no longer reach it at all.
+    expect(PROVIDER).toMatch(/setLanguageState\(loadTranscriptionLanguage\(currentNoteId\)\);/);
+    expect(ENGINE).toMatch(/async function start\(\{ language = "auto"/);
+    expect(LISTEN_IN_MODEL).toMatch(/export function createSession\(\{[\s\S]*?language,/);
     expect(LANGUAGE).toContain('export const TRANSCRIPTION_LANGUAGE_MEMORY_KEY = "sitewise-note-voice-lang-v1";');
   });
 
@@ -225,34 +255,36 @@ describe("10–13. with nowhere to insert, everything else still works and nothi
     MAIN_AREA.indexOf("const activeView =")
   );
 
-  test("10. a destination exists only when the note workspace is showing a note; otherwise Insert is disabled WITH a reason", () => {
+  test("10. the window no longer inserts into a note at all — a session is exported, not inserted", () => {
+    // The registration still exists: MainArea keeps it, other features use the
+    // shared insertion path, and 8D.1's report says only Listen In's EXPOSURE
+    // of it is removed.
     expect(registration).toContain('const transcriptTargetReady = workspace === "projects" && !!noteTitle;');
     expect(registration).toMatch(/canInsert: transcriptTargetReady,/);
-    expect(registration).toMatch(/reason: transcriptTargetReady\s*\n\s*\? ""\s*\n\s*: workspace === "projects"\s*\n\s*\? LIVE_TRANSCRIPT_MESSAGE\.NO_NOTE\s*\n\s*: LIVE_TRANSCRIPT_MESSAGE\.NOT_IN_NOTE_WORKSPACE,/);
-    // The workspace disables Insert and states the reason in the panel — never
-    // only as a tooltip on a disabled control.
-    expect(DIALOG).toContain("const canInsert = !!insertTarget?.canInsert;");
-    expect(DIALOG).toMatch(/disabled=\{!ready \|\| !canInsert\}/);
-    expect(DIALOG).toMatch(/\{!canInsert && ready && \(/);
-    expect(DIALOG).toMatch(/if \(!canInsert\) \{\s*\n\s*notice\.showError\(insertReason\);/);
-    expect(MODEL).toMatch(/NO_NOTE: "Open a note to insert this transcript into it\.",/);
-    expect(MODEL).toMatch(/NOT_IN_NOTE_WORKSPACE:/);
+    // …but the window offers no way to use it.
+    expect(DIALOG).not.toMatch(/Insert into note|Insert summary/);
+    expect(DIALOG).not.toMatch(/handleInsert|insertTranscript|canInsert|insertReason/);
+    // Its only remaining read of the target is the note's NAME, for context in
+    // the header — nothing that writes.
+    expect(DIALOG).toMatch(/const noteTitle = session\?\.insertTarget\?\.noteTitle \|\| "";/);
   });
 
   test("11. record, stop, edit, copy, export, summarise and clear are NOT gated on a destination", () => {
     for (const marker of [
       "onClick={handleToggleRecording}",
-      "onChange={(e) => session.edit(e.target.value)}",
+      // The transcript is DERIVED from the ordered chunks (8D.1), so the
+      // pre-8D.2 window renders it read-only rather than editing a string.
+      "readOnly",
       "onClick={handleCopy}",
-      "onClick={() => handleExport(TRANSCRIPT_EXPORT_FORMAT.TXT)}",
-      "onClick={() => handleExport(TRANSCRIPT_EXPORT_FORMAT.MD)}",
+      // ONE Export action, opening the chooser — not a button per format.
+      "onClick={() => setExportOpen(true)}",
       "onClick={handleSummarise}",
       "onClick={handleClear}",
     ]) {
       expect(DIALOG).toContain(marker);
     }
-    // Their disabled conditions mention readiness/recording — never canInsert.
-    for (const handler of ["handleCopy", "handleExport", "handleSummarise", "handleToggleRecording", "handleClear"]) {
+    // Their disabled conditions mention readiness/recording — never a note.
+    for (const handler of ["handleCopy", "handleSummarise", "handleToggleRecording", "handleClear"]) {
       const from = DIALOG.indexOf(`const ${handler} = useCallback(`);
       expect(from).toBeGreaterThan(-1);
       // Up to the next top-level declaration — the banner comments are
@@ -290,9 +322,10 @@ describe("10–13. with nowhere to insert, everything else still works and nothi
     for (const source of [MAIN_AREA, SIDEBAR, APP]) {
       expect(source).not.toMatch(/liveTranscript\??\.(stop|clear)\(/);
     }
-    // The provider re-seeds the language ONLY into an empty session, so a note
-    // switch cannot change the language of a running capture.
-    expect(PROVIDER).toMatch(/if \(!currentNoteId \|\| !sessionEmpty\) return;/);
+    // A running capture's language is its own session header's, so a note
+    // switch cannot reach it. The provider only holds the NEXT one's.
+    expect(PROVIDER).not.toMatch(/session\.setLanguage|engine\.setLanguage/);
+    expect(PROVIDER).toMatch(/const \[language, setLanguageState\] = useState/);
     // Stop lives in the workspace, which is shell-level and always openable
     // from the always-present sidebar row.
     expect(DIALOG).toMatch(/if \(recording\) session\.stop\(\);/);
@@ -321,10 +354,11 @@ describe("17–21. insertion is the shared editor path — a normal transaction,
 
   test("19/20/21. no direct storage write, no setContent, no HTML string; the editor transaction is what undo/autosave see", () => {
     expect(insert).not.toMatch(/localStorage|saveNoteTemplateInstance|setRowSectionDoc|setContent\(|insertContent\(|dangerouslySetInnerHTML/);
-    // The dialog hands over PLAIN TEXT and reports delivery honestly.
-    expect(DIALOG).toMatch(/const delivered = typeof onInsert === "function" \? onInsert\(state\.transcript\) : false;/);
-    expect(DIALOG).toContain("const onInsert = session?.insertTranscript;");
+    // The shared insertion path is untouched — MainArea still registers it and
+    // other features still use it. What changed is that LISTEN IN no longer
+    // exposes it: a session is a result to export, not text for the open note.
     expect(MAIN_AREA).toMatch(/insert: \(text\) => liveTranscriptInsertRef\.current\?\.\(text\) === true,/);
+    expect(DIALOG).not.toMatch(/onInsert|insertTranscript/);
     expect(DIALOG).not.toMatch(/<audio|blob:|insertContent/);
     // The composer route is a retained-editor transaction (Quick Add's).
     const templateDoc = withoutComments(read("components/template/NoteTemplateDoc.js"));
@@ -341,11 +375,21 @@ describe("22–24. copy and export", () => {
     expect(DIALOG).toContain('notice.showInfo("Transcript copied.");');
   });
 
-  test("23/24. TXT and Markdown exports through the pure builder and the shared download helper — no second export architecture", () => {
-    expect(DIALOG).toMatch(/handleExport\(TRANSCRIPT_EXPORT_FORMAT\.TXT\)/);
-    expect(DIALOG).toMatch(/handleExport\(TRANSCRIPT_EXPORT_FORMAT\.MD\)/);
-    expect(DIALOG).toMatch(/downloadExportFile\(file\.name, new Blob\(\[file\.text\], \{ type: file\.mimeType \}\)\);/);
+  test("23/24. ONE Export action opening a chooser — and no second export architecture", () => {
+    // The footer carries one Export; the format buttons are gone.
+    expect(DIALOG).toMatch(/onClick=\{\(\) => setExportOpen\(true\)\}/);
+    expect(DIALOG).not.toMatch(/Export \.txt|Export \.md|TRANSCRIPT_EXPORT_FORMAT/);
+    expect(DIALOG).toMatch(/<ListenInExportDialog/);
+    // The dialog itself builds nothing: neither it nor the chooser reaches a
+    // renderer directly — every format but plain text is a canonical producer.
     expect(DIALOG).not.toMatch(/html2pdf|html-to-docx|jsPDF|createObjectURL/);
+    const CHOOSER = withoutComments(read("components/ListenInExportDialog.js"));
+    expect(CHOOSER).not.toMatch(/html2pdf|html-to-docx|jsPDF|turndown/);
+    expect(CHOOSER).toMatch(/buildFreeformPdfFile/);
+    expect(CHOOSER).toMatch(/buildFreeformDocxFile/);
+    expect(CHOOSER).toMatch(/buildFreeformHtmlFile/);
+    expect(CHOOSER).toMatch(/buildFreeformMarkdownFile/);
+    expect(CHOOSER).toMatch(/downloadExportFile/);
   });
 });
 
@@ -407,12 +451,12 @@ describe("29/30. the old Listening / Auto-detect strip and the composer's privat
     // The blob:<audio> insertion into the editor stays gone.
     expect(BOTTOM_BAR).not.toMatch(/<audio/);
     expect(BOTTOM_BAR).not.toMatch(/insertContent\([\s\S]{0,120}audio/);
-    // Exactly two places call transcribeBlob: one per voice workflow.
+    // Exactly two places reach the transport: one per voice workflow.
     const callers = allSourceFiles()
-      .filter((file) => /transcribeBlob\(/.test(fs.readFileSync(file, "utf8")))
+      .filter((file) => /transcribeBlob\(|transcribe\(audio,/.test(fs.readFileSync(file, "utf8")))
       .map((file) => path.basename(file))
       .sort();
-    expect(callers).toEqual(["useDictation.js", "useLiveTranscript.js"]);
+    expect(callers).toEqual(["listenInEngine.js", "useDictation.js"]);
     expect(MAIN_AREA).not.toMatch(/onOpenLiveTranscript/);
     // This workspace is still opened from the sidebar's Capture entry alone.
     expect(SIDEBAR).toMatch(/liveTranscript\.openWorkspace\(e\.currentTarget\)/);
@@ -506,12 +550,14 @@ describe("accessibility and data flow", () => {
     expect(MODEL).toMatch(/export function liveTranscriptStatusLabel\(state\)/);
   });
 
-  test("audio goes only to this application's backend; nothing is stored; the transcript reaches a note only by explicit insertion", () => {
+  test("audio goes only to this application's backend, and a result leaves only as an explicit export", () => {
     expect(TRANSPORT).toMatch(/fetchWithTimeout\(`\$\{API_BASE\}\/api\/transcribe`/);
     expect(TRANSPORT).not.toMatch(/openai\.com|api\.openai/);
     expect(ROUTE).toContain("multer.memoryStorage()");
     expect(ROUTE).not.toMatch(/fs\.write|diskStorage|createWriteStream/);
     expect(HOOK).not.toMatch(/localStorage|indexedDB/);
-    expect(DIALOG.match(/onInsert\(/g).length).toBe(2); // transcript + summary, both explicit
+    // A Listen In result now leaves the session only as a FILE the user asked
+    // for, or the clipboard — never by being pushed into the open note.
+    expect(DIALOG).not.toMatch(/onInsert\(/);
   });
 });

@@ -19,7 +19,11 @@
 
 export const MICROPHONE_OWNER = Object.freeze({
   QUICK_ADD_DICTATION: "quick-add-dictation",
+  // Listen In (Phase 8D.1). The id keeps its original spelling on purpose:
+  // it is a stored/compared value, and "live-transcript" remains the internal
+  // technical name of the same workflow the product now calls Listen In.
   LIVE_TRANSCRIPT: "live-transcript",
+  LISTEN_IN: "live-transcript",
 });
 
 let owner = null;

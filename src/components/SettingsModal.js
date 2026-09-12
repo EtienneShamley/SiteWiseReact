@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useOptionalDataScope } from "../context/DataScopeContext";
+import { activeCaptureWarning } from "../lib/listenIn/listenInEngine";
 import { SYNC_STATUS, syncFailureMessage } from "../lib/cloud/cloudSync";
 import { ASSET_SYNC_STATUS, assetSyncFailureMessage } from "../lib/cloud/assetUploadSync";
 import { RETRY_UPLOADS_LABEL, assetSyncAttentionLine, assetSyncStatusLine, useAssetUploadStatus } from "./AssetUploadStatus";
@@ -116,6 +117,16 @@ export default function SettingsModal({ open, onClose }) {
 
   const handleSignOut = async () => {
     if (busy) return;
+    // A LIVE LISTEN IN CAPTURE IS NEVER DISCARDED SILENTLY. Signing out ends
+    // the workspace session, and with it the engine, so an active recording
+    // must be resolved by the person who started it — the sign-out is REFUSED
+    // with a sentence naming what to do, and nothing is stopped on their
+    // behalf. This reads one module-level fact and adds no auth coupling.
+    const capturing = activeCaptureWarning();
+    if (capturing) {
+      setNotice(capturing);
+      return;
+    }
     setBusy(true);
     try {
       // Flush what this browser still holds for the account before the

@@ -471,7 +471,7 @@ describe("the workspace tells a notice from a failure", () => {
     // Session errors come from the session model (state.error), are worded by
     // liveTranscriptErrorMessage, render as an alert, and clear only by an
     // explicit Dismiss or the next start/clear — no timer.
-    expect(DIALOG).toContain("liveTranscriptErrorMessage(state.error)");
+    expect(DIALOG).toContain("liveTranscriptErrorMessage(session.error)");
     expect(DIALOG).toMatch(/<p role="alert" className="text-xs text-red-700 dark:text-red-300">/);
     expect(DIALOG).toContain("onClick={session.clearError}");
     expect(liveTranscriptErrorMessage({ name: "NotAllowedError", message: "x" })).toMatch(/Microphone access was blocked/);

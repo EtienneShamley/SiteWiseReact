@@ -7,6 +7,7 @@ import SettingsModal from "./components/SettingsModal";
 import TemplateBuilderModal from "./components/template/TemplateBuilderModal";
 import useMediaQuery from "./hooks/useMediaQuery";
 import { LiveTranscriptProvider } from "./context/LiveTranscriptContext";
+import { activeCaptureWarning } from "./lib/listenIn/listenInEngine";
 import LiveTranscriptDialog from "./components/LiveTranscriptDialog";
 import { runTemplateMigration } from "./lib/templateMigration";
 import { useAppState } from "./context/AppStateContext";
@@ -70,11 +71,31 @@ function App() {
     runTemplateMigration();
   }, []);
 
+  // THE UNLOAD GUARD, and only while it is honest. A live Listen In capture
+  // cannot survive the tab closing — the microphone goes with the process —
+  // so the browser's own "leave site?" prompt is the last chance to say so.
+  // It is armed ONLY while something is actually recording: a prompt on every
+  // reload would train the user to dismiss it, and the whole value of this one
+  // is that it is rare. It never stops the capture and never blocks anything;
+  // the browser decides whether to show it at all.
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const onBeforeUnload = (event) => {
+      if (!activeCaptureWarning()) return undefined;
+      event.preventDefault();
+      // Browsers ignore custom text; a non-empty returnValue is the signal.
+      event.returnValue = "";
+      return "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
   return (
     <ThemeProvider>
-    {/* ONE Live Transcript session for the whole shell — the sidebar opens it,
-        MainArea renders its workspace and inserts from it, and it survives
-        every layout change (see src/context/LiveTranscriptContext.js). */}
+    {/* The Listen In UI adapter. The SESSION itself lives in the engine
+        outside React (src/lib/listenIn/listenInEngine.js), so it survives this
+        provider, every layout change and every unmount below it. */}
     <LiveTranscriptProvider>
       {/* The application shell is exactly one viewport tall (h-screen; 100dvh
           where the browser supports it, so mobile browser chrome cannot hide
@@ -123,11 +144,12 @@ function App() {
           open={templateLibraryOpen}
           onClose={() => setTemplateLibraryOpen(false)}
         />
-        {/* The Live Transcript workspace is SHELL-level, like the dialogs
-            above: it must open, record, stop and stay readable in every
-            workspace — with a note, with none, and in the PDFs workspace,
-            which MainArea's note branch never renders. Where a transcript
-            would go is registered with the session by MainArea. */}
+        {/* The Listen In window is SHELL-level, like the dialogs above: it must
+            open, stop and stay readable in every workspace — with a note, with
+            none, and in the PDFs workspace, which MainArea's note branch never
+            renders. Closing it closes the VIEW; the capture belongs to the
+            engine and carries on. Where a transcript would go is registered
+            with the session by MainArea. */}
         <LiveTranscriptDialog />
       </div>
     </LiveTranscriptProvider>

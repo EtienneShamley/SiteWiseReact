@@ -73,44 +73,50 @@ async function fetchWithTimeout(resource, options = {}) {
   }
 }
 
+/**
+ * The transport itself, as a plain function (Phase 8D.1). `useTranscription`
+ * below is a thin wrapper kept for the two React callers; the Listen In
+ * engine is not a component and calls this directly. One implementation, so
+ * the deadline, the abort relay and the error contract cannot diverge.
+ */
+export async function transcribeAudioBlob(blob, language = "auto", { timeoutMs, signal } = {}) {
+  const form = new FormData();
+  form.append("audio", blob, "audio.webm");
+  form.append("language", language); // ✅ send plain string
+
+  let resp;
+  try {
+    resp = await fetchWithTimeout(`${API_BASE}/api/transcribe`, {
+      method: "POST",
+      body: form,
+      timeout: resolveTranscribeTimeout(timeoutMs),
+      signal,
+    });
+  } catch (e) {
+    if (e instanceof ApiAuthError) throw authErrorFor(e.outcome);
+    const msg =
+      e?.name === "AbortError" ? "Request timed out" : "Network error";
+    throw new Error(msg);
+  }
+
+  const authOutcome = await apiAuthOutcomeForResponse(resp);
+  if (authOutcome) throw authErrorFor(authOutcome);
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch {
+    const txt = await resp.text();
+    data = { error: txt };
+  }
+
+  if (!resp.ok) {
+    throw new Error(data?.error || "Transcription failed");
+  }
+
+  return data.text || "";
+}
+
 export function useTranscription() {
-  const transcribeBlob = async (blob, language = "auto", { timeoutMs, signal } = {}) => {
-    const form = new FormData();
-    form.append("audio", blob, "audio.webm");
-    form.append("language", language); // ✅ send plain string
-
-    let resp;
-    try {
-      resp = await fetchWithTimeout(`${API_BASE}/api/transcribe`, {
-        method: "POST",
-        body: form,
-        timeout: resolveTranscribeTimeout(timeoutMs),
-        signal,
-      });
-    } catch (e) {
-      if (e instanceof ApiAuthError) throw authErrorFor(e.outcome);
-      const msg =
-        e?.name === "AbortError" ? "Request timed out" : "Network error";
-      throw new Error(msg);
-    }
-
-    const authOutcome = await apiAuthOutcomeForResponse(resp);
-    if (authOutcome) throw authErrorFor(authOutcome);
-
-    let data;
-    try {
-      data = await resp.json();
-    } catch {
-      const txt = await resp.text();
-      data = { error: txt };
-    }
-
-    if (!resp.ok) {
-      throw new Error(data?.error || "Transcription failed");
-    }
-
-    return data.text || "";
-  };
-
-  return { transcribeBlob };
+  return { transcribeBlob: transcribeAudioBlob };
 }

@@ -1,12 +1,24 @@
 // src/components/LiveTranscriptDialog.js
 //
-// THE LIVE TRANSCRIPT WORKSPACE — a focused capture surface for sustained
-// speech, opened from the sidebar's CAPTURE group (or the composer's
-// microphone shortcut, which opens this same session). It is deliberately not
-// the composer: the composer is quick manual/attachment capture; this is a
-// transcription workflow with its own language, start/stop, readable growing
-// transcript, and completion actions (Insert into note / Copy / Export /
-// Summarise / Clear).
+// THE LISTEN IN WINDOW — a VIEW of the capture session, and only a view
+// (Phase 8D.1).
+//
+// It is opened from the sidebar's CAPTURE group. It is deliberately not the
+// composer: the composer is quick manual/attachment capture and Quick Add
+// dictation; this is passive meeting capture with its own language,
+// start/stop, readable growing transcript, and completion actions.
+//
+// IT OWNS NO RECORDING. The session lives in the Listen In engine outside
+// React (src/lib/listenIn/listenInEngine.js); this component reads a snapshot
+// and dispatches explicit intents. CLOSING IT CLOSES THE VIEW — `Close` and
+// `Escape` call `closeWorkspace`, which sets one boolean, and there is no
+// unmount cleanup here at all. A capture keeps running while the user works
+// anywhere else, and clicking the sidebar row brings them back to the same
+// session.
+//
+// This is the PRE-8D.2 window, kept deliberately as-is apart from its wiring:
+// the redesigned Summary/Transcript workspace is the next phase, and
+// rebuilding it here would be work thrown away.
 //
 //   Live transcript
 //   ─────────────────────────────────────────
@@ -35,23 +47,19 @@ import { useLiveTranscriptSession } from "../context/LiveTranscriptContext";
 import useTransientMessage from "../hooks/useTransientMessage";
 import { useRefine } from "../hooks/useRefine";
 import { actionButtonClass, iconButtonClass } from "../lib/interactionStyles";
-import { downloadExportFile } from "../lib/templateExport";
 import { MEETING_NOTES_STYLE } from "../lib/refineContract";
 import { MESSAGE_TONE } from "../lib/transientMessage";
+import { LIVE_TRANSCRIPT_MESSAGE, liveTranscriptErrorMessage } from "../lib/liveTranscript";
 import {
-  LIVE_TRANSCRIPT_MESSAGE,
-  TRANSCRIPT_EXPORT_FORMAT,
-  buildTranscriptExport,
+  LISTEN_IN_MESSAGE,
+  LISTEN_IN_STATE,
+  elapsedMs as sessionElapsedMs,
   formatElapsed,
-  hasTranscript,
-  isRecording,
-  isStopping,
-  isTranscribing,
-  liveTranscriptErrorMessage,
-  liveTranscriptStatusLabel,
-  pendingSegmentCount,
-} from "../lib/liveTranscript";
-import { transcriptionLanguageLabel } from "../lib/transcriptionLanguage";
+  isCapturing,
+  listenInStatusLabel,
+  needsRecoveryWarning,
+} from "../lib/listenIn/listenInModel";
+import ListenInExportDialog from "./ListenInExportDialog";
 
 // How long a completion notice ("Copied.", "Inserted into note.") stays.
 export const LIVE_TRANSCRIPT_TRANSIENT_MS = 4000;
@@ -63,41 +71,46 @@ export const LIVE_TRANSCRIPT_TRANSIENT_MS = 4000;
  */
 export default function LiveTranscriptDialog() {
   const session = useLiveTranscriptSession();
-  const insertTarget = session?.insertTarget;
-  const canInsert = !!insertTarget?.canInsert;
-  // The note a transcript would go into — its title also names an export file.
-  // Empty whenever there is no such note, so the workspace never implies one.
-  const noteTitle = insertTarget?.noteTitle || "";
-  const insertReason = insertTarget?.reason || LIVE_TRANSCRIPT_MESSAGE.NO_NOTE;
-  const onInsert = session?.insertTranscript;
+  // A Listen In session is its OWN result now: it is exported, not inserted
+  // into whichever note happens to be open (Phase 8D.1 UI correction). The
+  // registered insert target is still read for ONE thing — naming the open
+  // note in the header for context — and for nothing that writes.
+  const noteTitle = session?.insertTarget?.noteTitle || "";
   const titleId = useId();
   const textareaId = useId();
   const dialogRef = useRef(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [summary, setSummary] = useState(null); // { text } | null
+  const [exportOpen, setExportOpen] = useState(false);
   const [summarising, setSummarising] = useState(false);
   const notice = useTransientMessage(LIVE_TRANSCRIPT_TRANSIENT_MS);
   const { refineText } = useRefine();
 
   const open = !!session?.open;
-  const state = session?.state;
-  const recording = state ? isRecording(state) : false;
-  const stopping = state ? isStopping(state) : false;
-  const transcribing = state ? isTranscribing(state) : false;
-  const pending = state ? pendingSegmentCount(state) : 0;
-  const ready = state ? hasTranscript(state) : false;
+  const capture = session?.session || null;
+  const recording = !!session?.recording;
+  const stopping = capture ? capture.state === LISTEN_IN_STATE.STOPPING : false;
+  const interrupted = !!session?.interrupted;
+  const finishing = !!session?.finishing;
+  const pending = session?.pending || 0;
+  const failed = session?.failed || 0;
+  const transcribing = pending > 0;
+  const transcript = session?.transcript || "";
+  const ready = transcript.trim().length > 0;
 
-  // Elapsed indicator: one tick per second while recording, nothing otherwise.
+  // The elapsed indicator DERIVES from the session's own clock; the interval
+  // only re-renders. So it is right the moment the window reopens, however
+  // long it was closed, and cannot drift because nothing was mounted.
   useEffect(() => {
-    if (!recording || !state?.startedAt) {
-      setElapsedMs(0);
+    if (!isCapturing(capture)) {
+      setElapsedMs(capture ? sessionElapsedMs(capture, Date.now()) : 0);
       return undefined;
     }
-    const tick = () => setElapsedMs(Date.now() - state.startedAt);
+    const tick = () => setElapsedMs(sessionElapsedMs(capture, Date.now()));
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [recording, state?.startedAt]);
+  }, [capture]);
 
   // Escape closes the workspace (the session keeps running). No focus trap:
   // the dialog is modal to pointer only, and Close is always reachable.
@@ -111,41 +124,19 @@ export default function LiveTranscriptDialog() {
     return () => document.removeEventListener("keydown", onKey);
   }, [open, closeWorkspace]);
 
+  // The ONE deliberate end of a capture. Nothing else in this file stops one.
   const handleToggleRecording = useCallback(() => {
     if (!session) return;
     if (recording) session.stop();
-    else if (!stopping) session.start();
+    else if (!stopping) session.start({ language: session.language });
   }, [session, recording, stopping]);
-
-  const handleInsert = useCallback(() => {
-    if (!session || !ready) {
-      notice.showError(LIVE_TRANSCRIPT_MESSAGE.EMPTY);
-      return;
-    }
-    if (!canInsert) {
-      notice.showError(insertReason);
-      return;
-    }
-    const delivered = typeof onInsert === "function" ? onInsert(state.transcript) : false;
-    if (delivered) notice.showInfo("Inserted into the note.");
-  }, [session, ready, canInsert, insertReason, onInsert, state, notice]);
-
-  const handleInsertSummary = useCallback(() => {
-    if (!summary || !summary.text) return;
-    if (!canInsert) {
-      notice.showError(insertReason);
-      return;
-    }
-    const delivered = typeof onInsert === "function" ? onInsert(summary.text) : false;
-    if (delivered) notice.showInfo("Summary inserted into the note.");
-  }, [summary, canInsert, insertReason, onInsert, notice]);
 
   const handleCopy = useCallback(async () => {
     if (!ready) {
       notice.showError(LIVE_TRANSCRIPT_MESSAGE.EMPTY);
       return;
     }
-    const text = state.transcript;
+    const text = transcript;
     try {
       if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
         await navigator.clipboard.writeText(text);
@@ -161,28 +152,7 @@ export default function LiveTranscriptDialog() {
     } catch {
       notice.showError("The transcript could not be copied. Select the text and copy it manually.");
     }
-  }, [ready, state, notice, textareaId]);
-
-  const handleExport = useCallback(
-    (format) => {
-      if (!ready) {
-        notice.showError(LIVE_TRANSCRIPT_MESSAGE.EMPTY);
-        return;
-      }
-      const file = buildTranscriptExport({
-        transcript: state.transcript,
-        noteTitle,
-        format,
-        now: Date.now(),
-        languageLabel: transcriptionLanguageLabel(session.language),
-      });
-      // The same download helper every other export uses; a Blob of the exact
-      // text on screen.
-      downloadExportFile(file.name, new Blob([file.text], { type: file.mimeType }));
-      notice.showInfo(`Exported ${file.name}.`);
-    },
-    [ready, state, noteTitle, session, notice]
-  );
+  }, [ready, transcript, notice, textareaId]);
 
   const handleSummarise = useCallback(async () => {
     if (!ready || summarising) return;
@@ -193,7 +163,7 @@ export default function LiveTranscriptDialog() {
       // pipeline: the transcript text goes to the backend, a summary comes
       // back. Never automatic — only on this explicit action.
       const result = await refineText({
-        text: state.transcript,
+        text: transcript,
         language: "English",
         style: MEETING_NOTES_STYLE,
       });
@@ -202,18 +172,24 @@ export default function LiveTranscriptDialog() {
     } finally {
       setSummarising(false);
     }
-  }, [ready, summarising, refineText, state, notice]);
+  }, [ready, summarising, refineText, transcript, notice]);
 
+  // Destructive and explicit: throws the whole session away. Refused while
+  // capture is live — Stop first — so one mis-click cannot lose a meeting.
   const handleClear = useCallback(() => {
     if (!session || recording || stopping) return;
-    session.clear();
+    session.discard();
     setSummary(null);
   }, [session, recording, stopping]);
 
   if (!open || !session) return null;
 
-  const statusLabel = liveTranscriptStatusLabel(state);
-  const errorMessage = state.error ? liveTranscriptErrorMessage(state.error) : "";
+  const recoveryUnavailable = needsRecoveryWarning(session);
+  // A session is exportable once it holds something worth putting in a file.
+  const hasSummaryText = !!(summary && summary.text && summary.text.trim());
+  const canExport = ready || hasSummaryText;
+  const statusLabel = listenInStatusLabel(capture, session.chunks);
+  const errorMessage = session.error ? liveTranscriptErrorMessage(session.error) : "";
   const recordLabel = recording ? "Stop recording" : "Start recording";
   const busy = stopping;
 
@@ -230,7 +206,7 @@ export default function LiveTranscriptDialog() {
         <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700 shrink-0">
           <div className="min-w-0">
             <h2 id={titleId} className="text-sm font-semibold text-gray-900 dark:text-white truncate">
-              Live transcript
+              Listen In
             </h2>
             {noteTitle && (
               <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{noteTitle}</p>
@@ -239,8 +215,14 @@ export default function LiveTranscriptDialog() {
           <button
             className={actionButtonClass({ className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
             onClick={session.closeWorkspace}
-            aria-label={recording ? "Close Live transcript (recording continues)" : "Close Live transcript"}
-            title={recording ? "Close — recording continues in the background" : "Close"}
+            aria-label={
+              recording ? "Close Listen In (recording continues)" : "Close Listen In"
+            }
+            title={
+              recording
+                ? "Close — recording continues in the background. Reopen it from Listen In in the sidebar."
+                : "Close"
+            }
           >
             Close
           </button>
@@ -288,6 +270,22 @@ export default function LiveTranscriptDialog() {
           </span>
         </div>
 
+        {/* NO DURABLE RECOVERY ON THIS DEVICE. Persistent and not dismissible
+            while it applies: someone recording a two-hour meeting must not be
+            able to lose the warning and then lose the meeting. It is derived
+            from what the engine reports about the store it actually got, so an
+            approved policy on a browser that cannot honour it still warns. */}
+        {recoveryUnavailable && (
+          <div
+            className="px-4 py-2 border-b border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 shrink-0"
+            data-listen-in-recovery="unavailable"
+          >
+            <p role="status" className="text-xs text-amber-800 dark:text-amber-200">
+              {LISTEN_IN_MESSAGE.RECOVERY_UNAVAILABLE}
+            </p>
+          </div>
+        )}
+
         {/* Errors stay inside the workspace, red, an alert region, until the
             state that produced them changes. */}
         {errorMessage && (
@@ -305,24 +303,70 @@ export default function LiveTranscriptDialog() {
           </div>
         )}
 
-        {/* The transcript — FINAL text, editable. Segments still in flight are
-            a status above, never guessed words here. New text is appended;
-            an edit already made is never overwritten. */}
+        {/* RECOVERY. A session found interrupted at start-up (the tab was
+            closed or reloaded while it was recording) keeps everything it had
+            sealed and waits here for an explicit choice. Resume continues the
+            SAME session and its sequence; Finish wraps it up and lets the
+            outstanding transcription finish on its own. Nothing is decided for
+            the user and no missing audio is invented. */}
+        {interrupted && (
+          <div className="px-4 py-2 border-b border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 shrink-0 flex items-start justify-between gap-3">
+            <p role="status" className="text-xs text-amber-800 dark:text-amber-200">
+              {LISTEN_IN_MESSAGE.INTERRUPTED}
+            </p>
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                className={actionButtonClass({ primary: true, className: "px-2 py-0.5 rounded text-[11px]" })}
+                onClick={() => session.resume()}
+              >
+                Resume
+              </button>
+              <button
+                className={actionButtonClass({ className: "px-2 py-0.5 rounded text-[11px]" })}
+                onClick={() => session.finish()}
+              >
+                Finish
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Parts whose transcription failed. Their AUDIO IS KEPT, so Try again
+            is a real retry rather than a hopeful button over a gap. */}
+        {failed > 0 && (
+          <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0 flex items-center justify-between gap-3">
+            <p role="status" className="text-xs text-gray-600 dark:text-gray-300">
+              {LISTEN_IN_MESSAGE.SOME_FAILED}
+            </p>
+            <button
+              className={actionButtonClass({ className: "px-2 py-0.5 rounded text-[11px] shrink-0" })}
+              onClick={() => session.retryFailed()}
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
+        {/* The transcript — the session's ordered segments, joined for reading.
+            It is DERIVED, so it is read-only here: the 8D.2 workspace replaces
+            this surface with Summary and Transcript views and owns any
+            editing. Parts still in flight are a status above, never guessed
+            words here. */}
         <div className="flex-1 min-h-0 flex flex-col px-4 py-3 gap-2">
           <label htmlFor={textareaId} className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
-            Transcript{transcribing ? ` — ${pending === 1 ? "1 segment" : `${pending} segments`} still transcribing` : ""}
+            Transcript{transcribing ? ` — ${pending === 1 ? "1 part" : `${pending} parts`} still transcribing` : ""}
+            {finishing ? " — finishing" : ""}
           </label>
           <textarea
             id={textareaId}
             className="nw-field flex-1 min-h-0 w-full resize-none rounded-md p-3 text-sm leading-relaxed"
-            value={state.transcript}
-            onChange={(e) => session.edit(e.target.value)}
+            value={transcript}
+            readOnly
             placeholder={
               recording
-                ? "Listening… transcribed speech appears here as each segment completes."
-                : "Press Start recording. Transcribed speech appears here and can be edited before you insert it."
+                ? "Listening… transcribed speech appears here as each part completes."
+                : "Press Start recording. Transcribed speech appears here, and you can insert it into a note when you are done."
             }
-            spellCheck
           />
           {summary && (
             <div className="shrink-0 max-h-40 overflow-auto rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 p-3">
@@ -331,14 +375,6 @@ export default function LiveTranscriptDialog() {
                   Meeting-notes summary (AI)
                 </span>
                 <div className="flex items-center gap-1">
-                  <button
-                    className={actionButtonClass({ primary: true, disabled: !canInsert, className: "px-2 py-0.5 rounded text-[11px]" })}
-                    onClick={handleInsertSummary}
-                    disabled={!canInsert}
-                    title={canInsert ? "Insert the summary into the note" : insertReason}
-                  >
-                    Insert summary
-                  </button>
                   <button
                     className={actionButtonClass({ className: "px-2 py-0.5 rounded text-[11px]" })}
                     onClick={() => setSummary(null)}
@@ -355,18 +391,6 @@ export default function LiveTranscriptDialog() {
         {/* Completion actions + one restrained notice line. */}
         <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-gray-200 dark:border-gray-700 shrink-0">
           <button
-            className={actionButtonClass({ primary: true, disabled: !ready || !canInsert, className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
-            onClick={handleInsert}
-            disabled={!ready || !canInsert}
-            title={
-              canInsert
-                ? "Insert the transcript into the note at the current position"
-                : insertReason
-            }
-          >
-            Insert into note
-          </button>
-          <button
             className={actionButtonClass({ disabled: !ready, className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
             onClick={handleCopy}
             disabled={!ready}
@@ -374,20 +398,16 @@ export default function LiveTranscriptDialog() {
             Copy
           </button>
           <button
-            className={actionButtonClass({ disabled: !ready, className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
-            onClick={() => handleExport(TRANSCRIPT_EXPORT_FORMAT.TXT)}
-            disabled={!ready}
-            title="Download the transcript as a plain-text file"
+            className={actionButtonClass({ disabled: !canExport, className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
+            onClick={() => setExportOpen(true)}
+            disabled={!canExport}
+            title={
+              canExport
+                ? "Choose what to export and in which format"
+                : "There is nothing to export yet"
+            }
           >
-            Export .txt
-          </button>
-          <button
-            className={actionButtonClass({ disabled: !ready, className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
-            onClick={() => handleExport(TRANSCRIPT_EXPORT_FORMAT.MD)}
-            disabled={!ready}
-            title="Download the transcript as a Markdown file"
-          >
-            Export .md
+            Export
           </button>
           <button
             className={actionButtonClass({ busy: summarising, disabled: !ready || summarising, className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
@@ -405,19 +425,10 @@ export default function LiveTranscriptDialog() {
             className={actionButtonClass({ danger: true, disabled: recording || stopping || (!ready && !transcribing), className: "px-3 py-1.5 rounded-lg text-xs font-medium ml-auto" })}
             onClick={handleClear}
             disabled={recording || stopping || (!ready && !transcribing)}
-            title={recording ? "Stop recording before clearing" : "Discard the transcript"}
+            title={recording ? "Stop recording before discarding" : "Discard this session and everything it captured"}
           >
-            Clear
+            Discard
           </button>
-          {/* With nowhere to insert, the reason is stated in the workspace —
-              never only as a tooltip on a disabled control. Everything else
-              (record, stop, edit, copy, export, summarise, clear) stays
-              available. */}
-          {!canInsert && ready && (
-            <span className="basis-full text-xs text-gray-500 dark:text-gray-400">
-              {insertReason}
-            </span>
-          )}
           {!!notice.message && (
             <span
               role="status"
@@ -434,6 +445,19 @@ export default function LiveTranscriptDialog() {
           )}
         </div>
       </div>
+
+      {/* The export chooser: what to export, then which format. It builds
+          nothing itself — every format but plain text comes from the canonical
+          NoteWise producers. */}
+      <ListenInExportDialog
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        session={capture}
+        chunks={session.chunks}
+        summary={summary}
+        hasSummary={hasSummaryText}
+        hasTranscript={ready}
+      />
     </div>
   );
 }

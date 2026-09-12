@@ -36,6 +36,9 @@ const MAIN_AREA = withoutComments(read("components/MainArea.js"));
 const BOTTOM_BAR = withoutComments(read("components/BottomBar.js"));
 const DICTATION_HOOK = withoutComments(read("hooks/useDictation.js"));
 const LIVE_HOOK = withoutComments(read("hooks/useLiveTranscript.js"));
+// Listen In's recorder moved out of React into the engine (Phase 8D.1); the
+// hook beside it is now only a subscriber.
+const LISTEN_IN_ENGINE = withoutComments(read("lib/listenIn/listenInEngine.js"));
 const AUDIO = withoutComments(read("lib/audioRecording.js"));
 
 describe("1. the composer's microphone is Quick Add dictation and never Live transcript", () => {
@@ -226,7 +229,8 @@ describe("3. what the two share is the low-level recording primitive, once", () 
   test("one container list and one support check, used by both recorders", () => {
     expect(AUDIO).toMatch(/export const AUDIO_RECORDING_MIME_CANDIDATES = Object\.freeze\(\[/);
     expect(AUDIO).toMatch(/export function pickSupportedMime\(/);
-    expect(LIVE_HOOK).toMatch(/import \{ isAudioRecordingSupported, pickSupportedMime \} from "\.\.\/lib\/audioRecording"/);
+    expect(LISTEN_IN_ENGINE).toMatch(/from "\.\.\/audioRecording"/);
+    expect(LISTEN_IN_ENGINE).toMatch(/pickSupportedMime\(\)/);
     expect(LIVE_HOOK).toMatch(/return isAudioRecordingSupported\(\);/);
     expect(DICTATION_HOOK).toMatch(/from "\.\.\/lib\/audioRecording"/);
     // No second candidate list anywhere.
@@ -238,22 +242,31 @@ describe("3. what the two share is the low-level recording primitive, once", () 
   });
 
   test("exactly two callers of the transport, one per workflow", () => {
+    // ONE transport implementation (`transcribeAudioBlob`), reached by exactly
+    // two workflows: Quick Add dictation through the React hook, and Listen In
+    // through the engine — which is not a component and so calls the plain
+    // function directly rather than the hook wrapper.
     const callers = allSourceFiles()
-      .filter((file) => /transcribeBlob\(/.test(fs.readFileSync(file, "utf8")))
+      .filter((file) => /transcribeBlob\(|transcribe\(audio,/.test(fs.readFileSync(file, "utf8")))
       .map((file) => path.basename(file))
       .sort();
-    expect(callers).toEqual(["useDictation.js", "useLiveTranscript.js"]);
+    expect(callers).toEqual(["listenInEngine.js", "useDictation.js"]);
+    // The engine takes it as an injected dependency defaulting to that one
+    // implementation — never a second transport of its own.
+    expect(LISTEN_IN_ENGINE).toMatch(/transcribe = transcribeAudioBlob/);
+    expect(LISTEN_IN_ENGINE).toMatch(/import \{ transcribeAudioBlob \} from "\.\.\/\.\.\/hooks\/useTranscription"/);
   });
 
   test("both recorders claim and release the one microphone", () => {
-    for (const hook of [DICTATION_HOOK, LIVE_HOOK]) {
-      expect(hook).toMatch(/claimMicrophone\(MICROPHONE_OWNER\./);
-      expect(hook).toMatch(/releaseMicrophone\(MICROPHONE_OWNER\./);
+    for (const owner of [DICTATION_HOOK, LISTEN_IN_ENGINE]) {
+      expect(owner).toMatch(/claimMicrophone\(MICROPHONE_OWNER\./);
+      expect(owner).toMatch(/releaseMicrophone\(MICROPHONE_OWNER\./);
     }
-    expect(LIVE_HOOK).toMatch(/if \(!claimMicrophone\(MICROPHONE_OWNER\.LIVE_TRANSCRIPT\)\.ok\) \{\s*\n\s*safeSet\(\(s\) => setSessionError\(s, microphoneInUseError\(\)\)\);/);
+    expect(LISTEN_IN_ENGINE).toMatch(/const claim = claimMicrophone\(MICROPHONE_OWNER\.LISTEN_IN\);/);
+    expect(LISTEN_IN_ENGINE).toMatch(/if \(!claim\.ok\) throw new Error\(LISTEN_IN_MESSAGE\.MIC_IN_USE\);/);
     expect(DICTATION_HOOK).toMatch(/const claim = claimMicrophone\(MICROPHONE_OWNER\.QUICK_ADD_DICTATION\);/);
     // Neither ever stops the other's recorder.
-    expect(DICTATION_HOOK).not.toMatch(/LIVE_TRANSCRIPT/);
-    expect(LIVE_HOOK).not.toMatch(/QUICK_ADD_DICTATION/);
+    expect(DICTATION_HOOK).not.toMatch(/LIVE_TRANSCRIPT|LISTEN_IN/);
+    expect(LISTEN_IN_ENGINE).not.toMatch(/QUICK_ADD_DICTATION/);
   });
 });

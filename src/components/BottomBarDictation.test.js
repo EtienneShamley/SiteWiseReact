@@ -35,6 +35,8 @@ import {
   saveTranscriptionLanguage,
 } from "../lib/transcriptionLanguage";
 import { LIVE_TRANSCRIPT_MESSAGE } from "../lib/liveTranscript";
+import { LISTEN_IN_MESSAGE } from "../lib/listenIn/listenInModel";
+import { resetListenInEnginesForTests } from "../lib/listenIn/listenInEngine";
 import {
   MICROPHONE_OWNER,
   claimMicrophone,
@@ -119,6 +121,7 @@ beforeEach(() => {
   localStorage.clear();
   noteId = "note-1";
   resetMicrophoneOwnershipForTests();
+  resetListenInEnginesForTests();
   partIntervals = [];
   jest.spyOn(globalThis, "setInterval").mockImplementation((fn, ms, ...rest) => {
     partIntervals.push([fn, ms]);
@@ -543,29 +546,34 @@ describe("13. one recorder at a time", () => {
   });
 
   const LiveProbe = forwardRef(function LiveProbe(_props, ref) {
-    const session = useLiveTranscript();
+    // Listen In is now an engine outside React (Phase 8D.1); the hook is a
+    // subscriber and needs the workspace the session belongs to.
+    const session = useLiveTranscript({ uid: "uid-mic-probe", workspaceId: "ws-mic-probe" });
     useImperativeHandle(ref, () => session, [session]);
     return null;
   });
 
-  test("Live transcript refuses to start while a Quick Add dictation is recording, and starts once it is done", async () => {
+  test("Listen In refuses to start while a Quick Add dictation is recording, and starts once it is done", async () => {
     mount();
     const probe = React.createRef();
     const probeHost = document.createElement("div");
     document.body.appendChild(probeHost);
     const probeRoot = createRoot(probeHost);
     act(() => probeRoot.render(<LiveProbe ref={probe} />));
+    await flush();
 
     click(micButton());
     await flush();
     expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.QUICK_ADD_DICTATION);
-    let started;
     await act(async () => {
-      started = await probe.current.start();
+      await probe.current.start();
     });
-    expect(started).toBe(false);
-    expect(probe.current.state.error.message).toBe(LIVE_TRANSCRIPT_MESSAGE.MIC_IN_USE);
-    expect(probe.current.state.status).toBe("idle");
+    // Refused with a sentence naming the holder — and it never stopped the
+    // dictation to take the microphone.
+    expect(probe.current.error.message).toBe(LISTEN_IN_MESSAGE.MIC_IN_USE);
+    expect(probe.current.session).toBeNull();
+    expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.QUICK_ADD_DICTATION);
+    expect(micButton().getAttribute("data-voice-phase")).toBe("recording");
     // Only the dictation's own stream was ever opened.
     expect(getUserMedia).toHaveBeenCalledTimes(1);
 
@@ -573,13 +581,15 @@ describe("13. one recorder at a time", () => {
     await flush();
     expect(currentMicrophoneOwner()).toBeNull();
     await act(async () => {
-      started = await probe.current.start();
+      await probe.current.start();
     });
-    expect(started).toBe(true);
-    expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.LIVE_TRANSCRIPT);
+    expect(probe.current.recording).toBe(true);
+    expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.LISTEN_IN);
     expect(getUserMedia).toHaveBeenCalledTimes(2);
 
-    act(() => probe.current.stop());
+    await act(async () => {
+      await probe.current.stop();
+    });
     await flush();
     expect(currentMicrophoneOwner()).toBeNull();
     act(() => probeRoot.unmount());

@@ -21,6 +21,7 @@
 // `{ ok, code, message }` results and never a raw provider error.
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { applyListenInIdentity } from "../lib/listenIn/listenInEngine";
 import {
   AUTH_STATUS,
   LOADING_AUTH_STATE,
@@ -66,7 +67,17 @@ export function AuthProvider({ adapter: injectedAdapter = null, children }) {
       adapterRef.current = adapter;
       setApiTokenProvider((force) => adapter.getIdToken(force));
       unsubscribe = adapter.subscribe((snapshot) => {
-        if (!cancelled) setState(authStateForSnapshot(snapshot));
+        if (cancelled) return;
+        const next = authStateForSnapshot(snapshot);
+        // THE IDENTITY BOUNDARY FOR LISTEN IN. Whoever is signed in now, any
+        // capture belonging to a DIFFERENT account stops here: its recorder
+        // and microphone are released, its session is left interrupted and its
+        // work is kept for that account. This sits on the auth state itself,
+        // not on a button, because a token expiring or another code path
+        // changing the Firebase user must end a live capture just as surely as
+        // the Settings sign-out does. It never deletes anything.
+        applyListenInIdentity(next.user ? next.user.uid : null);
+        setState(next);
       });
     };
 

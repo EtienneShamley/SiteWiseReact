@@ -26,6 +26,7 @@ import {
 } from "../lib/noteDrag";
 import { useTheme } from "../context/ThemeContext";
 import { useLiveTranscriptSession } from "../context/LiveTranscriptContext";
+import { elapsedMs, formatElapsed } from "../lib/listenIn/listenInModel";
 import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interactionStyles";
 import {
   NOTE_SURFACE,
@@ -117,8 +118,9 @@ function SidebarGroupHeading({ children }) {
  *   1. brand + the collapse/expand control (always reachable, both widths)
  *   2. THIS NOTE — the open note's surfaces as one navigation group
  *      (Template form / Free-form note / PDF, src/lib/noteSurfaces.js)
- *   2b. CAPTURE — Live transcript: opens the ONE transcription workspace
- *      (LiveTranscriptProvider); the row shows when recording is live
+ *   2b. CAPTURE — Listen In: opens the ONE capture session (the engine behind
+ *      LiveTranscriptProvider); the row shows when recording is live, with a
+ *      red accent and the elapsed time, whether or not its window is open
  *   3. WORKSPACE — Projects | PDFs, and Template Library (a workspace action
  *      that opens the reusable-template dialog owned by App.js)
  *   4. the project / folder / note tree (Projects workspace) — the ONE region
@@ -200,8 +202,23 @@ export default function Sidebar({
   } = useAppState();
 
   const { theme } = useTheme();
-  // The one Live Transcript session (null only where no provider is above).
+  // The one Listen In session (null only where no provider is above). The
+  // sidebar SUBSCRIBES to it — it never owns or ends it.
   const liveTranscript = useLiveTranscriptSession();
+  // Elapsed time is DERIVED from the session's own clock every second while
+  // capture is live, so it is identical wherever it is shown, survives the
+  // window being closed, and cannot drift because no component was mounted to
+  // count. The tick exists only to re-render; the value comes from the model.
+  const listenInRecording = !!liveTranscript && liveTranscript.recording;
+  const [, forceListenInTick] = useState(0);
+  useEffect(() => {
+    if (!listenInRecording) return undefined;
+    const id = setInterval(() => forceListenInTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [listenInRecording]);
+  const listenInElapsedLabel = listenInRecording
+    ? formatElapsed(elapsedMs(liveTranscript.session, Date.now()))
+    : "";
 
   const projRefs = useRef({});
   const folderRefs = useRef({});
@@ -599,38 +616,74 @@ export default function Sidebar({
             {!collapsed && <SidebarGroupHeading>Capture</SidebarGroupHeading>}
             <button
               type="button"
-              className={actionButtonClass({
-                open: liveTranscript.open,
-                className: collapsed
-                  ? "relative w-full flex items-center justify-center rounded p-2 text-base"
-                  : "w-full flex items-center gap-2 rounded px-3 py-2 text-sm text-left",
-              })}
+              className={[
+                actionButtonClass({
+                  open: liveTranscript.open,
+                  className: collapsed
+                    ? "relative w-full flex items-center justify-center rounded p-2 text-base"
+                    : "w-full flex items-center gap-2 rounded px-3 py-2 text-sm text-left",
+                }),
+                // While capture is LIVE the row is unmistakable at either
+                // width, and stays so with the window closed — that is the
+                // whole point of it. Colour is never the only signal: the
+                // accessible name, the title and (expanded) the word
+                // "Recording" beside a ticking clock all say it too.
+                liveTranscript.recording ? "nw-listen-in-live" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               onClick={(e) => {
                 liveTranscript.openWorkspace(e.currentTarget);
                 if (overlay && typeof onCloseOverlay === "function") onCloseOverlay();
               }}
               aria-haspopup="dialog"
-              aria-label={liveTranscript.recording ? "Live transcript — recording" : "Live transcript"}
+              aria-label={
+                liveTranscript.recording
+                  ? `Listen In — recording, ${listenInElapsedLabel}`
+                  : liveTranscript.interrupted
+                  ? "Listen In — interrupted"
+                  : "Listen In"
+              }
               title={
-                collapsed
-                  ? liveTranscript.recording ? "Live transcript — recording" : "Live transcript"
-                  : "Transcribe speech live and insert it into this note"
+                liveTranscript.recording
+                  ? `Listen In — recording ${listenInElapsedLabel}. Click to reopen the session.`
+                  : liveTranscript.interrupted
+                  ? "Listen In — this session was interrupted. Click to resume or finish it."
+                  : collapsed
+                  ? "Listen In"
+                  : "Capture a meeting or conversation and transcribe it"
               }
               data-nw-capture="live-transcript"
+              data-listen-in-state={
+                liveTranscript.recording
+                  ? "recording"
+                  : liveTranscript.interrupted
+                  ? "interrupted"
+                  : "idle"
+              }
             >
               <FaMicrophone className="shrink-0" aria-hidden="true" />
-              {!collapsed && <span className="flex-1 truncate">Live transcript</span>}
+              {!collapsed && <span className="flex-1 truncate">Listen In</span>}
               {liveTranscript.recording && (
                 <span
-                  className={collapsed ? "absolute top-1 right-1 h-2 w-2 rounded-full bg-red-600" : "ml-auto flex items-center gap-1 text-[11px] text-red-600 dark:text-red-400"}
+                  className={
+                    collapsed
+                      ? "absolute top-1 right-1 h-2.5 w-2.5 rounded-full bg-red-600 ring-2 ring-white dark:ring-gray-950 nw-listen-in-dot"
+                      : "ml-auto flex items-center gap-1 text-[11px] font-medium tabular-nums text-red-600 dark:text-red-400"
+                  }
                   aria-hidden="true"
                 >
                   {collapsed ? null : (
                     <>
-                      <span className="h-2 w-2 rounded-full bg-red-600 dark:bg-red-400" />
-                      Recording
+                      <span className="h-2 w-2 rounded-full bg-red-600 dark:bg-red-400 nw-listen-in-dot" />
+                      {listenInElapsedLabel}
                     </>
                   )}
+                </span>
+              )}
+              {!liveTranscript.recording && liveTranscript.interrupted && !collapsed && (
+                <span className="ml-auto text-[11px] text-amber-600 dark:text-amber-400" aria-hidden="true">
+                  Paused
                 </span>
               )}
             </button>
