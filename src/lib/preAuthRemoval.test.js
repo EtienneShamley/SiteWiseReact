@@ -44,8 +44,12 @@ describe("NOTEWISE_AI_ROUTES_PRE_AUTH is retired", () => {
     const app = read("server/app.js");
     expect(app).toMatch(/requireFirebaseUser\(/);
     expect(app).toMatch(/requireVerifiedEmail\(\)/);
-    // Both provider routes are mounted through the same policy chain.
-    expect(app.match(/\.\.\.providerRoutePolicy\(config, verifyIdToken/g)).toHaveLength(2);
+    // EVERY provider route is mounted through the same policy chain — three of
+    // them since Phase 8D.2 added the Listen In summary. Matched on the call
+    // alone rather than on its first two arguments: the summary mount spells
+    // them across several lines, and an argument-shaped pattern would have
+    // silently counted two and reported a third, unpoliced route as fine.
+    expect(app.match(/\.\.\.providerRoutePolicy\(/g)).toHaveLength(3);
   });
 
   test("the deployment/security documentation no longer describes it as a live setting", () => {
