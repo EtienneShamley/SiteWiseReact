@@ -305,10 +305,13 @@ describe("F. the summary belongs to the engine, and the route has one client", (
       expect(source).not.toMatch(/\/api\/listen-in/);
       expect(source).not.toMatch(/nextSummaryWindow|appendSummaryPart|mergeSummaryResults/);
     }
-    // The window dispatches intents and nothing else.
-    expect(DIALOG).toMatch(/session\.regenerateSummary\(\)/);
+    // The window dispatches intents and nothing else. Since 2026-09-13 the
+    // explicit Summarise / Summarise again / Try summarising again control is
+    // ONE intent, `summariseNow`, which the engine serves through the same
+    // pipeline as the automatic loop.
+    expect(DIALOG).toMatch(/session\.summariseNow\(\)/);
     expect(DIALOG).toMatch(/session\.editSummaryText\(value\)/);
-    expect(DIALOG).toMatch(/session\.retrySummary\(\)/);
+    expect(DIALOG).not.toMatch(/refine|\/api\//);
   });
 
   test("exactly ONE module in the browser talks to the summary route", () => {
@@ -497,5 +500,44 @@ describe("H. the user-facing vocabulary for a recording leg (Phase 8D.3.1)", () 
       expect(source).not.toMatch(/>\s*Paused\s*</);
       expect(source).not.toMatch(/"[^"]*\bPaused\b[^"]*"/);
     }
+  });
+});
+
+/* =============== G. nothing summarises on its own (2026-09-13) ============ */
+
+// The product rule is behavioural and is proved in listenInSummaryEngine,
+// listenInManualSummary, listenInMeetingLifecycle and ListenInWindowLifecycle:
+// no chunk, Stop, Start again or Complete asks the provider for anything.
+// What is pinned here is that the CODE has no way left to do so: no summary
+// timer, no scheduling, no wake from the drain, and no other summariser.
+describe("G. the summary loop has no trigger but the user's request", () => {
+  const SUMMARY_CLIENT = withoutComments(read("lib/listenIn/listenInSummaryClient.js"));
+
+  test("11/12. the engine keeps no summary timer, no scheduler and no automatic wake-up", () => {
+    expect(ENGINE).not.toMatch(/summaryTimer|scheduleSummary|disarmSummaryTimer|forceWanted|regenerateWanted/);
+    // The drain never wakes the summary loop, and bootstrap never does either:
+    // the only callers of wakeSummary are the user's three intents and the
+    // coalescing re-run of a request that arrived mid-pass.
+    const wakes = (ENGINE.match(/wakeSummary\(\);/g) || []).length;
+    expect(wakes).toBe(4);
+    expect(ENGINE).not.toMatch(/async function runDrain\(\)[\s\S]*?wakeSummary\(\)[\s\S]*?async function wakeDrain/);
+    // The test hook waits; it does not start anything.
+    expect(ENGINE).toMatch(/flushSummary: \(\) => \(summarising \? summarising : Promise\.resolve\(\)\)/);
+    // And nothing is timed: the only setTimer uses are the capture limit and the drain's retry.
+    const timers = ENGINE.match(/= setTimer\(/g) || [];
+    expect(timers).toHaveLength(2);
+    expect(ENGINE).toMatch(/limitTimer = setTimer\(/);
+    expect(ENGINE).toMatch(/retryTimer = setTimer\(/);
+  });
+
+  test("12. the one path to a provider is POST /api/listen-in/summary — never /api/refine", () => {
+    expect(SUMMARY_CLIENT).toMatch(/\/api\/listen-in\/summary/);
+    for (const source of [ENGINE, HOOK, PROVIDER, DIALOG, SUMMARY_CLIENT]) {
+      expect(source).not.toMatch(/api\/refine/);
+      expect(source).not.toMatch(/refineText|requestRefine|meetingNotes/);
+    }
+    // The window's control dispatches the engine's intent and nothing else.
+    expect(DIALOG).toMatch(/onClick=\{\(\) => session\.summariseNow\(\)\}/);
+    expect(DIALOG).not.toMatch(/fetch\(/);
   });
 });

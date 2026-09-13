@@ -26,7 +26,7 @@ const {
   assertSucceeds,
   initializeTestEnvironment,
 } = require("@firebase/rules-unit-testing");
-const { doc, getDoc, setDoc, deleteDoc, runTransaction, serverTimestamp, writeBatch, collection, getDocs } = require("firebase/firestore");
+const { doc, getDoc, setDoc, deleteDoc, runTransaction, serverTimestamp, writeBatch, collection, getDocs, query, where } = require("firebase/firestore");
 
 const PROJECT_ID = "notewise-rules-test";
 let env;
@@ -536,5 +536,313 @@ describe("pdfAnnotations documents", { concurrency: false }, () => {
     await assertFails(setDoc(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "pdf1", "chunks", "0"), { workspaceId: "ws-alice", id: "other", kind: "pdfAnnotations", index: 0, text: "{}", updatedAt: serverTimestamp() }));
     await assertFails(setDoc(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "pdf1", "chunks", "0"), { workspaceId: "ws-alice", id: "pdf1", kind: "pdfDocs", index: 0, text: "{}", updatedAt: serverTimestamp() }));
     await assertFails(setDoc(doc(f, "workspaces", "ws-alice", "pdfAnnotations", "pdf1", "chunks", "0"), { workspaceId: "ws-alice", id: "pdf1", kind: "pdfAnnotations", index: 0, text: 5, updatedAt: serverTimestamp() }));
+  });
+});
+
+// Listen In TEXT results (Phase 8D.4): workspaces/{wid}/listenInMeetings,
+// listenInTranscripts and listenInSummaries. Never audio.
+//
+// CREATOR-ONLY is the property under test. A meeting is stored under its
+// workspace but belongs to the person who recorded it: another member of the
+// same workspace must not be able to list, read, update or delete it merely
+// by being a member. Sharing is a separate, later design.
+//
+// The field lists, enums and caps are src/lib/cloud/listenInCloudModel.js's,
+// asserted equal there; here the emulator proves the authorization.
+describe("Listen In text documents (8D.4)", { concurrency: false }, () => {
+  const SID = "6f1c2a3b-0000-4000-8000-000000000001";
+  // `undefined` in `extra` REMOVES a field (a chunked parent carries no json).
+  const withoutUndefined = (data) => Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
+  const meeting = (wid, uid, extra = {}) =>
+    withoutUndefined(envelope(wid, "listenInMeetings", SID, {
+      sessionId: SID,
+      createdBy: uid,
+      title: "Site walk",
+      language: "en",
+      startedAt: 1700000000000,
+      stoppedAt: null,
+      completedAt: null,
+      capturedMs: 90000,
+      legStartedAt: null,
+      state: "finished",
+      stopReason: "user",
+      limitWarnedAt: null,
+      source: null,
+      captureSource: "media-recorder",
+      platform: null,
+      noteId: null,
+      projectId: null,
+      folderId: null,
+      revision: 1,
+      segmentCount: 3,
+      transcribedThroughSeq: 2,
+      pendingCount: 0,
+      failedSeqs: [],
+      transcriptPageCount: 1,
+      transcriptPageSize: 60,
+      summaryRevision: 2,
+      summaryStatus: "ready",
+      summaryFinal: true,
+      summaryCoveredThroughSeq: 2,
+      ...extra,
+    }));
+  const page = (wid, uid, n, extra = {}) =>
+    withoutUndefined(envelope(wid, "listenInTranscripts", `${SID}:${n}`, {
+      sessionId: SID,
+      createdBy: uid,
+      page: n,
+      revision: 1,
+      json: JSON.stringify({ schemaVersion: 1, sessionId: SID, createdBy: uid, page: n, pageSize: 60, revision: 1, segments: [] }),
+      ...extra,
+    }));
+  const summary = (wid, uid, extra = {}) =>
+    withoutUndefined(envelope(wid, "listenInSummaries", SID, {
+      sessionId: SID,
+      createdBy: uid,
+      revision: 1,
+      json: JSON.stringify({ schemaVersion: 1, sessionId: SID, createdBy: uid, revision: 1 }),
+      ...extra,
+    }));
+  const mine = (f, uid) => query(f, where("createdBy", "==", uid));
+
+  beforeEach(async () => {
+    await seedWorkspace("alice", "ws-alice");
+    await seedWorkspace("bob", "ws-bob");
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const f = ctx.firestore();
+      // mia is an ORDINARY MEMBER of alice's workspace, and not the creator.
+      await setDoc(doc(f, "workspaces", "ws-alice", "members", "mia"), { uid: "mia", role: "member", addedAt: new Date(), addedBy: "alice" });
+    });
+  });
+
+  test("32. unauthenticated: no read, no write, no delete on any of the three", async () => {
+    await setDoc(doc(db("alice"), "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice"));
+    const a = anon();
+    await assertFails(getDoc(doc(a, "workspaces", "ws-alice", "listenInMeetings", SID)));
+    await assertFails(getDocs(collection(a, "workspaces", "ws-alice", "listenInMeetings")));
+    await assertFails(getDocs(mine(collection(a, "workspaces", "ws-alice", "listenInMeetings"), "alice")));
+    await assertFails(setDoc(doc(a, "workspaces", "ws-alice", "listenInMeetings", "x"), meeting("ws-alice", "nobody", { sessionId: "x", id: "x" })));
+    await assertFails(setDoc(doc(a, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 0)));
+    await assertFails(setDoc(doc(a, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice")));
+    await assertFails(deleteDoc(doc(a, "workspaces", "ws-alice", "listenInMeetings", SID)));
+  });
+
+  test("33/34. a non-member and another workspace's owner can neither read, write nor delete; a spoofed workspace is refused", async () => {
+    const alice = db("alice");
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice")));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 0)));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice")));
+    const bob = db("bob"); // owns ws-bob, is not a member of ws-alice
+    await assertFails(getDoc(doc(bob, "workspaces", "ws-alice", "listenInMeetings", SID)));
+    await assertFails(getDoc(doc(bob, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`)));
+    await assertFails(getDoc(doc(bob, "workspaces", "ws-alice", "listenInSummaries", SID)));
+    await assertFails(getDocs(mine(collection(bob, "workspaces", "ws-alice", "listenInMeetings"), "bob")));
+    await assertFails(setDoc(doc(bob, "workspaces", "ws-alice", "listenInMeetings", "m2"), meeting("ws-alice", "bob", { sessionId: "m2", id: "m2" })));
+    await assertFails(setDoc(doc(bob, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice", { revision: 2 })));
+    await assertFails(deleteDoc(doc(bob, "workspaces", "ws-alice", "listenInMeetings", SID)));
+    await assertFails(deleteDoc(doc(bob, "workspaces", "ws-alice", "listenInSummaries", SID)));
+    // cross-workspace: the envelope names another workspace, or the path does
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", "m3"), meeting("ws-bob", "alice", { sessionId: "m3", id: "m3" })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-bob", "listenInMeetings", "m3"), meeting("ws-bob", "alice", { sessionId: "m3", id: "m3" })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-bob", "listenInTranscripts", `${SID}:0`), page("ws-bob", "alice", 0)));
+  });
+
+  test("35. the CREATOR may create, read, update, chunk, list and delete all three", async () => {
+    const alice = db("alice");
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice")));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 0)));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice")));
+    // an update at a HIGHER revision, and one at the SAME revision (an idempotent replay)
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice", { revision: 2 })));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice", { revision: 2 })));
+    // chunked page + chunk, as the sync engine writes them in ONE batch: the
+    // chunk rule reads the parent's author with getAfter, so the parent and
+    // its chunks may be created together.
+    const batch = writeBatch(alice);
+    batch.set(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`), page("ws-alice", "alice", 1, { json: undefined, chunked: true, chunkCount: 1, payloadUnits: 2 }));
+    batch.set(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`, "chunks", "0"), { workspaceId: "ws-alice", id: `${SID}:1`, kind: "listenInTranscripts", index: 0, text: "{}", updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+    const chunkedSummary = writeBatch(alice);
+    chunkedSummary.set(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice", { json: undefined, chunked: true, chunkCount: 1, payloadUnits: 2, revision: 2 }));
+    chunkedSummary.set(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID, "chunks", "0"), { workspaceId: "ws-alice", id: SID, kind: "listenInSummaries", index: 0, text: "{}", updatedAt: serverTimestamp() });
+    await assertSucceeds(chunkedSummary.commit());
+    // reads, including the chunk text
+    assert.equal((await assertSucceeds(getDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID)))).data().createdBy, "alice");
+    assert.equal((await assertSucceeds(getDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`, "chunks", "0")))).data().text, "{}");
+    // A LIST must constrain on createdBy — that is what makes the rule
+    // provable to Firestore. The same query without it is refused even for
+    // the creator, whose documents are the only ones there.
+    assert.equal((await assertSucceeds(getDocs(mine(collection(alice, "workspaces", "ws-alice", "listenInMeetings"), "alice")))).size, 1);
+    assert.equal((await assertSucceeds(getDocs(query(collection(alice, "workspaces", "ws-alice", "listenInTranscripts"), where("sessionId", "==", SID), where("createdBy", "==", "alice"))))).size, 2);
+    await assertFails(getDocs(collection(alice, "workspaces", "ws-alice", "listenInMeetings")));
+    // and the creator deletes all of it, chunks included, in one batch
+    const del = writeBatch(alice);
+    del.delete(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`, "chunks", "0"));
+    del.delete(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`));
+    del.delete(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID));
+    del.delete(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID));
+    await assertSucceeds(del.commit());
+    // Everything really is gone. Confirmed with the rules bypassed, because a
+    // creator-only READ cannot admit a document that no longer exists: there
+    // is no `resource.data.createdBy` to match, so even its author is refused
+    // rather than told "not found". That is a deliberate consequence of the
+    // rule and not a bug — a missing meeting is discovered by listing, not by
+    // fetching an id and reading the answer.
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const f = ctx.firestore();
+      for (const path of [
+        ["workspaces", "ws-alice", "listenInMeetings", SID],
+        ["workspaces", "ws-alice", "listenInSummaries", SID],
+        ["workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`],
+        ["workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`, "chunks", "0"],
+      ]) {
+        assert.equal((await getDoc(doc(f, ...path))).exists(), false);
+      }
+    });
+    await assertFails(getDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID)));
+    assert.equal((await assertSucceeds(getDocs(mine(collection(alice, "workspaces", "ws-alice", "listenInMeetings"), "alice")))).size, 0);
+    // A delete of something that is not there is a harmless no-op, so a
+    // discard of a meeting that never reached the account cannot leave a
+    // permanently failing outbox entry.
+    await assertSucceeds(deleteDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID)));
+  });
+
+  test("35b. THE SAME CREATOR ON ANOTHER DEVICE reads and updates the meeting; an ORDINARY MEMBER of the workspace cannot", async () => {
+    const alice = db("alice");
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice")));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 0)));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice")));
+    const chunked = writeBatch(alice);
+    chunked.set(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`), page("ws-alice", "alice", 1, { json: undefined, chunked: true, chunkCount: 1, payloadUnits: 2 }));
+    chunked.set(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`, "chunks", "0"), { workspaceId: "ws-alice", id: `${SID}:1`, kind: "listenInTranscripts", index: 0, text: "{}", updatedAt: serverTimestamp() });
+    await assertSucceeds(chunked.commit());
+
+    // ANOTHER DEVICE of the same account: a separate client context, same uid.
+    const aliceElsewhere = env.authenticatedContext("alice", { email_verified: true }).firestore();
+    assert.equal((await assertSucceeds(getDoc(doc(aliceElsewhere, "workspaces", "ws-alice", "listenInMeetings", SID)))).data().sessionId, SID);
+    assert.equal((await assertSucceeds(getDocs(mine(collection(aliceElsewhere, "workspaces", "ws-alice", "listenInMeetings"), "alice")))).size, 1);
+    assert.equal((await assertSucceeds(getDocs(query(collection(aliceElsewhere, "workspaces", "ws-alice", "listenInTranscripts"), where("sessionId", "==", SID), where("createdBy", "==", "alice"))))).size, 2);
+    assert.equal((await assertSucceeds(getDoc(doc(aliceElsewhere, "workspaces", "ws-alice", "listenInSummaries", SID)))).data().sessionId, SID);
+    assert.equal((await assertSucceeds(getDoc(doc(aliceElsewhere, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`, "chunks", "0")))).data().text, "{}");
+    await assertSucceeds(setDoc(doc(aliceElsewhere, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice", { revision: 3 })));
+
+    // AN ORDINARY MEMBER of the same workspace: nothing at all.
+    const mia = db("mia");
+    assert.equal((await getDoc(doc(db("alice"), "workspaces", "ws-alice", "members", "mia"))).exists(), true);
+    await assertFails(getDoc(doc(mia, "workspaces", "ws-alice", "listenInMeetings", SID)));
+    await assertFails(getDoc(doc(mia, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`)));
+    await assertFails(getDoc(doc(mia, "workspaces", "ws-alice", "listenInSummaries", SID)));
+    await assertFails(getDoc(doc(mia, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`, "chunks", "0")));
+    await assertFails(getDocs(collection(mia, "workspaces", "ws-alice", "listenInMeetings")));
+    // ...not even by asking only for the creator's documents
+    await assertFails(getDocs(mine(collection(mia, "workspaces", "ws-alice", "listenInMeetings"), "alice")));
+    // Their own constrained query is allowed and simply returns nothing.
+    assert.equal((await assertSucceeds(getDocs(mine(collection(mia, "workspaces", "ws-alice", "listenInMeetings"), "mia")))).size, 0);
+    // No update, under either author, at any revision.
+    await assertFails(setDoc(doc(mia, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice", { revision: 9 })));
+    await assertFails(setDoc(doc(mia, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "mia", { revision: 9 })));
+    await assertFails(setDoc(doc(mia, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 0, { revision: 9 })));
+    await assertFails(setDoc(doc(mia, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice", { revision: 9 })));
+    await assertFails(setDoc(doc(mia, "workspaces", "ws-alice", "listenInMeetings", SID), { title: "renamed", updatedAt: serverTimestamp() }, { merge: true }));
+    // No delete, of a document or of a chunk.
+    await assertFails(deleteDoc(doc(mia, "workspaces", "ws-alice", "listenInMeetings", SID)));
+    await assertFails(deleteDoc(doc(mia, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`)));
+    await assertFails(deleteDoc(doc(mia, "workspaces", "ws-alice", "listenInSummaries", SID)));
+    await assertFails(deleteDoc(doc(mia, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`, "chunks", "0")));
+    // ...and cannot write a chunk under the creator's parent either.
+    await assertFails(setDoc(doc(mia, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:1`, "chunks", "1"), { workspaceId: "ws-alice", id: `${SID}:1`, kind: "listenInTranscripts", index: 1, text: "{}", updatedAt: serverTimestamp() }));
+    // A member may of course record their OWN meeting in the same workspace.
+    const MIA_SID = "6f1c2a3b-0000-4000-8000-0000000000m2".replace("m2", "02");
+    await assertSucceeds(setDoc(doc(mia, "workspaces", "ws-alice", "listenInMeetings", MIA_SID), { ...meeting("ws-alice", "mia", { sessionId: MIA_SID }), id: MIA_SID }));
+    assert.equal((await assertSucceeds(getDocs(mine(collection(mia, "workspaces", "ws-alice", "listenInMeetings"), "mia")))).size, 1);
+    // ...which alice in turn cannot read.
+    await assertFails(getDoc(doc(db("alice"), "workspaces", "ws-alice", "listenInMeetings", MIA_SID)));
+    // The creator's own documents are untouched by any of it.
+    assert.equal((await getDoc(doc(db("alice"), "workspaces", "ws-alice", "listenInMeetings", SID))).data().revision, 3);
+  });
+
+  test("36. authorship: createdBy must be the caller on create and can never change; a stale revision is refused; the field lists are closed", async () => {
+    const alice = db("alice");
+    const mia = db("mia");
+    // a member may not author a meeting as somebody else, in either direction
+    await assertFails(setDoc(doc(mia, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice")));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "mia")));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "mia", 0)));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "mia")));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice")));
+    // ...nor re-author it afterwards, directly or by merge, even as its author
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "mia", { revision: 2 })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), { createdBy: "mia", updatedAt: serverTimestamp() }, { merge: true }));
+    // the revision never goes backwards, on any of the three
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice", { revision: 3 })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice", { revision: 2 })));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 0, { revision: 5 })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 0, { revision: 4 })));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 0, { revision: 5 })));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice", { revision: 7 })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice", { revision: 6 })));
+    // a page or summary cannot be moved to another meeting
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 0, { revision: 6, sessionId: "other" })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice", { revision: 8, sessionId: "other" })));
+    // closed field lists and typed values
+    const badMeetings = [
+      { audio: "x" },
+      { mimeType: "audio/webm" },
+      { revision: 0 },
+      { revision: "3" },
+      { state: "idle" },
+      { state: "deleted" },
+      { stopReason: "boom" },
+      { title: "x".repeat(201) },
+      { language: "x".repeat(17) },
+      { startedAt: 0 },
+      { capturedMs: -1 },
+      { failedSeqs: "1,2" },
+      { failedSeqs: Array.from({ length: 1025 }, (_, i) => i) },
+      { summaryStatus: "generating" },
+      { summaryFinal: "yes" },
+      { transcriptPageSize: 0 },
+      { schemaVersion: "1" },
+      { updatedAt: new Date(2020, 1, 1) },
+    ];
+    for (const extra of badMeetings) {
+      await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), meeting("ws-alice", "alice", { revision: 9, ...extra })));
+    }
+    const { createdBy: _c, ...noAuthor } = meeting("ws-alice", "alice", { revision: 9 });
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), noAuthor));
+    const { failedSeqs: _f, ...noCoverage } = meeting("ws-alice", "alice", { revision: 9 });
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", SID), noCoverage));
+    // pages and summaries: the author is required there too
+    const { createdBy: _pc, ...pageNoAuthor } = page("ws-alice", "alice", 2, { revision: 9 });
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:2`), pageNoAuthor));
+    const { createdBy: _sc, ...summaryNoAuthor } = summary("ws-alice", "alice", { revision: 9 });
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summaryNoAuthor));
+    // pages: id must be sessionId:page, page an int, json a string, no strays
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`), page("ws-alice", "alice", 1, { revision: 9, id: `${SID}:0` })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:2`), page("ws-alice", "alice", 2, { page: -1 })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:2`), page("ws-alice", "alice", 2, { json: 42 })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:2`), page("ws-alice", "alice", 2, { audio: "x" })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:2`), page("ws-alice", "alice", 2, { chunked: true, chunkCount: 65, payloadUnits: 1, json: undefined })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID), summary("ws-alice", "alice", { revision: 9, segments: [] })));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", "other"), summary("ws-alice", "alice", { revision: 9, id: "other" })));
+    // a chunk that names the wrong parent or kind is refused
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInTranscripts", `${SID}:0`, "chunks", "0"), { workspaceId: "ws-alice", id: `${SID}:1`, kind: "listenInTranscripts", index: 0, text: "{}", updatedAt: serverTimestamp() }));
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInSummaries", SID, "chunks", "0"), { workspaceId: "ws-alice", id: SID, kind: "pdfAnnotations", index: 0, text: "{}", updatedAt: serverTimestamp() }));
+    // the generic JSON-collection rule does not admit these names either
+    await assertFails(setDoc(doc(alice, "workspaces", "ws-alice", "listenInMeetings", "m9"), envelope("ws-alice", "listenInMeetings", "m9", { json: "{}" })));
+  });
+
+  test("the existing entities are unaffected: a note, an annotation and an asset document behave as before", async () => {
+    const alice = db("alice");
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "noteContent", "n1"), envelope("ws-alice", "noteContent", "n1", { html: "<p>x</p>" })));
+    await assertSucceeds(setDoc(doc(alice, "workspaces", "ws-alice", "pdfAnnotations", "pdf1"), envelope("ws-alice", "pdfAnnotations", "pdf1", { json: "{\"items\":[]}" })));
+    // an ordinary member still reads and writes ordinary workspace entities —
+    // creator-only is a Listen In rule, not a new workspace-wide policy
+    const mia = db("mia");
+    assert.equal((await assertSucceeds(getDoc(doc(mia, "workspaces", "ws-alice", "noteContent", "n1")))).data().html, "<p>x</p>");
+    await assertSucceeds(setDoc(doc(mia, "workspaces", "ws-alice", "noteContent", "n2"), envelope("ws-alice", "noteContent", "n2", { html: "<p>mine</p>" })));
+    assert.equal((await assertSucceeds(getDocs(collection(mia, "workspaces", "ws-alice", "noteContent")))).size, 2);
+    await assertFails(setDoc(doc(db("bob"), "workspaces", "ws-alice", "noteContent", "n3"), envelope("ws-alice", "noteContent", "n3", { html: "" })));
+    await assertFails(deleteDoc(doc(alice, "workspaces", "ws-alice", "assets", "asset-1")));
   });
 });

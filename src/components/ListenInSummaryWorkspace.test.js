@@ -175,6 +175,8 @@ function sessionValue(over = {}) {
     retryFailed: jest.fn(),
     retrySummary: jest.fn(),
     regenerateSummary: jest.fn(),
+    summariseNow: jest.fn(),
+    clear: jest.fn(),
     editSummaryText: jest.fn(),
     clearError: jest.fn(),
   };
@@ -208,46 +210,78 @@ afterEach(() => {
 const buttons = () => [...document.querySelectorAll("button")];
 const byText = (re) => buttons().find((b) => re.test(b.textContent.trim()));
 const click = (el) => act(() => el.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-const tab = (name) => document.querySelector(`[data-listen-in-tab="${name}"]`);
-const viewOf = (name) => document.querySelector(`[data-listen-in-view="${name}"]`);
+// ONE PAGE (2026-09-13): the transcript section sits above the Summarised
+// section, both always rendered. `viewOf` resolves the two old view names to
+// their sections so the content assertions below read unchanged.
+const SECTION_OF = { transcript: "transcript", summary: "summarised" };
+const viewOf = (name) => document.querySelector(`[data-listen-in-section="${SECTION_OF[name]}"]`);
+// The two PAGE sections only — the summary's own headed sub-sections (Key
+// points, Decisions, …) carry the same attribute one level down.
+const sections = () =>
+  [...document.querySelectorAll('[data-listen-in-page="single"] > [data-listen-in-section]')].map((el) => el.getAttribute("data-listen-in-section"));
 const text = () => document.body.textContent;
 
 /* ============================ 1. the two views =========================== */
 
-describe("1. the window has a Summary view and a Transcript view", () => {
-  test("both are offered as a labelled group of pressed-state toggles", () => {
+describe("1. ONE page: the transcript on top, the Summarised section directly beneath it", () => {
+  test("no view switcher of any kind renders — no Original/Summarised, no Summary/Transcript tabs", () => {
     mount(sessionValue());
-    const group = document.querySelector('[role="group"][aria-label="Listen In view"]');
-    expect(group).not.toBeNull();
-    expect([...group.querySelectorAll("button")].map((b) => b.textContent.trim())).toEqual([
-      "Summary",
-      "Transcript",
-    ]);
-    expect(tab("summary").getAttribute("aria-pressed")).toBe("true");
-    expect(tab("transcript").getAttribute("aria-pressed")).toBe("false");
+    expect(document.querySelector('[role="group"][aria-label="Listen In view"]')).toBeNull();
+    expect(document.querySelector("[data-listen-in-tab]")).toBeNull();
+    expect(document.querySelector("[aria-pressed]:not([data-listen-in-control])")).toBeNull();
+    for (const b of buttons()) expect(b.textContent.trim()).not.toMatch(/^(Original|Summarised|Summary|Transcript)$/);
   });
 
-  test("SUMMARY is the default once there is a summary to read", () => {
+  test("both sections render on the same page, transcript first, inside one scrolling body", () => {
     mount(sessionValue());
-    expect(viewOf("summary")).not.toBeNull();
-    expect(viewOf("transcript")).toBeNull();
-    expect(text()).toContain("The team walked the site");
+    expect(sections()).toEqual(["transcript", "summarised"]);
+    const page = document.querySelector('[data-listen-in-page="single"]');
+    expect(page).not.toBeNull();
+    expect(page.contains(viewOf("transcript"))).toBe(true);
+    expect(page.contains(viewOf("summary"))).toBe(true);
+    // The transcript precedes the summary in document order.
+    expect(viewOf("transcript").compareDocumentPosition(viewOf("summary")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(viewOf("transcript").textContent).toContain("Right, let us walk the site.");
+    expect(viewOf("summary").textContent).toContain("The team walked the site");
   });
 
-  test("with nothing summarised yet the TRANSCRIPT is what opens", () => {
-    mount(sessionValue({ summary: summaryRecord({ result: EMPTY_RESULT, final: false }) }));
-    expect(viewOf("transcript")).not.toBeNull();
+  test("each section is headed, and the headings say what they are", () => {
+    mount(sessionValue());
+    expect(viewOf("transcript").querySelector("h3").textContent.trim()).toBe("Original transcript");
+    expect(viewOf("summary").querySelector("h3").textContent.trim()).toBe("Summarised");
+  });
+
+  test("1/2/3/4/5. with nothing summarised yet the page is the transcript and ONE Summarise button — no Summarised section, no placeholder", () => {
+    mount(sessionValue({ summary: summaryRecord({ result: EMPTY_RESULT, final: false, revision: 0 }) }));
+    expect(sections()).toEqual(["transcript"]);
     expect(viewOf("summary")).toBeNull();
-    expect(text()).toContain("Right, let us walk the site.");
+    expect(viewOf("transcript").textContent).toContain("Right, let us walk the site.");
+    const summarise = byText(/^Summarise$/);
+    expect(summarise).toBeDefined();
+    // The button sits UNDER the transcript, inside the same scrolling page.
+    const page = document.querySelector('[data-listen-in-page="single"]');
+    expect(page.contains(summarise)).toBe(true);
+    expect(viewOf("transcript").compareDocumentPosition(summarise) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // No automatic-summary messaging of any kind.
+    expect(text()).not.toMatch(/Nothing has been summarised|summary appears|Listening —|Waiting for enough|builds itself|Summarised/);
+    expect(document.querySelector("[data-listen-in-summary-status]")).toBeNull();
   });
 
-  test("switching is one press, and the choice sticks", () => {
+  test("while the user's request is in flight the button reads Summarising… and there is still no Summarised section", () => {
+    mount(sessionValue({ summary: summaryRecord({ result: EMPTY_RESULT, final: false, revision: 0, status: LISTEN_IN_SUMMARY_STATUS.GENERATING }) }));
+    expect(sections()).toEqual(["transcript"]);
+    const busy = byText(/^Summarising…$/);
+    expect(busy).toBeDefined();
+    expect(busy.disabled).toBe(true);
+    expect(viewOf("transcript").textContent).toContain("Right, let us walk the site.");
+  });
+
+  test("the generated summary appears underneath the transcript, structured, on the same page", () => {
     mount(sessionValue());
-    click(tab("transcript"));
-    expect(viewOf("transcript")).not.toBeNull();
-    expect(tab("transcript").getAttribute("aria-pressed")).toBe("true");
-    click(tab("summary"));
-    expect(viewOf("summary")).not.toBeNull();
+    const summary = viewOf("summary");
+    expect(summary.textContent).toContain("Costs were reviewed.");
+    expect(summary.querySelector('[data-listen-in-section="Key points"]')).not.toBeNull();
+    expect(summary.querySelector("textarea")).toBeNull();
   });
 });
 
@@ -297,7 +331,7 @@ describe("3. the summary states what it covers and never overclaims", () => {
   test("a final summary over a whole recording says so, with no caveat", () => {
     mount(sessionValue());
     expect(document.querySelector("[data-listen-in-summary-status]").textContent).toBe(
-      "Final summary."
+      "Summary of the whole transcript."
     );
     expect(document.querySelector('[data-listen-in-coverage="incomplete"]')).toBeNull();
   });
@@ -313,7 +347,7 @@ describe("3. the summary states what it covers and never overclaims", () => {
       })
     );
     expect(document.querySelector("[data-listen-in-summary-status]").textContent).toMatch(
-      /in progress — it does not yet cover the whole meeting/
+      /does not cover the newest transcript\. Summarise again to include it\./
     );
   });
 
@@ -339,7 +373,7 @@ describe("3. the summary states what it covers and never overclaims", () => {
     );
   });
 
-  test("waiting for the first transcript says what it is waiting for", () => {
+  test("before the first transcript there is no Summarise button, no Summarised section and no waiting message", () => {
     mount(
       sessionValue({
         chunks: [chunk(0, CHUNK_STATE.SEALED)],
@@ -347,8 +381,10 @@ describe("3. the summary states what it covers and never overclaims", () => {
         summaryCoverage: { pendingCount: 1, transcribedThroughSeq: -1, summaryThroughSeq: -1, complete: false },
       })
     );
-    click(tab("summary"));
-    expect(text()).toMatch(/Waiting for enough transcript/);
+    expect(sections()).toEqual(["transcript"]);
+    expect(byText(/^Summarise$/)).toBeUndefined();
+    expect(text()).not.toMatch(/Waiting for enough|Listening —|summary appears/);
+    expect(text()).toMatch(/Transcribing this part/);
   });
 });
 
@@ -357,7 +393,6 @@ describe("3. the summary states what it covers and never overclaims", () => {
 describe("4. the transcript is read-first, complete and in order", () => {
   test("it renders the canonical ordered segments with elapsed offsets", () => {
     mount(sessionValue());
-    click(tab("transcript"));
     const body = viewOf("transcript").textContent;
     expect(body.indexOf("Right, let us walk the site.")).toBeLessThan(
       body.indexOf("Agreed, we will move the survey.")
@@ -368,7 +403,6 @@ describe("4. the transcript is read-first, complete and in order", () => {
 
   test("it is NOT an editable textarea", () => {
     mount(sessionValue());
-    click(tab("transcript"));
     expect(viewOf("transcript").querySelector("textarea")).toBeNull();
     expect(viewOf("transcript").querySelector("input")).toBeNull();
   });
@@ -384,7 +418,6 @@ describe("4. the transcript is read-first, complete and in order", () => {
         failed: 1,
       })
     );
-    click(tab("transcript"));
     const gap = document.querySelector('[data-listen-in-transcript="gap"]');
     expect(gap).not.toBeNull();
     expect(gap.textContent).toMatch(/could not be transcribed/);
@@ -401,7 +434,6 @@ describe("4. the transcript is read-first, complete and in order", () => {
         summaryCoverage: { pendingCount: 1 },
       })
     );
-    click(tab("transcript"));
     const pendingBlock = document.querySelector('[data-listen-in-transcript="pending"]');
     expect(pendingBlock).not.toBeNull();
     expect(pendingBlock.textContent).toMatch(/Transcribing/);
@@ -414,7 +446,6 @@ describe("4. the transcript is read-first, complete and in order", () => {
     const blocks = transcriptBlocks(CAPTURE, chunks);
     expect(blocks.length).toBeLessThan(chunks.length);
     mount(sessionValue({ chunks }));
-    click(tab("transcript"));
     expect(viewOf("transcript").querySelectorAll("p").length).toBe(blocks.length);
   });
 
@@ -431,13 +462,52 @@ describe("4. the transcript is read-first, complete and in order", () => {
   });
 });
 
-/* ====================== 5. no button-driven summary ====================== */
+/* ============ 5. explicit Summarise beside the automatic loop =========== */
 
-describe("5. summarisation is automatic — the old actions are gone", () => {
-  test("there is no Summarise button anywhere in the window", () => {
-    mount(sessionValue());
+describe("5. summarisation is automatic AND explicit (2026-09-13)", () => {
+  test("6. with transcript and no summary yet, the Summarised view offers [Summarise]", () => {
+    const value = mount(sessionValue({ summary: summaryRecord({ result: EMPTY_RESULT, final: false, revision: 0 }) }));
+    const summarise = byText(/^Summarise$/);
+    expect(summarise).toBeDefined();
+    expect(byText(/^Summarise again$/)).toBeUndefined();
+    expect(viewOf("summary")).toBeNull();
+    click(summarise);
+    expect(value.summariseNow).toHaveBeenCalledTimes(1);
+    // The old vocabulary is gone: no Regenerate, no bare Try again for the summary.
+    expect(byText(/^Regenerate$/)).toBeUndefined();
+  });
+
+  test("9. once a summary exists the control reads [Summarise again], and it is the same intent", () => {
+    const value = mount(sessionValue());
+    const again = byText(/^Summarise again$/);
+    expect(again).toBeDefined();
     expect(byText(/^Summarise$/)).toBeUndefined();
-    expect(text()).not.toMatch(/Summarise/);
+    click(again);
+    expect(value.summariseNow).toHaveBeenCalledTimes(1);
+    expect(value.regenerateSummary).not.toHaveBeenCalled();
+    expect(value.retrySummary).not.toHaveBeenCalled();
+  });
+
+  test("with no transcribed words there is nothing to summarise, so no control is offered", () => {
+    mount(
+      sessionValue({
+        chunks: [chunk(0, CHUNK_STATE.SEALED)],
+        summary: summaryRecord({ result: EMPTY_RESULT, final: false, revision: 0 }),
+        summaryCoverage: { pendingCount: 1, transcribedThroughSeq: -1, summaryThroughSeq: -1, complete: false },
+      })
+    );
+    expect(byText(/^Summarise$/)).toBeUndefined();
+    expect(byText(/^Summarise again$/)).toBeUndefined();
+  });
+
+  test("the control never touches the microphone or the meeting: it dispatches one intent and nothing else", () => {
+    const value = mount(sessionValue());
+    click(byText(/^Summarise again$/));
+    expect(value.start).not.toHaveBeenCalled();
+    expect(value.resume).not.toHaveBeenCalled();
+    expect(value.pause).not.toHaveBeenCalled();
+    expect(value.complete).not.toHaveBeenCalled();
+    expect(value.discard).not.toHaveBeenCalled();
   });
 
   test("there is no Insert action of any kind", () => {
@@ -445,19 +515,41 @@ describe("5. summarisation is automatic — the old actions are gone", () => {
     expect(text()).not.toMatch(/Insert/);
   });
 
-  test("the actions that remain are the session's own", () => {
-    mount(sessionValue());
-    expect(byText(/^Copy$/)).toBeDefined();
+  test("the actions that remain are the session's own — and a COMPLETED meeting is left with Clear, not Discard", () => {
+    const value = mount(sessionValue());
+    // Copy is named per section, beside what it copies; there is no bare Copy.
+    expect(byText(/^Copy transcript$/)).toBeDefined();
+    expect(byText(/^Copy summary$/)).toBeDefined();
+    expect(byText(/^Copy$/)).toBeUndefined();
     expect(byText(/^Export$/)).toBeDefined();
-    expect(byText(/^Discard$/)).toBeDefined();
     expect(byText(/^Close$/)).toBeDefined();
+    const clear = byText(/^Clear$/);
+    expect(clear).toBeDefined();
+    expect(byText(/^Discard$/)).toBeUndefined();
+    click(clear);
+    expect(value.clear).toHaveBeenCalledTimes(1);
+    expect(value.discard).not.toHaveBeenCalled();
+  });
+
+  test("an UNFINISHED meeting keeps its destructive Discard and is offered no Clear", () => {
+    mount(
+      sessionValue({
+        session: { ...CAPTURE, state: LISTEN_IN_STATE.PAUSED },
+        active: true,
+        paused: true,
+        finished: false,
+        canResume: true,
+      })
+    );
+    expect(byText(/^Discard$/)).toBeDefined();
+    expect(byText(/^Clear$/)).toBeUndefined();
   });
 });
 
 /* ========================== 6. failure and retry ========================= */
 
 describe("6. a summary failure is reported, and never reads as a lost recording", () => {
-  test("the message says the recording is unaffected and offers Try again", () => {
+  test("10. the message says the recording is unaffected and offers [Try summarising again] — never a bare Try again", () => {
     const value = mount(
       sessionValue({
         summary: summaryRecord({
@@ -468,10 +560,34 @@ describe("6. a summary failure is reported, and never reads as a lost recording"
       })
     );
     expect(text()).toMatch(/recording and its transcript are unaffected/);
-    const retry = byText(/^Try again$/);
+    const retry = byText(/^Try summarising again$/);
     expect(retry).toBeDefined();
+    expect(byText(/^Try again$/)).toBeUndefined();
     click(retry);
-    expect(value.retrySummary).toHaveBeenCalled();
+    expect(value.summariseNow).toHaveBeenCalledTimes(1);
+    // 11/12: the retry reopens nothing and creates nothing.
+    expect(value.start).not.toHaveBeenCalled();
+    expect(value.resume).not.toHaveBeenCalled();
+  });
+
+  test("a failed meeting with NO summary yet still keeps its Original and offers the retry", () => {
+    const value = mount(
+      sessionValue({
+        summary: summaryRecord({
+          status: LISTEN_IN_SUMMARY_STATUS.FAILED,
+          result: EMPTY_RESULT,
+          final: false,
+          revision: 0,
+          lastErrorOutcome: "failure",
+          lastErrorMessage: "The summary could not be generated. The recording and its transcript are unaffected.",
+        }),
+      })
+    );
+    // The Original is intact and readable.
+    expect(text()).toContain("Right, let us walk the site.");
+    expect(text()).toMatch(/The summary could not be generated\./);
+    click(byText(/^Try summarising again$/));
+    expect(value.summariseNow).toHaveBeenCalledTimes(1);
   });
 
   test("a failure does not remove the summary already generated", () => {
@@ -479,22 +595,30 @@ describe("6. a summary failure is reported, and never reads as a lost recording"
     expect(text()).toContain("The team walked the site");
   });
 
-  test("a failure with nothing generated yet still shows the transcript view", () => {
-    mount(
+  test("17/18/19. a failed request with nothing generated keeps the transcript visible, states the failure BENEATH it with Try summarising again, and shows no empty Summarised section", () => {
+    const value = mount(
       sessionValue({
         summary: summaryRecord({
           result: EMPTY_RESULT,
           final: false,
+          revision: 0,
           status: LISTEN_IN_SUMMARY_STATUS.FAILED,
           lastErrorOutcome: "failure",
+          lastErrorMessage: "The summary could not be generated. The recording and its transcript are unaffected.",
         }),
       })
     );
-    expect(viewOf("transcript")).not.toBeNull();
-    click(tab("summary"));
-    expect(document.querySelector("[data-listen-in-summary-status]").textContent).toMatch(
-      /could not be generated/
-    );
+    expect(sections()).toEqual(["transcript"]);
+    expect(viewOf("summary")).toBeNull();
+    expect(viewOf("transcript").textContent).toContain("Right, let us walk the site.");
+    const failure = document.querySelector('[data-listen-in-summary="failed"]');
+    expect(failure).not.toBeNull();
+    expect(failure.textContent).toMatch(/could not be generated/);
+    expect(viewOf("transcript").compareDocumentPosition(failure) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const retry = byText(/^Try summarising again$/);
+    expect(retry).toBeDefined();
+    click(retry);
+    expect(value.summariseNow).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -534,23 +658,24 @@ describe("7. the summary may be edited, and regeneration is explicit", () => {
     expect(text()).toContain("Three boreholes were logged.");
   });
 
-  test("Regenerate is a deliberate action, not something that happens to them", () => {
-    const value = mount(sessionValue());
-    const regenerate = byText(/^Regenerate$/);
-    expect(regenerate).toBeDefined();
-    click(regenerate);
-    expect(value.regenerateSummary).toHaveBeenCalled();
+  test("Summarise again is a deliberate action, not something that happens to them, and it warns before replacing their words", () => {
+    const value = mount(sessionValue({ summary: summaryRecord({ userSummaryText: "My own account of the meeting." }) }));
+    const again = byText(/^Summarise again$/);
+    expect(again).toBeDefined();
+    expect(again.getAttribute("title")).toMatch(/replacing your edited wording/);
+    click(again);
+    expect(value.summariseNow).toHaveBeenCalledTimes(1);
   });
 
-  test("while a generation is running, Regenerate is busy and cannot be pressed again", () => {
+  test("while a generation is running the control is busy and cannot be pressed again", () => {
     const value = mount(
       sessionValue({ summary: summaryRecord({ status: LISTEN_IN_SUMMARY_STATUS.GENERATING }) })
     );
-    const busy = byText(/^Generating…$/);
+    const busy = byText(/^Summarising…$/);
     expect(busy.disabled).toBe(true);
     expect(busy.getAttribute("aria-busy")).toBe("true");
     click(busy);
-    expect(value.regenerateSummary).not.toHaveBeenCalled();
+    expect(value.summariseNow).not.toHaveBeenCalled();
   });
 });
 
@@ -651,7 +776,7 @@ describe("8. the session header carries the state, the clock and the controls", 
     expect(byText(/^Start recording$/)).toBeDefined();
     expect(byText(/^Complete meeting$/)).toBeUndefined();
     expect(byText(/^Export$/)).toBeDefined();
-    expect(byText(/^Copy$/)).toBeDefined();
+    expect(byText(/^Copy transcript$/)).toBeDefined();
     expect(text()).toMatch(/Completed/);
   });
 
@@ -695,7 +820,7 @@ describe("8. the session header carries the state, the clock and the controls", 
 
 /* ============================== 9. Copy ================================== */
 
-describe("9. Copy copies the view the user is reading", () => {
+describe("9. Copy is named for what it copies — Copy transcript beside the transcript, Copy summary beside the summary", () => {
   const writeText = jest.fn(async () => {});
   beforeEach(() => {
     writeText.mockClear();
@@ -705,17 +830,30 @@ describe("9. Copy copies the view the user is reading", () => {
     });
   });
 
-  test("on Summary it copies the summary; on Transcript it copies the transcript", async () => {
+  test("13/14. Copy summary copies the summary; Copy transcript copies the whole transcript; each sits inside its own section", async () => {
     mount(sessionValue());
+    const copySummary = byText(/^Copy summary$/);
+    const copyTranscript = byText(/^Copy transcript$/);
+    expect(viewOf("summary").contains(copySummary)).toBe(true);
+    expect(viewOf("transcript").contains(copyTranscript)).toBe(true);
     await act(async () => {
-      byText(/^Copy$/).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      copySummary.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(writeText.mock.calls[0][0]).toContain("The team walked the site");
-
-    click(tab("transcript"));
+    expect(writeText.mock.calls[0][0]).not.toContain("Right, let us walk the site.");
+    expect(text()).toMatch(/Summary copied\./);
     await act(async () => {
-      byText(/^Copy$/).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      copyTranscript.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(writeText.mock.calls[1][0]).toContain("Right, let us walk the site.");
+    expect(writeText.mock.calls[1][0]).toContain("Agreed, we will move the survey.");
+    expect(writeText.mock.calls[1][0]).not.toContain("The team walked the site");
+    expect(text()).toMatch(/Transcript copied\./);
+  });
+
+  test("with no summary there is no Copy summary, and Copy transcript is still there", () => {
+    mount(sessionValue({ summary: summaryRecord({ result: EMPTY_RESULT, final: false, revision: 0 }) }));
+    expect(byText(/^Copy summary$/)).toBeUndefined();
+    expect(byText(/^Copy transcript$/)).toBeDefined();
   });
 });

@@ -20,6 +20,14 @@
 //                   annotation documents into IndexedDB by the precedence in
 //                   src/lib/pdfAnnotationSync.js. Local work; a browser
 //                   without IndexedDB skips it and the session still opens;
+//   4c. Listen In   (Phase 8D.4, approved 2026-09-12 — gated by
+//                   src/lib/listenIn/listenInPolicy.js →
+//                   LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED): the cloud bridge for
+//                   this account's Listen In TEXT results was installed
+//                   before step 3 so its payload providers could join the
+//                   engine; now that the session is open, re-queue anything
+//                   the account has not accepted. Local work; never fatal;
+//                   nothing of it runs if the flag is ever off.
 //   5. ready        hand back the session.
 //
 // OFFLINE START. When the bootstrap cannot reach Firestore and this browser
@@ -48,6 +56,7 @@ import {
   pdfAnnotationPayloadProvider,
   reconcilePdfAnnotationOutbox,
 } from "../pdfAnnotationSync";
+import { installListenInCloudSync } from "../listenIn/listenInCloudSync";
 import { forgetCaptureSnapshots, installCloudCapture, isCloudCaptureInstalled } from "./cloudCapture";
 import { CLOUD_COLLECTION } from "./cloudModel";
 import { outboxSize, pendingOutboxKeys } from "./cloudOutbox";
@@ -112,8 +121,11 @@ function withTimeout(promise, ms, setTimer, clearTimer) {
  *   setTimer?: Function, clearTimer?: Function,
  *   syncOptions?: object,
  *   onMalformed?: Function,
+ *   listenInCloud?: { approved?: boolean, persistence?: string, store?: object },
+ *                                 tests inject the approval and a store; production
+ *                                 passes nothing and the governance flag decides
  * }} options
- * @returns {Promise<{ workspace: { id, role, created }, mode, sync, hydration, close }>}
+ * @returns {Promise<{ workspace: { id, role, created }, mode, sync, hydration, listenIn, close }>}
  */
 export async function openWorkspaceSession({
   uid,
@@ -125,6 +137,7 @@ export async function openWorkspaceSession({
   clearTimer = (t) => clearTimeout(t),
   syncOptions = {},
   onMalformed = null,
+  listenInCloud = {},
 }) {
   if (!isCloudCaptureInstalled()) installCloudCapture({ storage, now });
 
@@ -146,6 +159,18 @@ export async function openWorkspaceSession({
   forgetCaptureSnapshots(workspace.id);
   setDurableScope({ kind: DURABLE_SCOPE_KIND.WORKSPACE, id: workspace.id });
 
+  // 2b. the Listen In cloud bridge (Phase 8D.4) — installed here so its
+  // providers can be handed to the engine below; it does nothing if the
+  // governance flag is off (`installed: false`, no providers). A failure to
+  // install is a failure of a text-replication convenience, never of the
+  // session: the engine falls back to its own store exactly as before.
+  let listenIn = { installed: false, providers: {}, reconcile: async () => null, uninstall: () => {} };
+  try {
+    listenIn = installListenInCloudSync({ uid, workspaceId: workspace.id, storage, now, ...(listenInCloud || {}) });
+  } catch {
+    // see above
+  }
+
   // 3. replay
   const sync = createCloudSync({
     workspaceId: workspace.id,
@@ -154,7 +179,7 @@ export async function openWorkspaceSession({
     now,
     setTimer,
     clearTimer,
-    payloadProviders: { [CLOUD_COLLECTION.PDF_ANNOTATIONS]: pdfAnnotationPayloadProvider },
+    payloadProviders: { [CLOUD_COLLECTION.PDF_ANNOTATIONS]: pdfAnnotationPayloadProvider, ...listenIn.providers },
     ...syncOptions,
   }).start();
   let hydration = { counts: null, malformed: [], done: false };
@@ -209,10 +234,22 @@ export async function openWorkspaceSession({
   }
   hydration = { ...hydration, annotations };
 
+  // 4c. Listen In (see the header). Never fatal, and nothing while inactive.
+  let listenInReconcile = null;
+  if (listenIn.installed) {
+    try {
+      listenInReconcile = await listenIn.reconcile();
+      if (listenInReconcile && listenInReconcile.enqueued.length > 0) sync.scheduleFlush();
+    } catch {
+      listenInReconcile = null;
+    }
+  }
+
   let closed = false;
   async function close() {
     if (closed) return;
     closed = true;
+    listenIn.uninstall();
     sync.stop();
     try {
       await store.close();
@@ -222,5 +259,12 @@ export async function openWorkspaceSession({
     if (outboxSize(workspace.id, storage) === 0) clearWorkspaceMirror(workspace.id, storage);
   }
 
-  return { workspace, mode, sync, hydration, close };
+  return {
+    workspace,
+    mode,
+    sync,
+    hydration,
+    listenIn: Object.freeze({ installed: listenIn.installed, reconciled: listenInReconcile }),
+    close,
+  };
 }

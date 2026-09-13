@@ -191,19 +191,24 @@ function crash() {
   resetMicrophoneOwnershipForTests();
 }
 
-/** Seal one chunk and let the drain and the summary loop have their pass. */
+/** Seal one chunk and let the drain have its pass. Nothing summarises on its
+ *  own (2026-09-13): the summary loop runs only on the user's request. */
 async function speak(rig) {
   rig.roll();
   await settle();
   await rig.engine.flush();
   await settle();
-  await rig.engine.flushSummary();
+}
+
+/** Let the drain run to rest. */
+async function drain(rig) {
+  await rig.engine.flush();
   await settle();
 }
 
-/** Let the drain and the summary loop run to rest. */
-async function drain(rig) {
-  await rig.engine.flush();
+/** The user presses Summarise, and the request runs to rest. */
+async function requestSummary(rig) {
+  await rig.engine.summariseNow();
   await settle();
   await rig.engine.flushSummary();
   await settle();
@@ -245,7 +250,9 @@ describe("Pause ends the microphone leg and keeps the meeting", () => {
     rig.advance(30000);
     await speak(rig);
     const before = snap(rig);
-    expect(before.summary.parts.length).toBeGreaterThan(0);
+    // Nothing has been summarised — nothing summarises without being asked.
+    expect(before.summary.parts.length).toBe(0);
+    expect(rig.summarise).not.toHaveBeenCalled();
 
     await rig.engine.pause();
     await settle();
@@ -255,10 +262,12 @@ describe("Pause ends the microphone leg and keeps the meeting", () => {
     expect(after.session.sessionId).toBe(before.session.sessionId);
     expect(after.active).toBe(true);
     expect(after.chunks[0].text).toBe(before.chunks[0].text);
-    // The summary record is the same one, not reset and not consolidated.
+    // The summary record is the same one, not reset, not consolidated, and
+    // Stop recording asked for nothing.
     expect(after.summary.sessionId).toBe(before.summary.sessionId);
-    expect(after.summary.parts.length).toBeGreaterThanOrEqual(before.summary.parts.length);
+    expect(after.summary.parts.length).toBe(0);
     expect(after.summary.final).toBe(false);
+    expect(rig.summarise).not.toHaveBeenCalled();
     // The next sequence continues from where the leg ended.
     expect(after.session.nextSeq).toBe(after.chunks.length);
     expect(after.session.nextSeq).toBeGreaterThan(before.session.nextSeq - 1);
@@ -331,8 +340,8 @@ describe("Pause ends the microphone leg and keeps the meeting", () => {
     expect(s.session.stoppedAt).toBeNull();
     expect(s.session.stopReason).toBeNull();
     expect(s.summary.final).toBe(false);
-    // No FINAL or MERGE request was ever made.
-    expect(rig.summarise.mock.calls.every(([r]) => r.mode === "window")).toBe(true);
+    // No request of any kind was made: Stop recording never summarises.
+    expect(rig.summarise).not.toHaveBeenCalled();
     expect(s.summaryCoverage.complete).toBe(false);
   });
 
@@ -426,7 +435,9 @@ describe("Resume reopens the microphone into the SAME meeting", () => {
       await drain(rig);
     }
     expect(rig.summarise.mock.calls.length).toBe(calls);
+    expect(calls).toBe(0);
     expect(snap(rig).summary.revision).toBe(revision);
+    expect(revision).toBe(0);
   });
 });
 
@@ -450,12 +461,21 @@ describe("Complete meeting ends the meeting and keeps the record", () => {
 
     await drain(rig);
     await drain(rig);
-    const s = snap(rig);
+    let s = snap(rig);
     expect(s.pending).toBe(0);
     expect(s.session.state).toBe(LISTEN_IN_STATE.FINISHED);
+    // Complete has ONE job (2026-09-13): it ends the meeting. It summarises
+    // nothing, and a completed meeting validly has no summary.
+    expect(s.summary.final).toBe(false);
+    expect(rig.summarise).not.toHaveBeenCalled();
+    // 28. no longer the active meeting.
+    expect(s.active).toBe(false);
+    // Summarise is still available after completion, on the same meeting.
+    await requestSummary(rig);
+    s = snap(rig);
     expect(s.summary.final).toBe(true);
     expect(rig.summarise.mock.calls.some(([r]) => r.mode === "final")).toBe(true);
-    // 28. no longer the active meeting.
+    expect(s.session.state).toBe(LISTEN_IN_STATE.FINISHED);
     expect(s.active).toBe(false);
   });
 
@@ -477,7 +497,7 @@ describe("Complete meeting ends the meeting and keeps the record", () => {
     expect(currentMicrophoneOwner()).toBeNull();
     const s = snap(rig);
     expect(s.session.state).toBe(LISTEN_IN_STATE.FINISHED);
-    expect(s.summary.final).toBe(true);
+    expect(rig.summarise).not.toHaveBeenCalled();
     expect(s.active).toBe(false);
     expect(s.session.stopReason).toBe(LISTEN_IN_STOP_REASON.USER);
   });
@@ -506,13 +526,18 @@ describe("Complete meeting ends the meeting and keeps the record", () => {
 
     expect(second.getUserMedia).not.toHaveBeenCalled();
     expect(currentMicrophoneOwner()).toBeNull();
-    const s = snap(second);
+    let s = snap(second);
     expect(s.session.state).toBe(LISTEN_IN_STATE.FINISHED);
     expect(s.chunks.every((c) => c.state === CHUNK_STATE.TRANSCRIBED)).toBe(true);
-    expect(s.summary.final).toBe(true);
+    expect(second.summarise).not.toHaveBeenCalled();
     expect(s.active).toBe(false);
     // The interruption stays on record as why capture ended.
     expect(s.session.stopReason).toBe(LISTEN_IN_STOP_REASON.INTERRUPTION);
+    // 34. and what was recovered summarises on request, without a microphone.
+    await requestSummary(second);
+    s = snap(second);
+    expect(s.summary.final).toBe(true);
+    expect(second.getUserMedia).not.toHaveBeenCalled();
   });
 
   test("29. Complete does NOT delete the meeting: header, chunks and summary all remain in the store", async () => {
@@ -526,6 +551,9 @@ describe("Complete meeting ends the meeting and keeps the record", () => {
     await settle();
     await drain(rig);
     await drain(rig);
+    // No summary record exists until the user asks for one.
+    expect(await store.getSummary(UID, WS, id)).toBeNull();
+    await requestSummary(rig);
 
     const header = await store.getSession(UID, WS, id);
     expect(header.state).toBe(LISTEN_IN_STATE.FINISHED);
@@ -588,6 +616,7 @@ describe("a crash recovers the same unfinished meeting, and nothing starts anoth
     await begin(rig);
     rig.advance(30000);
     await speak(rig);
+    await requestSummary(rig); // the user summarised the first leg before the crash
     const id = snap(rig).session.sessionId;
     const nextSeq = snap(rig).session.nextSeq;
     await store.putSession({ ...snap(rig).session, state: LISTEN_IN_STATE.RECORDING });
@@ -852,7 +881,8 @@ describe("the four-hour budget is per meeting and survives pause/resume", () => 
     await drain(rig);
     const s = snap(rig);
     expect(s.session.state).toBe(LISTEN_IN_STATE.FINISHED);
-    expect(s.summary.final).toBe(true);
+    // The limit completes the meeting; like every completion, it summarises nothing.
+    expect(rig.summarise).not.toHaveBeenCalled();
     expect(s.active).toBe(false);
     // And the next Start is a new meeting.
     await rig.engine.start({ language: "en" });

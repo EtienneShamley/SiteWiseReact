@@ -644,31 +644,24 @@ export function listenInFinishedWithIssues(session, chunks = []) {
 export function listenInSummaryStatusLabel(summary, coverage) {
   if (!summary) return "";
   const cov = coverage || {};
-  if (summary.status === LISTEN_IN_SUMMARY_STATUS.GENERATING) {
-    return summary.parts.length > 0 ? "Updating the summary…" : "Generating the summary…";
-  }
+  if (summary.status === LISTEN_IN_SUMMARY_STATUS.GENERATING) return "Summarising…";
   if (summary.status === LISTEN_IN_SUMMARY_STATUS.FAILED) {
     return "The summary could not be generated.";
   }
-  if (!hasSummaryToShow(summary)) {
-    if (cov.pendingCount > 0) return "Waiting for enough transcript to summarise…";
-    return cov.capturing ? "Listening — the summary appears once there is enough to summarise." : "";
-  }
+  // Summarisation is on request (2026-09-13): with no summary there is
+  // nothing to say here — the window offers the Summarise control instead.
+  if (!hasSummaryToShow(summary)) return "";
   if (summary.lastErrorOutcome) {
-    return "The latest part of the meeting could not be summarised. The summary below is what was generated before that.";
+    return "The latest attempt could not be summarised. The summary below is from the previous one.";
   }
-  if (!summary.final) {
-    if (cov.behind || cov.pendingCount > 0) {
-      return "Summary in progress — it does not yet cover the whole meeting.";
-    }
-    return cov.capturing
-      ? "Summary in progress — it covers the meeting so far."
-      : "Summary in progress — finalising.";
+  if (cov.behind || cov.pendingCount > 0) {
+    return "This summary does not cover the newest transcript. Summarise again to include it.";
   }
+  if (cov.capturing || !summary.final) return "Summary of the transcript so far.";
   if (cov.failedCount > 0) {
-    return `Final summary — ${cov.failedCount === 1 ? "one part" : `${cov.failedCount} parts`} of the recording could not be transcribed and are not covered.`;
+    return `Summary — ${cov.failedCount === 1 ? "one part" : `${cov.failedCount} parts`} of the recording could not be transcribed and are not covered.`;
   }
-  return "Final summary.";
+  return "Summary of the whole transcript.";
 }
 
 /**

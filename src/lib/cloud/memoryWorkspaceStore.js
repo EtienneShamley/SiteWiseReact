@@ -27,6 +27,12 @@
 //     but state / tombstonedAt / updatedAt — stored → tombstoned only with
 //     the store's own timestamp, tombstoned → stored dropping it, and a
 //     standing tombstone keeping its clock;
+// LISTEN IN TEXT (Phase 8D.4): `listListenInMeetings` and
+// `readListenInMeeting` mirror the Firestore store's on-demand reads and
+// enforce what `firestore.rules` enforces — membership AND creator-only, so a
+// meeting is readable, writable and deletable only by the account that
+// recorded it, and `readWorkspace` excludes the three collections entirely.
+//
 //   - DELETION is DENIED to everybody (Phase 7.10A: NoteWise V1 performs no
 //     physical cloud-asset deletion, so `firestore.rules` says
 //     `allow delete: if false` for this collection). Every caller's delete —
@@ -41,6 +47,16 @@
 import { MEMBER_ROLE } from "./workspaceBootstrap";
 import { ASSET_COLLECTION, assetCollectionPath, assetDocumentPath } from "./assetPaths";
 import { CLOUD_ASSET_STATE, validateAssetDocument, validateAssetTransition } from "./assetCloudModel";
+import { CLOUD_COLLECTION, HOISTED_PAYLOAD_FIELDS, LISTEN_IN_MEETING_FIELDS, ON_DEMAND_ENTITY_COLLECTIONS } from "./cloudModel";
+import {
+  isListenInCloudCollection,
+  transcriptPageDocumentId,
+  validateListenInMeetingPayload,
+} from "./listenInCloudModel";
+
+// The envelope every entity document carries (firestore.rules → validEnvelope).
+const ENVELOPE_KEYS = ["workspaceId", "id", "kind", "schemaVersion", "updatedAt"];
+const CHUNKED_KEYS = ["json", "chunked", "chunkCount", "payloadUnits"];
 
 const TIMESTAMP = Object.freeze({ __serverTimestamp: true });
 
@@ -116,6 +132,59 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
     if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
     if (data && data.workspaceId !== workspaceId) throw firestoreError("permission-denied", "workspaceId mismatch");
     if (b === ASSET_COLLECTION && path.length === 4) authorizeAssetWrite(workspaceId, c, data, exists);
+    if (isListenInCloudCollection(b) && path.length === 4) authorizeListenInWrite(workspaceId, b, c, data, exists);
+  }
+
+  // The Listen In rules of firestore.rules (Phase 8D.4), on the data as it
+  // will be stored: the field list, the identity, the revision that may never
+  // go backwards, and — the V1 product rule — CREATOR-ONLY access. Every one
+  // of the three documents names its author; only that author may create it
+  // as themselves, and only that author may update or delete it afterwards.
+  // Workspace membership is required as well, never instead.
+  function authorizeListenInWrite(workspaceId, collection, id, data, exists) {
+    if (!data) throw firestoreError("permission-denied", "listenIn: delete is not a set");
+    const resolved = resolveTimestamps(data, now());
+    const previous = exists ? docs.get(pathOf(["workspaces", workspaceId, collection, id])) : null;
+    if (resolved.kind !== collection || resolved.id !== id) throw firestoreError("permission-denied", "listenIn: envelope");
+    if (!Number.isInteger(resolved.revision) || resolved.revision < 1) throw firestoreError("permission-denied", "listenIn: revision");
+    if (previous && resolved.revision < previous.revision) throw firestoreError("permission-denied", "listenIn: stale revision");
+    if (typeof resolved.createdBy !== "string" || !resolved.createdBy) {
+      throw firestoreError("permission-denied", "listenIn: createdBy");
+    }
+    if (!previous && resolved.createdBy !== currentUid) {
+      throw firestoreError("permission-denied", "listenIn: createdBy is not the caller");
+    }
+    if (previous) {
+      if (previous.createdBy !== currentUid) throw firestoreError("permission-denied", "listenIn: not the creator");
+      if (resolved.createdBy !== previous.createdBy) throw firestoreError("permission-denied", "listenIn: createdBy changed");
+    }
+    if (collection === CLOUD_COLLECTION.LISTEN_IN_MEETINGS) {
+      const allowed = new Set([...ENVELOPE_KEYS, ...LISTEN_IN_MEETING_FIELDS]);
+      for (const key of Object.keys(resolved)) if (!allowed.has(key)) throw firestoreError("permission-denied", `listenIn: field ${key}`);
+      const { workspaceId: _w, id: _i, kind: _k, schemaVersion: _s, updatedAt: _u, ...payload } = resolved;
+      const check = validateListenInMeetingPayload(payload, { id });
+      if (!check.ok) throw firestoreError("permission-denied", `listenIn: ${check.reason}`);
+      return;
+    }
+    const hoisted = HOISTED_PAYLOAD_FIELDS[collection] || [];
+    const allowed = new Set([...ENVELOPE_KEYS, ...CHUNKED_KEYS, ...hoisted]);
+    for (const key of Object.keys(resolved)) if (!allowed.has(key)) throw firestoreError("permission-denied", `listenIn: field ${key}`);
+    if (!(typeof resolved.json === "string" || resolved.chunked === true)) throw firestoreError("permission-denied", "listenIn: payload");
+    if (typeof resolved.sessionId !== "string" || !resolved.sessionId) throw firestoreError("permission-denied", "listenIn: sessionId");
+    if (previous && previous.sessionId !== resolved.sessionId) throw firestoreError("permission-denied", "listenIn: sessionId changed");
+    if (collection === CLOUD_COLLECTION.LISTEN_IN_TRANSCRIPTS) {
+      if (!Number.isInteger(resolved.page) || resolved.page < 0) throw firestoreError("permission-denied", "listenIn: page");
+      if (id !== transcriptPageDocumentId(resolved.sessionId, resolved.page)) throw firestoreError("permission-denied", "listenIn: page id");
+    } else if (resolved.sessionId !== id) {
+      throw firestoreError("permission-denied", "listenIn: summary id");
+    }
+  }
+
+  /** A Listen In document may be read only by the user who created it. */
+  function assertListenInReadable(value, what) {
+    if (!value) return null;
+    if (value.createdBy !== currentUid) throw firestoreError("permission-denied", `listenIn: ${what} is not the caller's`);
+    return value;
   }
 
   // The asset-document rules of firestore.rules (`match /assets/{assetId}`),
@@ -149,6 +218,16 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
     if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
     if (relativePath[0] === ASSET_COLLECTION && relativePath.length === 2) {
       throw firestoreError("permission-denied", "assets: delete is denied");
+    }
+    // Listen In: the creator only. A document that is not there is a no-op
+    // delete, exactly as the rule allows, so a discard of a meeting that never
+    // reached the account cannot leave a permanently failing outbox entry.
+    if (isListenInCloudCollection(relativePath[0])) {
+      const parentPath = pathOf(["workspaces", workspaceId, relativePath[0], relativePath[1]]);
+      const parent = docs.get(parentPath);
+      if (parent && parent.createdBy !== currentUid) {
+        throw firestoreError("permission-denied", "listenIn: not the creator");
+      }
     }
   }
 
@@ -233,7 +312,7 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
         const rest = key.slice(prefix.length).split("/");
         if (rest.length !== 2) continue;
         const [collection, id] = rest;
-        if (["members", "migrations", ASSET_COLLECTION].includes(collection)) continue;
+        if (["members", "migrations", ASSET_COLLECTION, ...ON_DEMAND_ENTITY_COLLECTIONS].includes(collection)) continue;
         const chunks = [];
         if (value.chunked === true) {
           for (let i = 0; i < Number(value.chunkCount) || 0; i++) {
@@ -321,6 +400,61 @@ export function createMemoryWorkspaceStore({ now = () => Date.now() } = {}) {
       authorizeDelete(workspaceId, [ASSET_COLLECTION, assetId]);
       const existed = docs.delete(path);
       return { deleted: existed };
+    },
+
+    /**
+     * The CALLER'S OWN Listen In meeting headers in one workspace (8D.4).
+     *
+     * `uid` is explicit because the Firestore adapter must put it in the
+     * query for the creator-only read rule to admit the list at all; asking
+     * for another user's is refused here exactly as the rules refuse it.
+     */
+    async listListenInMeetings(workspaceId, uid) {
+      assertAuthenticated();
+      take("read");
+      calls.reads += 1;
+      if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
+      if (uid !== undefined && uid !== currentUid) throw firestoreError("permission-denied", "listenIn: not the caller");
+      const meetings = Object.entries(api.listWorkspaceDocs(workspaceId, CLOUD_COLLECTION.LISTEN_IN_MEETINGS))
+        .filter(([, value]) => value.createdBy === currentUid)
+        .map(([id, value]) => ({ id, fields: { ...value } }));
+      return { meetings };
+    },
+
+    /** One meeting: its header, every transcript page (with chunks) and its
+     *  summary (with chunks) — nothing of any other meeting. */
+    async readListenInMeeting(workspaceId, sessionId, uid) {
+      assertAuthenticated();
+      take("read");
+      calls.reads += 1;
+      if (!isMember(workspaceId, currentUid)) throw firestoreError("permission-denied", "not a member");
+      if (uid !== undefined && uid !== currentUid) throw firestoreError("permission-denied", "listenIn: not the caller");
+      const withChunks = (collection, id, value) => {
+        const chunks = [];
+        if (value.chunked === true) {
+          for (let i = 0; i < Number(value.chunkCount) || 0; i++) {
+            const chunk = docs.get(pathOf(["workspaces", workspaceId, collection, id, "chunks", String(i)]));
+            chunks.push(chunk ? chunk.text : undefined);
+          }
+        }
+        return { id, fields: { ...value }, chunks };
+      };
+      const header = assertListenInReadable(
+        docs.get(pathOf(["workspaces", workspaceId, CLOUD_COLLECTION.LISTEN_IN_MEETINGS, sessionId])),
+        "meeting"
+      );
+      const transcripts = Object.entries(api.listWorkspaceDocs(workspaceId, CLOUD_COLLECTION.LISTEN_IN_TRANSCRIPTS))
+        .filter(([, value]) => value.sessionId === sessionId && value.createdBy === currentUid)
+        .map(([id, value]) => withChunks(CLOUD_COLLECTION.LISTEN_IN_TRANSCRIPTS, id, value));
+      const summaryDoc = assertListenInReadable(
+        docs.get(pathOf(["workspaces", workspaceId, CLOUD_COLLECTION.LISTEN_IN_SUMMARIES, sessionId])),
+        "summary"
+      );
+      return {
+        meeting: header ? { id: sessionId, fields: { ...header } } : null,
+        transcripts,
+        summary: summaryDoc ? withChunks(CLOUD_COLLECTION.LISTEN_IN_SUMMARIES, sessionId, summaryDoc) : null,
+      };
     },
 
     async setDocument(path, data) {

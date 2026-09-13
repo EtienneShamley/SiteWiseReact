@@ -356,13 +356,14 @@ describe("Close, Stop recording and Complete meeting are three different things"
     expect(sidebarApi.recording).toBe(true);
     expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.LISTEN_IN);
     expect(tracks[0].stop).not.toHaveBeenCalled();
-    // 5. and the summary followed, still with no window.
-    expect(summaryCalls.length).toBeGreaterThanOrEqual(1);
-    expect(sidebarApi.summaryText).toMatch(/summary of window/);
+    // 6. and NO summary followed: nothing summarises on its own (2026-09-13).
+    expect(summaryCalls).toHaveLength(0);
+    expect(sidebarApi.summaryText).toBe("");
     openWindow();
     await flush();
     expect(windowApi.session.sessionId).toBe(id);
     expect(windowApi.transcript).toBe("captured words");
+    expect(windowApi.summary.revision).toBe(0);
   });
 
   test("STOP RECORDING: the microphone goes, the meeting stays — same id, still active, not interrupted", async () => {
@@ -413,9 +414,12 @@ describe("Close, Stop recording and Complete meeting are three different things"
     expect(windowApi.session.state).toBe(LISTEN_IN_STATE.FINISHED);
     expect(windowApi.active).toBe(false);
     expect(windowApi.session.sessionId).toBe(first);
-    // Still on show for review with its transcript and summary.
+    // Still on show for review with its transcript — and, because Complete
+    // has one job, with NO summary: nothing was asked for (2026-09-13).
     expect(windowApi.transcript).toBe("captured words");
-    expect(windowApi.summary.final).toBe(true);
+    expect(summaryCalls).toHaveLength(0);
+    expect(windowApi.summary.final).toBe(false);
+    expect(windowApi.summary.revision).toBe(0);
     await startCapture();
     expect(windowApi.session.sessionId).not.toBe(first);
     expect(windowApi.active).toBe(true);
@@ -769,7 +773,12 @@ describe("closing the window while summarising does not interrupt the engine", (
       await engine.flush();
     });
     await flush();
-    const inFlight = engine.flushSummary();
+    expect(summaryCalls).toHaveLength(0);
+    // The user presses Summarise (the same call the window's button makes).
+    let inFlight;
+    await act(async () => {
+      inFlight = engine.summariseNow();
+    });
     await flush();
     expect(summaryCalls.length).toBeGreaterThan(0);
     expect(windowApi.summary.status).toBe("generating");
@@ -785,7 +794,8 @@ describe("closing the window while summarising does not interrupt the engine", (
       await inFlight;
     });
     await flush();
-    expect(engine.getSnapshot().summary.result.summaryText).toBe("summary of window");
+    // One request: the window pass, then the consolidation of its one part.
+    expect(engine.getSnapshot().summary.result.summaryText).toBe("summary of final");
     // And the capture never noticed any of it.
     expect(sidebarApi.recording).toBe(true);
     expect(currentMicrophoneOwner()).toBe(MICROPHONE_OWNER.LISTEN_IN);
@@ -793,8 +803,9 @@ describe("closing the window while summarising does not interrupt the engine", (
     // REOPENING SHOWS THE SAME SUMMARY — not a new one, and not nothing.
     openWindow();
     await flush();
-    expect(at("summary").textContent).toBe("summary of window");
-    expect(windowApi.summary.revision).toBe(1);
+    expect(at("summary").textContent).toBe("summary of final");
+    const revision = windowApi.summary.revision;
+    expect(revision).toBeGreaterThan(0);
     expect(windowApi.session.sessionId).toBe(sidebarApi.session.sessionId);
   });
 
@@ -806,7 +817,7 @@ describe("closing the window while summarising does not interrupt the engine", (
     const engine = getListenInEngine(UID, WS);
     await act(async () => {
       await engine.flush();
-      await engine.flushSummary();
+      await engine.summariseNow();
     });
     await flush();
     const before = engine.getSnapshot().summary.revision;
@@ -818,7 +829,7 @@ describe("closing the window while summarising does not interrupt the engine", (
     // were; nothing in the view layer owns any of them.
     const after = getListenInEngine(UID, WS).getSnapshot();
     expect(after.summary.revision).toBe(before);
-    expect(after.summary.result.summaryText).toBe("summary of window");
+    expect(after.summary.result.summaryText).toBe("summary of final");
     expect(after.session.state).toBe(LISTEN_IN_STATE.RECORDING);
   });
 
@@ -830,10 +841,12 @@ describe("closing the window while summarising does not interrupt the engine", (
     const engine = getListenInEngine(UID, WS);
     await act(async () => {
       await engine.flush();
-      await engine.flushSummary();
+      await engine.summariseNow();
     });
     await flush();
     const calls = summaryCalls.length;
+    const revision = windowApi.summary.revision;
+    expect(calls).toBeGreaterThan(0);
 
     // Closing and reopening the window many times is a VIEW event and costs
     // nothing: no request, no revision, no regeneration.
@@ -844,6 +857,6 @@ describe("closing the window while summarising does not interrupt the engine", (
       await flush();
     }
     expect(summaryCalls.length).toBe(calls);
-    expect(windowApi.summary.revision).toBe(1);
+    expect(windowApi.summary.revision).toBe(revision);
   });
 });

@@ -478,24 +478,25 @@ describe("the status sentence never claims more than is true", () => {
   });
 
   test("generating, before and after there is anything to show", () => {
-    expect(listenInSummaryStatusLabel(summaryRequestStarted(fresh(), { now: 1 }), cov())).toMatch(
-      /Generating the summary/
-    );
+    // On request (2026-09-13): one word for a request in flight, whether or
+    // not there is already something to show.
+    expect(listenInSummaryStatusLabel(summaryRequestStarted(fresh(), { now: 1 }), cov())).toBe("Summarising…");
     const withPart = appendSummaryPart(fresh(), { part: result("a"), fromSeq: 0, toSeq: 0, now: 1 });
-    expect(listenInSummaryStatusLabel(summaryRequestStarted(withPart, { now: 2 }), cov())).toMatch(
-      /Updating the summary/
-    );
+    expect(listenInSummaryStatusLabel(summaryRequestStarted(withPart, { now: 2 }), cov())).toBe("Summarising…");
   });
 
   test("an in-progress summary says so, and says when it is behind", () => {
     const summary = appendSummaryPart(fresh(), { part: result("a"), fromSeq: 0, toSeq: 0, now: 1 });
-    expect(listenInSummaryStatusLabel(summary, cov({ capturing: true }))).toMatch(
-      /in progress — it covers the meeting so far/
-    );
+    // While the meeting still records, a summary is of the transcript so far.
+    expect(listenInSummaryStatusLabel(summary, cov({ capturing: true }))).toBe("Summary of the transcript so far.");
+    // Newer transcript exists that this summary has not read: say so, and say
+    // what to do about it — the user summarises again when they choose.
     expect(listenInSummaryStatusLabel(summary, cov({ behind: true, capturing: true }))).toMatch(
-      /does not yet cover the whole meeting/
+      /does not cover the newest transcript\. Summarise again to include it\./
     );
-    expect(listenInSummaryStatusLabel(summary, cov())).toMatch(/finalising/);
+    expect(listenInSummaryStatusLabel(summary, cov({ pendingCount: 1 }))).toMatch(/Summarise again to include it/);
+    // Not consolidated, nothing pending, not capturing: still "so far".
+    expect(listenInSummaryStatusLabel(summary, cov())).toBe("Summary of the transcript so far.");
   });
 
   test("a final summary over an incomplete recording names the gap", () => {
@@ -503,24 +504,29 @@ describe("the status sentence never claims more than is true", () => {
       appendSummaryPart(fresh(), { part: result("a"), fromSeq: 0, toSeq: 0, now: 1 }),
       { result: result("final"), now: 2 }
     );
-    expect(listenInSummaryStatusLabel(summary, cov())).toBe("Final summary.");
+    expect(listenInSummaryStatusLabel(summary, cov())).toBe("Summary of the whole transcript.");
     expect(listenInSummaryStatusLabel(summary, cov({ failedCount: 2 }))).toMatch(
-      /2 parts of the recording could not be transcribed/
+      /^Summary — 2 parts of the recording could not be transcribed/
     );
+    // A consolidated summary of a meeting that is STILL recording is not "the
+    // whole transcript" — it is the transcript so far.
+    expect(listenInSummaryStatusLabel(summary, cov({ capturing: true }))).toBe("Summary of the transcript so far.");
   });
 
   test("a failure is reported without the summary disappearing from the sentence", () => {
     const ready = appendSummaryPart(fresh(), { part: result("a"), fromSeq: 0, toSeq: 0, now: 1 });
     const failed = withSummaryFailure(ready, { outcome: "failure", now: 2 });
-    expect(listenInSummaryStatusLabel(failed, cov())).toMatch(/what was generated before that/);
+    expect(listenInSummaryStatusLabel(failed, cov())).toMatch(/The summary below is from the previous one/);
   });
 
-  test("nothing yet says what it is waiting for", () => {
-    expect(listenInSummaryStatusLabel(fresh(), cov({ pendingCount: 2 }))).toMatch(
-      /Waiting for enough transcript/
-    );
-    expect(listenInSummaryStatusLabel(fresh(), cov({ capturing: true }))).toMatch(/Listening/);
+  test("with nothing summarised there is NOTHING to say — no waiting, no listening, no promise of an automatic summary", () => {
+    expect(listenInSummaryStatusLabel(fresh(), cov({ pendingCount: 2 }))).toBe("");
+    expect(listenInSummaryStatusLabel(fresh(), cov({ capturing: true }))).toBe("");
+    expect(listenInSummaryStatusLabel(fresh(), cov())).toBe("");
     expect(listenInSummaryStatusLabel(null, cov())).toBe("");
+    // and a failed request with nothing generated is stated plainly
+    const failed = withSummaryFailure(fresh(), { outcome: "failure", now: 2 });
+    expect(listenInSummaryStatusLabel(failed, cov())).toBe("The summary could not be generated.");
   });
 });
 

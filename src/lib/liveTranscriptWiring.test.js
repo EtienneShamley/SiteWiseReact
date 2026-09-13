@@ -281,18 +281,21 @@ describe("10–13. with nowhere to insert, everything else still works and nothi
   test("11. record, stop, copy, export and discard are NOT gated on a destination", () => {
     for (const marker of [
       "onClick={handleToggleRecording}",
-      "onClick={handleCopy}",
+      "onCopy={handleCopyTranscript}",
+      "onCopy={handleCopySummary}",
       // ONE Export action, opening the chooser — not a button per format.
       "onClick={() => setExportOpen(true)}",
       "onClick={handleDiscard}",
     ]) {
       expect(DIALOG).toContain(marker);
     }
-    // 8D.2: summarisation is AUTOMATIC, so there is no Summarise handler to
-    // gate on anything at all (see ListenInSummaryWorkspace.test.js).
-    expect(DIALOG).not.toMatch(/handleSummarise|>Summarise</);
+    // Summarisation is automatic (8D.2) AND explicit (2026-09-13): the
+    // Summarise control dispatches the engine's `summariseNow` and is gated on
+    // transcribed words only — never on a note or a destination.
+    expect(DIALOG).toMatch(/session\.summariseNow\(\)/);
+    expect(DIALOG).not.toMatch(/handleSummarise/);
     // Their disabled conditions mention readiness/recording — never a note.
-    for (const handler of ["handleCopy", "handleToggleRecording", "handleDiscard"]) {
+    for (const handler of ["handleCopyTranscript", "handleToggleRecording", "handleDiscard"]) {
       const from = DIALOG.indexOf(`const ${handler} = useCallback(`);
       expect(from).toBeGreaterThan(-1);
       // Up to the next top-level declaration — the banner comments are
@@ -383,7 +386,13 @@ describe("22–24. copy and export", () => {
     // 8D.2: Copy copies the view the user is reading, and says which. The
     // old textarea selection fallback went with the textarea — there is no
     // editable transcript field to select from any more.
-    expect(DIALOG).toMatch(/"Summary copied\." : "Transcript copied\."/);
+    // One page, two named copies (2026-09-13): the transcript and the summary
+    // each have their own Copy beside them, and the notice names which.
+    expect(DIALOG).toMatch(/notice\.showInfo\(`\$\{what\} copied\.`\)/);
+    expect(DIALOG).toMatch(/copyText\(transcript, "Transcript"\)/);
+    expect(DIALOG).toMatch(/copyText\(session\?\.summaryText \|\| "", "Summary"\)/);
+    // and no selected-view state is left behind
+    expect(DIALOG).not.toMatch(/chosenView|LISTEN_IN_VIEW|data-listen-in-tab/);
   });
 
   test("23/24. ONE Export action opening a chooser — and no second export architecture", () => {
@@ -555,10 +564,14 @@ describe("accessibility and data flow", () => {
     expect(DIALOG).toContain("aria-labelledby={titleId}");
     expect(DIALOG).toMatch(/<span role="status" aria-live="polite" className="text-xs text-gray-500 dark:text-gray-400">\s*\n\s*\{statusLabel\}/);
     expect(DIALOG).toMatch(/if \(e\.key === "Escape"\) closeWorkspace\?\.\(\);/);
-    // 8D.2: the two views are a labelled group of toggle buttons carrying
-    // `aria-pressed`, not an ARIA tablist (docs/DESIGN_SYSTEM.md).
-    expect(DIALOG).toMatch(/role="group" aria-label="Listen In view"/);
-    expect(DIALOG).toMatch(/aria-pressed=\{view === value\}/);
+    // 2026-09-13: ONE page. The transcript and the Summarised section are
+    // two labelled <section>s in one scrolling body — no view switcher, no
+    // tablist, no selected-view state.
+    expect(DIALOG).not.toMatch(/role="group" aria-label="Listen In view"/);
+    expect(DIALOG).toMatch(/data-listen-in-page="single"/);
+    expect(DIALOG).toMatch(/aria-labelledby="listen-in-transcript-heading"/);
+    expect(DIALOG).toMatch(/aria-labelledby="listen-in-summarised-heading"/);
+    expect(DIALOG.indexOf("<TranscriptSection")).toBeLessThan(DIALOG.indexOf("<SummarisedSection"));
     expect(DIALOG).not.toMatch(/focus-trap|inert=/);
     // The status label is a sentence per state, never per word.
     expect(MODEL).toMatch(/export function liveTranscriptStatusLabel\(state\)/);

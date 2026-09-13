@@ -210,13 +210,20 @@ function crash() {
   resetMicrophoneOwnershipForTests();
 }
 
-/** Seal one chunk and let the drain and the summary loop have their pass. */
+/** Seal one chunk and let the drain have its pass. Nothing summarises on its
+ *  own (2026-09-13); where a test needs a summary, the user asks for one. */
 async function speak(rig) {
   rig.roll();
   await settle();
   await rig.engine.flush();
   await settle();
-  await rig.engine.flushSummary();
+}
+
+/** The user presses Summarise, and the request runs to rest. */
+async function requestSummary(engine) {
+  await engine.summariseNow();
+  await settle();
+  await engine.flushSummary();
   await settle();
 }
 
@@ -407,12 +414,11 @@ describe("the four-hour hard stop takes the same path a deliberate Stop takes", 
     expect(snap.pending).toBeGreaterThan(0);
     expect(snap.session.state).toBe(LISTEN_IN_STATE.FINISHING);
 
-    // 19/20. the drain and the summary carry on to completion on their own.
+    // 19/20. the drain carries on to completion on its own; the summary is the user's to ask for.
     rig.setOnline(true);
     await rig.engine.flush();
     await settle();
-    await rig.engine.flushSummary();
-    await settle();
+    await requestSummary(rig.engine);
     snap = rig.engine.getSnapshot();
     expect(snap.pending).toBe(0);
     // 24. finished WITH ISSUES — the dead chunk did not hang the session.
@@ -432,8 +438,7 @@ describe("the four-hour hard stop takes the same path a deliberate Stop takes", 
     await settle();
     await rig.engine.flush();
     await settle();
-    await rig.engine.flushSummary();
-    await settle();
+    await requestSummary(rig.engine);
 
     const snap = rig.engine.getSnapshot();
     expect(snap.session.state).toBe(LISTEN_IN_STATE.FINISHED);
@@ -470,8 +475,7 @@ describe("the four-hour hard stop takes the same path a deliberate Stop takes", 
     rig.setOnline(true);
     await rig.engine.flush();
     await settle();
-    await rig.engine.flushSummary();
-    await settle();
+    await requestSummary(rig.engine);
     snap = rig.engine.getSnapshot();
     expect(snap.pending).toBe(0);
     expect(snap.session.state).toBe(LISTEN_IN_STATE.FINISHED);
@@ -608,8 +612,7 @@ describe("the budget is capture time, and a resume continues the same session", 
     await settle();
     await second.engine.flush();
     await settle();
-    await second.engine.flushSummary();
-    await settle();
+    await requestSummary(second.engine);
 
     const snap = second.engine.getSnapshot();
     expect(second.getUserMedia).not.toHaveBeenCalled();
@@ -674,8 +677,7 @@ describe("finishing runs on its own, and a dead chunk never leaves it stuck", ()
 
     await rig.engine.flush();
     await settle();
-    await rig.engine.flushSummary();
-    await settle();
+    await requestSummary(rig.engine);
 
     const snap = rig.engine.getSnapshot();
     expect(snap.session.state).toBe(LISTEN_IN_STATE.FINISHED);
@@ -701,8 +703,7 @@ describe("finishing runs on its own, and a dead chunk never leaves it stuck", ()
     await settle();
     await rig.engine.flush();
     await settle();
-    await rig.engine.flushSummary();
-    await settle();
+    await requestSummary(rig.engine);
 
     let snap = rig.engine.getSnapshot();
     expect(snap.chunks).toHaveLength(1);
@@ -719,8 +720,7 @@ describe("finishing runs on its own, and a dead chunk never leaves it stuck", ()
     await settle();
     await rig.engine.flush();
     await settle();
-    await rig.engine.flushSummary();
-    await settle();
+    await requestSummary(rig.engine);
 
     snap = rig.engine.getSnapshot();
     expect(snap.failed).toBe(0);
@@ -747,8 +747,7 @@ describe("finishing runs on its own, and a dead chunk never leaves it stuck", ()
     await settle();
     await rig.engine.flush();
     await settle();
-    await rig.engine.flushSummary();
-    await settle();
+    await requestSummary(rig.engine);
     const before = rig.engine.getSnapshot();
     expect(before.failed).toBe(1);
 

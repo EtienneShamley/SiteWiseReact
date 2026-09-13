@@ -167,45 +167,40 @@ const settle = async () => {
 
 /**
  * Record ONE chunk of speech: roll the recorder (sealing the chunk and opening
- * the next), drain it, then let the summary loop have its pass.
+ * the next) and drain it. Nothing summarises on its own (2026-09-13): the
+ * summary loop runs only when the user asks — see `summarise` below.
  */
 async function speak(rig) {
   rig.roll();
   await settle();
   await rig.engine.flush();
   await settle();
+}
+
+/** The user presses Summarise, and the request runs to rest. */
+async function requestSummary(rig) {
+  await rig.engine.summariseNow();
+  await settle();
   await rig.engine.flushSummary();
   await settle();
 }
 
-/* ============================ automatic, not a button ==================== */
+/* ======================= on request, never on its own ==================== */
 
-describe("summarisation is automatic, and is not run once per chunk", () => {
-  test("ONE 30-second chunk of speech spends nothing at all", async () => {
+describe("nothing summarises on its own — the summary loop runs only on the user's request", () => {
+  test("6. ONE 30-second chunk of speech spends nothing at all", async () => {
     const summarise = recordingSummariser();
     const rig = buildEngine({ summarise, transcribe: async () => "Just one short sentence." });
-    const { engine, advance } = rig;
+    const { engine } = rig;
     await engine.start({ language: "en" });
     await speak(rig);
     expect(engine.getSnapshot().chunks[0].state).toBe(CHUNK_STATE.TRANSCRIBED);
     // The transcript is there; the summariser was never asked.
     expect(summarise).not.toHaveBeenCalled();
+    expect(engine.getSnapshot().summary.status).toBe("idle");
   });
 
-  test("enough transcript triggers a summary with no user action of any kind", async () => {
-    const summarise = recordingSummariser();
-    const rig = buildEngine({ summarise });
-    const { engine, advance } = rig;
-    await engine.start({ language: "en" });
-    await speak(rig);
-    expect(summarise).toHaveBeenCalledTimes(1);
-    expect(summarise.calls[0].mode).toBe("window");
-    const { summary } = engine.getSnapshot();
-    expect(summary.result.summaryText).toBe("window 0-0");
-    expect(summary.status).toBe("ready");
-  });
-
-  test("ten more chunks do NOT become ten more requests", async () => {
+  test("6. ten chunks of plentiful transcript over five minutes still trigger NOTHING", async () => {
     const summarise = recordingSummariser();
     const rig = buildEngine({ summarise });
     const { engine, advance } = rig;
@@ -214,25 +209,135 @@ describe("summarisation is automatic, and is not run once per chunk", () => {
       advance(30000);
       await speak(rig);
     }
-    // Ten chunks of speech, five minutes of wall clock: the interval gate
-    // holds the count far below one request per chunk.
-    expect(summarise.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(summarise).not.toHaveBeenCalled();
     expect(engine.getSnapshot().chunks).toHaveLength(10);
+    expect(engine.getSnapshot().summary.revision).toBe(0);
   });
 
-  test("each window reads only NEW transcript — nothing is summarised twice", async () => {
+  test("7/8. Stop recording and Start recording again trigger nothing", async () => {
     const summarise = recordingSummariser();
     const rig = buildEngine({ summarise });
-    const { engine, advance } = rig;
+    const { engine } = rig;
     await engine.start({ language: "en" });
     await speak(rig);
-    advance(LISTEN_IN_SUMMARY_POLICY.minIntervalMs + 1000);
+    await engine.pause();
+    await settle();
+    await engine.flush();
+    await settle();
+    expect(summarise).not.toHaveBeenCalled();
+    await engine.resume();
+    await settle();
     await speak(rig);
-    expect(summarise.mock.calls.length).toBe(2);
-    const first = summarise.calls[0].segments.map((s) => s.seq);
-    const second = summarise.calls[1].segments.map((s) => s.seq);
-    expect(first).toEqual([0]);
-    expect(second).toEqual([1]);
+    expect(summarise).not.toHaveBeenCalled();
+  });
+
+  test("9. Complete meeting (stop) triggers nothing — the drain finishes and the meeting is final with NO summary", async () => {
+    const summarise = recordingSummariser();
+    const rig = buildEngine({ summarise });
+    const { engine } = rig;
+    await engine.start({ language: "en" });
+    await speak(rig);
+    await engine.stop();
+    await settle();
+    await engine.flush();
+    await settle();
+    await engine.flush();
+    await settle();
+    const { session, summary, chunks } = engine.getSnapshot();
+    expect(session.state).toBe(LISTEN_IN_STATE.FINISHED);
+    expect(chunks.every((c) => c.state === CHUNK_STATE.TRANSCRIBED)).toBe(true);
+    expect(summarise).not.toHaveBeenCalled();
+    expect(summary.final).toBe(false);
+    expect(summary.revision).toBe(0);
+    expect(summary.parts).toHaveLength(0);
+  });
+
+  test("11/12. the engine schedules NO summary timer and runs NO summary loop of its own", async () => {
+    const setTimer = jest.fn(() => 0);
+    const setInterval_ = jest.fn(() => 0);
+    const summarise = recordingSummariser();
+    const engine = createListenInEngine({
+      uid: UID,
+      workspaceId: WS,
+      store: createListenInMemoryStore(),
+      transcribe: async () => WORDS,
+      summarise,
+      recorderSupported: () => true,
+      setTimer,
+      clearTimer: () => {},
+      setInterval_,
+      clearInterval_: () => {},
+      newSessionId: () => "session-no-timer",
+    });
+    await engine.start({ language: "en" });
+    FakeMediaRecorder.instances[0].stop();
+    await settle();
+    await engine.flush();
+    await settle();
+    // The engine arms exactly two timers of its own: the recorder roll
+    // interval and the four-hour capture limit. Neither is a summary timer,
+    // and firing every timer it armed summarises nothing.
+    expect(summarise).not.toHaveBeenCalled();
+    expect(setInterval_).toHaveBeenCalledTimes(1);
+    expect(setTimer).toHaveBeenCalledTimes(1);
+    const [[limitFn, limitMs]] = setTimer.mock.calls;
+    expect(limitMs).toBeGreaterThan(60 * 60 * 1000); // the capture limit, not a summary interval
+    limitFn(); // the limit check re-arms itself; it never summarises
+    await settle();
+    expect(summarise).not.toHaveBeenCalled();
+    await engine.stop();
+    await settle();
+    await engine.flush();
+    await settle();
+    expect(summarise).not.toHaveBeenCalled();
+    // Ending the capture disarms the limit; no timer of any kind remains for a
+    // summary to ride on.
+    expect(setTimer.mock.calls.every(([, ms]) => ms > 60 * 60 * 1000)).toBe(true);
+    engine.shutdown();
+  });
+
+  test("13/14. one request reads everything settled, however short, and consolidates it", async () => {
+    const summarise = recordingSummariser();
+    const rig = buildEngine({ summarise, transcribe: async () => "Just one short sentence." });
+    const { engine } = rig;
+    await engine.start({ language: "en" });
+    await speak(rig);
+    await requestSummary(rig);
+    expect(summarise.calls.map((c) => c.mode)).toEqual(["window", "final"]);
+    expect(summarise.calls[0].segments.map((s) => s.seq)).toEqual([0]);
+    const { summary } = engine.getSnapshot();
+    expect(summary.final).toBe(true);
+    expect(summary.status).toBe("ready");
+    expect(summary.coveredThroughSeq).toBe(0);
+  });
+
+  test("a request reads only NEW transcript — nothing is summarised twice, and Summarise again re-consolidates", async () => {
+    const summarise = recordingSummariser();
+    const rig = buildEngine({ summarise });
+    const { engine } = rig;
+    await engine.start({ language: "en" });
+    await speak(rig);
+    await requestSummary(rig);
+    await speak(rig);
+    await requestSummary(rig);
+    const windows = summarise.calls.filter((c) => c.mode === "window");
+    expect(windows.map((c) => c.segments.map((s) => s.seq))).toEqual([[0], [1]]);
+    expect(summarise.calls.filter((c) => c.mode === "final")).toHaveLength(2);
+    expect(engine.getSnapshot().summary.coveredThroughSeq).toBe(1);
+  });
+
+  test("a request with nothing new to read re-consolidates rather than re-reading the meeting", async () => {
+    const summarise = recordingSummariser();
+    const rig = buildEngine({ summarise });
+    const { engine } = rig;
+    await engine.start({ language: "en" });
+    await speak(rig);
+    await requestSummary(rig);
+    const first = engine.getSnapshot().summary.revision;
+    await requestSummary(rig);
+    expect(summarise.calls.filter((c) => c.mode === "window")).toHaveLength(1);
+    expect(summarise.calls.filter((c) => c.mode === "final")).toHaveLength(2);
+    expect(engine.getSnapshot().summary.revision).toBeGreaterThan(first);
   });
 });
 
@@ -249,11 +354,12 @@ describe("capture and transcription are never blocked by the summary", () => {
     const { engine, advance } = rig;
     await engine.start({ language: "en" });
 
-    // Start a summary and leave it hanging.
+    // The user asks for a summary, and the request is left hanging.
     rig.roll();
     await settle();
     await engine.flush();
     await settle();
+    await engine.summariseNow();
     const summaryRun = engine.flushSummary();
     await settle();
     expect(summarise).toHaveBeenCalled();
@@ -277,9 +383,10 @@ describe("capture and transcription are never blocked by the summary", () => {
   test("a summary FAILURE does not stop, pause or shorten the capture", async () => {
     const summarise = recordingSummariser({ fail: true });
     const rig = buildEngine({ summarise });
-    const { engine, advance } = rig;
+    const { engine } = rig;
     await engine.start({ language: "en" });
     await speak(rig);
+    await requestSummary(rig);
 
     expect(summarise).toHaveBeenCalled();
     const snap = engine.getSnapshot();
@@ -314,22 +421,29 @@ describe("capture and transcription are never blocked by the summary", () => {
       return { ok: true, result: summaryResult(`ok ${request.mode}`) };
     });
     const rig = buildEngine({ summarise });
-    const { engine, advance } = rig;
+    const { engine } = rig;
     await engine.start({ language: "en" });
     await speak(rig);
+    await requestSummary(rig);
     expect(engine.getSnapshot().summary.status).toBe("failed");
+
+    // No timer retries it: the failure stays until the user asks again.
+    await engine.flush();
+    await settle();
+    expect(summarise).toHaveBeenCalledTimes(1);
 
     fail = false;
     await engine.retrySummary();
     await settle();
     await engine.flushSummary();
     await settle();
-    expect(engine.getSnapshot().summary.result.summaryText).toBe("ok window");
+    expect(engine.getSnapshot().summary.result.summaryText).toBe("ok final");
     expect(engine.getSnapshot().summary.lastErrorOutcome).toBeNull();
   });
 
-  test("offline burns no attempt and sends nothing", async () => {
+  test("offline sends nothing, and reports the request as unavailable rather than pretending", async () => {
     const summarise = recordingSummariser();
+    let online = true;
     const engine = createListenInEngine({
       uid: UID,
       workspaceId: WS,
@@ -337,7 +451,7 @@ describe("capture and transcription are never blocked by the summary", () => {
       transcribe: async () => WORDS,
       summarise,
       recorderSupported: () => true,
-      isOnline: () => false,
+      isOnline: () => online,
       setTimer: () => 0,
       clearTimer: () => {},
       setInterval_: () => 0,
@@ -347,12 +461,24 @@ describe("capture and transcription are never blocked by the summary", () => {
     await engine.start({ language: "en" });
     FakeMediaRecorder.instances[0].stop();
     await settle();
-    // The drain cannot run offline either, so the transcript is seeded
-    // directly and only the summary loop is exercised.
+    // Transcribed while online; the connection then goes.
+    await engine.flush();
+    await settle();
+    expect(engine.getSnapshot().chunks[0].state).toBe(CHUNK_STATE.TRANSCRIBED);
+    online = false;
+    // Nothing was asked for: nothing happens.
     await engine.flushSummary();
     await settle();
     expect(summarise).not.toHaveBeenCalled();
-    expect(engine.getSnapshot().summary.attempts).toBe(0);
+    expect(engine.getSnapshot().summary.status).toBe("idle");
+    // The user asks while offline: nothing is sent, and the outcome is stated.
+    await engine.summariseNow();
+    await settle();
+    await engine.flushSummary();
+    await settle();
+    expect(summarise).not.toHaveBeenCalled();
+    expect(engine.getSnapshot().summary.lastErrorOutcome).toBe("unavailable");
+    expect(engine.getSnapshot().summary.status).toBe("failed");
   });
 });
 
@@ -363,12 +489,13 @@ describe("a long transcript is processed in bounded windows and reduced", () => 
     const summarise = recordingSummariser();
     const long = "x".repeat(9000);
     const rig = buildEngine({ summarise, transcribe: async () => long });
-    const { engine, advance } = rig;
+    const { engine } = rig;
     await engine.start({ language: "en" });
     for (let i = 0; i < 6; i += 1) {
-      advance(LISTEN_IN_SUMMARY_POLICY.minIntervalMs + 1000);
       await speak(rig);
     }
+    // ONE request from the user still reads the backlog in bounded windows.
+    await requestSummary(rig);
     expect(summarise.mock.calls.length).toBeGreaterThan(1);
     for (const call of summarise.calls.filter((c) => c.mode === "window")) {
       const chars = call.segments.reduce((n, s) => n + s.text.length, 0);
@@ -389,8 +516,7 @@ describe("a long transcript is processed in bounded windows and reduced", () => 
     await settle();
     await engine.flush();
     await settle();
-    await engine.flushSummary();
-    await settle();
+    await requestSummary(rig);
 
     const final = summarise.calls[summarise.calls.length - 1];
     expect(final.mode).toBe("final");
@@ -410,8 +536,7 @@ describe("a long transcript is processed in bounded windows and reduced", () => 
     await settle();
     await engine.flush();
     await settle();
-    await engine.flushSummary();
-    await settle();
+    await requestSummary(rig);
     const { summary } = engine.getSnapshot();
     expect(summarise).not.toHaveBeenCalled();
     expect(summary.final).toBe(true);
@@ -441,8 +566,7 @@ describe("Stop sequences capture, then transcription, then the summary", () => {
     await settle();
     await engine.flush();
     await settle();
-    await engine.flushSummary();
-    await settle();
+    await requestSummary(rig);
 
     // Every transcription happened before the consolidation.
     const finalAt = order.lastIndexOf("summary:final");
@@ -451,24 +575,29 @@ describe("Stop sequences capture, then transcription, then the summary", () => {
     expect(engine.getSnapshot().session.state).toBe(LISTEN_IN_STATE.FINISHED);
   });
 
-  test("finalisation summarises the LAST short window, gates and all", async () => {
+  test("20/21. a completed meeting summarises on request — a short closing remark and all", async () => {
     const summarise = recordingSummariser();
     const rig = buildEngine({ summarise, transcribe: async () => "One short closing remark." });
-    const { engine, advance } = rig;
+    const { engine } = rig;
     await engine.start({ language: "en" });
     await speak(rig);
-    expect(summarise).not.toHaveBeenCalled(); // too little to be worth a request
+    expect(summarise).not.toHaveBeenCalled();
 
     await engine.stop();
     await settle();
     await engine.flush();
     await settle();
-    await engine.flushSummary();
+    await engine.flush();
     await settle();
-    // Now it is worth it: the meeting is over and those words are all there is.
+    expect(engine.getSnapshot().session.state).toBe(LISTEN_IN_STATE.FINISHED);
+    expect(summarise).not.toHaveBeenCalled(); // Complete has one job
+
+    await requestSummary(rig);
     const modes = summarise.calls.map((c) => c.mode);
     expect(modes).toContain("window");
     expect(modes[modes.length - 1]).toBe("final");
+    expect(engine.getSnapshot().summary.final).toBe(true);
+    expect(engine.getSnapshot().session.state).toBe(LISTEN_IN_STATE.FINISHED);
   });
 
   test("a session FINISHES WITH ISSUES rather than hanging on a dead chunk", async () => {
@@ -485,8 +614,7 @@ describe("Stop sequences capture, then transcription, then the summary", () => {
     await settle();
     await engine.flush();
     await settle();
-    await engine.flushSummary();
-    await settle();
+    await requestSummary(rig);
 
     const snap = engine.getSnapshot();
     expect(snap.session.state).toBe(LISTEN_IN_STATE.FINISHED);
@@ -512,8 +640,7 @@ describe("Stop sequences capture, then transcription, then the summary", () => {
     await settle();
     await engine.flush();
     await settle();
-    await engine.flushSummary();
-    await settle();
+    await requestSummary(rig);
 
     const snap = engine.getSnapshot();
     expect(snap.session.state).toBe(LISTEN_IN_STATE.FINISHED);
@@ -530,9 +657,15 @@ describe("Stop sequences capture, then transcription, then the summary", () => {
 describe("the summary belongs to the session, not to any view", () => {
   test("it is published in the engine's snapshot with its coverage", async () => {
     const rig = buildEngine();
-    const { engine, advance } = rig;
+    const { engine } = rig;
     await engine.start({ language: "en" });
     await speak(rig);
+    // Before any request the coverage says so: transcribed, nothing summarised.
+    expect(engine.getSnapshot().summaryCoverage).toMatchObject({
+      transcribedThroughSeq: 0,
+      summaryThroughSeq: -1,
+    });
+    await requestSummary(rig);
     const snap = engine.getSnapshot();
     expect(snap.summary.sessionId).toBe("session-1");
     expect(snap.summary.uid).toBe(UID);
@@ -564,9 +697,11 @@ describe("the summary belongs to the session, not to any view", () => {
     await settle();
     await first.flush();
     await settle();
+    await first.summariseNow();
+    await settle();
     await first.flushSummary();
     await settle();
-    expect(first.getSnapshot().summary.result.summaryText).toBe("window 0-0");
+    expect(first.getSnapshot().summary.result.summaryText).toBe("final of 1");
     // The process goes away entirely (a reload, a crash, a closed tab).
     first.shutdown();
 
@@ -586,7 +721,7 @@ describe("the summary belongs to the session, not to any view", () => {
     await settle();
     const recovered = second.getSnapshot().summary;
     expect(recovered.sessionId).toBe("session-keep");
-    expect(recovered.result.summaryText).toBe("window 0-0");
+    expect(recovered.result.summaryText).toBe("final of 1");
     expect(recovered.coveredThroughSeq).toBe(0);
   });
 
@@ -628,7 +763,8 @@ describe("the summary belongs to the session, not to any view", () => {
     const { engine, advance } = rig;
     await engine.start({ language: "en" });
     await speak(rig);
-    expect(engine.getSnapshot().summary.result.summaryText).toBe("window 0-0");
+    await requestSummary(rig);
+    expect(engine.getSnapshot().summary.result.summaryText).toBe("final of 1");
     await engine.stop();
     await settle();
     await engine.flush();
@@ -646,22 +782,37 @@ describe("the summary belongs to the session, not to any view", () => {
 /* ============================== user editing ============================= */
 
 describe("editing and regeneration", () => {
-  test("an edit is stored on the session and survives the next generation", async () => {
+  test("an edit is stored on the session and survives more recording — nothing generates over it on its own", async () => {
     const summarise = recordingSummariser();
     const rig = buildEngine({ summarise });
-    const { engine, advance } = rig;
+    const { engine } = rig;
     await engine.start({ language: "en" });
     await speak(rig);
+    await requestSummary(rig);
+    const calls = summarise.mock.calls.length;
     await engine.editSummaryText("What I actually took from it.");
     await settle();
     expect(engine.getSnapshot().summary.userSummaryText).toBe("What I actually took from it.");
 
-    advance(LISTEN_IN_SUMMARY_POLICY.minIntervalMs + 1000);
+    // More of the meeting is recorded and transcribed. Nothing summarises,
+    // so nothing touches the person's words.
     await speak(rig);
+    await speak(rig);
+    await engine.stop();
+    await settle();
+    await engine.flush();
+    await settle();
     const summary = engine.getSnapshot().summary;
-    // The generated result moved on; the person's words did not.
+    expect(summarise.mock.calls.length).toBe(calls);
     expect(summary.userSummaryText).toBe("What I actually took from it.");
-    expect(summary.result.summaryText).toContain("window 1-1");
+    expect(summary.result.summaryText).toBe("final of 1");
+    // An explicit Summarise again is a regeneration: it reads the newer
+    // transcript and, as regeneration always has, replaces the edit.
+    await requestSummary(rig);
+    const again = engine.getSnapshot().summary;
+    expect(again.parts.map((p) => p.result.summaryText).some((t) => /^window 1-/.test(t))).toBe(true);
+    expect(again.result.summaryText).toMatch(/^final of/);
+    expect(again.userSummaryText).toBeNull();
   });
 
   test("REGENERATION is explicit, and is the only thing that replaces an edit", async () => {
@@ -686,10 +837,12 @@ describe("editing and regeneration", () => {
   test("a regeneration re-consolidates the PARTS — it does not re-read the meeting", async () => {
     const summarise = recordingSummariser();
     const rig = buildEngine({ summarise });
-    const { engine, advance } = rig;
+    const { engine } = rig;
     await engine.start({ language: "en" });
     await speak(rig);
+    await requestSummary(rig);
     const windowCalls = summarise.calls.filter((c) => c.mode === "window").length;
+    expect(windowCalls).toBe(1);
 
     await engine.regenerateSummary();
     await settle();

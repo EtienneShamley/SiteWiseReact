@@ -25,7 +25,15 @@
 //   src/lib/listenIn/listenInStore.js
 //                                the `listenInSessions` and `listenInChunks`
 //                                stores — a Listen In capture session and its
-//                                sealed audio/transcript chunks (Phase 8D.1)
+//                                sealed audio/transcript chunks (Phase 8D.1);
+//                                `listenInSummaries` (8D.2); and
+//                                `listenInCloudState` (8D.4) — which TEXT
+//                                projections of a meeting this device has
+//                                handed to the account, by revision. It holds
+//                                bookkeeping only: per-entity revisions and a
+//                                fixed-size DIGEST of the projected payload —
+//                                never audio, and never a copy of the
+//                                transcript or summary text itself.
 //
 // LISTEN IN IS NOT AN ASSET. Its two stores live in this database because a
 // browser allows one version of one database at a time and this module is the
@@ -57,6 +65,13 @@
 //       cannot hold a single Listen In record. An empty store is recreated,
 //       not migrated. Durable capture was approved at v5 (2026-09-12); any
 //       change from here on is a real migration.
+//   v6  everything above    unchanged
+//       listenInSummaries   keyPath ["uid", "workspaceId", "sessionId"]
+//   v7  everything above    unchanged
+//       listenInCloudState  keyPath ["uid", "workspaceId", "sessionId", "entity"]
+//                           (Phase 8D.4 — cloud replication bookkeeping for
+//                           Listen In TEXT results; additive, empty at
+//                           creation, never audio)
 //
 // The workspace-scoped stores are keyed by the WORKSPACE AND the asset, in
 // that order. That is what makes cross-account access structurally impossible
@@ -70,7 +85,7 @@
 // swallows an error or reports a write that did not land.
 
 export const ASSET_DB_NAME = "notewise-assets";
-export const ASSET_DB_VERSION = 6;
+export const ASSET_DB_VERSION = 7;
 
 export const ASSET_STORE = "assets";
 export const ASSET_UPLOAD_QUEUE_STORE = "assetUploadQueue";
@@ -86,6 +101,15 @@ export const LISTEN_IN_CHUNK_STORE = "listenInChunks";
 // while a summary grows with the meeting and is read only when a session is
 // opened.
 export const LISTEN_IN_SUMMARY_STORE = "listenInSummaries";
+// Cloud replication bookkeeping for Listen In TEXT results (Phase 8D.4): per
+// meeting and per cloud entity (the header, the summary, each transcript
+// page), which local revision was last projected and which one the account
+// has accepted. Never audio, and never a second copy of the transcript or the
+// summary: the only description of the content is a fixed-size digest
+// (src/lib/cloud/listenInCloudModel.js → `projectionSignature`), which is
+// what "has this changed?" is answered with. Its own store so the session, chunk and summary
+// rows are byte-for-byte what 8D.1–8D.3 wrote.
+export const LISTEN_IN_CLOUD_STATE_STORE = "listenInCloudState";
 
 /** The compound key path every workspace-and-asset store uses. */
 export const WORKSPACE_ASSET_KEY_PATH = ["workspaceId", "assetId"];
@@ -108,6 +132,9 @@ export const LISTEN_IN_SESSION_KEY_PATH = ["uid", "workspaceId", "sessionId"];
 export const LISTEN_IN_CHUNK_KEY_PATH = ["uid", "workspaceId", "sessionId", "seq"];
 /** One summary per session, under the same identity key as its session. */
 export const LISTEN_IN_SUMMARY_KEY_PATH = ["uid", "workspaceId", "sessionId"];
+/** One row per cloud ENTITY of one session ("meeting", "summary",
+ *  "transcript:<page>"), under the same identity prefix. */
+export const LISTEN_IN_CLOUD_STATE_KEY_PATH = ["uid", "workspaceId", "sessionId", "entity"];
 
 let dbPromise = null;
 
@@ -156,10 +183,16 @@ export function openAssetDb() {
       // v6 ADDS `listenInSummaries` and changes nothing else. It arrives
       // through the same loop because it carries the same identity key path,
       // and "create what is missing" is correct for it from any version.
+      //
+      // v7 ADDS `listenInCloudState` (Phase 8D.4) the same way: additive, one
+      // segment deeper than a session's key, and empty until a session's
+      // text results are projected for the account. Nothing existing is
+      // read, rewritten or removed by this step.
       for (const [name, keyPath] of [
         [LISTEN_IN_SESSION_STORE, LISTEN_IN_SESSION_KEY_PATH],
         [LISTEN_IN_CHUNK_STORE, LISTEN_IN_CHUNK_KEY_PATH],
         [LISTEN_IN_SUMMARY_STORE, LISTEN_IN_SUMMARY_KEY_PATH],
+        [LISTEN_IN_CLOUD_STATE_STORE, LISTEN_IN_CLOUD_STATE_KEY_PATH],
       ]) {
         const existing = db.objectStoreNames.contains(name);
         if (existing) {

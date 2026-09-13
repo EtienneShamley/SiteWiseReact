@@ -162,13 +162,14 @@ describe("1/2. Listen In no longer offers to insert into a note", () => {
     expect(document.body.textContent).not.toMatch(/Insert/);
   });
 
-  test("the automatic summary is shown with no Summarise button and no insertion", async () => {
+  test("the summary the user asked for is shown, with Summarise again beside it and no insertion", async () => {
     mountWindow();
     await flush();
-    // 8D.2: the summary is already there — it was generated automatically, not
-    // by a button the user had to find and press after a two-hour meeting.
-    expect(byText(/^Summarise$/)).toBeUndefined();
+    // The stub session holds a summary the user asked for (since 2026-09-13
+    // nothing summarises on its own); asking again is the same explicit intent.
     expect(document.body.textContent).toMatch(/A tidy summary\./);
+    expect(byText(/^Summarise again$/)).toBeDefined();
+    expect(byText(/^Summarise$/)).toBeUndefined();
     expect(byText(/Insert summary/)).toBeUndefined();
   });
 });
@@ -182,11 +183,28 @@ describe("3/4. one Export action, and the per-format buttons are gone", () => {
     expect(byText(/Export \.md/)).toBeUndefined();
   });
 
-  test("11/12. Copy and Discard remain", async () => {
+  test("11/12. Copy transcript and Copy summary remain, each beside its section; a COMPLETED meeting is left with Clear, and Discard is not offered for it", async () => {
     mountWindow();
     await flush();
-    expect(byText(/^Copy$/)).toBeDefined();
-    expect(byText(/^Discard$/)).toBeDefined();
+    expect(byText(/^Copy transcript$/)).toBeDefined();
+    expect(byText(/^Copy summary$/)).toBeDefined();
+    expect(byText(/^Copy$/)).toBeUndefined();
+    expect(byText(/^Clear$/)).toBeDefined();
+    expect(byText(/^Discard$/)).toBeUndefined();
+  });
+
+  test("32. a transcript with NO summary exports: Export is enabled and the chooser offers Transcript alone", async () => {
+    mountWindow(stubSession({ summary: null, summaryText: "", hasSummary: false }));
+    await flush();
+    expect(byText(/^Copy summary$/)).toBeUndefined();
+    const exportButton = byText(/^Export$/);
+    expect(exportButton.disabled).toBe(false);
+    click(exportButton);
+    await flush();
+    expect(chooser()).not.toBeNull();
+    const offered = [...chooser().querySelectorAll('[role="radiogroup"][aria-label="What to export"] [role="radio"]')];
+    expect(offered.map((el) => el.querySelector("span span").textContent.trim())).toEqual(["Transcript"]);
+    expect(offered[0].getAttribute("aria-checked")).toBe("true");
   });
 
   test("Export is disabled when the session holds nothing to export", async () => {
@@ -260,9 +278,14 @@ describe("5/6. the chooser offers three content choices and five formats", () =>
     expect(document.body.textContent).not.toMatch(/CSV|XLSX|JSON|RTF/i);
   });
 
-  test("a content choice the session cannot satisfy is not offered", () => {
+  test("33. a content choice the session cannot satisfy is not offered: with no summary, only Transcript", () => {
     mountChooser({ hasSummary: false });
-    expect(labelsIn("What to export")).toEqual(["Transcript", "Summary + Transcript"]);
+    expect(labelsIn("What to export")).toEqual(["Transcript"]);
+  });
+
+  test("33. with a summary but no transcript, only Summary", () => {
+    mountChooser({ hasTranscript: false });
+    expect(labelsIn("What to export")).toEqual(["Summary"]);
   });
 });
 

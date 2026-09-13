@@ -18,6 +18,7 @@ import {
   LISTEN_IN_CHUNK_STORE,
   LISTEN_IN_SESSION_STORE,
   LISTEN_IN_SUMMARY_STORE,
+  LISTEN_IN_CLOUD_STATE_STORE,
   ASSET_REMOTE_INDEX_STORE,
   ASSET_STORE,
   ASSET_UPLOAD_QUEUE_STORE,
@@ -86,13 +87,17 @@ const ALL_STORES = [
   // v6 (Phase 8D.2). The session's structured summary, under the same identity
   // key path as its session, added purely additively.
   LISTEN_IN_SUMMARY_STORE,
+  // v7 (Phase 8D.4). Cloud replication bookkeeping for Listen In TEXT results
+  // — revisions and signatures only, never audio — one segment deeper than a
+  // session's key, added purely additively.
+  LISTEN_IN_CLOUD_STATE_STORE,
 ].sort();
 
 describe("the v1 → current upgrade is additive", () => {
   test("the database opens at the current version with every store beside `assets`", async () => {
     // The first read through the module performs the upgrade.
     await listAssetIds();
-    expect(ASSET_DB_VERSION).toBe(6);
+    expect(ASSET_DB_VERSION).toBe(7);
     expect(await assetDbStoreNames()).toEqual(ALL_STORES);
   });
 

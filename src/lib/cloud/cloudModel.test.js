@@ -8,7 +8,9 @@ import {
   ASYNC_ENTITY_COLLECTIONS,
   CLOUD_COLLECTION,
   ENTITY_COLLECTIONS,
+  HOISTED_PAYLOAD_FIELDS,
   MAX_INLINE_PAYLOAD_UNITS,
+  ON_DEMAND_ENTITY_COLLECTIONS,
   WORKSPACE_COLLECTIONS,
   usesJsonPayload,
   validatePdfAnnotationPayload,
@@ -201,6 +203,38 @@ describe("readEntityDocument — validation on the way back", () => {
     expect(ok(CLOUD_COLLECTION.NOTE_CONTENT, "n1", fields, ["abc", "defg"]).reason).toBe("chunk-length-mismatch");
     expect(ok(CLOUD_COLLECTION.NOTE_CONTENT, "n1", fields, ["abc", "def"])).toEqual({ ok: true, payload: { html: "abcdef" } });
     expect(ok(CLOUD_COLLECTION.NOTE_CONTENT, "n1", { ...fields, chunkCount: 0 }, []).reason).toBe("bad-chunk-count");
+  });
+});
+
+/* ------------------ Listen In on-demand collections (8D.4) ---------------- */
+
+describe("Listen In — three ON-DEMAND collections that the workspace read never fetches", () => {
+  test("they are cloud collections, never mirror or workspace-read collections; pages and summaries are JSON with hoisted fields", () => {
+    expect(ON_DEMAND_ENTITY_COLLECTIONS).toEqual(["listenInMeetings", "listenInTranscripts", "listenInSummaries"]);
+    for (const c of ON_DEMAND_ENTITY_COLLECTIONS) {
+      expect(ENTITY_COLLECTIONS).not.toContain(c);
+      expect(ASYNC_ENTITY_COLLECTIONS).not.toContain(c);
+      expect(WORKSPACE_COLLECTIONS).not.toContain(c);
+      expect(entitiesOfRecord(c, {})).toBeNull();
+    }
+    expect(usesJsonPayload("listenInMeetings")).toBe(false);
+    expect(usesJsonPayload("listenInTranscripts")).toBe(true);
+    expect(usesJsonPayload("listenInSummaries")).toBe(true);
+    // `createdBy` is hoisted so the creator-only rules can read it without
+    // fetching the meeting header (Phase 8D.4).
+    expect(HOISTED_PAYLOAD_FIELDS.listenInTranscripts).toEqual(["sessionId", "createdBy", "page", "revision"]);
+    expect(HOISTED_PAYLOAD_FIELDS.listenInSummaries).toEqual(["sessionId", "createdBy", "revision"]);
+  });
+
+  test("a JSON document carries its hoisted fields natively beside the json, inline and chunked; a native header keeps only its field list", () => {
+    const page = buildEntityDocument({ workspaceId: "w", collection: "listenInTranscripts", id: "s:0", payload: { sessionId: "s", createdBy: "u", page: 0, revision: 2, segments: [] } });
+    expect(page.fields).toEqual({ workspaceId: "w", id: "s:0", kind: "listenInTranscripts", schemaVersion: 1, sessionId: "s", createdBy: "u", page: 0, revision: 2, json: '{"sessionId":"s","createdBy":"u","page":0,"revision":2,"segments":[]}' });
+    const big = buildEntityDocument({ workspaceId: "w", collection: "listenInSummaries", id: "s", payload: { sessionId: "s", createdBy: "u", revision: 1, result: { summaryText: "x".repeat(MAX_INLINE_PAYLOAD_UNITS + 1) } } });
+    expect(big.fields).toMatchObject({ chunked: true, sessionId: "s", createdBy: "u", revision: 1 });
+    expect(readEntityDocument({ workspaceId: "w", collection: "listenInSummaries", id: "s", fields: big.fields, chunks: big.chunks }).ok).toBe(true);
+    const header = buildEntityDocument({ workspaceId: "w", collection: "listenInMeetings", id: "s", payload: { sessionId: "s", createdBy: "u", revision: 1, failedSeqs: [1, "x", 2], audio: "never", mimeType: "audio/webm" } });
+    expect(header.fields).toEqual({ workspaceId: "w", id: "s", kind: "listenInMeetings", schemaVersion: 1, sessionId: "s", createdBy: "u", revision: 1, failedSeqs: [1, 2] });
+    expect(readEntityDocument({ workspaceId: "w", collection: "listenInMeetings", id: "s", fields: header.fields })).toEqual({ ok: true, payload: { sessionId: "s", createdBy: "u", revision: 1, failedSeqs: [1, 2] } });
   });
 });
 

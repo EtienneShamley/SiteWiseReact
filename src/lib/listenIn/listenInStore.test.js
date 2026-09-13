@@ -262,3 +262,58 @@ describe("the durable store actually survives a new connection", () => {
     expect(await second.getSession(UID, WS, "s-1")).toBeNull();
   });
 });
+
+/* ================ the cloud bookkeeping rows (Phase 8D.4) ================= */
+//
+// One row per cloud ENTITY of a session — the header, the summary, each
+// transcript page — holding revisions and a signature and never audio or
+// text. Proved against BOTH stores like everything above.
+
+describe.each([
+  ["memory", () => createListenInMemoryStore()],
+  ["durable (IndexedDB)", () => createListenInDurableStore()],
+])("%s store — sync state", (_name, make) => {
+  let store;
+  beforeEach(async () => {
+    await deleteAssetDb();
+    store = make();
+  });
+
+  const row = (entity, overrides = {}) => ({
+    uid: UID,
+    workspaceId: WS,
+    sessionId: "s-1",
+    entity,
+    revision: 1,
+    signature: "{}",
+    syncedRevision: 0,
+    chunks: 0,
+    updatedAt: 1,
+    ...overrides,
+  });
+
+  test("rows round-trip by entity, list per session or per account, and never leak across accounts", async () => {
+    await store.putSyncState(row("meeting"));
+    await store.putSyncState(row("transcript:0", { revision: 3, syncedRevision: 2 }));
+    await store.putSyncState(row("summary", { sessionId: "s-2" }));
+    await store.putSyncState(row("meeting", { uid: OTHER_UID }));
+    expect(await store.getSyncState(UID, WS, "s-1", "transcript:0")).toMatchObject({ revision: 3, syncedRevision: 2 });
+    expect(await store.getSyncState(UID, WS, "s-1", "nope")).toBeNull();
+    expect((await store.listSyncStates(UID, WS, "s-1")).map((r) => r.entity).sort()).toEqual(["meeting", "transcript:0"]);
+    expect((await store.listSyncStates(UID, WS)).map((r) => `${r.sessionId}/${r.entity}`).sort()).toEqual(["s-1/meeting", "s-1/transcript:0", "s-2/summary"]);
+    expect((await store.listSyncStates(OTHER_UID, WS)).map((r) => r.entity)).toEqual(["meeting"]);
+    await store.putSyncState(row("meeting", { revision: 2, syncedRevision: 2 }));
+    expect(await store.getSyncState(UID, WS, "s-1", "meeting")).toMatchObject({ revision: 2, syncedRevision: 2 });
+  });
+
+  test("an unscoped row is refused, and deleting the session removes its bookkeeping with it", async () => {
+    await expect(store.putSyncState(row("meeting", { uid: "" }))).rejects.toThrow(/signed-in user is required/i);
+    await expect(store.putSyncState(row("", {}))).rejects.toThrow(/entity name is required/i);
+    await store.putSession(session());
+    await store.putSyncState(row("meeting"));
+    await store.putSyncState(row("summary", { sessionId: "s-2" }));
+    await store.deleteSession(UID, WS, "s-1");
+    expect(await store.listSyncStates(UID, WS, "s-1")).toEqual([]);
+    expect((await store.listSyncStates(UID, WS)).map((r) => r.sessionId)).toEqual(["s-2"]);
+  });
+});

@@ -39,20 +39,38 @@
 // is never shown to anybody. Only a genuine INTERRUPTION (a crash, a reload,
 // a lost device) is recovery, and only that offers "Resume meeting".
 //   ─────────────────────────────────────────────────────────────────────────
-//   [ Summary ] [ Transcript ]                                       [Export]
+//                                                                    [Export]
 //   ─────────────────────────────────────────────────────────────────────────
-//   SUMMARY      the meeting's structured intelligence — overview, key points,
-//                decisions, action items, risks, follow-ups — generated
-//                automatically as the meeting runs and consolidated when it
-//                finishes. The DEFAULT view once there is anything to read.
-//   TRANSCRIPT   the complete ordered transcript, read-first, with elapsed
-//                offsets, failed parts named in place and parts still being
-//                transcribed shown as pending rather than as silence.
+//   ORIGINAL TRANSCRIPT                                    [Copy transcript]
+//   0:00  …the canonical transcript: complete, chronological, read-only,
+//         every recording leg of the meeting, failed parts named in place and
+//         parts still being transcribed shown as pending, never replaced by
+//         AI-generated wording…
+//   [ Summarise ]   · Summarising…  · [ Summarise again ]  · [ Try summarising again ]
+//   ─────────────────────────────────────────────────────────────────────────
+//   SUMMARISED                        (only once a summary exists)  [Copy summary]
+//   …the structured summary — overview, key points, decisions, action items,
+//   risks, follow-ups, and what it covers…
 //
-// THERE IS NO SUMMARISE BUTTON. Summarisation is automatic (Phase 8D.2): the
-// user does not finish a two-hour meeting and then press a button to find out
-// what it was about. `Regenerate` exists only because a summary the USER has
-// edited must never be overwritten without them asking.
+// ONE PAGE, AND SUMMARISATION IS MANUAL ONLY (2026-09-13). The body is a
+// single scrolling workspace: the Original transcript on top — the primary
+// meeting document — and beneath it ONE control, [Summarise]. Nothing
+// summarises on its own: not a chunk arriving, not Stop recording, not Start
+// recording again, not Complete meeting. When the user presses Summarise the
+// engine's `summariseNow` reads every settled window of the transcript
+// (however short) through the existing summary route and consolidates, the
+// button reads Summarising… meanwhile, and on success the SUMMARISED section
+// appears beneath the transcript, in the same scrolling window, with
+// [Summarise again] above it. On failure the transcript stays exactly where
+// it is and the error is stated beneath it with [Try summarising again]; no
+// empty Summarised section is ever shown. There is no view switcher, no
+// second page, no second summary system and no path to /api/refine.
+//
+// CLEAR IS NOT DISCARD. A COMPLETED meeting is left with [Clear]: it resets
+// this window to the ready-to-start state and deletes nothing — the meeting
+// stays a durable record locally and in the account for a later History,
+// review, export and sharing. DISCARD remains the destructive action of an
+// UNFINISHED meeting only, and is never the way to leave a completed one.
 //
 // Presentation only, and rendered at SHELL level (App.js) rather than inside
 // the note workspace, because Listen In is a workspace-level tool: it must
@@ -65,7 +83,7 @@ import { FaMicrophone, FaStop } from "react-icons/fa";
 import VoiceLanguageSelect from "./VoiceLanguageSelect";
 import { useLiveTranscriptSession } from "../context/LiveTranscriptContext";
 import useTransientMessage from "../hooks/useTransientMessage";
-import { actionButtonClass, iconButtonClass, tabClass } from "../lib/interactionStyles";
+import { actionButtonClass, iconButtonClass } from "../lib/interactionStyles";
 import { MESSAGE_TONE } from "../lib/transientMessage";
 import { LIVE_TRANSCRIPT_MESSAGE, liveTranscriptErrorMessage } from "../lib/liveTranscript";
 import {
@@ -94,21 +112,6 @@ import ListenInExportDialog from "./ListenInExportDialog";
 
 // How long a completion notice ("Copied.") stays.
 export const LIVE_TRANSCRIPT_TRANSIENT_MS = 4000;
-
-/**
- * The two views of one session. Not an ARIA tablist: they are toggle buttons
- * in a labelled group with `aria-pressed`, the same pattern as the rest of
- * NoteWise's segmented controls (docs/DESIGN_SYSTEM.md → Note view controls).
- */
-export const LISTEN_IN_VIEW = Object.freeze({
-  SUMMARY: "summary",
-  TRANSCRIPT: "transcript",
-});
-
-export const LISTEN_IN_VIEW_LABEL = Object.freeze({
-  [LISTEN_IN_VIEW.SUMMARY]: "Summary",
-  [LISTEN_IN_VIEW.TRANSCRIPT]: "Transcript",
-});
 
 /** What is known about coverage before a session has any. */
 const EMPTY_COVERAGE = Object.freeze({
@@ -149,25 +152,23 @@ function SummarySection({ heading, items }) {
 }
 
 /**
- * The Summary view.
+ * The SUMMARISED section — the lower half of the one page, directly beneath
+ * the transcript it summarises.
  *
  * It states what it covers rather than implying it: an in-progress summary
  * says so, a summary behind the transcript says so, and a finished one over a
  * recording with holes in it names them. Nothing here generates anything —
- * the engine does that on its own schedule — and the only actions are the two
- * that genuinely need a person: Try again after a failure, and Regenerate
- * after an edit.
+ * the engine does, on its own schedule and on request — and the controls are
+ * exactly the ones that need a person: Summarise (or Summarise again, or Try
+ * summarising again), Copy summary, and Edit summary.
  */
-function SummaryView({ session, summary, coverage, editing, onEdit, onCancelEdit, onSaveEdit }) {
+function SummarisedSection({ session, summary, coverage, editing, onEdit, onCancelEdit, onSaveEdit, onCopy }) {
   const draftRef = useRef(null);
   const statusLabel = listenInSummaryStatusLabel(summary, coverage);
   const coverageNote = summary && summary.final ? listenInCoverageNote(coverage) : "";
   const result = (summary && summary.result) || null;
   const text = session.summaryText || "";
   const edited = hasUserEditedSummary(summary);
-  const generating = !!summary && summary.status === LISTEN_IN_SUMMARY_STATUS.GENERATING;
-  const failed = !!(summary && summary.lastErrorOutcome);
-  const empty = !session.hasSummary;
 
   const sections = SECTION_ORDER.map((key) => {
     const raw = result && Array.isArray(result[key]) ? result[key] : [];
@@ -179,34 +180,39 @@ function SummaryView({ session, summary, coverage, editing, onEdit, onCancelEdit
   }).filter((s) => s.items.length > 0);
 
   return (
-    <div className="flex-1 min-h-0 overflow-auto px-4 py-3" data-listen-in-view="summary">
+    <section
+      className="px-4 py-3 border-t border-gray-200 dark:border-gray-700"
+      aria-labelledby="listen-in-summarised-heading"
+      data-listen-in-section="summarised"
+    >
+      <div className="flex items-center gap-2">
+        <h3 id="listen-in-summarised-heading" className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+          Summarised
+        </h3>
+        {/* Copy is named for what it copies, and lives beside it. */}
+        {!editing && (
+          <button
+            type="button"
+            className={actionButtonClass({ className: "ml-auto px-2 py-0.5 rounded text-[11px]" })}
+            onClick={onCopy}
+            title="Copy the summary to the clipboard"
+            data-listen-in-control="copy-summary"
+          >
+            Copy summary
+          </button>
+        )}
+      </div>
       {/* ONE polite region for what the summary is doing and what it covers.
           Words, never colour alone, and never a claim of completeness while
           transcription is behind it. */}
       <p
         role="status"
         aria-live="polite"
-        className="text-xs text-gray-500 dark:text-gray-400"
+        className="mt-1 text-xs text-gray-500 dark:text-gray-400"
         data-listen-in-summary-status={summary ? summary.status : "none"}
       >
         {statusLabel}
       </p>
-
-      {failed && (
-        <div className="mt-2 flex items-start justify-between gap-3 rounded-md border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 px-3 py-2">
-          <p role="status" className="text-xs text-amber-800 dark:text-amber-200">
-            {summary.lastErrorMessage ||
-              "The summary could not be generated. The recording and its transcript are unaffected."}
-          </p>
-          <button
-            type="button"
-            className={actionButtonClass({ className: "px-2 py-0.5 rounded text-[11px] shrink-0" })}
-            onClick={() => session.retrySummary()}
-          >
-            Try again
-          </button>
-        </div>
-      )}
 
       {coverageNote && (
         <p
@@ -251,15 +257,7 @@ function SummaryView({ session, summary, coverage, editing, onEdit, onCancelEdit
         </div>
       ) : (
         <>
-          {empty ? (
-            <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
-              {generating
-                ? "The summary is being generated."
-                : coverage.pendingCount > 0
-                  ? "The summary appears here once enough of the meeting has been transcribed."
-                  : "Nothing has been summarised yet. Start recording, and the summary builds itself as the meeting runs."}
-            </p>
-          ) : (
+          {(
             <>
               {edited && (
                 <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
@@ -289,29 +287,77 @@ function SummaryView({ session, summary, coverage, editing, onEdit, onCancelEdit
                 >
                   Edit summary
                 </button>
-                {/* REGENERATION IS EXPLICIT. Automatic generation keeps the
-                    structured facts current on its own; it never rewrites a
-                    person's own wording, so replacing that is a deliberate
-                    action with a plain warning beside it. */}
-                <button
-                  type="button"
-                  className={actionButtonClass({ busy: generating, disabled: generating, className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
-                  onClick={() => session.regenerateSummary()}
-                  disabled={generating}
-                  aria-busy={generating}
-                  title={
-                    edited
-                      ? "Generate the summary again, replacing your edited wording"
-                      : "Generate the summary again from this session's transcript"
-                  }
-                >
-                  {generating ? "Generating…" : "Regenerate"}
-                </button>
               </div>
             </>
           )}
         </>
       )}
+    </section>
+  );
+}
+
+/**
+ * THE SUMMARISE CONTROL — beneath the transcript, above any summary.
+ *
+ * One button whose wording follows the state: Summarise (no summary yet),
+ * Summarising… (a request the user made is in flight), Summarise again (a
+ * summary exists), Try summarising again (the user's last request failed).
+ * It is shown whenever there are transcribed words to summarise, dispatches
+ * the engine's `summariseNow` and nothing else, and never touches the
+ * microphone or the meeting. A failure of a request the user made is stated
+ * here, under the transcript that stays visible — never in an empty section.
+ */
+function SummariseControl({ session, summary }) {
+  const canSummarise = !!(session.transcript && session.transcript.trim());
+  if (!canSummarise) return null;
+  const generating = !!summary && summary.status === LISTEN_IN_SUMMARY_STATUS.GENERATING;
+  const failed = !!(summary && summary.lastErrorOutcome);
+  const hasSummary = !!session.hasSummary;
+  const edited = hasUserEditedSummary(summary);
+  const label = generating
+    ? "Summarising…"
+    : failed
+    ? "Try summarising again"
+    : hasSummary
+    ? "Summarise again"
+    : "Summarise";
+  return (
+    <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700" data-listen-in-summarise="control">
+      {failed && (
+        <div
+          className="mb-2 rounded-md border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 px-3 py-2"
+          data-listen-in-summary="failed"
+        >
+          <p role="status" className="text-xs text-amber-800 dark:text-amber-200">
+            {summary.lastErrorMessage ||
+              "The summary could not be generated. The recording and its transcript are unaffected."}
+          </p>
+        </div>
+      )}
+      <button
+        type="button"
+        className={actionButtonClass({
+          primary: !hasSummary || failed,
+          busy: generating,
+          disabled: generating,
+          className: "px-3 py-1.5 rounded-lg text-xs font-medium",
+        })}
+        onClick={() => session.summariseNow()}
+        disabled={generating}
+        aria-busy={generating}
+        data-listen-in-control="summarise"
+        title={
+          generating
+            ? "The summary is being generated"
+            : edited
+            ? "Summarise the transcript above again, replacing your edited wording"
+            : hasSummary
+            ? "Summarise the transcript above again"
+            : "Summarise the transcript above"
+        }
+      >
+        {label}
+      </button>
     </div>
   );
 }
@@ -319,7 +365,8 @@ function SummaryView({ session, summary, coverage, editing, onEdit, onCancelEdit
 /* ----------------------------- the transcript ---------------------------- */
 
 /**
- * The Transcript view — READ-FIRST, and complete.
+ * The ORIGINAL TRANSCRIPT section — the top of the one page, READ-FIRST and
+ * complete.
  *
  * Every canonical segment the session holds, in order: transcribed speech
  * grouped into readable paragraphs with the elapsed offset it began at, parts
@@ -328,9 +375,29 @@ function SummaryView({ session, summary, coverage, editing, onEdit, onCancelEdit
  * record of what was said, the summary is the thing a person edits, and a
  * large transcript editor is not this phase's work.
  */
-function TranscriptView({ session, blocks, pending = 0 }) {
+function TranscriptSection({ session, blocks, pending = 0, ready = false, onCopy }) {
   return (
-    <div className="flex-1 min-h-0 overflow-auto px-4 py-3" data-listen-in-view="transcript">
+    <section
+      className="px-4 py-3"
+      aria-labelledby="listen-in-transcript-heading"
+      data-listen-in-section="transcript"
+    >
+      <div className="flex items-center gap-2 mb-2">
+        <h3 id="listen-in-transcript-heading" className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+          Original transcript
+        </h3>
+        {ready && (
+          <button
+            type="button"
+            className={actionButtonClass({ className: "ml-auto px-2 py-0.5 rounded text-[11px]" })}
+            onClick={onCopy}
+            title="Copy the whole transcript to the clipboard"
+            data-listen-in-control="copy-transcript"
+          >
+            Copy transcript
+          </button>
+        )}
+      </div>
       {blocks.length === 0 ? (
         <p className="text-sm text-gray-500 dark:text-gray-400">
           {session.recording
@@ -377,7 +444,7 @@ function TranscriptView({ session, blocks, pending = 0 }) {
           ))}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -393,7 +460,6 @@ export default function LiveTranscriptDialog() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [exportOpen, setExportOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [chosenView, setChosenView] = useState(null);
   const notice = useTransientMessage(LIVE_TRANSCRIPT_TRANSIENT_MS);
 
   const open = !!session?.open;
@@ -422,6 +488,7 @@ export default function LiveTranscriptDialog() {
   // one is "nothing known yet", never a crash in the middle of a meeting.
   const coverage = session?.summaryCoverage || EMPTY_COVERAGE;
   const hasSummary = !!session?.hasSummary;
+  const finished = !!session?.finished;
 
   // The elapsed indicator DERIVES from the session's own clock; the interval
   // only re-renders. So it is right the moment the window reopens, however
@@ -473,32 +540,33 @@ export default function LiveTranscriptDialog() {
     [capture, session]
   );
 
-  // SUMMARY IS THE DEFAULT VIEW once there is one to read — the user primarily
-  // reviews the summary and reads the transcript when they need the words. It
-  // is a default, not a lock: an explicit choice wins from then on, and the
-  // Transcript view is what a session with nothing summarised yet opens on.
-  const defaultView = hasSummary ? LISTEN_IN_VIEW.SUMMARY : LISTEN_IN_VIEW.TRANSCRIPT;
-  const view = chosenView || defaultView;
-
-  const handleCopy = useCallback(async () => {
-    const text = view === LISTEN_IN_VIEW.SUMMARY ? session?.summaryText || "" : transcript;
-    if (!text.trim()) {
-      notice.showError(LIVE_TRANSCRIPT_MESSAGE.EMPTY);
-      return;
-    }
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-        await navigator.clipboard.writeText(text);
-      } else {
-        throw new Error("no clipboard");
+  // COPY IS NAMED FOR WHAT IT COPIES. Two controls, each beside its own
+  // section — Copy transcript above, Copy summary below — so there is no
+  // "selected view" to copy and nothing ambiguous about the answer.
+  const copyText = useCallback(
+    async (text, what) => {
+      if (!text.trim()) {
+        notice.showError(LIVE_TRANSCRIPT_MESSAGE.EMPTY);
+        return;
       }
-      notice.showInfo(view === LISTEN_IN_VIEW.SUMMARY ? "Summary copied." : "Transcript copied.");
-    } catch {
-      notice.showError(
-        "That could not be copied. Select the text and copy it manually."
-      );
-    }
-  }, [view, session, transcript, notice]);
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+          await navigator.clipboard.writeText(text);
+        } else {
+          throw new Error("no clipboard");
+        }
+        notice.showInfo(`${what} copied.`);
+      } catch {
+        notice.showError("That could not be copied. Select the text and copy it manually.");
+      }
+    },
+    [notice]
+  );
+  const handleCopyTranscript = useCallback(() => copyText(transcript, "Transcript"), [copyText, transcript]);
+  const handleCopySummary = useCallback(
+    () => copyText(session?.summaryText || "", "Summary"),
+    [copyText, session]
+  );
 
   const handleSaveEdit = useCallback(
     (value) => {
@@ -509,15 +577,24 @@ export default function LiveTranscriptDialog() {
     [session]
   );
 
-  // Destructive and explicit: throws the whole session away. Refused while
-  // capture is live — stop recording first — so one mis-click cannot lose a
-  // meeting.
+  // Destructive and explicit: throws the whole UNFINISHED meeting away. Refused
+  // while capture is live — stop recording first — so one mis-click cannot
+  // lose a meeting, and not offered at all for a completed one (see Clear).
   const handleDiscard = useCallback(() => {
     if (!session || recording || stopping) return;
     session.discard();
     setEditing(false);
-    setChosenView(null);
   }, [session, recording, stopping]);
+
+  // CLEAR — the non-destructive way to leave a COMPLETED meeting. The window
+  // returns to its ready-to-start state; the meeting's record, transcript,
+  // summary and cloud documents all remain, and the next Start is a new
+  // meeting. Nothing here deletes, and nothing here queues a cloud delete.
+  const handleClear = useCallback(() => {
+    if (!session || !finished) return;
+    session.clear();
+    setEditing(false);
+  }, [session, finished]);
 
   if (!open || !session) return null;
 
@@ -659,22 +736,9 @@ export default function LiveTranscriptDialog() {
           </button>
         </div>
 
-        {/* The two views, and the one Export action that spans both. */}
+        {/* The one Export action, spanning the transcript and the summary.
+            There is no view switcher: both sit on the one page below. */}
         <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
-          <div className="flex items-center gap-1" role="group" aria-label="Listen In view">
-            {[LISTEN_IN_VIEW.SUMMARY, LISTEN_IN_VIEW.TRANSCRIPT].map((value) => (
-              <button
-                key={value}
-                type="button"
-                className={tabClass({ active: view === value, className: "px-3 py-1 rounded-lg text-xs font-medium" })}
-                aria-pressed={view === value}
-                onClick={() => setChosenView(value)}
-                data-listen-in-tab={value}
-              >
-                {LISTEN_IN_VIEW_LABEL[value]}
-              </button>
-            ))}
-          </div>
           <button
             type="button"
             className={actionButtonClass({ disabled: !canExport, className: "ml-auto px-3 py-1.5 rounded-lg text-xs font-medium" })}
@@ -784,43 +848,65 @@ export default function LiveTranscriptDialog() {
           </div>
         )}
 
-        {view === LISTEN_IN_VIEW.SUMMARY ? (
-          <SummaryView
+        {/* ONE SCROLLING PAGE: the Original transcript on top, the Summarise
+            control beneath it, and — only once the user has asked for one and
+            got it — the Summarised section beneath that. A failed request is
+            stated in the control, under a transcript that stays visible. */}
+        <div className="flex-1 min-h-0 overflow-auto" data-listen-in-page="single">
+          <TranscriptSection
             session={session}
-            summary={summary}
-            coverage={coverage}
-            editing={editing}
-            onEdit={() => setEditing(true)}
-            onCancelEdit={() => setEditing(false)}
-            onSaveEdit={handleSaveEdit}
+            blocks={blocks}
+            pending={coverage.pendingCount || 0}
+            ready={ready}
+            onCopy={handleCopyTranscript}
           />
-        ) : (
-          <TranscriptView session={session} blocks={blocks} pending={coverage.pendingCount || 0} />
-        )}
+          <SummariseControl session={session} summary={summary} />
+          {hasSummary && (
+            <SummarisedSection
+              session={session}
+              summary={summary}
+              coverage={coverage}
+              editing={editing}
+              onEdit={() => setEditing(true)}
+              onCancelEdit={() => setEditing(false)}
+              onSaveEdit={handleSaveEdit}
+              onCopy={handleCopySummary}
+            />
+          )}
+        </div>
 
         {/* Completion actions + one restrained notice line. */}
         <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-gray-200 dark:border-gray-700 shrink-0">
-          <button
-            className={actionButtonClass({ className: "px-3 py-1.5 rounded-lg text-xs font-medium" })}
-            onClick={handleCopy}
-          >
-            Copy
-          </button>
-          {/* Destructive: discards the whole session with no undo. Refused
+          {/* A COMPLETED meeting is left with CLEAR: non-destructive, the
+              record stays, the window is ready for the next meeting. */}
+          {finished && (
+            <button
+              className={actionButtonClass({ className: "px-3 py-1.5 rounded-lg text-xs font-medium ml-auto" })}
+              onClick={handleClear}
+              title="Clear this completed meeting from the window. It is kept — nothing is deleted — and the next Start recording begins a new meeting"
+              data-listen-in-control="clear"
+            >
+              Clear
+            </button>
+          )}
+          {/* An UNFINISHED meeting has DISCARD: destructive, no undo. Refused
               while recording — stop first — so a live capture cannot be lost
-              by one mis-click. */}
-          <button
-            className={actionButtonClass({
-              danger: true,
-              disabled: recording || stopping || (!ready && !hasSummary && !finishing),
-              className: "px-3 py-1.5 rounded-lg text-xs font-medium ml-auto",
-            })}
-            onClick={handleDiscard}
-            disabled={recording || stopping || (!ready && !hasSummary && !finishing)}
-            title={recording ? "Stop recording before discarding" : "Discard this meeting and everything it captured"}
-          >
-            Discard
-          </button>
+              by one mis-click, and never shown for a completed meeting. */}
+          {!!capture && !finished && (
+            <button
+              className={actionButtonClass({
+                danger: true,
+                disabled: recording || stopping || (!ready && !hasSummary && !finishing),
+                className: "px-3 py-1.5 rounded-lg text-xs font-medium ml-auto",
+              })}
+              onClick={handleDiscard}
+              disabled={recording || stopping || (!ready && !hasSummary && !finishing)}
+              title={recording ? "Stop recording before discarding" : "Discard this meeting and everything it captured"}
+              data-listen-in-control="discard"
+            >
+              Discard
+            </button>
+          )}
           {!!notice.message && (
             <span
               role="status"

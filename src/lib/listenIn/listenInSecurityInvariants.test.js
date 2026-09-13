@@ -28,11 +28,16 @@
 // what is asserted here is the INVARIANT itself, compactly, so that one file
 // fails when a security property is lost.
 import {
+  LISTEN_IN_CLOUD_TEXT_POLICY,
+  LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED,
   LISTEN_IN_DURABLE_CAPTURE_APPROVED,
   LISTEN_IN_PERSISTENCE,
   LISTEN_IN_PERSISTENCE_POLICY,
+  resolveListenInCloudSync,
   resolveListenInPersistence,
 } from "./listenInPolicy";
+import { installListenInCloudSync } from "./listenInCloudSync";
+import { LISTEN_IN_MEETING_FIELDS } from "../cloud/cloudModel";
 import {
   LISTEN_IN_CHUNK_KEY_PATH,
   LISTEN_IN_SESSION_KEY_PATH,
@@ -296,6 +301,33 @@ describe("5. no Listen In audio has any path to the cloud", () => {
     expect(LISTEN_IN_PERSISTENCE_POLICY.cloud).toMatch(/never uploaded to Firebase Storage/i);
     expect(LISTEN_IN_PERSISTENCE_POLICY.cloud).toMatch(/\/api\/transcribe/);
   });
+
+  // Phase 8D.4 adds ONE module that legitimately reaches the cloud layer —
+  // for TEXT. It is held to a narrower promise than the list above: it may
+  // import the outbox and the model, and it may never import the Storage
+  // adapter, the asset upload layer or Firebase itself, and never read a
+  // chunk's bytes.
+  test("the cloud bridge reaches Firestore's outbox for text only: no Storage adapter, no asset queue, no audio read", () => {
+    const source = code(src("lib/listenIn/listenInCloudSync.js"));
+    const imports = [
+      ...(source.match(/^\s*import[\s\S]*?from\s+["'][^"']+["']/gm) || []),
+      ...(source.match(/require\(\s*["'][^"']+["']\s*\)/g) || []),
+    ].join("\n");
+    expect(imports).not.toMatch(/firebase|firebaseStorageAdapter|assetUpload|assetStorage|assetRemoteIndex|assetDb\b/i);
+    // Everything that PROJECTS or PROVIDES a payload — the bookkeeping, the
+    // decorator, the providers, the repair, the read model — reads chunks
+    // through the audio-free listing only. The one call to the bytes API in
+    // the module is the LOCAL retry-availability check at its foot, which
+    // asks whether audio exists on this device and hands nothing to anyone.
+    const projecting = source.slice(source.indexOf("async function recordProjection"), source.indexOf("export async function listenInRetryAvailability"));
+    expect(projecting.length).toBeGreaterThan(1000);
+    expect(projecting).not.toMatch(/(?<!inner\.)getChunkAudio\s*\(/);
+    expect(source).not.toMatch(/\b(uploadBytes|uploadBytesResumable|getDownloadURL|setDoc|addDoc|updateDoc|enqueueAssetUpload|queueAssetUpload|uploadAsset)\s*\(/);
+    // and the model it projects through names no audio field at all
+    expect(LISTEN_IN_MEETING_FIELDS).not.toEqual(expect.arrayContaining(["audio", "mimeType", "byteLength"]));
+    const model = code(src("lib/cloud/listenInCloudModel.js"));
+    expect(model).not.toMatch(/getChunkAudio|uploadBytes|firebase/i);
+  });
 });
 
 /* ============ 6. an identity transition interrupts live capture ========== */
@@ -472,5 +504,100 @@ describe("11. every provider-backed route is behind the same identity policy", (
     expect(body).toMatch(/requireFirebaseUser\(/);
     expect(body).toMatch(/requireVerifiedEmail\(\)/);
     expect(body).toMatch(/userRateLimit\(/);
+  });
+});
+
+
+/* ============ 12. cloud TEXT replication is gated, and audio-free ========= */
+
+describe("12. Listen In text results reach the account only under an approved flag, and audio never does", () => {
+  test("the flag is ON (approved 2026-09-12); off would install nothing, and on installs only through the policy", () => {
+    expect(LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED).toBe(true);
+    expect(resolveListenInCloudSync()).toBe(true);
+    expect(resolveListenInCloudSync({ approved: false })).toBe(false);
+    const off = installListenInCloudSync({ uid: UID, workspaceId: WS, approved: false });
+    expect(off.installed).toBe(false);
+    expect(off.providers).toEqual({});
+    expect(off.store).toBeNull();
+    const on = installListenInCloudSync({ uid: UID, workspaceId: WS, persistence: LISTEN_IN_PERSISTENCE.MEMORY });
+    expect(on.installed).toBe(true);
+    expect(Object.keys(on.providers).sort()).toEqual(["listenInMeetings", "listenInSummaries", "listenInTranscripts"]);
+    on.uninstall();
+  });
+
+  test("the tracked policy beside the flag keeps audio local, access creator-only and the bookkeeping text-free", () => {
+    expect(LISTEN_IN_CLOUD_TEXT_POLICY.audio).toMatch(/Local IndexedDB only/);
+    expect(LISTEN_IN_CLOUD_TEXT_POLICY.audio).toMatch(/never persisted to Firebase Storage or Firestore/);
+    expect(LISTEN_IN_CLOUD_TEXT_POLICY.text).toMatch(/never audio/);
+    expect(LISTEN_IN_CLOUD_TEXT_POLICY.where).toMatch(/AND the meeting's creator/);
+    expect(LISTEN_IN_CLOUD_TEXT_POLICY.where).toMatch(/another member of the same workspace gains no access by membership/i);
+    expect(LISTEN_IN_CLOUD_TEXT_POLICY.authority).toMatch(/local IndexedDB record stays authoritative/i);
+    expect(LISTEN_IN_CLOUD_TEXT_POLICY.retry).toMatch(/no other device is offered a retry/i);
+    expect(LISTEN_IN_CLOUD_TEXT_POLICY.bookkeeping).toMatch(/revisions, tokens and a digest/);
+    expect(LISTEN_IN_CLOUD_TEXT_POLICY.bookkeeping).toMatch(/never a second copy of the transcript/);
+  });
+
+  test("a Listen In cloud document is CREATOR-ONLY: the rules say so, and the reads are constrained to the caller", () => {
+    const rules = fs.readFileSync(path.join(ROOT, "firestore.rules"), "utf8");
+    // The author is pinned on create and immutable afterwards…
+    expect(rules).toMatch(/request\.resource\.data\.createdBy == request\.auth\.uid/);
+    expect(rules).toMatch(/request\.resource\.data\.createdBy == resource\.data\.createdBy/);
+    // …and READ, UPDATE and DELETE all require being that author. Each of the
+    // three collections carries the creator test on its read rule; membership
+    // alone never admits one.
+    const block = rules.slice(rules.indexOf("match /listenInMeetings/"), rules.indexOf("match /migrations/"));
+    expect(block.match(/allow read: if isMember\(wid\) && listenInCreator\(\);/g)).toHaveLength(3);
+    expect(block).not.toMatch(/allow read: if isMember\(wid\);/);
+    expect(block.match(/listenInCreator\(\)/g).length).toBeGreaterThanOrEqual(9);
+    // The chunk sub-collections hold pieces of the same text, so they are
+    // gated on their parent's author rather than on membership.
+    expect(block.match(/\.data\.createdBy == request\.auth\.uid/g).length).toBeGreaterThanOrEqual(6);
+    // Both cloud reads are constrained to the caller, so a list cannot even
+    // be asked for across authors.
+    const bridge = code(src("lib/listenIn/listenInCloudSync.js"));
+    expect(bridge).toMatch(/readListenInMeeting\(workspaceId, sessionId, uid\)/);
+    expect(bridge).toMatch(/listListenInMeetings\(workspaceId, uid\)/);
+    expect(bridge).toMatch(/meeting\.createdBy !== uid/);
+    const store = code(src("lib/cloud/firestoreWorkspaceStore.js"));
+    expect(store).toMatch(/where\("createdBy", "==", uid\)/);
+  });
+
+  test("the local cloud bookkeeping keeps a DIGEST, never a second copy of the words", () => {
+    const model = code(src("lib/cloud/listenInCloudModel.js"));
+    // The signature is a digest of the canonical projection, not the
+    // projection: the row cannot carry transcript or summary text.
+    const signature = model.slice(model.indexOf("export function projectionSignature"), model.indexOf("export function digestOfText"));
+    expect(signature).toMatch(/digestOfText\(JSON\.stringify\(rest\)\)/);
+    expect(signature).not.toMatch(/return JSON\.stringify/);
+    const bridge = code(src("lib/listenIn/listenInCloudSync.js"));
+    // The only thing written into a bookkeeping row as `signature` is that
+    // digest, and the row carries no payload field of any kind.
+    const record = bridge.slice(bridge.indexOf("async function recordProjection"), bridge.indexOf("/** The projection of one entity"));
+    expect(record).toMatch(/const signature = projectionSignature\(payload\);/);
+    expect(record).toMatch(/putSyncState\(\{/);
+    for (const forbidden of ["payload,", "segments", "json", "text"]) {
+      expect({ forbidden, hit: new RegExp(`\\b${forbidden}`).test(record.slice(record.indexOf("putSyncState({"), record.indexOf("});", record.indexOf("putSyncState({")))) }).toEqual({
+        forbidden,
+        hit: false,
+      });
+    }
+    // A real projection's signature is short and holds none of its words.
+    const { projectionSignature } = require("../cloud/listenInCloudModel");
+    const words = "the eastern boundary drainage plan was agreed ".repeat(30);
+    const digest = projectionSignature({ sessionId: "s", createdBy: UID, revision: 3, segments: [{ seq: 0, text: words }] });
+    expect(digest.length).toBeLessThan(40);
+    expect(digest).not.toMatch(/eastern|boundary|drainage/);
+  });
+
+  test("the session installs the bridge only through the policy, and the rules admit no Listen In audio collection", () => {
+    const session = code(src("lib/cloud/workspaceSession.js"));
+    expect(session).toMatch(/installListenInCloudSync\(/);
+    // the policy module decides; the session passes no approval of its own
+    const call = session.slice(session.indexOf("installListenInCloudSync({"), session.indexOf("});", session.indexOf("installListenInCloudSync({")));
+    expect(call).not.toMatch(/approved\s*:\s*true/);
+    const rules = fs.readFileSync(path.join(ROOT, "firestore.rules"), "utf8");
+    expect(rules).not.toMatch(/listenInAudio|listenInChunks|audio\/webm/);
+    const storageRules = fs.readFileSync(path.join(ROOT, "storage.rules"), "utf8");
+    expect(storageRules).not.toMatch(/listenIn/i);
   });
 });

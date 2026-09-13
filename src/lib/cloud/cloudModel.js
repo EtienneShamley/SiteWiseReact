@@ -24,6 +24,20 @@
 //   workspaces/{wid}/notePdfRefs/{noteId}      { pdfId }
 //   workspaces/{wid}/settings/{id}             workspace-level pointers (the default template)
 //   workspaces/{wid}/migrations/{sourceId}     the local→cloud migration record of one browser
+//   workspaces/{wid}/listenInMeetings/{sessionId}
+//                                              (Phase 8D.4) one Listen In MEETING's header —
+//                                              native fields, so the rules can hold its
+//                                              author and its revision
+//   workspaces/{wid}/listenInTranscripts/{sessionId}:{page}
+//                                              one bounded PAGE of that meeting's ordered
+//                                              transcript segments (JSON; chunked past the
+//                                              inline budget) — text and state, never audio
+//   workspaces/{wid}/listenInSummaries/{sessionId}
+//                                              that meeting's structured summary (JSON)
+//                                              These three are ON-DEMAND collections: not part
+//                                              of the workspace read, drained by the same
+//                                              outbox through payload providers, and read by
+//                                              src/lib/cloud/listenInCloudModel.js.
 //
 // Every entity document carries the same ENVELOPE — `{ workspaceId, id, kind,
 // updatedAt }` — plus its payload: small, simple kinds store native fields
@@ -60,7 +74,24 @@ export const CLOUD_COLLECTION = Object.freeze({
   NOTE_PDF_REFS: "notePdfRefs",
   SETTINGS: "settings",
   PDF_ANNOTATIONS: "pdfAnnotations",
+  LISTEN_IN_MEETINGS: "listenInMeetings",
+  LISTEN_IN_TRANSCRIPTS: "listenInTranscripts",
+  LISTEN_IN_SUMMARIES: "listenInSummaries",
 });
+
+/**
+ * Collections whose documents are read ON DEMAND — one meeting at a time —
+ * rather than as part of the workspace read (Phase 8D.4, Listen In). Their
+ * local copy is IndexedDB, their outbox entries are drained by the same
+ * engine through payload providers, and `readWorkspace` never fetches them:
+ * a workspace with hundreds of meetings must not download every transcript
+ * at sign-in. Never a durable-storage record, never hydrated into the mirror.
+ */
+export const ON_DEMAND_ENTITY_COLLECTIONS = Object.freeze([
+  CLOUD_COLLECTION.LISTEN_IN_MEETINGS,
+  CLOUD_COLLECTION.LISTEN_IN_TRANSCRIPTS,
+  CLOUD_COLLECTION.LISTEN_IN_SUMMARIES,
+]);
 
 /**
  * Collections whose local copy is a durable-storage record — the workspace
@@ -69,7 +100,9 @@ export const CLOUD_COLLECTION = Object.freeze({
  * these; a collection whose local copy lives elsewhere is NOT one of them.
  */
 export const ENTITY_COLLECTIONS = Object.freeze(
-  Object.values(CLOUD_COLLECTION).filter((c) => c !== CLOUD_COLLECTION.PDF_ANNOTATIONS)
+  Object.values(CLOUD_COLLECTION).filter(
+    (c) => c !== CLOUD_COLLECTION.PDF_ANNOTATIONS && !ON_DEMAND_ENTITY_COLLECTIONS.includes(c)
+  )
 );
 
 /**
@@ -95,6 +128,57 @@ const JSON_PAYLOAD_COLLECTIONS = new Set([
   CLOUD_COLLECTION.TEMPLATE_INSTANCES,
   CLOUD_COLLECTION.PDF_DOCS,
   CLOUD_COLLECTION.PDF_ANNOTATIONS,
+  CLOUD_COLLECTION.LISTEN_IN_TRANSCRIPTS,
+  CLOUD_COLLECTION.LISTEN_IN_SUMMARIES,
+]);
+
+/**
+ * JSON collections whose documents ALSO carry a few of their payload's fields
+ * natively, beside the `json` string, so the Security Rules can read them
+ * (Phase 8D.4): the meeting a page belongs to, ITS AUTHOR (the rules admit
+ * only the creator to read, update or delete a Listen In document), its page
+ * number and the revision the rules refuse to let go backwards. They are copied from the
+ * payload at build time and validated against it on the way back by the
+ * collection's own model (src/lib/cloud/listenInCloudModel.js).
+ */
+export const HOISTED_PAYLOAD_FIELDS = Object.freeze({
+  [CLOUD_COLLECTION.LISTEN_IN_TRANSCRIPTS]: Object.freeze(["sessionId", "createdBy", "page", "revision"]),
+  [CLOUD_COLLECTION.LISTEN_IN_SUMMARIES]: Object.freeze(["sessionId", "createdBy", "revision"]),
+});
+
+/** The native fields a Listen In meeting header may carry (Phase 8D.4). The
+ *  list is the rules' `hasOnly` list minus the envelope; the meeting model
+ *  validates their values. */
+export const LISTEN_IN_MEETING_FIELDS = Object.freeze([
+  "sessionId",
+  "createdBy",
+  "title",
+  "language",
+  "startedAt",
+  "stoppedAt",
+  "completedAt",
+  "capturedMs",
+  "legStartedAt",
+  "state",
+  "stopReason",
+  "limitWarnedAt",
+  "source",
+  "captureSource",
+  "platform",
+  "noteId",
+  "projectId",
+  "folderId",
+  "revision",
+  "segmentCount",
+  "transcribedThroughSeq",
+  "pendingCount",
+  "failedSeqs",
+  "transcriptPageCount",
+  "transcriptPageSize",
+  "summaryRevision",
+  "summaryStatus",
+  "summaryFinal",
+  "summaryCoveredThroughSeq",
 ]);
 
 export function usesJsonPayload(collection) {
@@ -373,27 +457,53 @@ export function buildEntityDocument({ workspaceId, collection, id, payload }) {
   const envelope = { workspaceId, id, kind: collection, schemaVersion: CLOUD_SCHEMA_VERSION };
   const field = payloadField(collection);
   if (!field) {
-    // Native fields, always small (nodes, refs, settings).
-    return { fields: { ...envelope, ...sanitizeNative(payload) }, chunks: [] };
+    // Native fields, always small (nodes, refs, settings, meeting headers).
+    return { fields: { ...envelope, ...sanitizeNative(payload, collection) }, chunks: [] };
   }
   const textValue =
     field === "html" ? (typeof payload?.html === "string" ? payload.html : "") : JSON.stringify(payload);
+  const hoisted = hoistedFields(collection, payload);
   if (textValue.length <= MAX_INLINE_PAYLOAD_UNITS) {
-    return { fields: { ...envelope, [field]: textValue }, chunks: [] };
+    return { fields: { ...envelope, ...hoisted, [field]: textValue }, chunks: [] };
   }
   const chunks = chunkPayload(textValue);
   return {
-    fields: { ...envelope, chunked: true, chunkCount: chunks.length, payloadUnits: textValue.length },
+    fields: { ...envelope, ...hoisted, chunked: true, chunkCount: chunks.length, payloadUnits: textValue.length },
     chunks,
   };
+}
+
+// The payload fields a JSON collection also carries natively (see
+// HOISTED_PAYLOAD_FIELDS). Only JSON-safe scalars travel; the model validates.
+function hoistedFields(collection, payload) {
+  const names = HOISTED_PAYLOAD_FIELDS[collection];
+  if (!names) return {};
+  const out = {};
+  const src = obj(payload);
+  for (const key of names) {
+    const v = src[key];
+    if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[key] = v;
+  }
+  return out;
 }
 
 // Only the fields a native payload may carry, with JSON-safe values. A
 // node's own kind (project / folder / note) travels as `nodeKind`: `kind` is
 // the envelope's collection name on every document.
-function sanitizeNative(payload) {
+function sanitizeNative(payload, collection = null) {
   const out = {};
   const src = obj(payload);
+  if (collection === CLOUD_COLLECTION.LISTEN_IN_MEETINGS) {
+    // A meeting header is the one native document with a list field
+    // (`failedSeqs`, integers only); everything else is a scalar.
+    for (const key of LISTEN_IN_MEETING_FIELDS) {
+      if (!(key in src)) continue;
+      const v = src[key];
+      if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[key] = v;
+      else if (key === "failedSeqs" && Array.isArray(v)) out[key] = v.filter((n) => Number.isInteger(n));
+    }
+    return out;
+  }
   for (const key of ["name", "title", "parentId", "order", "pdfId", "defaultTemplateId"]) {
     if (!(key in src)) continue;
     const v = src[key];
@@ -423,7 +533,7 @@ export function readEntityDocument({ workspaceId, collection, id, fields, chunks
     // The envelope's `kind` is the collection; strip it before the payload
     // reads its own `nodeKind`.
     const { kind: _collectionKind, ...rest } = f;
-    return validateNativePayload(collection, sanitizeNative(rest));
+    return validateNativePayload(collection, sanitizeNative(rest, collection));
   }
   let textValue;
   if (f.chunked === true) {
@@ -470,6 +580,11 @@ function validateNativePayload(collection, payload) {
         return { ok: false, reason: "bad-settings" };
       }
       return { ok: true, payload: { defaultTemplateId: payload.defaultTemplateId || null } };
+    case CLOUD_COLLECTION.LISTEN_IN_MEETINGS:
+      // Shape-checked here (the envelope and the field list); the values are
+      // the meeting model's to judge (src/lib/cloud/listenInCloudModel.js →
+      // validateListenInMeetingPayload), exactly as pdfAnnotations does.
+      return { ok: true, payload };
     default:
       return { ok: false, reason: "unknown-collection" };
   }

@@ -147,10 +147,19 @@ function httpStatusForSummaryOutcome(outcome) {
   return outcome === LISTEN_IN_SUMMARY_OUTCOME.UNAVAILABLE ? 503 : 502;
 }
 
+/**
+ * The outcome a caller reports for an HTTP status. 404 is UNAVAILABLE rather
+ * than a generic failure, exactly as the refine contract treats it: it means
+ * the route is not mounted on the backend the browser reached — a backend
+ * started before this route existed, or a deployment behind the client — and
+ * no retry of the same request will change that. Found for real on
+ * 2026-09-13, when a stale dev server answered every summary with 404 and the
+ * window reported "could not be generated" four times over.
+ */
 function summaryOutcomeForHttpStatus(status) {
   if (status === 401) return LISTEN_IN_SUMMARY_OUTCOME.UNAUTHENTICATED;
   if (status === 403) return LISTEN_IN_SUMMARY_OUTCOME.EMAIL_NOT_VERIFIED;
-  if (status === 503) return LISTEN_IN_SUMMARY_OUTCOME.UNAVAILABLE;
+  if (status === 404 || status === 503) return LISTEN_IN_SUMMARY_OUTCOME.UNAVAILABLE;
   return LISTEN_IN_SUMMARY_OUTCOME.FAILURE;
 }
 

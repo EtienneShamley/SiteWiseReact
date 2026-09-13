@@ -295,8 +295,9 @@ function createApp(config, deps = {}) {
   );
   // The Listen In summary (Phase 8D.2). Its own policy chain with its own
   // budget and its own body limit, because it is a third cost profile — one
-  // completion over a bounded transcript window, run automatically while a
-  // meeting is under way — and must never inherit a limit sized for Refine.
+  // completion over a bounded transcript window, requested by the user
+  // (since 2026-09-13 nothing summarises on its own) — and must never inherit
+  // a limit sized for Refine.
   app.use(
     "/api/listen-in/summary",
     ...providerRoutePolicy(

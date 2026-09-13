@@ -19,7 +19,26 @@
 //   deleteAssetDocument(wid, assetId) remove one asset metadata document
 //                                     (a transport seam only — denied by the
 //                                     rules and called by nothing in V1)
+//   listListenInMeetings(wid, uid)    the CALLER'S Listen In meeting HEADERS
+//   readListenInMeeting(wid, sessionId, uid)
+//                                     one of the caller's meetings: header +
+//                                     transcript pages + summary, with their
+//                                     chunks (8D.4)
 //   close()
+//
+// LISTEN IN (Phase 8D.4). `listenInMeetings`, `listenInTranscripts` and
+// `listenInSummaries` are ON-DEMAND collections (src/lib/cloud/cloudModel.js
+// → ON_DEMAND_ENTITY_COLLECTIONS): `readWorkspace` never fetches them — a
+// workspace with hundreds of meetings must not download every transcript at
+// sign-in — and the two reads above fetch exactly one meeting, or the
+// headers only. Their writes travel through `commitBatch` like every other
+// entity. Nothing here carries audio: the collections hold text and state.
+//
+// EVERY LISTEN IN READ IS CONSTRAINED TO THE CALLER. The rules admit a
+// Listen In document only to its `createdBy`, and Firestore admits a LIST
+// only when the query itself proves it: both reads below therefore take the
+// uid and put `where("createdBy", "==", uid)` in the query. Passing another
+// user's uid does not widen anything — the rules would refuse the result.
 //
 // ASSET METADATA (Production Readiness Phase 7). `workspaces/{wid}/assets/
 // {assetId}` is the Firestore record of an asset whose BYTES live in
@@ -59,14 +78,16 @@ import {
   getDocs,
   initializeFirestore,
   memoryLocalCache,
+  query,
   runTransaction,
   serverTimestamp,
   setDoc,
   terminate,
+  where,
   writeBatch,
 } from "firebase/firestore";
 import { ensureFirebaseApp } from "../firebaseApp";
-import { WORKSPACE_COLLECTIONS } from "./cloudModel";
+import { CLOUD_COLLECTION, WORKSPACE_COLLECTIONS } from "./cloudModel";
 import { assetCollectionPath, assetDocumentPath } from "./assetPaths";
 
 /**
@@ -81,6 +102,21 @@ export function createFirestoreWorkspaceStore(config) {
   }
 
   const ref = (path) => doc(db, ...path);
+
+  /** The chunk texts of one chunked document, in index order. */
+  async function chunksOf(workspaceId, name, id, fields) {
+    const chunks = [];
+    if (!fields || fields.chunked !== true) return chunks;
+    const chunkSnapshot = await getDocs(collectionRef(db, "workspaces", workspaceId, name, id, "chunks"));
+    const byIndex = new Map();
+    for (const c of chunkSnapshot.docs) {
+      const data = c.data();
+      byIndex.set(Number(data.index), data.text);
+    }
+    const count = Number(fields.chunkCount) || 0;
+    for (let i = 0; i < count; i++) chunks.push(byIndex.get(i));
+    return chunks;
+  }
 
   return Object.freeze({
     timestamp: () => serverTimestamp(),
@@ -163,6 +199,47 @@ export function createFirestoreWorkspaceStore(config) {
      */
     async deleteAssetDocument(workspaceId, assetId) {
       await deleteDoc(ref(assetDocumentPath(workspaceId, assetId)));
+    },
+
+    /** The caller's own Listen In meeting headers in one workspace (8D.4). */
+    async listListenInMeetings(workspaceId, uid) {
+      const snapshot = await getDocs(
+        query(collectionRef(db, "workspaces", workspaceId, CLOUD_COLLECTION.LISTEN_IN_MEETINGS), where("createdBy", "==", uid))
+      );
+      return { meetings: snapshot.docs.map((d) => ({ id: d.id, fields: d.data() })) };
+    },
+
+    /**
+     * One of the caller's Listen In meetings (Phase 8D.4): its header, its
+     * transcript pages (selected by the hoisted `sessionId` and `createdBy`
+     * fields) and its summary, each with its chunks.
+     *
+     * The page query is two equality filters, which Firestore serves from the
+     * automatic single-field indexes — no composite index is needed, and
+     * `firestore.indexes.json` stays empty.
+     */
+    async readListenInMeeting(workspaceId, sessionId, uid) {
+      const headerSnapshot = await getDoc(ref(["workspaces", workspaceId, CLOUD_COLLECTION.LISTEN_IN_MEETINGS, sessionId]));
+      const meeting = headerSnapshot.exists() ? { id: sessionId, fields: headerSnapshot.data() } : null;
+      const pageSnapshot = await getDocs(
+        query(
+          collectionRef(db, "workspaces", workspaceId, CLOUD_COLLECTION.LISTEN_IN_TRANSCRIPTS),
+          where("sessionId", "==", sessionId),
+          where("createdBy", "==", uid)
+        )
+      );
+      const transcripts = [];
+      for (const d of pageSnapshot.docs) {
+        const fields = d.data();
+        transcripts.push({ id: d.id, fields, chunks: await chunksOf(workspaceId, CLOUD_COLLECTION.LISTEN_IN_TRANSCRIPTS, d.id, fields) });
+      }
+      const summarySnapshot = await getDoc(ref(["workspaces", workspaceId, CLOUD_COLLECTION.LISTEN_IN_SUMMARIES, sessionId]));
+      let summary = null;
+      if (summarySnapshot.exists()) {
+        const fields = summarySnapshot.data();
+        summary = { id: sessionId, fields, chunks: await chunksOf(workspaceId, CLOUD_COLLECTION.LISTEN_IN_SUMMARIES, sessionId, fields) };
+      }
+      return { meeting, transcripts, summary };
     },
 
     async close() {

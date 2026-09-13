@@ -87,6 +87,64 @@ export function listenInSurvivesReload(persistence) {
   return persistence === LISTEN_IN_PERSISTENCE.DURABLE;
 }
 
+/* ===================== the cloud TEXT-results policy ===================== */
+//
+// LISTEN IN TEXT RESULTS IN THE ACCOUNT (Phase 8D.4) — a second gate, for a
+// second change in what NoteWise retains about a conversation.
+//
+// 8D.1 approved keeping a meeting on THIS DEVICE. 8D.4 builds the machinery
+// that would replicate its TEXT — the meeting header, the ordered transcript
+// segments and the structured summary, never audio — to the workspace's
+// Firestore, so a completed meeting survives the device and can be opened by
+// the same account on another of its devices.
+//
+// SIGNED OFF 2026-09-12. `docs/SECURITY.md` → Data Flow → "Listen In text
+// results in the account" describes exactly what this permits: what is
+// replicated (text and state only), what never is (audio), who may read a
+// meeting (its creator, while still a member — never another member merely by
+// membership), that local IndexedDB stays authoritative for capture and
+// recovery, and that the local bookkeeping holds revisions, tokens and a
+// digest and no copy of the words. THAT PARAGRAPH AND THIS CONSTANT MOVE
+// TOGETHER: `listenInPolicy.test.js` pins the pairing in both directions.
+//
+// Were it false again: the cloud bridge would not be installed, no outbox
+// identity recorded for a Listen In entity, no payload provider registered
+// and no reconcile run — Listen In would behave exactly as 8D.3.1 left it.
+//
+// AUDIO IS OUTSIDE THIS FLAG ENTIRELY. Under any value of it, no Listen In
+// audio reaches Firebase Storage, Firestore, an asset upload queue or any
+// other cloud store; the only request that ever carries it is the transient
+// POST /api/transcribe. That is the 8D.1 promise above, unchanged.
+
+/**
+ * Whether `docs/SECURITY.md` permits Listen In TEXT results (header,
+ * transcript, structured summary) to be replicated to the workspace's
+ * Firestore. TRUE since 2026-09-12, with the amended paragraph that
+ * describes it.
+ */
+export const LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED = true;
+
+/** The approved policy, beside the flag that enforces it. */
+export const LISTEN_IN_CLOUD_TEXT_POLICY = Object.freeze({
+  scope: "Listen In only. Quick Add Dictation is untouched.",
+  audio: "Local IndexedDB only; sent transiently only to the authenticated /api/transcribe; never persisted to Firebase Storage or Firestore.",
+  text: "Meeting metadata, ordered transcript segments (text + state, never audio) and the structured summary are replicated asynchronously to the workspace's Firestore.",
+  where: "workspaces/{wid}/listenInMeetings, listenInTranscripts (bounded pages), listenInSummaries — workspace membership AND the meeting's creator; another member of the same workspace gains no access by membership. Sharing is a later, explicit Share/Inbox design.",
+  when: "After every confirmed local write, through the existing outbox; a Firestore outage never touches capture, transcription or completion.",
+  authority: "The local IndexedDB record stays authoritative for active capture and recovery; the cloud copy is a replica read by other devices, never adopted as an active meeting.",
+  retry: "Failed transcript segments are replicated as failures only; the retained audio behind them stays on the recording device, and no other device is offered a retry it cannot perform.",
+  bookkeeping: "The local listenInCloudState store holds revisions, tokens and a digest of each projection — never audio, never a second copy of the transcript or the summary.",
+});
+
+/**
+ * Whether the cloud bridge may be installed for a session. `approved` is
+ * injectable so tests prove BOTH sides without editing a governance-controlled
+ * constant, exactly as `resolveListenInPersistence` does.
+ */
+export function resolveListenInCloudSync({ approved = LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED } = {}) {
+  return approved === true;
+}
+
 /* ========================= the duration policy =========================== */
 //
 // HOW LONG ONE LISTEN IN SESSION MAY RECORD (Phase 8D.3).

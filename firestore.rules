@@ -26,7 +26,19 @@ rules_version = '2';
 //   - asset metadata (workspaces/{wid}/assets, Phase 7.3) is created and
 //     tombstoned by members and is NEVER deleted from the client: NoteWise
 //     V1 performs no physical cloud-asset deletion (Phase 7.10A), so the
-//     canonical record of an asset survives its own tombstone.
+//     canonical record of an asset survives its own tombstone;
+//   - Listen In TEXT results (workspaces/{wid}/listenInMeetings,
+//     listenInTranscripts, listenInSummaries — Phase 8D.4) are stored under
+//     their workspace but are PRIVATE TO THEIR CREATOR: each document names
+//     its author in `createdBy`, only that user may read, update or delete
+//     it, and the author can never be changed. Membership is still required
+//     as well, so losing workspace access loses the meeting too. Every one
+//     of the three carries a revision that may never go backwards, so a
+//     stale replay cannot regress a newer transcript or summary; the field
+//     lists are closed; and no Listen In audio has a collection here or in
+//     storage.rules at all. Sharing a meeting with other members is a
+//     separate, later design (Share / Inbox) that will grant access
+//     explicitly — nothing here grants it by workspace membership alone.
 //
 // Tested against the emulator: test/rules/firestore.rules.test.js.
 
@@ -316,6 +328,193 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['state', 'tombstonedAt', 'updatedAt'])
           && validAssetStateChange();
         allow delete: if false;
+      }
+
+      // ------------------------------------------- Listen In (Phase 8D.4)
+      // Text results of a Listen In MEETING: never audio. Model:
+      // src/lib/cloud/listenInCloudModel.js — the field lists, enums and caps
+      // below are that module's, asserted equal by its tests.
+      //
+      //   listenInMeetings/{sessionId}            header (native fields)
+      //   listenInTranscripts/{sessionId}:{page}  one page of ordered segments
+      //                                           (json / chunks + hoisted
+      //                                           sessionId, createdBy, page,
+      //                                           revision)
+      //   listenInSummaries/{sessionId}           structured summary (json /
+      //                                           chunks + hoisted sessionId,
+      //                                           createdBy, revision)
+      //
+      // CREATOR-ONLY, by product decision (V1): a meeting belongs to the
+      // person who recorded it, not to everyone who shares their workspace.
+      //
+      //   read           member AND `resource.data.createdBy == uid`. A list
+      //                  query must therefore constrain on createdBy, which
+      //                  is what the client's reads do.
+      //   create         member; closed field list; typed and capped;
+      //                  identity = path; `createdBy` == the caller
+      //   update         member; creator; same validation; createdBy
+      //                  unchanged; revision >= the stored revision (an equal
+      //                  revision is the idempotent replay of an accepted
+      //                  write)
+      //   delete         member; creator (a discard removes the meeting's
+      //                  records — the JSON-entity policy, unlike assets).
+      //                  A document that is ABSENT is deletable as a no-op:
+      //                  `resource` is null then, so the creator test cannot
+      //                  run, and a discard of a meeting that never reached
+      //                  the account must not leave a permanently failing
+      //                  outbox entry behind.
+      //
+      // The chunk sub-collections hold pieces of the SAME text, so they are
+      // gated on their parent's author rather than on membership: `get` for
+      // a read or a delete (the parent is still there), `getAfter` for a
+      // write, so the first chunked create — parent and chunks in one batch —
+      // is judged on the state the batch produces.
+      function nullOrInt(v) {
+        return v == null || v is int;
+      }
+
+      function nullOrText(v, max) {
+        return v == null || (v is string && v.size() <= max);
+      }
+
+      function listenInCreator() {
+        return resource != null && resource.data.createdBy == request.auth.uid;
+      }
+
+      function revisionHolds() {
+        return request.resource.data.revision is int
+          && request.resource.data.revision >= 1
+          && (resource == null || request.resource.data.revision >= resource.data.revision);
+      }
+
+      function validListenInMeeting(sessionId) {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['workspaceId', 'id', 'kind', 'schemaVersion', 'updatedAt',
+            'sessionId', 'createdBy', 'title', 'language', 'startedAt', 'stoppedAt', 'completedAt',
+            'capturedMs', 'legStartedAt', 'state', 'stopReason', 'limitWarnedAt', 'source', 'captureSource',
+            'platform', 'noteId', 'projectId', 'folderId', 'revision', 'segmentCount', 'transcribedThroughSeq',
+            'pendingCount', 'failedSeqs', 'transcriptPageCount', 'transcriptPageSize', 'summaryRevision',
+            'summaryStatus', 'summaryFinal', 'summaryCoveredThroughSeq'])
+          && d.keys().hasAll(['sessionId', 'createdBy', 'title', 'language', 'startedAt', 'capturedMs', 'state',
+            'revision', 'segmentCount', 'transcribedThroughSeq', 'pendingCount', 'failedSeqs',
+            'transcriptPageCount', 'transcriptPageSize', 'summaryRevision', 'summaryFinal',
+            'summaryCoveredThroughSeq'])
+          && d.sessionId == sessionId
+          && d.createdBy is string
+          && d.title is string && d.title.size() <= 200
+          && d.language is string && d.language.size() <= 16
+          && d.startedAt is int && d.startedAt > 0
+          && nullOrInt(d.get('stoppedAt', null))
+          && nullOrInt(d.get('completedAt', null))
+          && d.capturedMs is int && d.capturedMs >= 0
+          && nullOrInt(d.get('legStartedAt', null))
+          && d.state in ['recording', 'paused', 'stopping', 'finishing', 'finished', 'interrupted']
+          && (d.get('stopReason', null) == null || d.stopReason in ['user', 'error', 'interruption', 'limit'])
+          && nullOrInt(d.get('limitWarnedAt', null))
+          && nullOrText(d.get('source', null), 64)
+          && nullOrText(d.get('captureSource', null), 64)
+          && nullOrText(d.get('platform', null), 64)
+          && nullOrText(d.get('noteId', null), 200)
+          && nullOrText(d.get('projectId', null), 200)
+          && nullOrText(d.get('folderId', null), 200)
+          && d.segmentCount is int && d.segmentCount >= 0
+          && d.transcribedThroughSeq is int && d.transcribedThroughSeq >= -1
+          && d.pendingCount is int && d.pendingCount >= 0
+          && d.failedSeqs is list && d.failedSeqs.size() <= 1024
+          && d.transcriptPageCount is int && d.transcriptPageCount >= 0
+          && d.transcriptPageSize is int && d.transcriptPageSize >= 1
+          && d.summaryRevision is int && d.summaryRevision >= 0
+          && (d.get('summaryStatus', null) == null || d.summaryStatus in ['idle', 'ready', 'failed'])
+          && d.summaryFinal is bool
+          && d.summaryCoveredThroughSeq is int && d.summaryCoveredThroughSeq >= -1;
+      }
+
+      match /listenInMeetings/{sessionId} {
+        allow read: if isMember(wid) && listenInCreator();
+        allow create: if isMember(wid)
+          && validEnvelope('listenInMeetings', sessionId)
+          && validListenInMeeting(sessionId)
+          && revisionHolds()
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update: if isMember(wid)
+          && listenInCreator()
+          && validEnvelope('listenInMeetings', sessionId)
+          && validListenInMeeting(sessionId)
+          && revisionHolds()
+          && request.resource.data.createdBy == resource.data.createdBy;
+        allow delete: if isMember(wid) && (resource == null || listenInCreator());
+      }
+
+      function validListenInJson(keys) {
+        return request.resource.data.keys().hasOnly(keys)
+          && (('json' in request.resource.data && request.resource.data.json is string) || request.resource.data.chunked == true)
+          && validChunkFields()
+          && request.resource.data.sessionId is string
+          && request.resource.data.sessionId.size() > 0
+          && request.resource.data.createdBy is string
+          && (resource == null || request.resource.data.sessionId == resource.data.sessionId);
+      }
+
+      match /listenInTranscripts/{id} {
+        allow read: if isMember(wid) && listenInCreator();
+        allow create: if isMember(wid)
+          && validEnvelope('listenInTranscripts', id)
+          && validListenInJson(['workspaceId', 'id', 'kind', 'schemaVersion', 'updatedAt', 'json', 'chunked', 'chunkCount', 'payloadUnits', 'sessionId', 'createdBy', 'page', 'revision'])
+          && request.resource.data.page is int
+          && request.resource.data.page >= 0
+          && id == request.resource.data.sessionId + ':' + string(request.resource.data.page)
+          && revisionHolds()
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update: if isMember(wid)
+          && listenInCreator()
+          && validEnvelope('listenInTranscripts', id)
+          && validListenInJson(['workspaceId', 'id', 'kind', 'schemaVersion', 'updatedAt', 'json', 'chunked', 'chunkCount', 'payloadUnits', 'sessionId', 'createdBy', 'page', 'revision'])
+          && request.resource.data.page is int
+          && request.resource.data.page >= 0
+          && id == request.resource.data.sessionId + ':' + string(request.resource.data.page)
+          && revisionHolds()
+          && request.resource.data.createdBy == resource.data.createdBy;
+        allow delete: if isMember(wid) && (resource == null || listenInCreator());
+
+        match /chunks/{n} {
+          allow read: if isMember(wid)
+            && get(/databases/$(database)/documents/workspaces/$(wid)/listenInTranscripts/$(id)).data.createdBy == request.auth.uid;
+          allow create, update: if isMember(wid)
+            && validChunk('listenInTranscripts', id)
+            && getAfter(/databases/$(database)/documents/workspaces/$(wid)/listenInTranscripts/$(id)).data.createdBy == request.auth.uid;
+          allow delete: if isMember(wid)
+            && (!exists(/databases/$(database)/documents/workspaces/$(wid)/listenInTranscripts/$(id))
+                || get(/databases/$(database)/documents/workspaces/$(wid)/listenInTranscripts/$(id)).data.createdBy == request.auth.uid);
+        }
+      }
+
+      match /listenInSummaries/{sessionId} {
+        allow read: if isMember(wid) && listenInCreator();
+        allow create: if isMember(wid)
+          && validEnvelope('listenInSummaries', sessionId)
+          && validListenInJson(['workspaceId', 'id', 'kind', 'schemaVersion', 'updatedAt', 'json', 'chunked', 'chunkCount', 'payloadUnits', 'sessionId', 'createdBy', 'revision'])
+          && request.resource.data.sessionId == sessionId
+          && revisionHolds()
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update: if isMember(wid)
+          && listenInCreator()
+          && validEnvelope('listenInSummaries', sessionId)
+          && validListenInJson(['workspaceId', 'id', 'kind', 'schemaVersion', 'updatedAt', 'json', 'chunked', 'chunkCount', 'payloadUnits', 'sessionId', 'createdBy', 'revision'])
+          && request.resource.data.sessionId == sessionId
+          && revisionHolds()
+          && request.resource.data.createdBy == resource.data.createdBy;
+        allow delete: if isMember(wid) && (resource == null || listenInCreator());
+
+        match /chunks/{n} {
+          allow read: if isMember(wid)
+            && get(/databases/$(database)/documents/workspaces/$(wid)/listenInSummaries/$(sessionId)).data.createdBy == request.auth.uid;
+          allow create, update: if isMember(wid)
+            && validChunk('listenInSummaries', sessionId)
+            && getAfter(/databases/$(database)/documents/workspaces/$(wid)/listenInSummaries/$(sessionId)).data.createdBy == request.auth.uid;
+          allow delete: if isMember(wid)
+            && (!exists(/databases/$(database)/documents/workspaces/$(wid)/listenInSummaries/$(sessionId))
+                || get(/databases/$(database)/documents/workspaces/$(wid)/listenInSummaries/$(sessionId)).data.createdBy == request.auth.uid);
+        }
       }
 
       match /migrations/{sourceId} {

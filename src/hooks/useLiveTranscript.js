@@ -191,6 +191,13 @@ export default function useLiveTranscript({ uid = null, workspaceId = null } = {
       (options) => (engine ? engine.regenerateSummary(options) : null),
       [engine]
     ),
+    /** Explicit Summarise: read every settled window now, gates or not, and consolidate. */
+    summariseNow: useCallback(
+      (options) => (engine ? engine.summariseNow(options) : null),
+      [engine]
+    ),
+    /** Clear a COMPLETED meeting from view. Deletes nothing; the next Start is a new meeting. */
+    clear: useCallback(() => (engine ? engine.clear() : null), [engine]),
     editSummaryText: useCallback(
       (text) => (engine ? engine.editSummaryText(text) : null),
       [engine]

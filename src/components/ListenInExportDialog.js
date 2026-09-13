@@ -163,12 +163,15 @@ export default function ListenInExportDialog({
 
   // A choice the session cannot satisfy is disabled rather than offered and
   // then failed: exporting a summary that does not exist is not an error the
-  // user should have to discover.
+  // user should have to discover. Since 2026-09-13 nothing summarises on its
+  // own, so a meeting with no summary is the ordinary case, not a gap in
+  // waiting: every summary-dependent choice — Summary, and Summary +
+  // Transcript — needs a summary the user asked for; Transcript needs none.
   const contentAvailable = useMemo(
     () => ({
       [LISTEN_IN_EXPORT_CONTENT.SUMMARY]: hasSummary,
       [LISTEN_IN_EXPORT_CONTENT.TRANSCRIPT]: hasTranscript,
-      [LISTEN_IN_EXPORT_CONTENT.BOTH]: hasSummary || hasTranscript,
+      [LISTEN_IN_EXPORT_CONTENT.BOTH]: hasSummary && hasTranscript,
     }),
     [hasSummary, hasTranscript]
   );

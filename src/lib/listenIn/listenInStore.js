@@ -26,6 +26,12 @@
 //   releaseChunkAudio(uid, w, s, seq)        drop the bytes, keep the row
 //   putSummary(summary)                      upsert the session's summary
 //   getSummary(uid, workspaceId, sessionId)
+//   putSyncState(row)                        (8D.4) one cloud entity's revision
+//                                            bookkeeping — revisions and a
+//                                            digest, never audio, never a copy
+//                                            of the transcript or summary
+//   getSyncState(uid, w, s, entity)
+//   listSyncStates(uid, workspaceId[, sessionId])
 //   deleteSession(uid, workspaceId, sessionId)
 //
 // EVERY OPERATION NAMES THE ACCOUNT. There is no call that reads, changes or
@@ -49,6 +55,7 @@
 
 import {
   LISTEN_IN_CHUNK_STORE,
+  LISTEN_IN_CLOUD_STATE_STORE,
   LISTEN_IN_SESSION_STORE,
   LISTEN_IN_SUMMARY_STORE,
   assetDbTransaction,
@@ -56,12 +63,24 @@ import {
   listenInSessionKeyRange,
 } from "../assetDb";
 import { sortBySeq } from "./listenInModel";
+import { LISTEN_IN_PERSISTENCE } from "./listenInPolicy";
 
 /** The audio field is stripped from anything a listing returns. */
 function withoutAudio(row) {
   if (!row) return null;
   const { audio, ...rest } = row;
   return rest;
+}
+
+/**
+ * The store a given persistence mode selects (src/lib/listenIn/listenInPolicy.js
+ * → `resolveListenInPersistence`). The engine and the cloud bridge both ask
+ * here so that, in memory mode, they can be handed the SAME instance.
+ */
+export function createListenInStore(persistence) {
+  return persistence === LISTEN_IN_PERSISTENCE.DURABLE
+    ? createListenInDurableStore()
+    : createListenInMemoryStore();
 }
 
 function requireIds(uid, workspaceId, sessionId) {
@@ -188,16 +207,57 @@ export function createListenInDurableStore() {
       return row || null;
     },
 
-    /** Everything: the header, every chunk row, every retained blob, the summary. */
+    /**
+     * Cloud replication bookkeeping (Phase 8D.4): one row per cloud entity of
+     * a session, keyed one segment deeper than the session. It records WHICH
+     * revision of a text projection was last handed to the account and which
+     * one the account accepted, plus a fixed-size DIGEST of that projection
+     * so a change can be detected without keeping the projection. It holds no
+     * audio and no copy of the transcript or the summary.
+     */
+    async putSyncState(row) {
+      requireIds(row.uid, row.workspaceId, row.sessionId);
+      if (typeof row.entity !== "string" || !row.entity) {
+        throw new Error("A cloud entity name is required to store Listen In sync state");
+      }
+      await assetDbTransaction(LISTEN_IN_CLOUD_STATE_STORE, "readwrite", (stores) => {
+        stores[LISTEN_IN_CLOUD_STATE_STORE].put({ ...row });
+      });
+      return row;
+    },
+
+    async getSyncState(uid, workspaceId, sessionId, entity) {
+      requireIds(uid, workspaceId, sessionId);
+      const row = await assetDbTransaction(LISTEN_IN_CLOUD_STATE_STORE, "readonly", (stores) =>
+        stores[LISTEN_IN_CLOUD_STATE_STORE].get([uid, workspaceId, sessionId, entity])
+      );
+      return row || null;
+    },
+
+    async listSyncStates(uid, workspaceId, sessionId = undefined) {
+      requireIds(uid, workspaceId, sessionId);
+      const range =
+        sessionId === undefined
+          ? listenInOwnerKeyRange(uid, workspaceId)
+          : listenInSessionKeyRange(uid, workspaceId, sessionId);
+      const rows = await assetDbTransaction(LISTEN_IN_CLOUD_STATE_STORE, "readonly", (stores) =>
+        stores[LISTEN_IN_CLOUD_STATE_STORE].getAll(range)
+      );
+      return (rows || []).filter((r) => r && r.uid === uid && r.workspaceId === workspaceId);
+    },
+
+    /** Everything: the header, every chunk row, every retained blob, the
+     *  summary and the cloud bookkeeping. */
     async deleteSession(uid, workspaceId, sessionId) {
       requireIds(uid, workspaceId, sessionId);
       await assetDbTransaction(
-        [LISTEN_IN_SESSION_STORE, LISTEN_IN_CHUNK_STORE, LISTEN_IN_SUMMARY_STORE],
+        [LISTEN_IN_SESSION_STORE, LISTEN_IN_CHUNK_STORE, LISTEN_IN_SUMMARY_STORE, LISTEN_IN_CLOUD_STATE_STORE],
         "readwrite",
         (stores) => {
           stores[LISTEN_IN_SESSION_STORE].delete([uid, workspaceId, sessionId]);
           stores[LISTEN_IN_CHUNK_STORE].delete(listenInSessionKeyRange(uid, workspaceId, sessionId));
           stores[LISTEN_IN_SUMMARY_STORE].delete([uid, workspaceId, sessionId]);
+          stores[LISTEN_IN_CLOUD_STATE_STORE].delete(listenInSessionKeyRange(uid, workspaceId, sessionId));
         }
       );
     },
@@ -217,6 +277,7 @@ export function createListenInMemoryStore() {
   const sessions = new Map(); // "uid\u0000w\u0000s" → header
   const chunks = new Map(); // "uid\u0000w\u0000s\u0000seq" → row (audio included)
   const summaries = new Map(); // "uid\u0000w\u0000s" → the session's summary
+  const syncStates = new Map(); // "uid\u0000w\u0000s\u0000entity" → cloud bookkeeping
   // The uid is part of the key here for the same reason it is part of the
   // IndexedDB key path: the boundary must hold in BOTH implementations, or the
   // durable tests would be proving a property the memory store does not have.
@@ -303,6 +364,33 @@ export function createListenInMemoryStore() {
       return row ? { ...row } : null;
     },
 
+    async putSyncState(row) {
+      requireIds(row.uid, row.workspaceId, row.sessionId);
+      if (typeof row.entity !== "string" || !row.entity) {
+        throw new Error("A cloud entity name is required to store Listen In sync state");
+      }
+      syncStates.set(chunkKey(row.uid, row.workspaceId, row.sessionId, row.entity), { ...row });
+      return row;
+    },
+
+    async getSyncState(uid, workspaceId, sessionId, entity) {
+      requireIds(uid, workspaceId, sessionId);
+      const row = syncStates.get(chunkKey(uid, workspaceId, sessionId, entity));
+      return row ? { ...row } : null;
+    },
+
+    async listSyncStates(uid, workspaceId, sessionId = undefined) {
+      requireIds(uid, workspaceId, sessionId);
+      return [...syncStates.values()]
+        .filter(
+          (r) =>
+            r.uid === uid &&
+            r.workspaceId === workspaceId &&
+            (sessionId === undefined || r.sessionId === sessionId)
+        )
+        .map((r) => ({ ...r }));
+    },
+
     async deleteSession(uid, workspaceId, sessionId) {
       requireIds(uid, workspaceId, sessionId);
       sessions.delete(sessionKey(uid, workspaceId, sessionId));
@@ -311,6 +399,12 @@ export function createListenInMemoryStore() {
         const row = chunks.get(key);
         if (row.uid === uid && row.workspaceId === workspaceId && row.sessionId === sessionId) {
           chunks.delete(key);
+        }
+      }
+      for (const key of [...syncStates.keys()]) {
+        const row = syncStates.get(key);
+        if (row.uid === uid && row.workspaceId === workspaceId && row.sessionId === sessionId) {
+          syncStates.delete(key);
         }
       }
     },

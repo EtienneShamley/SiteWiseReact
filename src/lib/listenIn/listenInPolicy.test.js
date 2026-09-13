@@ -34,6 +34,7 @@
 // they are about to ask for approval on; it is skipped, visibly, wherever the
 // document is not on disk, and it can never be the thing that fails a build.
 import {
+  LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED,
   LISTEN_IN_DURABLE_CAPTURE_APPROVED,
   LISTEN_IN_PERSISTENCE,
   LISTEN_IN_PERSISTENCE_POLICY,
@@ -189,6 +190,65 @@ export const SECURITY_DOC_FACTS = Object.freeze({
 });
 
 /**
+ * THE PHASE 8D.4 FACTS, KEYED ON THE FLAG (prepared 2026-09-12, INACTIVE).
+ *
+ * The cloud text-sync constant and the document's wording must move together
+ * in BOTH directions, so the facts required depend on which way the constant
+ * is set rather than on a single fixed state:
+ *
+ *   `LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED === false` (today) — the document must
+ *     still carry the approved local-only sentence and must NOT describe a
+ *     cloud text path, because none runs.
+ *   `=== true` — the document must carry the text-results policy, name the
+ *     constant, state creator-only access, state that audio is excluded and
+ *     that the local bookkeeping keeps no copy of the text, and must no longer
+ *     make the retired local-only and browser-only claims.
+ *
+ * Flipping the constant without amending the document therefore fails this
+ * check, and amending the document without flipping the constant fails it too.
+ * Neither half can land alone. Both sides are unit-tested below against
+ * synthetic text, so the pairing is proved without the document on disk and
+ * without the flag being flipped.
+ */
+export const LISTEN_IN_CLOUD_TEXT_DOC_FACTS = Object.freeze({
+  whenApproved: Object.freeze({
+    present: Object.freeze([
+      ["the 8D.4 text-results section", /\*\*Listen In text results in the account/],
+      ["the gating constant is named", /LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED/],
+      ["text may replicate", /replicated to the workspace's Firestore/],
+      ["creator-only by default", /private to the account that recorded it/i],
+      ["audio may never cloud-sync", /never persisted to Firestore, Firebase Storage or any asset upload queue/],
+      ["only the recording device may retry", /only the device that recorded it can retry/i],
+      ["the bookkeeping keeps no copy of the text", /revisions, tokens and a digest/],
+    ]),
+    absent: Object.freeze([
+      ["the retired local-only summary claim", /it is not uploaded anywhere in V1/],
+      ["the retired browser-only claim", /exist only in the user's browser storage/],
+      ["the retired no-cloud-sync claim", /There is no cloud backup, sync, or recovery mechanism/],
+    ]),
+  }),
+  whenUnapproved: Object.freeze({
+    present: Object.freeze([
+      ["the summary is still described as local-only", /it is not uploaded anywhere in V1/],
+    ]),
+    absent: Object.freeze([
+      ["a cloud text path the code does not run", /\*\*Listen In text results in the account/],
+    ]),
+  }),
+});
+
+/** The facts the document must satisfy, for a given state of the flag. */
+export function securityDocFacts({ cloudTextApproved = LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED } = {}) {
+  const extra = cloudTextApproved
+    ? LISTEN_IN_CLOUD_TEXT_DOC_FACTS.whenApproved
+    : LISTEN_IN_CLOUD_TEXT_DOC_FACTS.whenUnapproved;
+  return {
+    present: [...SECURITY_DOC_FACTS.present, ...extra.present],
+    absent: [...SECURITY_DOC_FACTS.absent, ...extra.absent],
+  };
+}
+
+/**
  * Compare the governance document against the facts above.
  *
  * PURE, and it takes the document's text rather than reading it, so all three
@@ -203,12 +263,13 @@ export const SECURITY_DOC_FACTS = Object.freeze({
  * @param {string|null} text the document's contents, or null when it is absent
  * @returns {{checked: boolean, ok: boolean, reason: string, missing: string[], stale: string[]}}
  */
-export function checkSecurityDocFacts(text) {
+export function checkSecurityDocFacts(text, options = {}) {
   if (typeof text !== "string") {
     return { checked: false, ok: true, reason: "absent", missing: [], stale: [] };
   }
-  const missing = SECURITY_DOC_FACTS.present.filter(([, re]) => !re.test(text)).map(([name]) => name);
-  const stale = SECURITY_DOC_FACTS.absent.filter(([, re]) => re.test(text)).map(([name]) => name);
+  const facts = securityDocFacts(options);
+  const missing = facts.present.filter(([, re]) => !re.test(text)).map(([name]) => name);
+  const stale = facts.absent.filter(([, re]) => re.test(text)).map(([name]) => name);
   return {
     checked: true,
     ok: missing.length === 0 && stale.length === 0,
@@ -240,6 +301,11 @@ describe("the governance-document check is safe to run anywhere", () => {
       "an authenticated account change immediately stops capture",
       "**Listen In summary route (Phase 8D.2, 2026-09-12).** **No audio reaches it**",
       "RATE_LIMIT_LISTEN_IN_SUMMARY",
+      // The 8D.4 facts the ON flag requires (see the pairing group below).
+      "**Listen In text results in the account (Phase 8D.4).** gated in code by LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED",
+      "replicated to the workspace's Firestore; private to the account that recorded it",
+      "never persisted to Firestore, Firebase Storage or any asset upload queue; only the device that recorded it can retry",
+      "revisions, tokens and a digest",
       // …but the Quick Add promise has gone.
     ].join("\n");
     const result = checkSecurityDocFacts(drifted);
@@ -265,12 +331,113 @@ describe("the governance-document check is safe to run anywhere", () => {
       "**Listen In summary route (Phase 8D.2, 2026-09-12).**",
       "**No audio reaches it**",
       "RATE_LIMIT_LISTEN_IN_SUMMARY",
+      // The 8D.4 facts the ON flag requires (see the pairing group below).
+      "**Listen In text results in the account (Phase 8D.4).** gated in code by LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED",
+      "replicated to the workspace's Firestore; private to the account that recorded it",
+      "never persisted to Firestore, Firebase Storage or any asset upload queue; only the device that recorded it can retry",
+      "revisions, tokens and a digest",
     ].join("\n");
     expect(checkSecurityDocFacts(good)).toMatchObject({
       checked: true,
       ok: true,
       reason: "consistent",
     });
+  });
+});
+
+/* ============ the 8D.4 pairing: the flag and the wording together ========= */
+//
+// Prepared while the flag is OFF. Both directions are proved here against
+// SYNTHETIC text, so the pairing holds in a clean CI checkout with no `docs/`
+// directory and with nothing activated.
+
+describe("the cloud text-sync flag and the document's wording move together", () => {
+  const APPROVED_DOC = [
+    "**Durable Listen In capture (Phase 8D.1, 2026-09-12).**",
+    "Quick Add Dictation is unchanged and remains memory-only",
+    "keyed by [uid, workspaceId, sessionId]",
+    "Listen In audio is never** uploaded to Firebase Storage",
+    "an authenticated account change immediately stops that account's capture",
+    "**Listen In summary route (Phase 8D.2, 2026-09-12).**",
+    "**No audio reaches it**",
+    "RATE_LIMIT_LISTEN_IN_SUMMARY",
+    "**Listen In text results in the account (Phase 8D.4).**",
+    "gated in code by LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED",
+    "replicated to the workspace's Firestore",
+    "a meeting is private to the account that recorded it",
+    "audio is never persisted to Firestore, Firebase Storage or any asset upload queue",
+    "only the device that recorded it can retry a failed segment",
+    "the bookkeeping holds revisions, tokens and a digest",
+  ].join("\n");
+
+  const UNAPPROVED_DOC = [
+    "**Durable Listen In capture (Phase 8D.1, 2026-09-12).**",
+    "Quick Add Dictation is unchanged and remains memory-only",
+    "keyed by [uid, workspaceId, sessionId]",
+    "Listen In audio is never** uploaded to Firebase Storage",
+    "an authenticated account change immediately stops that account's capture",
+    "**Listen In summary route (Phase 8D.2, 2026-09-12).**",
+    "**No audio reaches it**",
+    "RATE_LIMIT_LISTEN_IN_SUMMARY",
+    "it is not uploaded anywhere in V1",
+  ].join("\n");
+
+  test("the flag is ON (approved 2026-09-12), so the default check is the approved-wording check", () => {
+    expect(LISTEN_IN_CLOUD_TEXT_SYNC_APPROVED).toBe(true);
+    expect(checkSecurityDocFacts(APPROVED_DOC)).toMatchObject({ ok: true, reason: "consistent" });
+    expect(checkSecurityDocFacts(UNAPPROVED_DOC).ok).toBe(false);
+    // The pre-approval wording is still what an OFF flag would require, so
+    // turning the flag off again would demand the document be reverted too.
+    expect(checkSecurityDocFacts(UNAPPROVED_DOC, { cloudTextApproved: false })).toMatchObject({ ok: true, reason: "consistent" });
+  });
+
+  test("flipping the flag WITHOUT amending the document fails, and names every fact that is missing", () => {
+    const result = checkSecurityDocFacts(UNAPPROVED_DOC, { cloudTextApproved: true });
+    expect(result.ok).toBe(false);
+    expect(result.missing).toEqual([
+      "the 8D.4 text-results section",
+      "the gating constant is named",
+      "text may replicate",
+      "creator-only by default",
+      "audio may never cloud-sync",
+      "only the recording device may retry",
+      "the bookkeeping keeps no copy of the text",
+    ]);
+    expect(result.stale).toEqual(["the retired local-only summary claim"]);
+  });
+
+  test("amending the document WITHOUT flipping the flag fails too: the code would not do what it says", () => {
+    const result = checkSecurityDocFacts(APPROVED_DOC, { cloudTextApproved: false });
+    expect(result.ok).toBe(false);
+    expect(result.missing).toEqual(["the summary is still described as local-only"]);
+    expect(result.stale).toEqual(["a cloud text path the code does not run"]);
+  });
+
+  test("the amended document with the flag ON is consistent", () => {
+    expect(checkSecurityDocFacts(APPROVED_DOC, { cloudTextApproved: true })).toMatchObject({ ok: true, reason: "consistent" });
+  });
+
+  test("the retired privacy claims are refused once the policy is approved", () => {
+    for (const retired of [
+      "Notes, photos, templates, and uploaded evidence files currently exist only in the user's browser storage.",
+      "There is no cloud backup, sync, or recovery mechanism — clearing browser data permanently deletes everything.",
+    ]) {
+      const result = checkSecurityDocFacts(`${APPROVED_DOC}\n${retired}`, { cloudTextApproved: true });
+      expect(result.ok).toBe(false);
+      expect(result.stale.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("an ABSENT document is still not a failure, in either state", () => {
+    for (const approved of [true, false]) {
+      expect(checkSecurityDocFacts(null, { cloudTextApproved: approved })).toEqual({
+        checked: false,
+        ok: true,
+        reason: "absent",
+        missing: [],
+        stale: [],
+      });
+    }
   });
 });
 
@@ -284,7 +451,9 @@ describeWhereDocumented("the local governance document agrees with the tracked p
   test("docs/SECURITY.md carries every fact the approved flag rests on", () => {
     // Reached only when the document is on disk. If this fails, the document
     // is what must be amended — through the approval workflow in AGENTS.md,
-    // never by weakening this list.
+    // never by weakening this list. With the cloud text-sync flag ON, this
+    // is the check that the APPROVED 8D.4 wording is present and the retired
+    // local-only wording is gone.
     const result = checkSecurityDocFacts(fs.readFileSync(SECURITY_DOC, "utf8"));
     expect({ missing: result.missing, stale: result.stale }).toEqual({ missing: [], stale: [] });
   });
