@@ -33,6 +33,7 @@ import { toolbarControlsForEditor } from "../../lib/editorCapabilities";
 import { importImageFromUrl } from "../../lib/editorImageUrlImport";
 import { iconButtonClass, menuItemClass } from "../../lib/interactionStyles";
 import useTransientMessage from "../../hooks/useTransientMessage";
+import useViewportClamp from "../../hooks/useViewportClamp";
 import { MESSAGE_TONE } from "../../lib/transientMessage";
 import { BusySpinner } from "../BusyStatus";
 
@@ -103,9 +104,12 @@ export default function FormattingControls({
   const fileInputRef = useRef();
   const attachInputRef = useRef();
   const tableMenuRef = useRef(null);
+  const tableMenuPanelRef = useRef(null);
   const textColorRef = useRef(null);
   const highlightColorRef = useRef(null);
   const [tableMenuOpen, setTableMenuOpen] = useState(false);
+  // Kept inside the viewport near a screen edge (phones); unchanged when it fits.
+  useViewportClamp(tableMenuPanelRef, tableMenuOpen);
   // One restrained inline message for a rejected link, image or colour, with a
   // managed lifetime — it auto-dismisses, a new attempt supersedes it, and a
   // success clears it. It used to have no lifecycle at all and stayed on screen
@@ -516,7 +520,14 @@ export default function FormattingControls({
   ];
 
   return (
-    <div className="flex flex-wrap items-center gap-1" onMouseDown={preserveSelectionOnPress}>
+    <div
+      className="flex flex-wrap items-center gap-1"
+      onMouseDown={preserveSelectionOnPress}
+      // The phone shell constrains this root to its container and lets each
+      // group (its direct child <div>s) wrap — see mobileShell.css. Desktop
+      // layout is untouched.
+      data-nw-formatting-controls
+    >
       {/* History — the OWNING editor's own history (session-only). In the
           Template form that is the active row's editor, so Undo/Redo can only
           ever step through that row's edits, never another row's and never the
@@ -783,6 +794,7 @@ export default function FormattingControls({
           </button>
           {tableMenuOpen && s.inTable && !offFor("tableOptions") && (
             <div
+              ref={tableMenuPanelRef}
               role="menu"
               className="absolute left-0 top-full mt-1 z-20 min-w-[11rem] py-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg"
             >

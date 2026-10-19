@@ -103,7 +103,9 @@ describe("[10] the Template editing ribbon stays outside the document scroller",
   });
 
   test("the modal body stops scrolling itself while a template is being edited", () => {
-    expect(MODAL).toContain('className={editing ? "flex-1 min-h-0 flex flex-col" : "flex-1 overflow-auto p-4"}');
+    // The body's two states are unchanged; on the phone the same element also
+    // carries the phone dialog's body class (TemplateBuilderModal.js).
+    expect(MODAL).toContain('editing ? "flex-1 min-h-0 flex flex-col" : "flex-1 overflow-auto p-4"');
   });
 
   test("the ribbon is a real toolbar with three groups and belongs to the Template Builder only", () => {

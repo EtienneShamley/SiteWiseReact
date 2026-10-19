@@ -1,4 +1,5 @@
 // src/components/template/ResizableTwoColTable.js
+import { createPortal } from "react-dom";
 import React, {
   useCallback,
   useLayoutEffect,
@@ -437,6 +438,11 @@ export default function ResizableTwoColTable({
   onLeftPctCommit, // (pct) => void — once, on label-divider drag release
   enableColumnDivider = false, // layout-editing surfaces (Builder + completed note)
   addRowLabel = "Add Row",
+  // Where the table's editing CHROME (Add row, drag hints) renders. A completed
+  // note passes the shell's slot OUTSIDE the document-zoom wrapper, so the
+  // chrome never scales with the document; the Builder passes nothing and
+  // keeps it inline above the page.
+  chromeSlot = null,
   // The row the bottom capture bar (Quick Add) would insert into, if any. This
   // is PRESENTATION ONLY — the selection is owned by MainArea and mirrored down
   // through NoteTemplateDoc. It never changes what a row does, only how it
@@ -2887,33 +2893,44 @@ export default function ResizableTwoColTable({
     // The branded table colours are CSS custom properties on this wrapper, so
     // they cascade into every page and every row rendered by <PagedDocument>.
     <div className="w-full" style={tableStyleVars}>
-      {/* CHROME — editing controls on the app surface (not document content) */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-3">
-          {onAddRow && (
-            <button
-              type="button"
-              className={actionButtonClass({ className: "px-3 py-1 rounded" })}
-              onClick={onAddRow}
-            >
-              {addRowLabel}
-            </button>
-          )}
-        </div>
+      {/* CHROME — editing controls on the app surface (not document content).
+          Rendered into `chromeSlot`, outside the zoomed document, when the
+          shell provides one; a wrapping row either way, so on a narrow screen
+          the hints drop beneath the action rather than colliding with it. */}
+      {(() => {
+        const chrome = (
+          <div
+            className="nw-tpl-chrome flex flex-wrap items-start justify-between gap-2 mb-3"
+            data-nw-template-chrome-part="table"
+          >
+            <div className="flex items-center gap-3">
+              {onAddRow && (
+                <button
+                  type="button"
+                  className={actionButtonClass({ className: "px-3 py-1 rounded" })}
+                  onClick={onAddRow}
+                >
+                  {addRowLabel}
+                </button>
+              )}
+            </div>
 
-        {/* The numeric left-column percentage input is deliberately gone: the
-            divider itself is the control in the Builder, and a completed note
-            takes its ratio from the pinned template version. */}
-        <div className="flex flex-col text-xs text-black dark:text-white opacity-70 text-right">
-          {enableColumnDivider && <span>Drag a divider to resize columns</span>}
-          <span>Drag row borders to adjust height</span>
-          {showRowActions && (
-            <span>
-              Use a cell's ⋯ menu for rows, splitting a cell, and table columns
-            </span>
-          )}
-        </div>
-      </div>
+            {/* The numeric left-column percentage input is deliberately gone: the
+                divider itself is the control in the Builder, and a completed note
+                takes its ratio from the pinned template version. */}
+            <div className="nw-tpl-chrome__hints flex flex-col min-w-0 text-xs text-black dark:text-white opacity-70 text-right">
+              {enableColumnDivider && <span>Drag a divider to resize columns</span>}
+              <span>Drag row borders to adjust height</span>
+              {showRowActions && (
+                <span>
+                  Use a cell's ⋯ menu for rows, splitting a cell, and table columns
+                </span>
+              )}
+            </div>
+          </div>
+        );
+        return chromeSlot ? createPortal(chrome, chromeSlot) : chrome;
+      })()}
 
       {/* PAGE-AWARE DOCUMENT */}
       <PagedDocument blocks={blocks} />

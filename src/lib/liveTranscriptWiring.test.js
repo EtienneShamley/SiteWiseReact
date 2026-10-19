@@ -50,7 +50,9 @@ const NOTE_MAIN = MAIN_AREA.slice(
 );
 const CHAT_WINDOW_AT = NOTE_MAIN.indexOf('id="chatWindow"');
 const TOOLBAR_AT = NOTE_MAIN.indexOf("<EditorToolbar");
-const CAPTURE_BAR = NOTE_MAIN.slice(NOTE_MAIN.indexOf("The Quick Add capture bar") > -1 ? NOTE_MAIN.indexOf("The Quick Add capture bar") : NOTE_MAIN.indexOf("<BottomBar") - 2500, NOTE_MAIN.indexOf("<LiveTranscriptDialog"));
+// The window reaches back over the header row's phone-only Quick Add settings
+// control (Phase 8E.1) to the composer's label strings.
+const CAPTURE_BAR = NOTE_MAIN.slice(NOTE_MAIN.indexOf("The Quick Add capture bar") > -1 ? NOTE_MAIN.indexOf("The Quick Add capture bar") : NOTE_MAIN.indexOf("<BottomBar") - 4000, NOTE_MAIN.indexOf("<LiveTranscriptDialog"));
 const CAPTURE_GROUP = SIDEBAR.slice(SIDEBAR.indexOf('aria-label="Capture"') - 600, SIDEBAR.indexOf('aria-label="Workspace"'));
 
 /* ============================== 1–4. Sidebar ============================= */

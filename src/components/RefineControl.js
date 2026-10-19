@@ -48,6 +48,7 @@
 // carries its reason as `title`.
 
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import useViewportClamp from "../hooks/useViewportClamp";
 import { FaChevronDown } from "react-icons/fa";
 import { useEditorState } from "@tiptap/react";
 import useOutsideClose from "../hooks/useOutsideClose";
@@ -105,6 +106,12 @@ export default function RefineControl({
   const rootRef = useRef(null);
   const triggerRef = useRef(null);
   const firstFieldRef = useRef(null);
+  const panelRef = useRef(null);
+  // Keep the panel inside the viewport when its trigger sits near an edge
+  // (phones); a panel that already fits is left exactly where CSS puts it.
+  // Keyed on `open`: while the panel is not rendered the ref is empty and the
+  // hook does nothing.
+  useViewportClamp(panelRef, open);
   const baseId = useId();
 
   // Tiptap v3 does not re-render React on selection changes, so the two facts
@@ -284,6 +291,7 @@ export default function RefineControl({
 
       {open && !disabled && (
         <div
+          ref={panelRef}
           id={`${baseId}-refine-dialog`}
           role="dialog"
           aria-label="Refine with AI"

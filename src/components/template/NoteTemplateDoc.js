@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import ResizableTwoColTable from "./ResizableTwoColTable";
 import {
   DEFAULT_LEFT_COL_PCT,
@@ -251,6 +252,12 @@ function validateComposedPhoto() {
 }
 
 export default function NoteTemplateDoc({
+  // Where this form's editing CHROME renders (2026-09-13): the template
+  // selector and its help, the notices, "Add section at end" and the drag
+  // hints. MainArea passes an element that sits OUTSIDE the document-zoom
+  // wrapper, so the chrome keeps its UI size while the document scales;
+  // without one (no shell, a test) the chrome renders inline as before.
+  chromeSlot = null,
   noteId,
   // Quick Add's ONE Template destination.
   //
@@ -3101,8 +3108,11 @@ export default function NoteTemplateDoc({
       ? getSectionRegistry().get(activeSectionIdentity)
       : null;
 
-  return (
-    <div className="p-2 text-black dark:text-white">
+  // EDITOR CHROME — the app-surface controls and notices ABOVE the document.
+  // Not document content, so never zoomed: it is rendered into `chromeSlot`
+  // (outside the zoom wrapper) when the shell provides one.
+  const chrome = (
+    <div className="nw-tpl-chrome text-black dark:text-white" data-nw-template-chrome-part="note">
       {/* Per-note template selection. This control ONLY chooses which template
           this note uses — it never creates or edits a template. Creating and
           managing the reusable templates themselves lives behind the top-level
@@ -3162,8 +3172,17 @@ export default function NoteTemplateDoc({
             : `${placementFallbacks.length} sections no longer have their original position in this template and are shown at the end of the document.`}
         </div>
       )}
+    </div>
+  );
+
+  return (
+    <div className="p-2 text-black dark:text-white">
+      {chromeSlot ? createPortal(chrome, chromeSlot) : chrome}
 
       <ResizableTwoColTable
+        // The table's own chrome (Add section, drag hints) joins this form's
+        // chrome outside the zoom.
+        chromeSlot={chromeSlot}
         leftPct={displayLeftPct}
         valueColumns={displayValueColumns}
         rows={displayRows}

@@ -1,11 +1,14 @@
-import React from "react";
+import React, { useRef, useState } from "react";
 import { FaChevronUp, FaChevronDown, FaSearchMinus, FaSearchPlus } from "react-icons/fa";
 import FormattingControls from "./editor/FormattingControls";
+import PhoneSheet from "./mobile/PhoneSheet";
 import { iconButtonClass } from "../lib/interactionStyles";
+import { SHELL_LAYOUT, useShellLayout } from "../context/ShellLayoutContext";
 import { SAVED_HINT, SAVE_FAILED_DETAIL } from "../lib/saveStatus";
 import {
   canZoomIn,
   canZoomOut,
+  documentZoomLevelsForShell,
   documentZoomLabel,
   isDefaultDocumentZoom,
 } from "../lib/documentZoom";
@@ -86,6 +89,19 @@ export default function EditorToolbar({
   workspaceExpanded = false,
   onToggleWorkspaceExpanded = null,
 }) {
+  // THE PHONE SHELL (Phase 8E.1): formatting is light editing on a phone, so
+  // the toolbar row keeps only "Format", the zoom group and the save status,
+  // and the full formatting controls open in a full-screen SHEET over the
+  // note screen (src/components/mobile/PhoneSheet.js) — never inline, where
+  // they consumed the document's height. The controls are HIDDEN with the
+  // closed sheet, never unmounted, so nothing they hold is lost. Desktop is
+  // unchanged.
+  const shellLayout = useShellLayout();
+  const phoneShell = shellLayout === SHELL_LAYOUT.PHONE;
+  const [phoneFormattingOpen, setPhoneFormattingOpen] = useState(false);
+  const phoneFormatButtonRef = useRef(null);
+  // The zoom ladder this shell steps through (down to 25% on a phone).
+  const zoomLevels = documentZoomLevelsForShell(shellLayout);
   if (!editor) return null;
 
   const saveLabel = saveStatus?.label || "";
@@ -100,16 +116,43 @@ export default function EditorToolbar({
     typeof onZoomOut === "function" &&
     typeof onZoomReset === "function";
 
+  // ONE set of formatting controls, placed by shell. Desktop: a direct child
+  // of the toolbar row, exactly as before the phone shell existed. Phone: the
+  // body of the formatting sheet below — the SAME element over the SAME
+  // editor instance, rendered once, hidden with the sheet while "Format" is
+  // not open. Every command it dispatches reaches the editor MainArea handed
+  // this toolbar, so the sheet can no more act on a different document than
+  // the desktop row can.
+  const controls = (
+    <FormattingControls
+      editor={editor}
+      disabled={disabled}
+      imagePolicy={imagePolicy}
+      filePolicy={filePolicy}
+      disabledHint={disabledHint}
+    />
+  );
+
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 bg-gray-100 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2">
-      <FormattingControls
-        editor={editor}
-        disabled={disabled}
-        imagePolicy={imagePolicy}
-        filePolicy={filePolicy}
-        disabledHint={disabledHint}
-      />
-      <div className="flex items-center gap-2 ml-auto">
+    <div className="flex flex-wrap items-center justify-between gap-2 bg-gray-100 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2" data-nw-editor-toolbar>
+      {phoneShell && (
+        <button
+          ref={phoneFormatButtonRef}
+          type="button"
+          className={iconButtonClass({
+            pressed: phoneFormattingOpen,
+            className: "px-3 py-2 rounded-lg text-sm font-medium min-h-[44px]",
+          })}
+          onClick={() => setPhoneFormattingOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={phoneFormattingOpen}
+          data-nw-phone-format-toggle
+        >
+          Format
+        </button>
+      )}
+      {!phoneShell && controls}
+      <div className="flex items-center gap-2 ml-auto" data-nw-toolbar-status>
         {/* DOCUMENT ZOOM — a document-working control, so it belongs on the
             toolbar with formatting rather than in the header (identity and
             document actions) or the sidebar (navigation). Three real buttons:
@@ -129,7 +172,7 @@ export default function EditorToolbar({
               type="button"
               className={iconButtonClass({ className: "p-2 rounded-lg" })}
               onClick={onZoomOut}
-              disabled={!canZoomOut(documentZoom)}
+              disabled={!canZoomOut(documentZoom, zoomLevels)}
               aria-label={ZOOM_OUT_LABEL}
               title={ZOOM_OUT_LABEL}
             >
@@ -156,7 +199,7 @@ export default function EditorToolbar({
               type="button"
               className={iconButtonClass({ className: "p-2 rounded-lg" })}
               onClick={onZoomIn}
-              disabled={!canZoomIn(documentZoom)}
+              disabled={!canZoomIn(documentZoom, zoomLevels)}
               aria-label={ZOOM_IN_LABEL}
               title={ZOOM_IN_LABEL}
             >
@@ -252,6 +295,23 @@ export default function EditorToolbar({
           </button>
         )}
       </div>
+      {/* THE FORMATTING SHEET (phone). Out of the document flow entirely: a
+          closed sheet is `hidden`, an open one is a fixed full-screen dialog,
+          so the note workspace keeps its height in both states. Closing
+          returns focus to the Format control; the document, its selection
+          and its zoom are untouched by either transition. */}
+      {phoneShell && (
+        <PhoneSheet
+          open={phoneFormattingOpen}
+          title="Formatting"
+          closeLabel="Close formatting"
+          onClose={() => setPhoneFormattingOpen(false)}
+          returnFocusTo={phoneFormatButtonRef}
+          data-nw-phone-format-sheet
+        >
+          {controls}
+        </PhoneSheet>
+      )}
     </div>
   );
 }

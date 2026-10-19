@@ -167,7 +167,7 @@ describe("20/26. zoom reaches the document surfaces and only them", () => {
 
   test("the PDF surface is OUTSIDE the wrapper — it keeps its own viewer scale", () => {
     const pdfAt = NOTE_MAIN.indexOf("<PdfEditorTab");
-    const wrapperEnd = NOTE_MAIN.indexOf("</div>\n            ) : (", ZOOM_WRAPPER_AT);
+    const wrapperEnd = NOTE_MAIN.indexOf("</div>\n              </>\n            ) : (", ZOOM_WRAPPER_AT);
     expect(pdfAt).toBeGreaterThan(-1);
     expect(wrapperEnd).toBeGreaterThan(-1);
     expect(pdfAt).toBeGreaterThan(wrapperEnd);
@@ -204,7 +204,7 @@ describe("20/26. zoom reaches the document surfaces and only them", () => {
 describe("15–19. zoom is presentation state and writes no document data", () => {
   test("15. no editor transaction: the zoom handlers touch no editor, view or command", () => {
     const block = MAIN_AREA.slice(
-      MAIN_AREA.indexOf("const [documentZoom, setDocumentZoom] = useState(loadDocumentZoom);"),
+      MAIN_AREA.indexOf("const [documentZoom, setDocumentZoom] = useState(() => loadDocumentZoom(undefined, zoomLevels));"),
       MAIN_AREA.indexOf("const [composerCollapsed")
     );
     expect(block).toMatch(/const applyDocumentZoom = useCallback/);
@@ -213,7 +213,7 @@ describe("15–19. zoom is presentation state and writes no document data", () =
 
   test("16/17/18/19. no note save, no sectionDoc, no TemplateVersion, no document mutation", () => {
     const block = MAIN_AREA.slice(
-      MAIN_AREA.indexOf("const [documentZoom, setDocumentZoom] = useState(loadDocumentZoom);"),
+      MAIN_AREA.indexOf("const [documentZoom, setDocumentZoom] = useState(() => loadDocumentZoom(undefined, zoomLevels));"),
       MAIN_AREA.indexOf("const [composerCollapsed")
     );
     expect(block).not.toMatch(
@@ -296,7 +296,7 @@ describe("32–37. zoom coexists with the three space controls and the one scrol
     // document grows inside #chatWindow, which already scrolls both axes.
     // (The slice ends where the wrapper does — the note-linked PDF frame
     // that follows is OUTSIDE it and deliberately clips its own viewer.)
-    const wrapperEnd = NOTE_MAIN.indexOf("</div>\n            ) : (", ZOOM_WRAPPER_AT);
+    const wrapperEnd = NOTE_MAIN.indexOf("</div>\n              </>\n            ) : (", ZOOM_WRAPPER_AT);
     expect(wrapperEnd).toBeGreaterThan(ZOOM_WRAPPER_AT);
     const wrapper = NOTE_MAIN.slice(ZOOM_WRAPPER_AT, wrapperEnd);
     expect(wrapper).not.toMatch(/overflow-/);
@@ -308,7 +308,7 @@ describe("32–37. zoom coexists with the three space controls and the one scrol
     expect(MAIN_AREA).not.toMatch(/documentZoom.*composerCollapsed|composerCollapsed.*documentZoom/);
     expect(SIDEBAR).not.toMatch(/documentZoom/);
     // Each control owns its own state; none reads another's.
-    expect(MAIN_AREA).toContain("const [documentZoom, setDocumentZoom] = useState(loadDocumentZoom);");
+    expect(MAIN_AREA).toContain("const [documentZoom, setDocumentZoom] = useState(() => loadDocumentZoom(undefined, zoomLevels));");
     expect(MAIN_AREA).toContain("const [composerCollapsed, setComposerCollapsed] = useState(false);");
     expect(MAIN_AREA).toContain("const [workspaceExpanded, setWorkspaceExpanded] = useState(false);");
   });
@@ -355,8 +355,8 @@ describe("the zoom controls are real, labelled and readable", () => {
   });
 
   test("the ends of the ladder genuinely disable their own control, and reset disables at 100%", () => {
-    expect(group).toMatch(/disabled=\{!canZoomOut\(documentZoom\)\}/);
-    expect(group).toMatch(/disabled=\{!canZoomIn\(documentZoom\)\}/);
+    expect(group).toMatch(/disabled=\{!canZoomOut\(documentZoom, zoomLevels\)\}/);
+    expect(group).toMatch(/disabled=\{!canZoomIn\(documentZoom, zoomLevels\)\}/);
     expect(group).toMatch(/disabled=\{isDefaultDocumentZoom\(documentZoom\)\}/);
     // Keyboard: native buttons with the shared focus ring, no key handling.
     expect(TOOLBAR).not.toMatch(/onKeyDown/);
@@ -407,16 +407,19 @@ describe("38–42. Document Preview and every export are untouched by UI zoom", 
       .filter((f) => /from "[^"]*\/documentZoom"/.test(fs.readFileSync(f, "utf8")))
       .map((f) => path.basename(f))
       .sort();
-    // The toolbar (the controls), MainArea (the state and the wrapper) and the
-    // page-guide hook (the one measurement compensation). The paged editor
-    // deliberately does NOT import it — it receives the value as a prop and
-    // forwards it, so it gains no dependency on the zoom model at all.
+    // The toolbar (the controls), MainArea (the state and the wrapper), the
+    // page-guide hook (the one measurement compensation) and — since Phase
+    // 8E.1 — the paged editor with its paper-scale model: the sheet's width
+    // must be held at its 100% layout width and drawn at the zoom scale
+    // (src/lib/freeformPaperScale.js), so the paged editor publishes the
+    // scale of the value it receives as a prop. Nothing else imports it.
     expect(importers).toEqual([
       "EditorToolbar.js",
+      "FreeformPagedEditor.js",
       "MainArea.js",
+      "freeformPaperScale.js",
       "useFreeformPageGuides.js",
     ]);
-    expect(PAGED_EDITOR).not.toMatch(/from "[^"]*documentZoom"/);
     expect(PAGED_EDITOR).toMatch(/\{ editor, documentZoom \}/);
   });
 

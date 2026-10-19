@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { FaDownload, FaChevronDown } from "react-icons/fa";
 import useOutsideClose from "../../hooks/useOutsideClose";
+import useViewportClamp from "../../hooks/useViewportClamp";
 import { exportPDF, exportDOCX, exportHTML, exportMD } from "../../lib/exportUtils";
 import { captureFreeformExportSnapshot } from "../../lib/freeformExportPdf";
 import {
@@ -85,6 +86,9 @@ export default function ExportMenu({ source }) {
   const [state, setState] = useState(createExportState);
   const ref = useRef(null);
   const triggerRef = useRef(null);
+  const menuPanelRef = useRef(null);
+  // Kept inside the viewport near a screen edge (phones); unchanged when it fits.
+  useViewportClamp(menuPanelRef, open);
   // Monotonic request id, read synchronously so two clicks inside one tick
   // cannot both start a transaction before the control re-renders as disabled.
   const requestRef = useRef(0);
@@ -283,6 +287,7 @@ export default function ExportMenu({ source }) {
 
       {open && !disabled && (
         <div
+          ref={menuPanelRef}
           role="menu"
           aria-label={exportControlLabel(view)}
           className="absolute right-0 top-full mt-2 min-w-[260px] rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 overflow-hidden z-50"

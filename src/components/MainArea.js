@@ -75,13 +75,14 @@ import { MESSAGE_TONE } from "../lib/transientMessage";
 import NoteTemplateDoc from "./template/NoteTemplateDoc";
 import { ATTACHMENT_KIND } from "../lib/noteAttachments";
 import { useLiveTranscriptSession } from "../context/LiveTranscriptContext";
-import { FaChevronDown, FaChevronUp } from "react-icons/fa";
+import { FaChevronDown, FaChevronUp, FaSlidersH } from "react-icons/fa";
 import { NOTE_VIEW } from "../lib/noteViews";
 import { currentNoteSurface, noteSurfaceLabel } from "../lib/noteSurfaces";
 import { LIVE_TRANSCRIPT_MESSAGE } from "../lib/liveTranscript";
 import {
   loadDocumentZoom,
   saveDocumentZoom,
+  documentZoomLevelsForShell,
   zoomIn as zoomInLevel,
   zoomOut as zoomOutLevel,
   zoomScale,
@@ -90,6 +91,7 @@ import {
 import { actionButtonClass, iconButtonClass } from "../lib/interactionStyles";
 import useSaveStatus from "../hooks/useSaveStatus";
 import { useOptionalDataScope } from "../context/DataScopeContext";
+import { SHELL_LAYOUT, useShellLayout } from "../context/ShellLayoutContext";
 import { FLUSH_PENDING_WRITES_EVENT } from "./auth/WorkspaceGate";
 import { CLOUD_COLLECTION } from "../lib/cloud/cloudModel";
 import { SYNC_OUTCOME } from "../lib/cloud/cloudSync";
@@ -158,6 +160,16 @@ export default function MainArea() {
     noteWorkspaceTab,
     setNoteWorkspaceTab,
   } = useAppState();
+  // Rendered inside the PHONE shell (Phase 8E.1)? Read for POLICY only: the
+  // phone is a PDF viewer, never the PDF editor, so this component never
+  // mounts PdfEditorTab there. Presentation is the phone shell's CSS.
+  const shellLayout = useShellLayout();
+  const phoneShell = shellLayout === SHELL_LAYOUT.PHONE;
+  // The zoom LADDER is a shell policy (src/lib/documentZoom.js): the phone
+  // steps down to 25% so a whole sheet fits its screen; the desktop keeps
+  // 75–150%. Values are validated against every ladder; only stepping and
+  // the remembered preference are snapped to this shell's.
+  const zoomLevels = documentZoomLevelsForShell(shellLayout);
   const { refineText } = useRefine();
   // The workspace's sync engine (Production Readiness Phase 6). A local
   // write is confirmed into the workspace MIRROR; "Saved" is claimed only
@@ -191,6 +203,17 @@ export default function MainArea() {
     () => setWorkspaceExpanded((prev) => !prev),
     []
   );
+  // PHONE ONLY: whether the Quick Add SETTINGS sheet (the AI action and the
+  // coordinate system, which the phone composer keeps out of its body) is
+  // open. Transient UI state, like the composer collapse beside it; the
+  // sheet and its values are the composer's (BottomBar).
+  const [quickAddSettingsOpen, setQuickAddSettingsOpen] = useState(false);
+  const quickAddSettingsButtonRef = useRef(null);
+  const closeQuickAddSettings = useCallback(() => {
+    setQuickAddSettingsOpen(false);
+    const el = quickAddSettingsButtonRef.current;
+    if (el && typeof el.focus === "function") el.focus();
+  }, []);
   // Collapsible Quick Add composer: transient UI state, EXPANDED by default,
   // never persisted and never note data. Collapsing HIDES the composer
   // (display:none) rather than unmounting it, so an unsent draft — typed text,
@@ -201,7 +224,7 @@ export default function MainArea() {
   // Seeded from the remembered UI preference, which is validated and clamped
   // on read, so a corrupt or future stored value renders at 100% rather than
   // at a broken scale.
-  const [documentZoom, setDocumentZoom] = useState(loadDocumentZoom);
+  const [documentZoom, setDocumentZoom] = useState(() => loadDocumentZoom(undefined, zoomLevels));
   // Every change goes through the ladder and is remembered. This writes ONLY
   // the zoom preference key — no note, project, template or section document
   // is touched, and no editor transaction is dispatched, so changing zoom can
@@ -214,18 +237,27 @@ export default function MainArea() {
     });
   }, []);
   const handleZoomIn = useCallback(
-    () => applyDocumentZoom((prev) => zoomInLevel(prev)),
-    [applyDocumentZoom]
+    () => applyDocumentZoom((prev) => zoomInLevel(prev, zoomLevels)),
+    [applyDocumentZoom, zoomLevels]
   );
   const handleZoomOut = useCallback(
-    () => applyDocumentZoom((prev) => zoomOutLevel(prev)),
-    [applyDocumentZoom]
+    () => applyDocumentZoom((prev) => zoomOutLevel(prev, zoomLevels)),
+    [applyDocumentZoom, zoomLevels]
   );
   const handleZoomReset = useCallback(
     () => applyDocumentZoom(DEFAULT_DOCUMENT_ZOOM),
     [applyDocumentZoom]
   );
 
+  // THE TEMPLATE CHROME SLOT (2026-09-13). The Template form's editing chrome
+  // — the template selector and its help, the empty-state and placement
+  // notices, "Add section at end" and the drag hints — is UI, not document,
+  // so it must not scale with document zoom. NoteTemplateDoc renders it into
+  // this element through a portal; the element is a sibling placed BEFORE the
+  // zoom wrapper, so the chrome keeps normal UI size and position at every
+  // zoom while the document beneath it scales. Held in state (a callback
+  // ref) so the portal has its target on the first render after mount.
+  const [templateChromeSlot, setTemplateChromeSlot] = useState(null);
   const [composerCollapsed, setComposerCollapsed] = useState(false);
   const toggleComposerCollapsed = useCallback(
     () => setComposerCollapsed((prev) => !prev),
@@ -1838,7 +1870,8 @@ export default function MainArea() {
   /* ============================ PDFs workspace ============================= */
   // The global PDF workspace is independent of any project/folder/note. It shows
   // either the open PDF (canonical editor) or the global PDF library.
-  if (workspace === "pdfs") {
+  // Never inside the phone shell: its PDFs screen is the phone viewer.
+  if (workspace === "pdfs" && !phoneShell) {
     if (standalonePdf) {
       return (
         <main className="flex-1 min-w-0 h-full min-h-0 flex flex-col p-4 gap-3">
@@ -1911,7 +1944,7 @@ export default function MainArea() {
           Nothing here owns an editor, so collapsing it cannot unmount,
           recreate or re-register one. */}
       {!chromeCollapsed && (
-        <div className="flex items-center justify-between gap-3 flex-wrap min-h-[2.25rem]">
+        <div className="flex items-center justify-between gap-3 flex-wrap min-h-[2.25rem]" data-nw-note-header>
           {/* Note identity: the title, and — because view navigation now sits
               in the sidebar, which may be collapsed to icons — which surface
               of the note this is. Not a heading level larger than the
@@ -1939,7 +1972,7 @@ export default function MainArea() {
               belong together — Export and the preview of exactly what Export
               produces. */}
           {activeTab === "note" && (
-            <div className="flex items-center gap-2 flex-wrap justify-end">
+            <div className="flex items-center gap-2 flex-wrap justify-end" data-nw-note-actions>
               {/* AI Refine follows the SAME owner as the formatting toolbar:
                   the Free-form editor in the Free-form note, the ACTIVE
                   Section's editor in the Template form. No owner (Template
@@ -2088,7 +2121,15 @@ export default function MainArea() {
           {/* NOTE VIEW */}
           <div style={{ display: activeTab === "note" ? "block" : "none" }}>
             {noteTitle ? (
-              /* DOCUMENT ZOOM applies to the note DOCUMENT surfaces — the
+              <>
+              {/* Template editor CHROME, outside the zoomed subtree below —
+                  shown with the Template form only (see templateChromeSlot). */}
+              <div
+                ref={setTemplateChromeSlot}
+                data-nw-template-chrome
+                style={{ display: noteLayout === "template" ? "block" : "none" }}
+              />
+              {/* DOCUMENT ZOOM applies to the note DOCUMENT surfaces — the
                  Free-form paper and the whole Template form — and to nothing
                  else, so the sidebar, header, toolbar and Quick Add composer
                  stay at their normal size. It deliberately wraps BOTH surfaces
@@ -2111,7 +2152,7 @@ export default function MainArea() {
                  layoutPxFromVisualPx in src/lib/documentZoom.js.
 
                  The PDF surface below is deliberately OUTSIDE this wrapper:
-                 it has its own viewer scale. */
+                 it has its own viewer scale. */}
               <div className="nw-doc-zoom" style={{ zoom: zoomScale(documentZoom) }}>
                 <div
                   style={{
@@ -2143,6 +2184,8 @@ export default function MainArea() {
                       templateComposeRef.current = api;
                     }}
                     onSelectRow={handleSelectTemplateRow}
+                    // Where the form's editing chrome renders — outside the zoom.
+                    chromeSlot={templateChromeSlot}
                     quickAddTargetRowId={activeTemplateRowId}
                     onSaveBegin={beginTemplateSave}
                     onSaveSettle={settleTemplateSave}
@@ -2153,6 +2196,7 @@ export default function MainArea() {
                   />
                 </div>
               </div>
+              </>
             ) : (
               <div className="text-gray-400 px-4 py-10 text-center">
                 <div className="text-base font-medium text-gray-500 dark:text-gray-300">
@@ -2172,6 +2216,9 @@ export default function MainArea() {
               scroll — a linked PDF must not become one tall block that
               #chatWindow scrolls, ribbon and all. `marginTop: 0` cancels the
               region's space-y gap so nothing overflows by that margin. */}
+          {/* Not mounted inside the phone shell: a linked PDF opens in the
+              phone PDF viewer instead (src/components/mobile). */}
+          {!phoneShell && (
           <div
             className="flex flex-col min-h-0"
             style={{ display: activeTab === "pdf" ? "flex" : "none", height: "100%", marginTop: 0 }}
@@ -2231,6 +2278,7 @@ export default function MainArea() {
               </div>
             )}
           </div>
+          )}
         </div>
 
         {/* The Quick Add capture bar (Note tab only). Its microphone is Quick
@@ -2243,12 +2291,18 @@ export default function MainArea() {
           className="bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800"
           style={{ display: activeTab === "note" ? "block" : "none" }}
         >
-          <div className={composerCollapsed ? "px-4 py-1.5 flex flex-col gap-2" : "px-4 py-3 flex flex-col gap-2"}>
+          {/* `data-nw-quickadd-composer`: the composer container the phone
+              stylesheet insets (mobileShell.css) — an explicit hook, so no
+              phone rule depends on this element's position in the tree. */}
+          <div
+            className={composerCollapsed ? "px-4 py-1.5 flex flex-col gap-2" : "px-4 py-3 flex flex-col gap-2"}
+            data-nw-quickadd-composer
+          >
             {/* COMPOSER COLLAPSE — the third, VERTICAL space control (the
                 sidebar governs width; the workspace expand collapses the
                 chrome ABOVE the document; this collapses the capture area
                 BELOW it). One row: what is hidden, and the way back. */}
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center justify-between gap-2" data-nw-quickadd-header>
               <span className="text-xs text-gray-500 dark:text-gray-400">
                 {composerCollapsed
                   ? composerHasDraft
@@ -2256,6 +2310,28 @@ export default function MainArea() {
                     : "Quick Add composer hidden"
                   : "Quick Add"}
               </span>
+              {/* QUICK ADD SETTINGS (phone): opens the composer's settings
+                  sheet. `ml-auto` seats it beside the collapse control at the
+                  row's end; it is not offered while the composer is
+                  collapsed, because nothing it configures is showing. */}
+              {phoneShell && !composerCollapsed && (
+                <button
+                  ref={quickAddSettingsButtonRef}
+                  type="button"
+                  className={iconButtonClass({
+                    pressed: quickAddSettingsOpen,
+                    className: "p-1.5 rounded-lg ml-auto",
+                  })}
+                  onClick={() => setQuickAddSettingsOpen(true)}
+                  aria-haspopup="dialog"
+                  aria-expanded={quickAddSettingsOpen}
+                  aria-label="Quick Add settings"
+                  title="Quick Add settings"
+                  data-nw-quickadd-settings-toggle
+                >
+                  <FaSlidersH aria-hidden="true" />
+                </button>
+              )}
               <button
                 type="button"
                 className={iconButtonClass({
@@ -2340,6 +2416,9 @@ export default function MainArea() {
               // at Send time, and re-checked before every item.
               onSendComposer={handleQuickAddComposerSend}
               onCompositionChange={setComposerHasDraft}
+              // Phone only: the Quick Add settings sheet (see the header row).
+              settingsOpen={quickAddSettingsOpen}
+              onCloseSettings={closeQuickAddSettings}
             />
             </div>
           </div>

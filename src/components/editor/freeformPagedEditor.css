@@ -106,8 +106,17 @@
    overridden inline from the same measurement the spacers use. */
 .nw-ff-page-surface {
   box-sizing: border-box;
-  width: 100%;
-  max-width: 210mm;
+  /* The sheet SCALES WITH DOCUMENT ZOOM (Phase 8E.1 — see
+     src/lib/freeformPaperScale.js). Inside the zoomed wrapper `100%` is the
+     container's width in this subtree's own px, so `100% × scale` is the
+     container's real width — a constant — and the sheet's visual width is
+     therefore container × scale: smaller at 25%, larger at 150%, and the text
+     column never reflows. A plain `width: 100%` filled the container at every
+     zoom, so zooming out only shrank the type and made the sheet taller.
+     The `min(…, 100%)` cap keeps the pre-existing behaviour above 100%: a
+     full-width sheet with larger type, never a horizontal scroll. */
+  width: calc(100% * var(--nw-doc-zoom-scale, 1));
+  max-width: min(210mm, 100%);
   margin: 0 auto;
   padding: 20mm var(--nw-ff-paper-pad-x);
   background: #ffffff;

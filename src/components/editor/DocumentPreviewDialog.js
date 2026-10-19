@@ -6,12 +6,18 @@
 // currently selected format.
 //
 // Rendering per preview `previewKind` (see documentPreview.js):
-//   - "pdf"  -> a plain, UNSANDBOXED native <iframe src={artifact.previewUrl}>
+//   - "pdf"  -> DESKTOP: a plain, UNSANDBOXED native <iframe src={artifact.previewUrl}>
 //               — the browser's own built-in PDF viewer, a different trust
 //               boundary than arbitrary HTML (see docs/features/PDF_EDITOR.md
 //               for why the persistent PdfAnnotator pipeline is not reused
 //               here either — this is a transient Blob). The only kind that
 //               uses an object URL at all.
+//               PHONE: the phone shell's own PDF viewer (MobilePdfViewer),
+//               given the artifact's `blob` — the very Blob Download sends —
+//               which it opens with pdf.js and lays out page by page with
+//               "Page N of M", previous / next, zoom and find. The browser's
+//               embedded PDF frame was not usable there: in the iOS Simulator
+//               it showed page 1 of an 8-page export and nothing after it.
 //   - "html" -> a SANDBOXED <iframe srcDoc={artifact.previewHtml}>, used by
 //               BOTH the real HTML export (the exact generated document
 //               string) and the DOCX layout approximation (the exact
@@ -39,10 +45,12 @@
 //               truncated. No Rendered mode is offered: no safe
 //               Markdown-to-HTML renderer exists in this codebase, and one is
 //               deliberately not added solely for this.
-import React, { useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import useOutsideClose from "../../hooks/useOutsideClose";
 import { actionButtonClass } from "../../lib/interactionStyles";
 import { exportFailureMessage } from "../../lib/exportIdentity";
+import { SHELL_LAYOUT, useShellLayout } from "../../context/ShellLayoutContext";
+import MobilePdfViewer from "../mobile/MobilePdfViewer";
 import {
   DOCUMENT_PREVIEW_FORMAT,
   DOCUMENT_PREVIEW_KIND,
@@ -53,6 +61,17 @@ import {
   documentPreviewStatusLabel,
 } from "../../lib/documentPreview";
 
+// ONE dialog, two PRESENTATIONS (Phase 8E.1), exactly as TemplateBuilderModal
+// does it. The desktop keeps its centred card with the header row of Format /
+// Refresh / Download / Close, unchanged. Inside the phone shell — which
+// provides SHELL_LAYOUT.PHONE and renders this dialog within its own DOM, so
+// its phone stylesheet reaches it — the SAME controls, preview surface and
+// notes take the `.nw-phone-dialog` sheet instead: full screen, safe-area
+// aware, covering the bottom navigation; Close sits in the header beside the
+// title; Format, Refresh and Download sit in their own wrapping block below
+// it; and the preview body takes the remaining height and owns the scrolling
+// (mobileShell.css). The producer, cache, object URLs and Download are
+// DocumentPreview.js's and identical in both.
 export default function DocumentPreviewDialog({
   open,
   // The note view being previewed (NOTE_VIEW) — used only to word the
@@ -73,9 +92,19 @@ export default function DocumentPreviewDialog({
   refreshDisabled,
 }) {
   const ref = useRef(null);
+  const closeRef = useRef(null);
+  const phone = useShellLayout() === SHELL_LAYOUT.PHONE;
   useOutsideClose(ref, () => {
     if (open) onClose();
   });
+
+  // Phone: focus goes to the sheet's Close control when it opens, as in
+  // PhoneSheet. DocumentPreview returns it to the trigger on close.
+  useEffect(() => {
+    if (!open || !phone) return;
+    const el = closeRef.current;
+    if (el && typeof el.focus === "function") el.focus();
+  }, [open, phone]);
 
   if (!open) return null;
 
@@ -89,97 +118,161 @@ export default function DocumentPreviewDialog({
   const downloadLabel = `Download ${formatLabel}`;
   const failureFallback = exportFailureMessage(view);
 
+  const formatControl = (
+    <label
+      className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300"
+      data-nw-doc-preview-format
+    >
+      <span>Format</span>
+      <select
+        className="nw-field px-2 py-1 text-xs rounded"
+        value={format}
+        onChange={(e) => onSelectFormat(e.target.value)}
+        aria-label="Preview format"
+      >
+        {formats.map((f) => (
+          <option key={f} value={f}>
+            {documentPreviewFormatLabel(f)}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
+  const refreshButton = typeof onRefresh === "function" && (
+    <button
+      className={actionButtonClass({
+        busy: loading,
+        disabled: refreshDisabled,
+        className: "px-3 py-1.5 rounded-lg text-xs font-medium",
+      })}
+      onClick={onRefresh}
+      disabled={refreshDisabled}
+      aria-busy={loading}
+      title="Regenerate this preview from the note's current content"
+      aria-label={
+        loading ? "Refreshing preview…" : "Refresh preview"
+      }
+      data-nw-doc-preview-refresh
+    >
+      {loading ? "Refreshing…" : "Refresh preview"}
+    </button>
+  );
+
+  const downloadButton = (
+    <button
+      className={actionButtonClass({
+        primary: true,
+        disabled: !canDownload,
+        className: "px-3 py-1.5 rounded-lg text-xs font-medium",
+      })}
+      onClick={onDownload}
+      disabled={!canDownload}
+      // Honest for every format: what Download sends is always the
+      // real generated file, whether or not the PREVIEW above it
+      // reproduces that file exactly.
+      title={
+        canDownload
+          ? `Download the generated ${formatLabel} file`
+          : "This preview is not ready to download yet"
+      }
+      aria-label={
+        artifact?.filename
+          ? `Download ${artifact.filename}`
+          : downloadLabel
+      }
+      data-nw-doc-preview-download
+    >
+      {downloadLabel}
+    </button>
+  );
+
+  const header = phone ? (
+    <>
+      <div className="nw-phone-dialog__header" data-nw-doc-preview-header>
+        <div className="nw-phone-doc-preview__heading">
+          <h2 className="nw-phone-dialog__title">
+            Document Preview
+          </h2>
+          {noteTitle && (
+            <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
+              {noteTitle}
+            </p>
+          )}
+        </div>
+        <button
+          ref={closeRef}
+          type="button"
+          className={actionButtonClass({
+            className: "nw-phone-dialog__close px-3 py-1.5 rounded-lg text-sm",
+          })}
+          onClick={onClose}
+          aria-label="Close Document Preview"
+          data-nw-doc-preview-close
+        >
+          Close
+        </button>
+      </div>
+      <div className="nw-phone-doc-preview__controls" data-nw-doc-preview-controls>
+        {formatControl}
+        <div className="nw-phone-doc-preview__actions" data-nw-doc-preview-actions>
+          {refreshButton}
+          {downloadButton}
+        </div>
+      </div>
+    </>
+  ) : (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700 shrink-0">
+      <div className="min-w-0">
+        <h2 className="text-sm font-semibold text-gray-900 dark:text-white truncate">
+          Document Preview
+        </h2>
+        {noteTitle && (
+          <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
+            {noteTitle}
+          </p>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 shrink-0" data-nw-doc-preview-actions>
+        {formatControl}
+        {refreshButton}
+        {downloadButton}
+        <button
+          className={actionButtonClass({
+            className: "px-3 py-1.5 rounded-lg text-xs font-medium",
+          })}
+          onClick={onClose}
+          aria-label="Close Document Preview"
+          data-nw-doc-preview-close
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4">
+    <div
+      className={
+        phone
+          ? "nw-phone-dialog"
+          : "fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4"
+      }
+    >
       <div
         ref={ref}
         role="dialog"
         aria-modal="true"
         aria-label={dialogLabel}
-        className="w-full max-w-4xl h-[85vh] flex flex-col bg-white dark:bg-gray-900 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 overflow-hidden"
+        className={
+          phone
+            ? "nw-phone-dialog__panel bg-white dark:bg-gray-900 text-black dark:text-white"
+            : "w-full max-w-4xl h-[85vh] flex flex-col bg-white dark:bg-gray-900 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 overflow-hidden"
+        }
+        data-nw-doc-preview-presentation={phone ? "phone" : "desktop"}
       >
-        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700 shrink-0">
-          <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-gray-900 dark:text-white truncate">
-              Document Preview
-            </h2>
-            {noteTitle && (
-              <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
-                {noteTitle}
-              </p>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300">
-              <span>Format</span>
-              <select
-                className="nw-field px-2 py-1 text-xs rounded"
-                value={format}
-                onChange={(e) => onSelectFormat(e.target.value)}
-                aria-label="Preview format"
-              >
-                {formats.map((f) => (
-                  <option key={f} value={f}>
-                    {documentPreviewFormatLabel(f)}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {typeof onRefresh === "function" && (
-              <button
-                className={actionButtonClass({
-                  busy: loading,
-                  disabled: refreshDisabled,
-                  className: "px-3 py-1.5 rounded-lg text-xs font-medium",
-                })}
-                onClick={onRefresh}
-                disabled={refreshDisabled}
-                aria-busy={loading}
-                title="Regenerate this preview from the note's current content"
-                aria-label={
-                  loading ? "Refreshing preview…" : "Refresh preview"
-                }
-              >
-                {loading ? "Refreshing…" : "Refresh preview"}
-              </button>
-            )}
-            <button
-              className={actionButtonClass({
-                primary: true,
-                disabled: !canDownload,
-                className: "px-3 py-1.5 rounded-lg text-xs font-medium",
-              })}
-              onClick={onDownload}
-              disabled={!canDownload}
-              // Honest for every format: what Download sends is always the
-              // real generated file, whether or not the PREVIEW above it
-              // reproduces that file exactly.
-              title={
-                canDownload
-                  ? `Download the generated ${formatLabel} file`
-                  : "This preview is not ready to download yet"
-              }
-              aria-label={
-                artifact?.filename
-                  ? `Download ${artifact.filename}`
-                  : downloadLabel
-              }
-            >
-              {downloadLabel}
-            </button>
-            <button
-              className={actionButtonClass({
-                className: "px-3 py-1.5 rounded-lg text-xs font-medium",
-              })}
-              onClick={onClose}
-              aria-label="Close Document Preview"
-            >
-              Close
-            </button>
-          </div>
-        </div>
+        {header}
 
         {/* Status line: names the format and states plainly whether this is
             an exact reproduction of the download or a labelled approximation.
@@ -191,9 +284,12 @@ export default function DocumentPreviewDialog({
           </p>
         </div>
 
-        <div className="flex-1 min-h-0 relative bg-gray-100 dark:bg-gray-950">
+        <div
+          className="flex-1 min-h-0 relative bg-gray-100 dark:bg-gray-950"
+          data-nw-doc-preview-body
+        >
           {hasContent && (
-            <DocumentPreviewSurface artifact={artifact} dialogLabel={dialogLabel} />
+            <DocumentPreviewSurface artifact={artifact} dialogLabel={dialogLabel} phone={phone} />
           )}
 
           {/* A first-ever generation for this format: nothing to show yet. */}
@@ -246,7 +342,7 @@ export default function DocumentPreviewDialog({
         </div>
 
         <p className="px-4 py-2 text-[11px] text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-700 shrink-0">
-          {FOOTER_NOTE[format] || FOOTER_NOTE_DEFAULT}
+          {(phone && PHONE_FOOTER_NOTE[format]) || FOOTER_NOTE[format] || FOOTER_NOTE_DEFAULT}
         </p>
       </div>
     </div>
@@ -267,9 +363,30 @@ const FOOTER_NOTE = {
     "The downloaded DOCX file is the real export; this preview is a sandboxed layout approximation only.",
 };
 const FOOTER_NOTE_DEFAULT = "This is the exact file the matching Export action produces.";
+// The phone shows the PDF in its own page viewer, not the browser's.
+const PHONE_FOOTER_NOTE = {
+  [DOCUMENT_PREVIEW_FORMAT.PDF]:
+    "This is the exact file Export PDF produces, shown page by page.",
+};
 
 /** Renders one artifact according to its `previewKind`. */
-function DocumentPreviewSurface({ artifact, dialogLabel }) {
+function DocumentPreviewSurface({ artifact, dialogLabel, phone }) {
+  if (artifact.previewKind === DOCUMENT_PREVIEW_KIND.PDF && phone) {
+    // Keyed per generation (each PDF artifact has its own URL), so a Refresh
+    // opens the new file in a fresh viewer, which releases the previous
+    // pdf.js document as it unmounts.
+    return (
+      <div
+        className="absolute inset-0 flex flex-col"
+        role="region"
+        aria-label={dialogLabel}
+        data-nw-doc-preview-pdf="phone"
+      >
+        <MobilePdfViewer key={artifact.previewUrl} file={artifact.blob} />
+      </div>
+    );
+  }
+
   if (artifact.previewKind === DOCUMENT_PREVIEW_KIND.PDF) {
     return (
       <iframe

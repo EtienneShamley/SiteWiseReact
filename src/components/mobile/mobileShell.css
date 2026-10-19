@@ -1,0 +1,1219 @@
+/*
+ * NoteWise PHONE SHELL (Phase 8E.1).
+ *
+ * The phone composition's own layout: one screen at a time between the status
+ * bar and the bottom navigation, the Listen In mini-bar in the layout flow
+ * directly above the navigation, and phone presentation for the shared
+ * components the shell reuses (the note workspace, the Quick Add composer,
+ * the Listen In workspace, the photo annotator).
+ *
+ * Every rule is scoped under `.nw-phone-shell` (or a phone-only class), so
+ * nothing here can reach the desktop shell. Colours come from the interaction
+ * tokens in src/styles/nav.css; there is no second palette.
+ *
+ * Touch targets are at least 44 px. Primary actions never depend on hover.
+ * Safe-area insets use env(), which `viewport-fit=cover` (public/index.html)
+ * makes available on iOS.
+ */
+
+/* ------------------------------------------------------------------ frame */
+
+.nw-phone-shell {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100vh;
+  height: 100dvh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.nw-phone-shell [data-nw-persistence-banner] {
+  top: env(safe-area-inset-top, 0px);
+}
+
+/* The verify-email banner is rendered by the auth gate ABOVE the application
+   (so outside .nw-phone-shell), and on a phone it must clear the status bar
+   and notch. Scoped by the SAME query that chooses the phone shell
+   (PHONE_SHELL_QUERY in src/lib/mobileShell.js), so the desktop banner is
+   untouched: it keeps its py-2, and env() is 0 there anyway. */
+@media (max-width: 767px), (max-height: 500px) and (pointer: coarse) {
+  [data-nw-verify-banner][role="status"] {
+    padding-top: calc(0.5rem + env(safe-area-inset-top, 0px));
+    padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+    padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+  }
+}
+
+.nw-phone-content {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.nw-phone-screen {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+}
+
+/* `hidden` must win over the flex display above. */
+.nw-phone-screen[hidden] {
+  display: none !important;
+}
+
+.nw-phone-screen-inner {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 1rem;
+}
+
+/* iOS zooms the page when a field under 16 px takes focus; a phone field is
+   never smaller than that. */
+.nw-phone-shell input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.nw-phone-shell select,
+.nw-phone-shell textarea {
+  font-size: max(16px, 1em);
+}
+
+/* --------------------------------------------------------- screen headers */
+
+.nw-phone-screen-header {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.125rem;
+  padding: 0.5rem 1rem 0.75rem;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+.dark .nw-phone-screen-header {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.nw-phone-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 44px;
+  padding: 0 0.5rem 0 0;
+  margin-left: -0.125rem;
+  border: 0;
+  background: transparent;
+  color: var(--nw-accent-bright);
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+.nw-phone-back:focus-visible {
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: 2px;
+  border-radius: 0.375rem;
+}
+
+.nw-phone-title {
+  margin: 0;
+  font-size: 1.375rem;
+  line-height: 1.25;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.nw-phone-subtitle {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--nw-nav-muted-text);
+}
+
+/* ------------------------------------------------------------ touch lists */
+
+.nw-phone-section {
+  padding-top: 0.75rem;
+}
+
+.nw-phone-section-heading {
+  margin: 0;
+  padding: 0 1rem 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--nw-nav-muted-text);
+}
+
+.nw-phone-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0.5rem;
+}
+
+.nw-phone-row {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 0.75rem;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-size: 1rem;
+}
+.nw-phone-row:active {
+  background: var(--nw-state-hover-bg);
+}
+.nw-phone-row:focus-visible {
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: -2px;
+}
+.nw-phone-row[aria-current="true"] {
+  background: var(--nw-nav-selected-bg);
+  border-color: var(--nw-nav-active-border);
+}
+.nw-phone-row__icon {
+  flex: none;
+  font-size: 1.125rem;
+  color: var(--nw-nav-muted-text);
+}
+.nw-phone-row[aria-current="true"] .nw-phone-row__icon {
+  color: var(--nw-nav-active-text);
+}
+.nw-phone-row__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.nw-phone-row__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.nw-phone-row__meta {
+  font-size: 0.8125rem;
+  color: var(--nw-nav-muted-text);
+}
+.nw-phone-row[aria-current="true"] .nw-phone-row__meta {
+  color: var(--nw-nav-active-text);
+}
+.nw-phone-row__chevron {
+  flex: none;
+  font-size: 0.875rem;
+  color: var(--nw-nav-muted-text);
+}
+
+.nw-phone-empty,
+.nw-phone-hint {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  font-size: 0.9375rem;
+  color: var(--nw-nav-muted-text);
+}
+
+.nw-phone-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 1rem;
+}
+
+.nw-phone-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-height: 44px;
+  padding: 0 1rem;
+  border-radius: 9999px;
+  font-size: 0.9375rem;
+}
+
+/* ------------------------------------------------------ bottom navigation */
+
+.nw-phone-nav {
+  flex: none;
+  background: #ffffff;
+  border-top: 1px solid rgba(15, 23, 42, 0.1);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.dark .nw-phone-nav {
+  background: #030712;
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+.nw-phone-nav__list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nw-phone-nav__item {
+  position: relative;
+  width: 100%;
+  min-height: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.125rem;
+  padding: 0.25rem 0.125rem;
+  border: 0;
+  background: transparent;
+  color: var(--nw-nav-muted-text);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1.1;
+}
+.nw-phone-nav__item:focus-visible {
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: -3px;
+  border-radius: 0.5rem;
+}
+/* The current tab: accent colour, heavier label AND an indicator bar — never
+   colour alone. */
+.nw-phone-nav__item--active {
+  color: var(--nw-nav-active-text);
+  font-weight: 700;
+}
+.nw-phone-nav__item--active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 28%;
+  right: 28%;
+  height: 3px;
+  border-radius: 0 0 3px 3px;
+  background: var(--nw-nav-rail);
+}
+
+.nw-phone-nav__icon {
+  position: relative;
+  display: inline-flex;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+.nw-phone-nav__label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nw-phone-nav__live {
+  position: absolute;
+  top: -3px;
+  right: -7px;
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  background: rgb(220 38 38);
+  box-shadow: 0 0 0 2px #ffffff;
+}
+.dark .nw-phone-nav__live {
+  background: rgb(248 113 113);
+  box-shadow: 0 0 0 2px #030712;
+}
+
+/* While the keyboard is up the navigation steps aside, so nothing needs the
+   home-indicator inset below the composer. */
+.nw-phone-shell[data-nw-keyboard="open"] .nw-phone-minibar-slot {
+  padding-bottom: 0.25rem;
+}
+
+/* ---------------------------------------------------- Listen In mini-bar */
+
+.nw-phone-minibar-slot {
+  flex: none;
+  padding: 0.375rem 0.5rem;
+  border-top: 1px solid rgba(15, 23, 42, 0.06);
+}
+.dark .nw-phone-minibar-slot {
+  border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+.nw-phone-minibar {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 0.75rem;
+  background: #f8fafc;
+  color: #0f172a;
+  text-align: left;
+}
+.dark .nw-phone-minibar {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: #111827;
+  color: #e5e7eb;
+}
+.nw-phone-minibar:focus-visible {
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: 2px;
+}
+
+.nw-phone-minibar__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  border: 2px solid currentColor;
+  background: transparent;
+  box-sizing: border-box;
+}
+.nw-phone-minibar__icon {
+  flex: none;
+  font-size: 0.9375rem;
+}
+.nw-phone-minibar__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+.nw-phone-minibar__title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nw-phone-minibar__detail {
+  font-size: 0.75rem;
+  opacity: 0.8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nw-phone-minibar__time {
+  flex: none;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.nw-phone-minibar__open {
+  flex: none;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--nw-accent-bright);
+}
+
+/* Recording: red, with a solid pulsing dot. */
+.nw-phone-minibar--recording {
+  border-color: rgb(220 38 38);
+  background: rgb(254 242 242);
+  color: rgb(153 27 27);
+}
+.nw-phone-minibar--recording .nw-phone-minibar__dot {
+  border-color: rgb(220 38 38);
+  background: rgb(220 38 38);
+}
+.dark .nw-phone-minibar--recording {
+  border-color: rgb(248 113 113);
+  background: rgb(69 10 10 / 0.6);
+  color: rgb(254 202 202);
+}
+.dark .nw-phone-minibar--recording .nw-phone-minibar__dot {
+  border-color: rgb(248 113 113);
+  background: rgb(248 113 113);
+}
+
+/* Stopped / completing: neutral — the microphone is genuinely released, so
+   nothing red; a hollow dot. */
+.nw-phone-minibar--stopped .nw-phone-minibar__dot,
+.nw-phone-minibar--completing .nw-phone-minibar__dot {
+  color: #64748b;
+}
+
+/* Interrupted: amber, recoverable. */
+.nw-phone-minibar--interrupted {
+  border-color: rgb(217 119 6);
+  background: rgb(255 251 235);
+  color: rgb(146 64 14);
+}
+.nw-phone-minibar--interrupted .nw-phone-minibar__dot {
+  border-color: rgb(217 119 6);
+}
+.dark .nw-phone-minibar--interrupted {
+  border-color: rgb(251 191 36);
+  background: rgb(69 26 3 / 0.6);
+  color: rgb(253 230 138);
+}
+
+/* ------------------------------------------------------------ Note screen */
+
+.nw-phone-notebar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+.dark .nw-phone-notebar {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+.nw-phone-notebar__context {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+  max-width: 45%;
+  min-height: 44px;
+  padding: 0 0.25rem;
+  border: 0;
+  background: transparent;
+  color: var(--nw-accent-bright);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.nw-phone-notebar__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nw-phone-seg {
+  margin-left: auto;
+  display: flex;
+  gap: 0.25rem;
+  flex: none;
+}
+.nw-phone-shell .nw-phone-seg__btn {
+  min-height: 40px;
+  padding: 0 0.625rem;
+  border-radius: 9999px;
+  font-size: 0.8125rem;
+}
+/* The Template Library (Builder) action: top-right of the note bar, its own
+   control beside the note-mode segment; on a narrow screen it keeps the
+   right edge of the next row rather than squeezing the segment. */
+.nw-phone-shell .nw-phone-notebar__builder {
+  margin-left: auto;
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+/* WHO OWNS THE HEIGHT. The phone shell is a chain of column flex boxes from
+   its fixed 100dvh frame down to the note workspace, every link sized by
+   FLEX (`flex: 1 1 auto; min-height: 0`), never by a percentage: a
+   percentage height inside a flexed box is not reliably resolvable on iOS
+   WebKit, and MainArea's `h-full` main — correct on the desktop, where its
+   parent has an explicit height — resolved to its content height here, so
+   the document region grew to the document's height instead of the space
+   left, and the composer was pushed under the navigation. So on the phone:
+   the workspace is a column flex box; the main is a flexed column item; the
+   document region (the desktop's grid) is a column flex box whose scroller
+   (#chatWindow) takes the remaining height and scrolls, and whose composer
+   keeps its natural height beneath it. The mini-bar and the bottom
+   navigation are siblings of the content column in the shell, so the space
+   they take is subtracted by the same flex layout — no offsets anywhere. */
+.nw-phone-note-workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The shared note workspace (MainArea), phone presentation. */
+.nw-phone-note-workspace > main {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  padding: 0.5rem;
+  gap: 0.5rem;
+}
+/* The document region: the desktop's `grid grid-rows-[1fr_auto]`, as a
+   column flex box here so its rows are sized by flex, not by a grid track
+   that needs a definite height. */
+.nw-phone-note-workspace > main > .grid {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.nw-phone-shell #chatWindow {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+}
+.nw-phone-shell #chatWindow + div {
+  flex: none;
+}
+.nw-phone-shell [data-nw-note-header] {
+  min-height: 0;
+  gap: 0.375rem;
+}
+.nw-phone-shell [data-nw-note-actions] {
+  justify-content: flex-start;
+}
+.nw-phone-shell [data-nw-note-header] button {
+  min-height: 40px;
+}
+
+/* The Template form's editing chrome sits in the shell's slot ABOVE the zoomed
+   document, at UI size. On a phone its hints wrap beneath the action and read
+   left-aligned; nothing here may be wider than the screen. */
+.nw-phone-shell [data-nw-template-chrome] {
+  min-width: 0;
+  padding: 0 0.5rem;
+}
+.nw-phone-shell [data-nw-template-chrome] .nw-tpl-chrome__hints {
+  flex: 1 1 100%;
+  text-align: left;
+}
+.nw-phone-shell [data-nw-template-chrome] select {
+  max-width: 100%;
+}
+
+/* The Quick Add composer: the two absolutely-positioned control rows become
+   ordinary rows under the text, controls first, so nothing overlaps at phone
+   width and every control is a real touch target.
+
+   THE WIDTH BUDGET of the primary action rail, which is ONE ROW by policy at
+   every supported phone width, 375 px included. Seven 44 px circles with six
+   4 px gaps need 332 px. Between the screen edge and the rail sit, per side:
+   the note workspace's main padding (0.5rem, shared with the document), the
+   composer container (0.25rem), the composer root (0), the composer box
+   (0.375rem) and its 1 px border — 19 px a side, 38 px in all — leaving
+   337 px at 375 px. Nothing is shrunk below its touch target to get there;
+   only insets and gaps are compact. */
+.nw-phone-shell [data-nw-quickadd-header] button {
+  min-width: 40px;
+  min-height: 40px;
+}
+.nw-phone-shell [data-nw-quickadd-composer] {
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+}
+.nw-phone-shell [data-nw-quickadd-root] {
+  padding: 0 0 0.25rem;
+}
+.nw-phone-shell [data-nw-quickadd-box] {
+  display: flex;
+  flex-direction: column;
+  padding: 0.5rem 0.375rem;
+}
+.nw-phone-shell [data-nw-quickadd-box] textarea {
+  max-height: 34vh !important;
+}
+.nw-phone-shell [data-nw-quickadd-controls],
+.nw-phone-shell [data-nw-quickadd-status] {
+  position: static;
+  row-gap: 0.375rem;
+}
+.nw-phone-shell [data-nw-quickadd-status] {
+  flex-wrap: wrap;
+}
+/* The PRIMARY rail never wraps (its budget above is met by policy). Only an
+   EXTENDED rail — Discard dictation while recording, Revert after a refine —
+   may wrap onto a second line rather than run past the composer's edge. */
+.nw-phone-shell [data-nw-quickadd-controls] {
+  order: 1;
+  flex-wrap: nowrap;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  margin-top: 0.375rem;
+}
+.nw-phone-shell [data-nw-quickadd-rail="extended"] {
+  flex-wrap: wrap;
+}
+.nw-phone-shell [data-nw-quickadd-status] {
+  order: 2;
+  gap: 0.5rem;
+  margin-top: 0.375rem;
+}
+/* A native select sizes itself to its longest option ("NZTM (New Zealand
+   Transverse Mercator)" at 16 px is wider than a phone's status row), so no
+   status-row control may be wider than the row itself. */
+.nw-phone-shell [data-nw-quickadd-status] > * {
+  max-width: 100%;
+  min-width: 0;
+}
+.nw-phone-shell [data-nw-quickadd-controls] button {
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
+}
+
+/* THE ACTION RAIL'S ONE GEOMETRY. Every ordinary control (plus, camera,
+   discard, language, microphone, AI, revert, delete) and Send are the same
+   44 px circle: no padding of their own, the icon centred by flex, one icon
+   size, so nothing sits higher or lower than its neighbour. The microphone's
+   circle is its wrapper and its button fills it; the language control's
+   circle is its chip and its face fills it. */
+.nw-phone-shell [data-nw-quickadd-action],
+.nw-phone-shell [data-nw-quickadd-send],
+.nw-phone-shell .nw-voice-lang-compact--icon {
+  box-sizing: border-box;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  margin: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  line-height: 1;
+  font-size: 1.0625rem;
+}
+.nw-phone-shell [data-nw-quickadd-action] svg,
+.nw-phone-shell [data-nw-quickadd-send] svg,
+.nw-phone-shell .nw-voice-lang-compact--icon svg {
+  display: block;
+  width: 1.125rem;
+  height: 1.125rem;
+}
+.nw-phone-shell [data-nw-quickadd-action] > button[data-voice-phase] {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+}
+.nw-phone-shell .nw-voice-lang-compact--icon .nw-voice-lang-compact-face {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  padding: 0;
+  border-radius: 9999px;
+  border-color: rgb(209 213 219);
+  background-color: #ffffff;
+  color: rgb(55 65 81);
+}
+.dark .nw-phone-shell .nw-voice-lang-compact--icon .nw-voice-lang-compact-face {
+  border-color: rgb(75 85 99);
+  background-color: #1b1b1b;
+  color: rgb(229 231 235);
+}
+
+/* THE FORMATTING TOOLBAR on a phone: one row — [Format] … [zoom · status].
+   The formatting controls themselves open in the phone SHEET below
+   (`.nw-phone-dialog`, PhoneSheet.js), never inline: a closed sheet is
+   `hidden` and an open one is a fixed overlay, so in neither state does the
+   toolbar take the document's height. Inside the sheet the controls root
+   wraps GROUPS, and a group wider than the screen wraps inside itself
+   instead of clipping (a group is a non-wrapping row on the desktop; the
+   text-style group alone is wider than a phone). Nothing is hidden, scaled
+   or scrolled sideways; no height is fixed. */
+.nw-phone-shell [data-nw-editor-toolbar] {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+}
+.nw-phone-shell [data-nw-toolbar-status] {
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.nw-phone-shell [data-nw-formatting-controls] {
+  min-width: 0;
+  max-width: 100%;
+}
+.nw-phone-shell [data-nw-formatting-controls] > div {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.nw-phone-shell [data-nw-formatting-controls] select {
+  min-width: 0;
+  max-width: 100%;
+}
+.nw-phone-shell [data-nw-formatting-controls] button,
+.nw-phone-shell [data-nw-formatting-controls] input[type="color"] {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+/* ------------------------------------------------------- phone dialogs */
+
+/* THE PHONE SHEET: a full-screen dialog for a surface too tall to sit inline
+   on a phone — the note's formatting controls, the Template Builder's ribbon
+   (PhoneSheet.js) — and the presentation the App-owned Template Library /
+   Builder modal takes inside this shell (TemplateBuilderModal.js). Fixed to
+   the viewport, so it takes no space in the shell's column and covers the
+   navigation while open; the panel keeps the safe-area insets, its header
+   stays put, and its BODY is the one thing that scrolls — vertically only.
+   Nothing here is scaled, and no height is a device number. */
+.nw-phone-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.4);
+}
+.nw-phone-dialog[hidden] {
+  display: none !important;
+}
+.nw-phone-dialog__panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.nw-phone-dialog__header {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+  min-width: 0;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+.dark .nw-phone-dialog__header {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+.nw-phone-dialog__header button {
+  min-height: 44px;
+}
+.nw-phone-dialog__title {
+  margin: 0;
+  min-width: 0;
+  font-size: 1.125rem;
+  line-height: 1.3;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.nw-phone-dialog__close {
+  flex: none;
+}
+.nw-phone-dialog__body {
+  min-width: 0;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.nw-phone-dialog__body--scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.75rem 1rem 1rem;
+}
+
+/* DOCUMENT PREVIEW in the phone dialog (DocumentPreviewDialog.js). Its
+   desktop header is ONE row whose action group never shrinks — Format,
+   Refresh, Download and Close at their full widths — which is wider than a
+   phone, so the card clipped it and Close (last) was cut off entirely. Here
+   Close sits beside the title in the sheet header; Format takes the full
+   width on its own line; Refresh and Download share a row and stack when
+   they do not fit. Every control is a 44 px target and nothing is hidden,
+   scaled or scrolled sideways. The preview BODY takes the remaining height
+   and owns the scrolling: the surface inside it (the PDF / HTML frame, the
+   Markdown source) normally scrolls itself, and if an engine sizes a frame
+   to its content the body scrolls instead — never the panel or the shell. */
+.nw-phone-doc-preview__heading {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.nw-phone-doc-preview__controls {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.5rem 1rem 0.75rem;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+.dark .nw-phone-doc-preview__controls {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+.nw-phone-dialog [data-nw-doc-preview-format] {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.25rem;
+  min-width: 0;
+  font-size: 0.8125rem;
+}
+.nw-phone-dialog [data-nw-doc-preview-format] select {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+.nw-phone-doc-preview__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.nw-phone-doc-preview__actions button {
+  flex: 1 1 8rem;
+  min-width: 0;
+  min-height: 44px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 0.9375rem;
+}
+.nw-phone-dialog [data-nw-doc-preview-body] {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* THE TEMPLATE LIBRARY in the phone dialog. Its desktop row is ONE
+   horizontal line — name and date beside a non-shrinking group of five text
+   actions — which cannot fit a phone: the group kept its full width and the
+   actions collided with the date. Here the row STACKS: name and date first,
+   then the actions as a wrapping row of real touch targets, all inside the
+   dialog's width. The library's own title and sentence are the dialog
+   header's, so that copy is dropped here and only here. */
+.nw-phone-dialog [data-nw-template-library-intro] {
+  display: none;
+}
+.nw-phone-dialog [data-nw-template-library-create] {
+  width: 100%;
+  min-height: 44px;
+  justify-content: center;
+  font-size: 0.9375rem;
+}
+.nw-phone-dialog [data-nw-template-item] {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+.nw-phone-dialog [data-nw-template-item-summary] {
+  min-width: 0;
+}
+.nw-phone-dialog [data-nw-template-item-name] {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.nw-phone-dialog [data-nw-template-item-actions] {
+  flex-shrink: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 0.5rem;
+}
+.nw-phone-dialog [data-nw-template-item-actions] button {
+  min-height: 44px;
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+  font-size: 0.9375rem;
+}
+
+/* THE TEMPLATE BUILDER in the phone dialog. The editing ribbon renders in its
+   own sheet behind "Template tools" (TemplateBuilderDoc.js); inside it every
+   ribbon group wraps within the sheet's width and its controls are touch
+   targets. The collapsible Document branding panel and the Submit control in
+   the document scroller get the same target size. The A4 page itself keeps
+   the paged document's own sideways scroller (pagedDocument.css), exactly as
+   the note's Template form does on the phone. */
+.nw-phone-shell [data-nw-template-ribbon] {
+  min-width: 0;
+  max-width: 100%;
+}
+.nw-phone-shell [data-nw-template-ribbon] .nw-ribbon-group,
+.nw-phone-shell [data-nw-template-ribbon] .nw-ribbon-group > div {
+  min-width: 0;
+  max-width: 100%;
+}
+.nw-phone-shell [data-nw-template-ribbon] button,
+.nw-phone-shell [data-nw-template-ribbon] select,
+.nw-phone-shell [data-nw-template-ribbon] input[type="text"],
+.nw-phone-shell [data-nw-template-ribbon] input[type="number"],
+.nw-phone-shell [data-nw-template-ribbon] input[type="color"],
+.nw-phone-shell .branding-panel button,
+.nw-phone-shell .branding-panel input[type="color"],
+.nw-phone-shell [data-nw-template-submit] {
+  min-height: 40px;
+}
+.nw-phone-shell [data-nw-template-ribbon] input[type="checkbox"],
+.nw-phone-shell .branding-panel input[type="checkbox"] {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+.nw-phone-shell [data-nw-template-ribbon] select {
+  max-width: 100%;
+}
+
+/* Image controls inside the editor: real touch targets. */
+.nw-phone-shell .nw-editor-root .nw-media-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+}
+
+/* The photo annotator: inside the safe area, not under the notch or the home
+   indicator. */
+.nw-phone-shell [data-photo-annotator="true"] {
+  height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 1rem);
+  max-height: none;
+  margin-top: env(safe-area-inset-top, 0px);
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+.nw-phone-shell [data-photo-annotator="true"] [role="toolbar"] button {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+/* ------------------------------------------------------ Listen In screen */
+
+.nw-li-phone {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.nw-li-phone [data-listen-in-state] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title close"
+    "time time"
+    "status status"
+    "language language"
+    "record record"
+    "complete complete";
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  padding: 0.75rem 1rem;
+}
+.nw-li-phone [data-listen-in-part="title"] {
+  grid-area: title;
+  font-size: 1.375rem;
+}
+.nw-li-phone [data-listen-in-control="close"] {
+  grid-area: close;
+  min-height: 44px;
+  padding: 0 1rem;
+  font-size: 0.9375rem;
+}
+.nw-li-phone [data-listen-in-part="elapsed"] {
+  grid-area: time;
+  font-size: 2.25rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+/* The header's one status sentence (its only direct role="status" child). */
+.nw-li-phone [data-listen-in-state] > [role="status"] {
+  grid-area: status;
+  font-size: 0.9375rem;
+}
+.nw-li-phone [data-listen-in-part="language"] {
+  grid-area: language;
+  margin-left: 0;
+  justify-content: space-between;
+  font-size: 0.9375rem;
+}
+.nw-li-phone [data-listen-in-part="language"] select {
+  min-height: 44px;
+}
+.nw-li-phone [data-listen-in-control="record"] {
+  grid-area: record;
+  width: 100%;
+  min-height: 56px;
+  justify-content: center;
+  font-size: 1.0625rem;
+}
+.nw-li-phone [data-listen-in-control="complete"] {
+  grid-area: complete;
+  width: 100%;
+  min-height: 48px;
+  font-size: 1rem;
+}
+
+.nw-li-phone button {
+  min-height: 44px;
+}
+.nw-li-phone [data-listen-in-control="export"],
+.nw-li-phone [data-listen-in-control="copy-transcript"],
+.nw-li-phone [data-listen-in-control="copy-summary"],
+.nw-li-phone [data-listen-in-control="clear"],
+.nw-li-phone [data-listen-in-control="discard"] {
+  padding: 0 1rem;
+  font-size: 0.9375rem;
+}
+.nw-li-phone [data-listen-in-control="summarise"] {
+  width: 100%;
+  min-height: 48px;
+  font-size: 1rem;
+}
+.nw-li-phone [data-listen-in-section] p,
+.nw-li-phone [data-listen-in-section] li {
+  font-size: 0.9375rem;
+}
+
+/* ------------------------------------------------------------ PDF viewer */
+
+.nw-phone-pdf {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.nw-phone-pdf-viewer {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.nw-phone-pdf-toolbar,
+.nw-phone-pdf-find {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0.25rem 0.375rem;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+.dark .nw-phone-pdf-toolbar,
+.dark .nw-phone-pdf-find {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+.nw-phone-pdf-find {
+  flex-wrap: wrap;
+}
+.nw-phone-pdf-find input {
+  flex: 1 1 8rem;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 0.625rem;
+  border: 1px solid rgba(15, 23, 42, 0.2);
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+}
+.nw-phone-pdf-find-status {
+  flex-basis: 100%;
+  padding: 0 0.25rem 0.25rem;
+  font-size: 0.8125rem;
+  color: var(--nw-nav-muted-text);
+}
+.nw-phone-pdf-find-status:empty {
+  display: none;
+}
+
+.nw-phone-pdf-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  font-size: 1rem;
+}
+.nw-phone-pdf-btn:disabled {
+  color: var(--nw-state-disabled-text);
+}
+.nw-phone-pdf-btn[aria-pressed="true"],
+.nw-phone-pdf-btn[aria-expanded="true"] {
+  background: var(--nw-nav-selected-bg);
+  color: var(--nw-nav-active-text);
+}
+.nw-phone-pdf-btn:focus-visible {
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: -2px;
+}
+.nw-phone-pdf-pageno {
+  flex: none;
+  min-width: 6.5rem;
+  text-align: center;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+.nw-phone-pdf-spacer {
+  flex: 1 1 auto;
+}
+
+.nw-phone-pdf-notice,
+.nw-phone-pdf-state {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  font-size: 0.9375rem;
+}
+.nw-phone-pdf-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.nw-phone-pdf-scroller {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: #eceef1;
+}
+.dark .nw-phone-pdf-scroller {
+  background: #0b0f14;
+}
+.nw-phone-pdf-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
+}
+.nw-phone-pdf-page {
+  flex: none;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}

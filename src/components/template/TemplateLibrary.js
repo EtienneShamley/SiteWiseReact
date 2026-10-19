@@ -114,15 +114,18 @@ export default function TemplateLibrary({ onEditTemplate }) {
   }
 
   return (
-    <div className="p-4 text-black dark:text-white">
+    <div className="p-4 text-black dark:text-white" data-nw-template-library>
       <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
-        <div className="min-w-0">
+        {/* The phone dialog's own header already carries this title and
+            sentence, so the phone stylesheet drops this copy of them there
+            (mobileShell.css); the desktop shows both, as before. */}
+        <div className="min-w-0" data-nw-template-library-intro>
           <h1 className="text-xl font-semibold">Template Library</h1>
           <p className="text-sm text-gray-600 dark:text-gray-300">
             Create and manage reusable templates for structured notes and reports.
           </p>
         </div>
-        <button className={primaryBtnCls} onClick={handleCreate}>
+        <button className={primaryBtnCls} onClick={handleCreate} data-nw-template-library-create>
           Create template
         </button>
       </div>
@@ -132,7 +135,7 @@ export default function TemplateLibrary({ onEditTemplate }) {
           Create a reusable template for structured notes and reports.
         </p>
       ) : (
-        <ul className="space-y-2">
+        <ul className="space-y-2" data-nw-template-list>
           {templates.map((tpl) => {
             // Being the default is a CONFIGURATION property of a template, not
             // the user's current location — so it takes no active-navigation
@@ -148,10 +151,15 @@ export default function TemplateLibrary({ onEditTemplate }) {
               className={navItemClass({
                 className: "flex items-center justify-between gap-3 rounded-lg px-3 py-2",
               })}
+              // Phone presentation hooks (mobileShell.css): the row stacks —
+              // name and date above the actions, actions wrapping in full —
+              // instead of the desktop's one horizontal row. Desktop classes
+              // above are untouched.
+              data-nw-template-item
             >
-              <div className="min-w-0">
+              <div className="min-w-0" data-nw-template-item-summary>
                 <div className="flex items-center gap-2">
-                  <span className="font-medium truncate">
+                  <span className="font-medium truncate" data-nw-template-item-name>
                     {tpl.name || "Untitled"}
                   </span>
                   {/* A status chip, not a control and not a location: no hover,
@@ -171,7 +179,10 @@ export default function TemplateLibrary({ onEditTemplate }) {
 
               {/* Every action names the template it acts on in its accessible
                   name, so a row of repeated verbs is never ambiguous. */}
-              <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+              <div
+                className="flex items-center gap-2 shrink-0 flex-wrap justify-end"
+                data-nw-template-item-actions
+              >
                 <button
                   className={btnCls}
                   onClick={() => onEditTemplate && onEditTemplate(tpl.id)}

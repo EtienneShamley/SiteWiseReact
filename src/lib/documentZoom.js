@@ -20,15 +20,39 @@
 //
 // Pure except for the two storage helpers, which never throw.
 
-/** The zoom ladder, ascending. 100 is the default and always present. */
+/** The DESKTOP zoom ladder, ascending. 100 is the default and always present. */
 export const DOCUMENT_ZOOM_LEVELS = Object.freeze([75, 90, 100, 110, 125, 150]);
+
+/**
+ * The PHONE zoom ladder (Phase 8E.1). A phone needs to zoom a whole sheet out
+ * far enough to see it — 25% of A4 on a 375 px screen — so its ladder extends
+ * below the desktop's; the upper half is the desktop ladder, so 100% means the
+ * same thing on both. The ladder is a SHELL policy, chosen once by the shell
+ * (`documentZoomLevelsForShell`), never a per-editor conditional.
+ */
+export const PHONE_DOCUMENT_ZOOM_LEVELS = Object.freeze([25, 40, 50, 60, 75, 90, 100, 110, 125, 150]);
+
+/** Every value any ladder can hold, ascending — what a stored or rendered value is validated against. */
+export const ALL_DOCUMENT_ZOOM_LEVELS = Object.freeze(
+  [...new Set([...DOCUMENT_ZOOM_LEVELS, ...PHONE_DOCUMENT_ZOOM_LEVELS])].sort((a, b) => a - b)
+);
 
 export const DEFAULT_DOCUMENT_ZOOM = 100;
 export const MIN_DOCUMENT_ZOOM = DOCUMENT_ZOOM_LEVELS[0];
 export const MAX_DOCUMENT_ZOOM = DOCUMENT_ZOOM_LEVELS[DOCUMENT_ZOOM_LEVELS.length - 1];
+export const MIN_PHONE_DOCUMENT_ZOOM = PHONE_DOCUMENT_ZOOM_LEVELS[0];
 
-export function isDocumentZoom(value) {
-  return DOCUMENT_ZOOM_LEVELS.indexOf(value) !== -1;
+/** The ladder a shell composition steps through: "phone" → the phone ladder, anything else → desktop. */
+export function documentZoomLevelsForShell(shell) {
+  return shell === "phone" ? PHONE_DOCUMENT_ZOOM_LEVELS : DOCUMENT_ZOOM_LEVELS;
+}
+
+function ladder(levels) {
+  return Array.isArray(levels) && levels.length > 0 ? levels : DOCUMENT_ZOOM_LEVELS;
+}
+
+export function isDocumentZoom(value, levels = DOCUMENT_ZOOM_LEVELS) {
+  return ladder(levels).indexOf(value) !== -1;
 }
 
 /**
@@ -37,7 +61,10 @@ export function isDocumentZoom(value) {
  * value from a future version — falls back to 100% rather than to the nearest
  * end of the scale, because "unreadable" is not the same as "very small".
  */
-export function normalizeDocumentZoom(value) {
+export function normalizeDocumentZoom(value, levels = DOCUMENT_ZOOM_LEVELS) {
+  const steps = ladder(levels);
+  const min = steps[0];
+  const max = steps[steps.length - 1];
   // Only a real number, or a string that is one (which is what comes back out
   // of storage), is a zoom. Everything else falls back to the default rather
   // than being coerced: `Number(true)` is 1 and `Number("")` is 0, and both
@@ -50,12 +77,12 @@ export function normalizeDocumentZoom(value) {
       ? Number(value)
       : NaN;
   if (!Number.isFinite(n)) return DEFAULT_DOCUMENT_ZOOM;
-  if (n <= MIN_DOCUMENT_ZOOM) return MIN_DOCUMENT_ZOOM;
-  if (n >= MAX_DOCUMENT_ZOOM) return MAX_DOCUMENT_ZOOM;
+  if (n <= min) return min;
+  if (n >= max) return max;
   // Nearest step; a tie resolves downward, so a value never silently magnifies.
-  let best = DOCUMENT_ZOOM_LEVELS[0];
+  let best = steps[0];
   let bestGap = Math.abs(n - best);
-  for (const level of DOCUMENT_ZOOM_LEVELS) {
+  for (const level of steps) {
     const gap = Math.abs(n - level);
     if (gap < bestGap) {
       best = level;
@@ -66,39 +93,51 @@ export function normalizeDocumentZoom(value) {
 }
 
 /** The next step up the ladder — the maximum stays the maximum. */
-export function zoomIn(value) {
-  const current = normalizeDocumentZoom(value);
-  const index = DOCUMENT_ZOOM_LEVELS.indexOf(current);
-  return DOCUMENT_ZOOM_LEVELS[Math.min(index + 1, DOCUMENT_ZOOM_LEVELS.length - 1)];
+export function zoomIn(value, levels = DOCUMENT_ZOOM_LEVELS) {
+  const steps = ladder(levels);
+  const current = normalizeDocumentZoom(value, steps);
+  const index = steps.indexOf(current);
+  return steps[Math.min(index + 1, steps.length - 1)];
 }
 
 /** The next step down the ladder — the minimum stays the minimum. */
-export function zoomOut(value) {
-  const current = normalizeDocumentZoom(value);
-  const index = DOCUMENT_ZOOM_LEVELS.indexOf(current);
-  return DOCUMENT_ZOOM_LEVELS[Math.max(index - 1, 0)];
+export function zoomOut(value, levels = DOCUMENT_ZOOM_LEVELS) {
+  const steps = ladder(levels);
+  const current = normalizeDocumentZoom(value, steps);
+  const index = steps.indexOf(current);
+  return steps[Math.max(index - 1, 0)];
 }
 
-export function canZoomIn(value) {
-  return normalizeDocumentZoom(value) < MAX_DOCUMENT_ZOOM;
+export function canZoomIn(value, levels = DOCUMENT_ZOOM_LEVELS) {
+  const steps = ladder(levels);
+  return normalizeDocumentZoom(value, steps) < steps[steps.length - 1];
 }
 
-export function canZoomOut(value) {
-  return normalizeDocumentZoom(value) > MIN_DOCUMENT_ZOOM;
+export function canZoomOut(value, levels = DOCUMENT_ZOOM_LEVELS) {
+  const steps = ladder(levels);
+  return normalizeDocumentZoom(value, steps) > steps[0];
 }
 
 export function isDefaultDocumentZoom(value) {
-  return normalizeDocumentZoom(value) === DEFAULT_DOCUMENT_ZOOM;
+  return normalizeDocumentZoom(value, ALL_DOCUMENT_ZOOM_LEVELS) === DEFAULT_DOCUMENT_ZOOM;
 }
 
-/** The CSS `zoom` factor for a percentage — 125 → 1.25. */
+/**
+ * The CSS `zoom` factor for a percentage — 125 → 1.25, 25 → 0.25.
+ *
+ * A VALUE is valid on any ladder (a phone's 25% must render at 0.25 wherever
+ * it is drawn), so this validates against every ladder; only STEPPING is
+ * ladder-specific. The factor is strictly increasing in the percentage — that
+ * is the whole meaning of the control, and `freeformPaperScale.js` /
+ * `pagedDocument.css` are what turn it into a sheet that grows with it.
+ */
 export function zoomScale(value) {
-  return normalizeDocumentZoom(value) / 100;
+  return normalizeDocumentZoom(value, ALL_DOCUMENT_ZOOM_LEVELS) / 100;
 }
 
 /** The visible label. The unit is part of the value, never a separate glyph. */
 export function documentZoomLabel(value) {
-  return `${normalizeDocumentZoom(value)}%`;
+  return `${normalizeDocumentZoom(value, ALL_DOCUMENT_ZOOM_LEVELS)}%`;
 }
 
 /**
@@ -145,12 +184,14 @@ function defaultStorage() {
  * The remembered zoom, always a valid ladder value. A missing, corrupt,
  * out-of-range or future value reads as 100% — never as a broken layout.
  */
-export function loadDocumentZoom(storage = defaultStorage()) {
+export function loadDocumentZoom(storage = defaultStorage(), levels = DOCUMENT_ZOOM_LEVELS) {
   if (!storage) return DEFAULT_DOCUMENT_ZOOM;
   try {
     const raw = storage.getItem(DOCUMENT_ZOOM_STORAGE_KEY);
     if (raw === null || raw === undefined) return DEFAULT_DOCUMENT_ZOOM;
-    return normalizeDocumentZoom(raw);
+    // Snapped to the READING shell's ladder: a 25% chosen on a phone opens on
+    // a desktop at that ladder's nearest step, never as a control it cannot step.
+    return normalizeDocumentZoom(raw, levels);
   } catch {
     return DEFAULT_DOCUMENT_ZOOM;
   }
@@ -160,7 +201,7 @@ export function loadDocumentZoom(storage = defaultStorage()) {
 export function saveDocumentZoom(value, storage = defaultStorage()) {
   if (!storage) return;
   try {
-    storage.setItem(DOCUMENT_ZOOM_STORAGE_KEY, String(normalizeDocumentZoom(value)));
+    storage.setItem(DOCUMENT_ZOOM_STORAGE_KEY, String(normalizeDocumentZoom(value, ALL_DOCUMENT_ZOOM_LEVELS)));
   } catch {
     // Storage full or unavailable: the session keeps its own choice.
   }

@@ -25,6 +25,8 @@ import React from "react";
 import { EditorContent } from "@tiptap/react";
 import useFreeformPageGuides from "../../hooks/useFreeformPageGuides";
 import { FREEFORM_PAGE_GUIDE_CAPTION } from "../../lib/freeformPageGuides";
+import { FREEFORM_ZOOM_SCALE_VAR } from "../../lib/freeformPaperScale";
+import { zoomScale } from "../../lib/documentZoom";
 import FreeformPageGuideLayer from "./FreeformPageGuideLayer";
 import "./freeformPagedEditor.css";
 
@@ -49,8 +51,14 @@ export default function FreeformPagedEditor({ editor, documentZoom }) {
   const columnStyle =
     columnHeightPx > 0 ? { minHeight: `${columnHeightPx}px` } : undefined;
 
+  // The zoom SCALE, published to the stylesheet so the sheet's width can be
+  // held at its 100% layout width and drawn at the scale — the one rule that
+  // makes the Free-form sheet shrink and grow with the percentage like the
+  // Template's does (src/lib/freeformPaperScale.js). Presentation only.
+  const shellStyle = { [FREEFORM_ZOOM_SCALE_VAR]: zoomScale(documentZoom) };
+
   return (
-    <div className="nw-ff-paged-shell">
+    <div className="nw-ff-paged-shell" style={shellStyle}>
       {/* One honest caption, shown once — never per page, never inside
           EditorContent, never live (announcing it on every keystroke would be
           noise). It is what turns an approximate layout into an accurate claim:

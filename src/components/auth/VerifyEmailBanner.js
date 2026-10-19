@@ -53,6 +53,7 @@ export default function VerifyEmailBanner() {
     <div
       className="fixed top-0 inset-x-0 z-50 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2 text-sm bg-amber-100 dark:bg-amber-900 text-amber-900 dark:text-amber-100 border-b border-amber-300 dark:border-amber-700 shadow"
       role="status"
+      data-nw-verify-banner
     >
       <span className="min-w-0">
         {notice || VERIFY_EMAIL_BANNER_TEXT}

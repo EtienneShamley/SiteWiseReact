@@ -24,8 +24,10 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>NoteWise uses the camera when you take a photo to add to a note.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>NoteWise uses the microphone to record short voice notes for Quick Add dictation and for Live transcript, and transcribes them into text you can edit before adding to a note.</string>
+	<string>NoteWise uses the microphone for Dictate and Listen In recording, and transcribes what you record into text you can review.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -17,6 +17,9 @@ import {
   isDocumentZoom,
   layoutPxFromVisualPx,
   loadDocumentZoom,
+  MIN_PHONE_DOCUMENT_ZOOM,
+  PHONE_DOCUMENT_ZOOM_LEVELS,
+  documentZoomLevelsForShell,
   normalizeDocumentZoom,
   saveDocumentZoom,
   zoomIn,
@@ -152,6 +155,75 @@ describe("layoutPxFromVisualPx — the single zoom compensation", () => {
     // An unusable ZOOM falls back to the default scale of 1, not to a divide
     // by zero.
     expect(layoutPxFromVisualPx(120, "nonsense")).toBe(120);
+  });
+});
+
+/* ============ the two ladders: desktop 75–150, phone 25–150 ============== */
+
+describe("zoom ladders are a SHELL policy", () => {
+  test("1/2. the phone ladder reaches 25% and 50%, never 0%, and 100% is the shared reference", () => {
+    expect(PHONE_DOCUMENT_ZOOM_LEVELS).toEqual([25, 40, 50, 60, 75, 90, 100, 110, 125, 150]);
+    expect(MIN_PHONE_DOCUMENT_ZOOM).toBe(25);
+    expect(PHONE_DOCUMENT_ZOOM_LEVELS).toContain(50);
+    expect(PHONE_DOCUMENT_ZOOM_LEVELS).toContain(100);
+    expect(PHONE_DOCUMENT_ZOOM_LEVELS).toContain(150);
+    for (const value of [0, 1, 10, -20, "0", 24]) {
+      expect(normalizeDocumentZoom(value, PHONE_DOCUMENT_ZOOM_LEVELS)).toBe(25);
+    }
+    expect(zoomOut(25, PHONE_DOCUMENT_ZOOM_LEVELS)).toBe(25);
+    expect(canZoomOut(25, PHONE_DOCUMENT_ZOOM_LEVELS)).toBe(false);
+    expect(zoomScale(0)).toBeGreaterThan(0);
+  });
+
+  test("3. the desktop ladder is exactly what it was", () => {
+    expect(DOCUMENT_ZOOM_LEVELS).toEqual([75, 90, 100, 110, 125, 150]);
+    expect(documentZoomLevelsForShell("desktop")).toBe(DOCUMENT_ZOOM_LEVELS);
+    expect(documentZoomLevelsForShell(undefined)).toBe(DOCUMENT_ZOOM_LEVELS);
+    expect(documentZoomLevelsForShell("phone")).toBe(PHONE_DOCUMENT_ZOOM_LEVELS);
+    // The default ladder of every stepping helper is still the desktop's.
+    expect(zoomOut(75)).toBe(75);
+    expect(normalizeDocumentZoom(25)).toBe(75);
+    expect(canZoomOut(75)).toBe(false);
+  });
+
+  test("4/5. minus decreases and plus increases the displayed percentage, on both ladders", () => {
+    for (const levels of [DOCUMENT_ZOOM_LEVELS, PHONE_DOCUMENT_ZOOM_LEVELS]) {
+      for (let i = 1; i < levels.length; i += 1) {
+        expect(zoomOut(levels[i], levels)).toBe(levels[i - 1]);
+        expect(zoomIn(levels[i - 1], levels)).toBe(levels[i]);
+      }
+    }
+    // Walking the phone ladder down from 100% with the minus button.
+    const walk = [];
+    let at = 100;
+    while (canZoomOut(at, PHONE_DOCUMENT_ZOOM_LEVELS)) {
+      at = zoomOut(at, PHONE_DOCUMENT_ZOOM_LEVELS);
+      walk.push(at);
+    }
+    expect(walk).toEqual([90, 75, 60, 50, 40, 25]);
+  });
+
+  test("a VALUE from either ladder renders and labels at its own percentage; only stepping snaps", () => {
+    expect(zoomScale(25)).toBe(0.25);
+    expect(zoomScale(50)).toBe(0.5);
+    expect(documentZoomLabel(25)).toBe("25%");
+    expect(isDefaultDocumentZoom(25)).toBe(false);
+    expect(isDefaultDocumentZoom(100)).toBe(true);
+    // Garbage still reads as 100%, and out-of-range values clamp to the union's ends.
+    expect(zoomScale("nonsense")).toBe(1);
+    expect(zoomScale(999)).toBe(1.5);
+    expect(zoomScale(3)).toBe(0.25);
+  });
+
+  test("the remembered preference is snapped to the READING shell's ladder", () => {
+    const storage = memStorage();
+    saveDocumentZoom(25, storage);
+    expect(storage.dump()[DOCUMENT_ZOOM_STORAGE_KEY]).toBe("25");
+    expect(loadDocumentZoom(storage, PHONE_DOCUMENT_ZOOM_LEVELS)).toBe(25);
+    expect(loadDocumentZoom(storage)).toBe(75);
+    saveDocumentZoom(125, storage);
+    expect(loadDocumentZoom(storage, PHONE_DOCUMENT_ZOOM_LEVELS)).toBe(125);
+    expect(loadDocumentZoom(storage)).toBe(125);
   });
 });
 

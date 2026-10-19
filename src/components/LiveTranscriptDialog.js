@@ -451,10 +451,33 @@ function TranscriptSection({ session, blocks, pending = 0, ready = false, onCopy
 /* ------------------------------- the window ------------------------------ */
 
 /**
- * Takes no props: everything it shows comes from the one session.
+ * The two presentations of the ONE Listen In workspace (Phase 8E.1). The
+ * desktop DIALOG floats over the application shell; the PHONE presentation is
+ * the phone shell's Listen In screen, a full-height page between the status
+ * bar and the bottom navigation. They share every line of logic, every intent
+ * and every sentence below: only the frame and the phone CSS differ.
+ */
+export const LISTEN_IN_PRESENTATION = Object.freeze({
+  DIALOG: "dialog",
+  PHONE: "phone",
+});
+
+/**
+ * The desktop window. Takes no props: everything it shows comes from the one
+ * session.
  */
 export default function LiveTranscriptDialog() {
+  return <ListenInWindow presentation={LISTEN_IN_PRESENTATION.DIALOG} />;
+}
+
+/**
+ * THE LISTEN IN WORKSPACE in either presentation. On the phone, Close is the
+ * same provider `closeWorkspace` — one boolean — so leaving the screen never
+ * stops recording, exactly as closing the desktop window never does.
+ */
+export function ListenInWindow({ presentation = LISTEN_IN_PRESENTATION.DIALOG }) {
   const session = useLiveTranscriptSession();
+  const phone = presentation === LISTEN_IN_PRESENTATION.PHONE;
   const titleId = useId();
   const dialogRef = useRef(null);
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -625,22 +648,16 @@ export default function LiveTranscriptDialog() {
   // refusal that has already happened, it does not cause or lift one.
   const budgetExhausted = (paused || interrupted) && !canResume;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4">
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className="w-full max-w-3xl h-[80vh] flex flex-col bg-white dark:bg-gray-900 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 overflow-hidden"
-      >
+  // The workspace itself — identical in both presentations.
+  const workspaceContent = (
+      <>
         {/* THE SESSION HEADER: what this is, what it is doing, how long it has
             been doing it, and the controls that apply to that state. */}
         <div
           className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 shrink-0"
           data-listen-in-state={capture ? capture.state : "idle"}
         >
-          <h2 id={titleId} className="text-sm font-semibold text-gray-900 dark:text-white">
+          <h2 id={titleId} className="text-sm font-semibold text-gray-900 dark:text-white" data-listen-in-part="title">
             Listen In
           </h2>
 
@@ -648,6 +665,7 @@ export default function LiveTranscriptDialog() {
             <span
               className="text-xs tabular-nums text-gray-600 dark:text-gray-300"
               aria-label={`Recorded for ${formatElapsed(elapsedMs)}`}
+              data-listen-in-part="elapsed"
             >
               {formatElapsed(elapsedMs)}
             </span>
@@ -659,7 +677,7 @@ export default function LiveTranscriptDialog() {
             {statusLabel}
           </span>
 
-          <label className="ml-auto flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300">
+          <label className="ml-auto flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300" data-listen-in-part="language">
             <span>Language</span>
             <VoiceLanguageSelect
               value={session.language}
@@ -747,6 +765,7 @@ export default function LiveTranscriptDialog() {
             title={
               canExport ? "Choose what to export and in which format" : "There is nothing to export yet"
             }
+            data-listen-in-control="export"
           >
             Export
           </button>
@@ -922,8 +941,11 @@ export default function LiveTranscriptDialog() {
             </span>
           )}
         </div>
-      </div>
+      </>
+  );
 
+  const exportChooser = (
+      <>
       {/* The export chooser: what to export, then which format. It builds
           nothing itself — every format but plain text comes from the canonical
           NoteWise producers — and the SUMMARY it carries is the session's
@@ -941,6 +963,40 @@ export default function LiveTranscriptDialog() {
         hasSummary={hasSummary}
         hasTranscript={ready}
       />
+      </>
+  );
+
+  // THE PHONE SCREEN: a page in the phone shell's content area, not a modal —
+  // the bottom navigation and the rest of NoteWise stay one tap away, and the
+  // shell hides this screen (without touching the session) when the user goes
+  // anywhere else.
+  if (phone) {
+    return (
+      <section
+        ref={dialogRef}
+        aria-labelledby={titleId}
+        className="nw-li-phone bg-white dark:bg-gray-900"
+        data-listen-in-presentation={presentation}
+      >
+        {workspaceContent}
+        {exportChooser}
+      </section>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="w-full max-w-3xl h-[80vh] flex flex-col bg-white dark:bg-gray-900 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 overflow-hidden"
+        data-listen-in-presentation={presentation}
+      >
+        {workspaceContent}
+      </div>
+      {exportChooser}
     </div>
   );
 }

@@ -11,6 +11,8 @@ import { activeCaptureWarning } from "./lib/listenIn/listenInEngine";
 import LiveTranscriptDialog from "./components/LiveTranscriptDialog";
 import { runTemplateMigration } from "./lib/templateMigration";
 import { useAppState } from "./context/AppStateContext";
+import PhoneShell from "./components/mobile/PhoneShell";
+import { PHONE_SHELL_QUERY } from "./lib/mobileShell";
 
 // Surfaces localStorage persistence failures (tree, PDF registry, note links)
 // rather than letting them fail silently.
@@ -18,7 +20,10 @@ function PersistenceErrorBanner() {
   const { persistenceError, clearPersistenceError } = useAppState();
   if (!persistenceError) return null;
   return (
-    <div className="fixed top-0 inset-x-0 z-[60] flex items-center justify-between gap-3 px-4 py-2 text-sm bg-red-600 text-white shadow">
+    <div
+      className="fixed top-0 inset-x-0 z-[60] flex items-center justify-between gap-3 px-4 py-2 text-sm bg-red-600 text-white shadow"
+      data-nw-persistence-banner
+    >
       <span className="truncate">{persistenceError}</span>
       <button className="shrink-0 underline text-xs" onClick={clearPersistenceError}>
         Dismiss
@@ -54,6 +59,12 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarDrawerOpen, setSidebarDrawerOpen] = useState(false);
   const compact = useMediaQuery(SIDEBAR_COMPACT_QUERY);
+  // THE SHELL BOUNDARY (Phase 8E.1). A phone-sized viewport gets the phone
+  // shell's own composition; everything else keeps the desktop shell below,
+  // unchanged. Both render inside the SAME providers, over the same
+  // application state, Listen In engine and stores — only the composition
+  // differs (src/lib/mobileShell.js, src/components/mobile/PhoneShell.js).
+  const phone = useMediaQuery(PHONE_SHELL_QUERY);
   const sidebarIsRail = compact ? !sidebarDrawerOpen : sidebarCollapsed;
   const sidebarOverlay = compact && sidebarDrawerOpen;
   const toggleSidebar = useCallback(() => {
@@ -97,6 +108,30 @@ function App() {
         outside React (src/lib/listenIn/listenInEngine.js), so it survives this
         provider, every layout change and every unmount below it. */}
     <LiveTranscriptProvider>
+      {phone ? (
+        <>
+          <PhoneShell
+            banner={<PersistenceErrorBanner />}
+            onOpenSettings={() => setSettingsOpen(true)}
+            // TEMPLATE LIBRARY (the Template BUILDER) — a workspace action for
+            // creating and managing reusable templates. It is NOT the note's
+            // Template MODE (Free-form / Template on the Note screen); both
+            // exist on the phone exactly as they do on the desktop.
+            onOpenTemplateLibrary={() => setTemplateLibraryOpen(true)}
+          >
+            {/* The same Settings and Template Library dialogs the desktop
+                sidebar opens — rendered INSIDE the phone shell, so they get
+                its layout context (the Template Library takes its phone
+                presentation from it) and its stylesheet. */}
+            <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+            <TemplateBuilderModal
+              open={templateLibraryOpen}
+              onClose={() => setTemplateLibraryOpen(false)}
+            />
+          </PhoneShell>
+        </>
+      ) : (
+        <>
       {/* The application shell is exactly one viewport tall (h-screen; 100dvh
           where the browser supports it, so mobile browser chrome cannot hide
           the bottom of the workspace). Each column then owns its own vertical
@@ -152,6 +187,8 @@ function App() {
             with the session by MainArea. */}
         <LiveTranscriptDialog />
       </div>
+        </>
+      )}
     </LiveTranscriptProvider>
     </ThemeProvider>
   );

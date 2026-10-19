@@ -1,13 +1,16 @@
 // src/components/VoiceLanguageSelect.js
 import React from "react";
+import { FaGlobe } from "react-icons/fa";
 import {
   TRANSCRIPTION_LANGUAGES,
+  transcriptionLanguageLabel,
   transcriptionLanguageShortLabel,
 } from "../lib/transcriptionLanguage";
 
 export const VOICE_LANGUAGE_SELECT_VARIANT = Object.freeze({
   FIELD: "field",
   COMPACT: "compact",
+  ICON: "icon",
 });
 
 // The ONE option list for every transcription-language control.
@@ -32,6 +35,11 @@ function languageOptions() {
  *              options, keyboard behaviour and the platform picker (iOS/Android
  *              included) are exactly the field's. `label` names it and `title`
  *              explains it.
+ *   icon     — the PHONE composer's action-rail form (Phase 8E.1): the same
+ *              chip structure with a globe as its face, so it takes the rail's
+ *              circular action geometry (mobileShell.css). A face with no
+ *              words needs the state in the name, so the accessible name is
+ *              "<label>: <language>" — "Language: Auto-detect".
  */
 export default function VoiceLanguageSelect({
   value,
@@ -41,18 +49,30 @@ export default function VoiceLanguageSelect({
   label,
   title,
 }) {
-  if (variant === VOICE_LANGUAGE_SELECT_VARIANT.COMPACT) {
-    const name = label || "Transcription language";
+  if (
+    variant === VOICE_LANGUAGE_SELECT_VARIANT.COMPACT ||
+    variant === VOICE_LANGUAGE_SELECT_VARIANT.ICON
+  ) {
+    const icon = variant === VOICE_LANGUAGE_SELECT_VARIANT.ICON;
+    const name = icon
+      ? `${label || "Language"}: ${transcriptionLanguageLabel(value) || transcriptionLanguageLabel("auto")}`
+      : label || "Transcription language";
     return (
       <span
-        className="nw-voice-lang-compact"
+        className={icon ? "nw-voice-lang-compact nw-voice-lang-compact--icon" : "nw-voice-lang-compact"}
         data-disabled={disabled ? "true" : undefined}
       >
         <span className="nw-voice-lang-compact-face" aria-hidden="true">
-          <span className="nw-voice-lang-compact-code">
-            {transcriptionLanguageShortLabel(value)}
-          </span>
-          <span className="nw-voice-lang-compact-caret">▾</span>
+          {icon ? (
+            <FaGlobe />
+          ) : (
+            <>
+              <span className="nw-voice-lang-compact-code">
+                {transcriptionLanguageShortLabel(value)}
+              </span>
+              <span className="nw-voice-lang-compact-caret">▾</span>
+            </>
+          )}
         </span>
         <select
           className="nw-voice-lang-compact-select"

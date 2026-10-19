@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import ResizableTwoColTable from "./ResizableTwoColTable";
 import BrandingPanel from "./BrandingPanel";
 import TemplateEditorRibbon from "./TemplateEditorRibbon";
+import PhoneSheet from "../mobile/PhoneSheet";
+import { SHELL_LAYOUT, useShellLayout } from "../../context/ShellLayoutContext";
 import { HEADER_OBJECT } from "./BrandedDocumentHeader";
 import { useHeaderTextEditor } from "./headerTextEditor";
 import { withHeaderLayout } from "../../lib/templateHeaderLayout";
@@ -56,7 +58,56 @@ import {
   tableLabelFill,
 } from "../../lib/templateBranding";
 import useAssetObjectUrl from "../../hooks/useAssetObjectUrl";
-import { actionButtonClass } from "../../lib/interactionStyles";
+import { actionButtonClass, iconButtonClass } from "../../lib/interactionStyles";
+
+// WHERE THE RIBBON LIVES (Phase 8E.1). On the desktop the Template editing
+// ribbon is rendered exactly where it always was: inline, fixed above the
+// document scroller. On a phone every group of the ribbon wraps and the whole
+// of it is taller than the screen, so it opens in a full-screen sheet behind
+// one "Template tools" control instead — the SAME ribbon element, over the
+// same header text editor and the same selection state TemplateBuilderDoc
+// owns; only its host differs. `data-nw-template-tools` marks both the
+// control and the sheet so a press on either keeps the selection the ribbon
+// acts on (see the deselect rule in TemplateBuilderDoc).
+function TemplateToolsHost({ phone, children }) {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef(null);
+  if (!phone) return children;
+  return (
+    <>
+      <div
+        className="flex items-center gap-2 px-2 py-1 border-b border-gray-200 dark:border-gray-800"
+        data-nw-template-tools
+      >
+        <button
+          ref={buttonRef}
+          type="button"
+          className={iconButtonClass({
+            pressed: open,
+            className: "px-3 py-2 rounded-lg text-sm font-medium min-h-[44px]",
+          })}
+          onClick={() => setOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          data-nw-template-tools-toggle
+        >
+          Template tools
+        </button>
+      </div>
+      <PhoneSheet
+        open={open}
+        title="Template tools"
+        closeLabel="Close template tools"
+        onClose={() => setOpen(false)}
+        returnFocusTo={buttonRef}
+        data-nw-template-tools
+        data-nw-template-tools-sheet
+      >
+        {children}
+      </PhoneSheet>
+    </>
+  );
+}
 
 // Load the template's current version for editing, so opening the builder
 // edits the real saved template instead of always resetting to the default
@@ -83,6 +134,8 @@ function loadCurrentDefinition(templateId) {
 }
 
 export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
+  // Which shell hosts the Builder — decides only where the ribbon renders.
+  const phone = useShellLayout() === SHELL_LAYOUT.PHONE;
   const [rows, setRows] = useState(
     () => loadCurrentDefinition(templateId)?.rows ?? normalizeRows(defaultRows)
   );
@@ -182,6 +235,9 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
       const target = e.target;
       if (!target || typeof target.closest !== "function") return;
       if (target.closest("[data-nw-template-ribbon]")) return;
+      // The phone's "Template tools" control and the sheet hosting the ribbon
+      // are the ribbon's own chrome: a press there keeps the selection too.
+      if (target.closest("[data-nw-template-tools]")) return;
       if (!target.closest("[data-cell-selectable]")) setCellSelection(null);
       if (target.closest("[data-header-region]")) return;
       setHeaderSelection(null);
@@ -701,7 +757,9 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
       {/* The Template editing ribbon: OUTSIDE the document scroller, so it stays
           fixed at the top of the Template workspace while the A4 document
           scrolls underneath it. It belongs to the Template Builder, not to
-          note filling. */}
+          note filling. On a phone the host below puts the same ribbon in a
+          sheet behind "Template tools"; on the desktop it renders it inline. */}
+      <TemplateToolsHost phone={phone}>
       <TemplateEditorRibbon
         branding={branding}
         onHeaderChange={updateHeader}
@@ -720,6 +778,7 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
         onCellFillChange={changeCellFill}
         onPageFillChange={changePageFill}
       />
+      </TemplateToolsHost>
 
       {/* The document scroller. */}
       {/* The document scroller's inset matches the note workspace's, so the
@@ -779,6 +838,7 @@ export default function TemplateBuilderDoc({ templateId, onTemplateSubmit }) {
               className: "px-3 py-1 rounded",
             })}
             onClick={handleSubmitTemplate}
+            data-nw-template-submit
           >
             Submit template
           </button>

@@ -1,5 +1,5 @@
 // src/components/BottomBar.js
-import React, { useRef, useState, useMemo, useEffect } from "react";
+import React, { useId, useRef, useState, useMemo, useEffect } from "react";
 import {
   FaPlus,
   FaCamera,
@@ -13,11 +13,14 @@ import StylePresetSelect from "./StylePresetSelect";
 import BusyStatus from "./BusyStatus";
 import VoiceButton from "./VoiceButton";
 import VoiceLanguageSelect, { VOICE_LANGUAGE_SELECT_VARIANT } from "./VoiceLanguageSelect";
+import PhoneSheet from "./mobile/PhoneSheet";
+import { SHELL_LAYOUT, useShellLayout } from "../context/ShellLayoutContext";
 import { useRefine } from "../hooks/useRefine";
 import useDictation from "../hooks/useDictation";
 import { useAppState } from "../context/AppStateContext";
 import {
   DICTATION_LANGUAGE_CONTROL_LABEL,
+  QUICK_ADD_LANGUAGE_CONTROL_LABEL,
   DICTATION_MESSAGE,
   DICTATION_PHASE,
   dictationControlLabel,
@@ -256,6 +259,14 @@ export default function BottomBar({
   // so a collapsed composer's handle can say a draft is kept.
   //   (hasComposition: boolean) => void
   onCompositionChange,
+  // PHONE ONLY (Phase 8E.1): the Quick Add SETTINGS sheet — the AI action
+  // and the coordinate system, which the phone composer no longer shows
+  // inline. Whether it is open is the host's transient UI state (MainArea
+  // owns the control that opens it, in the composer's header row); the
+  // values and handlers it shows are exactly this composer's own. Ignored
+  // on the desktop, which keeps both selects in the status row.
+  settingsOpen = false,
+  onCloseSettings = null,
 }) {
   const { currentNoteId } = useAppState();
 
@@ -307,6 +318,13 @@ export default function BottomBar({
 
   // NEW: coordinate system state (default Mount Eden 2000)
   const [coordSystem, setCoordSystem] = useState(DEFAULT_COORD_SYSTEM);
+  // WHICH SHELL hosts the composer — presentation only. On the phone the two
+  // preference selects move into the settings sheet (below), the language
+  // control takes its globe form, and the action rail shares one circular
+  // geometry (mobileShell.css). Nothing about what is captured or sent
+  // differs between the shells.
+  const phoneShell = useShellLayout() === SHELL_LAYOUT.PHONE;
+  const settingsIds = useId();
   // PHOTO DETAILS — the visible documentary stamp — is a Settings preference
   // of the workspace (src/lib/photoDetailsPreference.js), not a control here.
   // It is read at the moment a photograph is chosen, never cached in state, so
@@ -1291,8 +1309,9 @@ export default function BottomBar({
   };
 
   return (
-    <div className="px-2 pb-2">
+    <div className="px-2 pb-2" data-nw-quickadd-root>
       <div
+        data-nw-quickadd-box
         className={[
           "relative w-full rounded-2xl",
           "bg-gray-100 dark:bg-[#2a2a2a]",
@@ -1383,12 +1402,17 @@ export default function BottomBar({
         />
 
         {/* Status row (left) */}
-        <div className="absolute left-3 bottom-2 flex items-center gap-3">
+        <div className="absolute left-3 bottom-2 flex items-center gap-3" data-nw-quickadd-status>
+          {/* The AI action and the coordinate system are PREFERENCES, not
+              capture actions: inline here on the desktop as always; on the
+              phone they live in the Quick Add settings sheet below. */}
+          {!phoneShell && (
           <StylePresetSelect
             value={stylePreset}
             onChange={onStyleChange}
             disabled={isDisabled}
           />
+          )}
 
           {/* DESTINATION CHIP — where Quick Add sends this capture. The one
               place this is stated: no "Quick Add to" label repeats the
@@ -1421,6 +1445,7 @@ export default function BottomBar({
               and same padding/radius/type scale as the two selects beside it,
               so the three read as one family. The bare `border` utility is
               dropped: the field class owns the border in every state. */}
+          {!phoneShell && (
           <select
             className="nw-field px-2 py-1 text-xs rounded"
             value={coordSystem}
@@ -1433,6 +1458,7 @@ export default function BottomBar({
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
+          )}
 
           {!!composerError && (
             <span className="text-xs px-2 py-1 rounded bg-red-100 text-red-900 dark:bg-red-900/40 dark:text-red-200 border border-red-300 dark:border-red-700" role="alert">
@@ -1442,7 +1468,16 @@ export default function BottomBar({
         </div>
 
         {/* Controls (right) */}
-        <div className="absolute right-2 bottom-2 flex items-center gap-3">
+        <div
+          className="absolute right-2 bottom-2 flex items-center gap-3"
+          data-nw-quickadd-controls
+          // WHICH RAIL THIS IS, for the phone stylesheet: the PRIMARY rail
+          // (add, camera, language, microphone, AI, delete, Send) is one row
+          // by policy and never wraps; while a transient control is present
+          // — Discard dictation during a recording, Revert after a refine —
+          // the rail is EXTENDED and may wrap rather than overflow.
+          data-nw-quickadd-rail={dictationRecording || refinedDraft != null ? "extended" : "primary"}
+        >
           {/* One capture control, adapted to the destination. In the Free-form
               note it accepts images and documents exactly as before. In the
               Template form it accepts only what the SELECTED row's field type
@@ -1470,6 +1505,9 @@ export default function BottomBar({
             className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
             disabled={isDisabled || !canCaptureAnything || preparingImage}
             aria-busy={preparingImage || undefined}
+            // `data-nw-quickadd-action` marks every ordinary action-rail
+            // control; the phone stylesheet gives them one circular geometry.
+            data-nw-quickadd-action
           >
             <FaPlus />
           </button>
@@ -1495,6 +1533,7 @@ export default function BottomBar({
             className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
             disabled={isDisabled || !canCaptureImage || preparingImage}
             aria-busy={preparingImage || undefined}
+            data-nw-quickadd-action
           >
             <FaCamera />
           </button>
@@ -1510,6 +1549,7 @@ export default function BottomBar({
               title="Discard dictation"
               aria-label="Discard dictation"
               className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] text-red-700 dark:text-red-200 border border-red-300 dark:border-red-700"
+              data-nw-quickadd-action
             >
               <FaTrash />
             </button>
@@ -1517,19 +1557,25 @@ export default function BottomBar({
           {/* DICTATION LANGUAGE — a compact chip ("Auto", "EN") beside the
               Dictate control, a native select underneath. It configures the
               NEXT dictation only; it opens nothing else and stays available
-              while a clip is in flight (that clip keeps its own language). */}
+              while a clip is in flight (that clip keeps its own language).
+              On the phone the same control is a globe in the action rail,
+              named "Language: <language>" ("Language: Auto-detect"). */}
           <VoiceLanguageSelect
-            variant={VOICE_LANGUAGE_SELECT_VARIANT.COMPACT}
+            variant={phoneShell ? VOICE_LANGUAGE_SELECT_VARIANT.ICON : VOICE_LANGUAGE_SELECT_VARIANT.COMPACT}
             value={dictationLanguage}
             onChange={chooseDictationLanguage}
             disabled={disabled}
-            label={DICTATION_LANGUAGE_CONTROL_LABEL}
+            label={phoneShell ? QUICK_ADD_LANGUAGE_CONTROL_LABEL : DICTATION_LANGUAGE_CONTROL_LABEL}
             title={dictationLanguageTitle({
               language: dictationLanguage,
               dictating: dictation.phase !== DICTATION_PHASE.IDLE,
+              label: phoneShell ? QUICK_ADD_LANGUAGE_CONTROL_LABEL : DICTATION_LANGUAGE_CONTROL_LABEL,
             })}
           />
-          <div className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200">
+          <div
+            className="p-0.5 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200"
+            data-nw-quickadd-action
+          >
             {/* Not disabled where recording is unsupported: pressing it then
                 explains why on the composer's error line, rather than a dead
                 control. */}
@@ -1549,6 +1595,7 @@ export default function BottomBar({
             disabled={!hasText || isDisabled}
             title="Refine with AI"
             className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-60"
+            data-nw-quickadd-action
           >
             <FaStar />
           </button>
@@ -1559,6 +1606,7 @@ export default function BottomBar({
               onClick={revertRefine}
               title="Revert"
               className="p-2 rounded-full bg-white dark:bg-[#1b1b1b] border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200"
+              data-nw-quickadd-action
             >
               <FaUndo />
             </button>
@@ -1573,6 +1621,7 @@ export default function BottomBar({
             disabled={!hasComposition || isDisabled}
             title="Clear current message"
             className="w-9 h-9 flex items-center justify-center rounded-full bg-white dark:bg-[#1b1b1b] text-red-700 dark:text-red-200 border border-gray-300 dark:border-gray-600 disabled:opacity-60"
+            data-nw-quickadd-action
           >
             <FaTrash />
           </button>
@@ -1596,11 +1645,61 @@ export default function BottomBar({
               canSend ? inputLabel.replace(/^Quick Add/, "Send Quick Add") : "Send Quick Add — select a template row first"
             }
             className="w-9 h-9 flex items-center justify-center rounded-full bg-white dark:bg-[#f0f0f0] text-gray-700 border border-gray-300 disabled:opacity-60"
+            data-nw-quickadd-send
           >
             <FaArrowUp />
           </button>
         </div>
       </div>
+
+      {/* QUICK ADD SETTINGS (phone). The two preference controls the phone
+          composer keeps out of its body, in the phone sheet, over the SAME
+          state and handlers the desktop's inline controls use: the app-wide
+          Refine mode from the host, and this composer's per-note coordinate
+          system. Closing changes nothing — the values are wherever they were
+          set — so reopening shows the same selections. */}
+      {phoneShell && (
+        <PhoneSheet
+          open={!!settingsOpen}
+          title="Quick Add settings"
+          closeLabel="Close Quick Add settings"
+          onClose={onCloseSettings}
+          data-nw-quickadd-settings-sheet
+        >
+          <div className="flex flex-col gap-4" data-nw-quickadd-settings>
+            <div className="flex flex-col gap-1">
+              <label className="nw-field-label text-sm font-medium" htmlFor={`${settingsIds}-ai-action`}>
+                AI action
+              </label>
+              <StylePresetSelect
+                id={`${settingsIds}-ai-action`}
+                className="nw-field w-full px-3 py-2 text-sm rounded-lg"
+                label="AI action"
+                value={stylePreset}
+                onChange={onStyleChange}
+                disabled={isDisabled}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="nw-field-label text-sm font-medium" htmlFor={`${settingsIds}-coord-system`}>
+                Coordinate system
+              </label>
+              <select
+                id={`${settingsIds}-coord-system`}
+                className="nw-field w-full px-3 py-2 text-sm rounded-lg"
+                value={coordSystem}
+                onChange={(e) => setCoordSystem(e.target.value)}
+                disabled={isDisabled}
+                title="Choose coordinate system for the converted line"
+              >
+                {COORD_SYSTEM_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </PhoneSheet>
+      )}
     </div>
   );
 }

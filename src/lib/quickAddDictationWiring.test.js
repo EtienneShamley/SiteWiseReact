@@ -82,10 +82,12 @@ describe("1. the composer's microphone is Quick Add dictation and never Live tra
   test("the composer's dictation language is the shared selector in its compact form, wired to dictation only", () => {
     const control = between(BOTTOM_BAR, "<VoiceLanguageSelect", "<VoiceButton");
     expect(control.length).toBeGreaterThan(100);
-    expect(control).toMatch(/variant=\{VOICE_LANGUAGE_SELECT_VARIANT\.COMPACT\}/);
+    // The compact chip on the desktop; the same control as a globe in the
+    // phone action rail (Phase 8E.1), named "Language" there.
+    expect(control).toMatch(/variant=\{phoneShell \? VOICE_LANGUAGE_SELECT_VARIANT\.ICON : VOICE_LANGUAGE_SELECT_VARIANT\.COMPACT\}/);
     expect(control).toMatch(/value=\{dictationLanguage\}/);
     expect(control).toMatch(/onChange=\{chooseDictationLanguage\}/);
-    expect(control).toMatch(/label=\{DICTATION_LANGUAGE_CONTROL_LABEL\}/);
+    expect(control).toMatch(/label=\{phoneShell \? QUICK_ADD_LANGUAGE_CONTROL_LABEL : DICTATION_LANGUAGE_CONTROL_LABEL\}/);
     // It opens and controls nothing but the next dictation's language.
     expect(control).not.toMatch(/openWorkspace|LiveTranscript|session\.|aria-haspopup/);
     const chooseAt = BOTTOM_BAR.indexOf("const chooseDictationLanguage");

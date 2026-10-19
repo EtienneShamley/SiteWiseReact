@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 import TemplateBuilderDoc from "./TemplateBuilderDoc";
 import TemplateLibrary from "./TemplateLibrary";
 import { actionButtonClass } from "../../lib/interactionStyles";
+import { SHELL_LAYOUT, useShellLayout } from "../../context/ShellLayoutContext";
 
 // Back and Close are text-labelled actions: idle grey, shared hover box,
 // temporary turquoise while held, and no permanent selected state. Neither owns
@@ -13,8 +14,18 @@ const btnCls = actionButtonClass({ className: "px-3 py-1 rounded" });
 // (default — where company templates are created and managed) and editing one
 // template. Saving returns to the library. Nothing here belongs to a single
 // note: a note only CHOOSES which template it uses.
+//
+// ONE modal, two PRESENTATIONS (Phase 8E.1). The desktop keeps its centred
+// 90vw × 90vh panel exactly as before. Inside the phone shell — which
+// provides SHELL_LAYOUT.PHONE and renders this modal within its own DOM, so
+// its phone stylesheet reaches it — the same markup takes the `.nw-phone-
+// dialog` classes instead: a full-screen, safe-area-aware sheet whose header
+// stays put and whose body scrolls (mobileShell.css). Ownership, the two
+// views, Back / Close and everything the views do are identical in both.
 export default function TemplateBuilderModal({ open, onClose }) {
   const [editingTemplateId, setEditingTemplateId] = useState(null);
+  const phone = useShellLayout() === SHELL_LAYOUT.PHONE;
+  const titleId = useId();
 
   // Reopen on the library view each time the modal is shown.
   useEffect(() => {
@@ -26,10 +37,32 @@ export default function TemplateBuilderModal({ open, onClose }) {
   const editing = editingTemplateId != null;
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-      <div className="bg-white dark:bg-neutral-900 rounded-xl w-[90vw] h-[90vh] shadow-xl border border-gray-300 dark:border-gray-700 flex flex-col">
+    <div
+      className={
+        phone
+          ? "nw-phone-dialog"
+          : "fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      }
+    >
+      <div
+        className={
+          phone
+            ? "nw-phone-dialog__panel bg-white dark:bg-neutral-900 text-black dark:text-white"
+            : "bg-white dark:bg-neutral-900 rounded-xl w-[90vw] h-[90vh] shadow-xl border border-gray-300 dark:border-gray-700 flex flex-col"
+        }
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        data-nw-template-builder-presentation={phone ? "phone" : "desktop"}
+      >
         {/* HEADER */}
-        <div className="flex justify-between items-center px-4 py-2 border-b border-gray-300 dark:border-gray-700">
+        <div
+          className={
+            phone
+              ? "nw-phone-dialog__header"
+              : "flex justify-between items-center px-4 py-2 border-b border-gray-300 dark:border-gray-700"
+          }
+        >
           <div className="flex items-center gap-3 min-w-0">
             {editing && (
               <button
@@ -41,7 +74,7 @@ export default function TemplateBuilderModal({ open, onClose }) {
               </button>
             )}
             <div className="min-w-0">
-              <h2 className="text-lg font-semibold text-black dark:text-white">
+              <h2 id={titleId} className="text-lg font-semibold text-black dark:text-white">
                 {editing ? "Edit template" : "Template Library"}
               </h2>
               {!editing && (
@@ -63,7 +96,14 @@ export default function TemplateBuilderModal({ open, onClose }) {
             (fixed at the top) and the document scroller beneath it, so the
             ribbon stays put while the A4 document scrolls under it. The
             library view keeps its own scrolling body. */}
-        <div className={editing ? "flex-1 min-h-0 flex flex-col" : "flex-1 overflow-auto p-4"}>
+        <div
+          className={[
+            phone ? "nw-phone-dialog__body" : "",
+            editing ? "flex-1 min-h-0 flex flex-col" : "flex-1 overflow-auto p-4",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+        >
           {editing ? (
             <TemplateBuilderDoc
               key={editingTemplateId}

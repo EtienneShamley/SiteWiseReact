@@ -230,17 +230,28 @@ export function dictationErrorMessage(error) {
 
 /** The accessible name of the composer's dictation-language control. */
 export const DICTATION_LANGUAGE_CONTROL_LABEL = "Dictation language";
+// The PHONE composer's name for the same control (Phase 8E.1): the concept is
+// "Language", its automatic value "Auto-detect" — the compact rail shows a
+// globe, so the accessible name carries both the concept and the state
+// ("Language: Auto-detect", "Language: English").
+export const QUICK_ADD_LANGUAGE_CONTROL_LABEL = "Language";
 
 /**
  * The dictation-language control's tooltip. While a clip is recording or
  * transcribing it also says that a change applies to the NEXT dictation: the
  * clip in flight keeps the language that was selected when it started.
+ * `label` is the control's name in the surface that shows it (the desktop
+ * chip says "Dictation language", the phone rail says "Language").
  */
-export function dictationLanguageTitle({ language, dictating = false } = {}) {
+export function dictationLanguageTitle({
+  language,
+  dictating = false,
+  label = DICTATION_LANGUAGE_CONTROL_LABEL,
+} = {}) {
   const name = transcriptionLanguageLabel(language) || transcriptionLanguageLabel("auto");
   return dictating
-    ? `${DICTATION_LANGUAGE_CONTROL_LABEL}: ${name} — a change applies to the next dictation`
-    : `${DICTATION_LANGUAGE_CONTROL_LABEL}: ${name}`;
+    ? `${label}: ${name} — a change applies to the next dictation`
+    : `${label}: ${name}`;
 }
 
 /** What the composer's Dictate control says in each phase. */
