@@ -1217,3 +1217,350 @@
   background: #ffffff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 }
+
+/* ------------------------------------------- navigation drawer (2026-10-21) */
+
+/* THE ☰ TRIGGER, in each screen's existing header row (MobileDrawerTrigger.js)
+   — beside the Back control where a screen has one. A 44 px target. */
+.nw-phone-header-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+  margin-left: -0.625rem;
+}
+.nw-phone-drawer-trigger {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  font-size: 1.125rem;
+}
+.nw-phone-drawer-trigger:active {
+  background: var(--nw-state-hover-bg);
+}
+.nw-phone-drawer-trigger:focus-visible {
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: 2px;
+}
+/* Above the shared Listen In workspace, which is not changed for it. */
+.nw-phone-listen-in-bar {
+  flex: none;
+  padding: 0.25rem 1rem 0;
+}
+
+/* THE DRAWER: fixed to the viewport, above the screens, the mini-bar and the
+   bottom navigation (which the shell makes inert while it is open), below the
+   App-owned phone dialogs (.nw-phone-dialog, z-index 60). */
+.nw-phone-drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+}
+.nw-phone-drawer__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  touch-action: none;
+  animation: nw-phone-drawer-fade 180ms ease-out;
+}
+.nw-phone-drawer__panel {
+  position: relative;
+  box-sizing: border-box;
+  width: min(86vw, 22rem);
+  max-width: calc(100vw - 3rem);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  box-shadow: 0 0 2rem rgba(0, 0, 0, 0.25);
+  animation: nw-phone-drawer-in 220ms ease-out;
+}
+/* The two keyframes live in src/styles/nav.css beside the app's other
+   animation, so this sheet holds only phone-scoped selectors. */
+@media (prefers-reduced-motion: reduce) {
+  .nw-phone-drawer__panel,
+  .nw-phone-drawer__backdrop {
+    animation: none;
+  }
+}
+
+.nw-phone-drawer__header,
+.nw-phone-drawer__footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem 0.25rem 1rem;
+}
+.nw-phone-drawer__header {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+.nw-phone-drawer__footer {
+  padding: 0.25rem 0.5rem;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+.dark .nw-phone-drawer__header,
+.dark .nw-phone-drawer__footer {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.nw-phone-drawer__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+.nw-phone-drawer__mark {
+  font-weight: 800;
+  letter-spacing: -0.025em;
+}
+.nw-phone-drawer__close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  font-size: 1.125rem;
+}
+
+/* THE ONE SCROLLING BODY. Groups, saved meetings and the whole tree flow down
+   it; nothing inside it scrolls on its own, vertically or sideways. */
+.nw-phone-drawer__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.5rem 0.5rem 1rem;
+}
+.nw-phone-drawer__group {
+  margin-bottom: 0.5rem;
+}
+.nw-phone-drawer__group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 0.5rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--nw-nav-muted-text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: left;
+}
+.nw-phone-drawer__caret {
+  flex: none;
+  font-size: 0.75rem;
+}
+.nw-phone-drawer__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: #f59e0b;
+}
+.nw-phone-drawer__dot--live {
+  background: #dc2626;
+}
+
+.nw-phone-drawer__row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.nw-phone-drawer__item {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 0.625rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  font-size: 0.9375rem;
+  text-align: left;
+}
+.nw-phone-drawer__item:active,
+.nw-phone-drawer__more:active,
+.nw-phone-drawer__group-toggle:active {
+  background: var(--nw-state-hover-bg);
+}
+.nw-phone-drawer__item[aria-current] {
+  background: var(--nw-nav-selected-bg);
+  color: var(--nw-nav-active-text);
+  font-weight: 600;
+}
+.nw-phone-drawer__item:disabled {
+  color: var(--nw-state-disabled-text);
+}
+.nw-phone-drawer__item--meeting {
+  font-size: 0.875rem;
+}
+.nw-phone-drawer__item-icon {
+  flex: none;
+  color: var(--nw-nav-muted-text);
+}
+.nw-phone-drawer__item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nw-phone-drawer__item-detail {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--nw-nav-muted-text);
+}
+.nw-phone-drawer__status--live {
+  color: #dc2626;
+}
+.nw-phone-drawer__status--open {
+  color: #b45309;
+}
+.dark .nw-phone-drawer__status--live {
+  color: #f87171;
+}
+.dark .nw-phone-drawer__status--open {
+  color: #fbbf24;
+}
+.nw-phone-drawer__item:focus-visible,
+.nw-phone-drawer__more:focus-visible,
+.nw-phone-drawer__group-toggle:focus-visible,
+.nw-phone-drawer__close:focus-visible,
+.nw-phone-drawer__action:focus-visible,
+.nw-phone-drawer__create:focus-visible {
+  outline: 2px solid var(--nw-focus-ring);
+  outline-offset: -2px;
+}
+.nw-phone-drawer__more {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--nw-nav-muted-text);
+}
+
+/* A row's actions, inline beneath it — full touch size, in the same flow. */
+.nw-phone-drawer__actions,
+.nw-phone-drawer__error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  min-width: 0;
+  padding: 0 0.5rem 0.25rem 2.25rem;
+}
+.nw-phone-drawer__action {
+  min-height: 44px;
+  padding: 0 0.75rem;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  font-size: 0.875rem;
+}
+.dark .nw-phone-drawer__action {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.nw-phone-drawer__action--danger {
+  color: var(--nw-danger-text, #dc2626);
+}
+.nw-phone-drawer__error {
+  color: #b91c1c;
+  font-size: 0.8125rem;
+}
+.dark .nw-phone-drawer__error {
+  color: #fca5a5;
+}
+.nw-phone-drawer__error-text {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+
+.nw-phone-drawer__meetings,
+.nw-phone-drawer__tree,
+.nw-phone-drawer__children {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.nw-phone-drawer__meetings {
+  padding-left: 1.5rem;
+}
+.nw-phone-drawer__children {
+  padding-left: 1rem;
+}
+
+.nw-phone-drawer__projects {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+.dark .nw-phone-drawer__projects {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+.nw-phone-drawer__projects-heading {
+  margin: 0;
+  padding: 0.5rem 0.5rem 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.nw-phone-drawer__creates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0 0.25rem 0.5rem;
+}
+.nw-phone-drawer__create {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 44px;
+  padding: 0 0.625rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--nw-accent-bright);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.nw-phone-drawer__empty {
+  margin: 0;
+  padding: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--nw-nav-muted-text);
+}

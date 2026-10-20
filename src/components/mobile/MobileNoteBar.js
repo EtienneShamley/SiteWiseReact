@@ -19,6 +19,7 @@ import { useAppState } from "../../context/AppStateContext";
 import { actionButtonClass, tabClass } from "../../lib/interactionStyles";
 import { locateNote } from "../../lib/mobileShell";
 import { NOTE_LAYOUT, NOTE_SURFACE, NOTE_SURFACE_LABEL } from "../../lib/noteSurfaces";
+import MobileDrawerTrigger from "./MobileDrawerTrigger";
 
 const PHONE_NOTE_VIEWS = Object.freeze([
   { surface: NOTE_SURFACE.FREEFORM, layout: NOTE_LAYOUT.NATURAL, shortLabel: "Free-form" },
@@ -39,6 +40,8 @@ export default function MobileNoteBar({ onBackToProjects, onOpenLinkedPdf, onOpe
 
   return (
     <div className="nw-phone-notebar" data-nw-phone-notebar>
+      {/* The phone navigation drawer's ☰ (renders nothing off the phone shell). */}
+      <MobileDrawerTrigger />
       <button
         type="button"
         className="nw-phone-notebar__context"

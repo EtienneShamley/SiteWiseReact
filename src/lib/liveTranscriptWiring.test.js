@@ -65,7 +65,7 @@ describe("1–4. Live transcript in the sidebar's CAPTURE group, both widths, dr
     const workspace = SIDEBAR.indexOf('aria-label="Workspace"');
     expect(thisNote).toBeLessThan(capture);
     expect(capture).toBeLessThan(workspace);
-    expect(CAPTURE_GROUP).toMatch(/<SidebarGroupHeading>Capture<\/SidebarGroupHeading>/);
+    expect(CAPTURE_GROUP).toMatch(/<SidebarGroupHeading\s+group=\{SIDEBAR_GROUP\.CAPTURE\}[\s\S]*?>\s*Capture\s*<\/SidebarGroupHeading>/);
     // The product feature is LISTEN IN (Phase 8D.1); "live-transcript" survives
     // only as the internal hook/data-attribute name, which is deliberate.
     expect(CAPTURE_GROUP).toMatch(/\{!collapsed && <span className="flex-1 truncate">Listen In<\/span>\}/);

@@ -15,6 +15,7 @@ import { useAppState } from "../../context/AppStateContext";
 import { actionButtonClass } from "../../lib/interactionStyles";
 import MobileListRow from "./MobileListRow";
 import MobilePdfViewer from "./MobilePdfViewer";
+import { MobileHeaderBar } from "./MobileDrawerTrigger";
 
 function updatedLine(doc) {
   const when = doc && (doc.updatedAt || doc.createdAt);
@@ -36,15 +37,17 @@ export default function MobilePdfScreen() {
     return (
       <div className="nw-phone-pdf" data-nw-phone-pdf="viewer">
         <header className="nw-phone-screen-header">
-          <button
-            type="button"
-            className="nw-phone-back"
-            onClick={() => setCurrentPdfId(null)}
-            aria-label="Back to PDFs"
-          >
-            <FaChevronLeft aria-hidden="true" />
-            <span>PDFs</span>
-          </button>
+          <MobileHeaderBar>
+            <button
+              type="button"
+              className="nw-phone-back"
+              onClick={() => setCurrentPdfId(null)}
+              aria-label="Back to PDFs"
+            >
+              <FaChevronLeft aria-hidden="true" />
+              <span>PDFs</span>
+            </button>
+          </MobileHeaderBar>
           <h1 className="nw-phone-title">{doc.name}</h1>
           <p className="nw-phone-subtitle">Viewing · annotation is available on a larger screen</p>
         </header>
@@ -65,6 +68,7 @@ export default function MobilePdfScreen() {
   return (
     <div className="nw-phone-screen-inner" data-nw-phone-pdf="library">
       <header className="nw-phone-screen-header">
+        <MobileHeaderBar />
         <h1 className="nw-phone-title">PDFs</h1>
         <p className="nw-phone-subtitle">Standalone documents</p>
       </header>

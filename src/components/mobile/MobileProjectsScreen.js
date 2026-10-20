@@ -22,6 +22,7 @@ import { useAppState } from "../../context/AppStateContext";
 import { actionButtonClass } from "../../lib/interactionStyles";
 import { MOBILE_BROWSE_LEVEL, browseParent, resolveBrowse } from "../../lib/mobileShell";
 import MobileListRow from "./MobileListRow";
+import { MobileHeaderBar } from "./MobileDrawerTrigger";
 
 function count(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
@@ -109,17 +110,19 @@ export default function MobileProjectsScreen({ browse, onBrowse, onOpenNote }) {
   return (
     <div className="nw-phone-screen-inner" data-nw-phone-browse={view.level}>
       <header className="nw-phone-screen-header">
-        {back && (
-          <button
-            type="button"
-            className="nw-phone-back"
-            onClick={() => go(back.path)}
-            aria-label={`Back to ${back.label}`}
-          >
-            <FaChevronLeft aria-hidden="true" />
-            <span>{back.label}</span>
-          </button>
-        )}
+        <MobileHeaderBar>
+          {back && (
+            <button
+              type="button"
+              className="nw-phone-back"
+              onClick={() => go(back.path)}
+              aria-label={`Back to ${back.label}`}
+            >
+              <FaChevronLeft aria-hidden="true" />
+              <span>{back.label}</span>
+            </button>
+          )}
+        </MobileHeaderBar>
         <h1 className="nw-phone-title">{title}</h1>
         <p className="nw-phone-subtitle">{subtitle}</p>
       </header>

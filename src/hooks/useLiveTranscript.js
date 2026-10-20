@@ -81,6 +81,7 @@ const EMPTY = Object.freeze({
   summaryCoverage: EMPTY_COVERAGE,
   duration: EMPTY_DURATION,
   active: false,
+  meetings: [],
 });
 
 /**
@@ -175,6 +176,8 @@ export default function useLiveTranscript({ uid = null, workspaceId = null } = {
     summaryCoverage: state.summaryCoverage || EMPTY_COVERAGE,
     summaryText: summaryDisplayText(summary),
     hasSummary: hasSummaryToShow(summary),
+    /** This account's meetings in this workspace, newest first (headers only). */
+    meetings: state.meetings || EMPTY.meetings,
     start: useCallback((options) => (engine ? engine.start(options) : null), [engine]),
     stop: useCallback(() => (engine ? engine.stop() : null), [engine]),
     /** Stop recording: end the microphone leg, keep the meeting active. */
@@ -198,6 +201,16 @@ export default function useLiveTranscript({ uid = null, workspaceId = null } = {
     ),
     /** Clear a COMPLETED meeting from view. Deletes nothing; the next Start is a new meeting. */
     clear: useCallback(() => (engine ? engine.clear() : null), [engine]),
+    /** Show a completed meeting for review. Never resumes, never records. */
+    viewMeeting: useCallback(
+      (sessionId) => (engine ? engine.view(sessionId) : null),
+      [engine]
+    ),
+    /** Permanently delete a COMPLETED saved meeting — the caller confirms first. */
+    deleteMeeting: useCallback(
+      (sessionId) => (engine ? engine.deleteMeeting(sessionId) : null),
+      [engine]
+    ),
     editSummaryText: useCallback(
       (text) => (engine ? engine.editSummaryText(text) : null),
       [engine]

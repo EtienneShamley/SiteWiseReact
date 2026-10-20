@@ -112,12 +112,13 @@ describe("3/4/5/6. what is deliberately NOT styled", () => {
     expect(MAIN_AREA).not.toMatch(/nw-tree-scroll/);
   });
 
-  test("4. the collapsed icon rail carries no tree and no scroll container to style", () => {
-    // The class sits on the tree region, which renders only when expanded.
-    const treeAt = SIDEBAR.indexOf('className="nw-tree-scroll');
-    const gateAt = SIDEBAR.lastIndexOf('{!collapsed && workspace === "projects" && (', treeAt);
-    expect(gateAt).toBeGreaterThan(-1);
-    expect(gateAt).toBeLessThan(treeAt);
+  test("4. the class is on the sidebar's ONE scrolling body; the tree inside it has none of its own", () => {
+    // Since the one-scroll sidebar (2026-10-20) the groups and the Projects
+    // tree flow down one body; the tree (expanded only) is not a scroller.
+    const bodyAt = SIDEBAR.indexOf('className="nw-tree-scroll');
+    expect(SIDEBAR.slice(bodyAt, SIDEBAR.indexOf(">", bodyAt))).toContain("data-nw-sidebar-body");
+    const treeAt = SIDEBAR.indexOf("data-nw-projects>");
+    expect(SIDEBAR.lastIndexOf("{!collapsed && (", treeAt)).toBeGreaterThan(bodyAt);
     expect((SIDEBAR.match(/nw-tree-scroll/g) || []).length).toBe(1);
   });
 

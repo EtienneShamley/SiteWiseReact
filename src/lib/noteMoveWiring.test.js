@@ -216,7 +216,9 @@ describe("22. the collapsed rails carry none of it", () => {
       MIDDLE_PANE.indexOf("const onNewNote = () => {")
     );
     expect(rail).not.toMatch(/draggable|onDrop|noteDrag|MoveNoteDialog/);
-    expect(SIDEBAR).toContain('{!collapsed && workspace === "projects" && (');
+    const treeAt = SIDEBAR.indexOf("data-nw-projects>");
+    expect(treeAt).toBeGreaterThan(-1);
+    expect(SIDEBAR.slice(SIDEBAR.lastIndexOf("{!collapsed && (", treeAt), treeAt)).toMatch(/^\{!collapsed && \(\s*<div className="space-y-2 pb-2" $/);
   });
 });
 

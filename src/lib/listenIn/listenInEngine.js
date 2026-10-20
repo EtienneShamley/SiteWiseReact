@@ -76,12 +76,15 @@ import {
   isSessionOpen,
   markFinished,
   markLimitWarned,
+  meetingListEntries,
   normaliseSession,
   pauseRecording,
   pendingChunks,
   requestStop,
   resumeRecording,
   takeSeq,
+  upsertMeetingEntry,
+  withoutMeetingEntry,
 } from "./listenInModel";
 import {
   LISTEN_IN_DURATION_POLICY,
@@ -264,6 +267,16 @@ export function createListenInEngine({
   // ---- session state (the engine's, never a component's) ----
   let session = null; // the open session header, or null
   let chunks = []; // its chunk rows, metadata + text, never audio
+  // THIS ACCOUNT'S MEETINGS in this workspace, newest first — header-derived
+  // list entries only (src/lib/listenIn/listenInModel.js → meetingListEntry),
+  // never a transcript, a summary or audio. Read once at bootstrap from the
+  // same uid-scoped store, then kept current as headers are saved.
+  let meetings = [];
+  // The latest `view` request; an older one that resolves late is dropped.
+  let viewRequest = 0;
+  // Meetings deleted (or being deleted) by `deleteMeeting`: a `view` of one
+  // that was already reading when the delete began never puts it back on show.
+  const deletedIds = new Set();
   let error = null;
   let started = false;
   let stopped = false;
@@ -320,6 +333,7 @@ export function createListenInEngine({
       supported: recorderSupported(),
       pending: pendingChunks(chunks).length,
       failed: failedChunks(chunks).length,
+      meetings: meetings.slice(),
       // Whether `session` is THE ACTIVE MEETING (recording, paused,
       // interrupted or completing) rather than a completed record kept on
       // show for review. A completed meeting is not active: Start begins a
@@ -355,6 +369,7 @@ export function createListenInEngine({
 
   async function saveSession(next) {
     session = next;
+    meetings = upsertMeetingEntry(meetings, next);
     try {
       await data.putSession(next);
     } catch {
@@ -990,6 +1005,10 @@ export function createListenInEngine({
     } catch {
       open = [];
     }
+    // The same listing seeds the meeting list. A defensive owner check, behind
+    // the store's own uid-keyed range: a header that is not this account's is
+    // never listed.
+    meetings = meetingListEntries(open.filter((s) => s && s.uid === uid));
     // ACTIVE-MEETING DISCOVERY. Only an UNCOMPLETED meeting is adopted: a
     // completed record — however recent — is never mistaken for the active
     // one, and is never deleted to make this easier. Normal use cannot leave
@@ -1272,6 +1291,7 @@ export function createListenInEngine({
     chunks = [];
     summary = null;
     error = null;
+    meetings = withoutMeetingEntry(meetings, id);
     try {
       await data.deleteSession(owner, w, id);
     } catch {
@@ -1390,6 +1410,128 @@ export function createListenInEngine({
   }
 
   /**
+   * Show one of this account's COMPLETED meetings for review — exactly the
+   * state a meeting is in after Complete, so the same window, transcript,
+   * summary, export and Clear apply to it. Nothing is written: the header,
+   * chunks and summary are only read from the same uid-scoped store.
+   *
+   * It never displaces the active meeting. While one exists, only that one is
+   * shown (asking for it is a no-op; asking for another is refused), and a
+   * stored header that is still open is never adopted here — bootstrap
+   * discovery owns that. Nothing resumes and no microphone is touched.
+   */
+  async function view(sessionId) {
+    if (stopped || !sessionId || deletedIds.has(sessionId)) return snapshot();
+    if (session && session.sessionId === sessionId) return snapshot();
+    if (isSessionOpen(session)) {
+      error = new Error(LISTEN_IN_MESSAGE.MEETING_ACTIVE);
+      emit();
+      return snapshot();
+    }
+    const request = ++viewRequest;
+    let header = null;
+    let rows = [];
+    let stored = null;
+    try {
+      header = await data.getSession(uid, workspaceId, sessionId);
+      if (header && header.uid === uid && !isSessionOpen(header)) {
+        rows = await data.listChunks(uid, workspaceId, sessionId);
+        if (typeof data.getSummary === "function") stored = await data.getSummary(uid, workspaceId, sessionId);
+      }
+    } catch {
+      header = null;
+    }
+    // Superseded by a later request, deleted meanwhile, or a meeting started.
+    if (request !== viewRequest || stopped || deletedIds.has(sessionId) || isSessionOpen(session)) return snapshot();
+    if (!header || header.uid !== uid || isSessionOpen(header)) return snapshot();
+    disarmRetry();
+    disarmLimitTimer();
+    limitStopping = false;
+    session = normaliseSession(header);
+    chunks = rows || [];
+    summary = stored || null;
+    ensureSummary();
+    error = null;
+    emit();
+    return snapshot();
+  }
+
+  /**
+   * DELETE ONE SAVED, COMPLETED MEETING — permanently, after the caller's
+   * explicit confirmation. Not Clear (which deletes nothing) and not Discard
+   * (which throws away the UNFINISHED meeting on show): this is the history's
+   * delete, and it is refused for any meeting that is not completed — the
+   * active meeting is never reachable through it.
+   *
+   * WHAT GOES is exactly what `discard` removes, through the SAME store call:
+   * the header, every chunk row and any retained audio, the summary and the
+   * cloud bookkeeping. When the account's cloud bridge is installed that call
+   * is its decorator (src/lib/listenIn/listenInCloudSync.js), which waits for
+   * the meeting's pending cloud writes, queues the deletes of its header,
+   * transcript pages and summary FIRST, and removes the local rows second — so
+   * a queued upsert finds nothing to send and the reconcile has nothing to
+   * re-project. Only this account's meeting in this workspace can be named.
+   *
+   * If the meeting is the one on show it leaves the window first, and any
+   * drain or summary pass still finishing for it is waited for, so nothing
+   * writes to it after the delete. Any other meeting — including an active one
+   * — is left exactly as it is.
+   */
+  async function deleteMeeting(sessionId) {
+    if (stopped || !sessionId) return snapshot();
+    if (session && session.sessionId === sessionId && isSessionOpen(session)) {
+      error = new Error(LISTEN_IN_MESSAGE.DELETE_UNFINISHED);
+      emit();
+      return snapshot();
+    }
+    let header = null;
+    try {
+      header = await data.getSession(uid, workspaceId, sessionId);
+    } catch {
+      error = new Error(LISTEN_IN_MESSAGE.DELETE_FAILED);
+      emit();
+      return snapshot();
+    }
+    if (stopped) return snapshot();
+    if (!header || header.uid !== uid || header.workspaceId !== workspaceId) {
+      // Nothing of this account's is stored under that id: a stale row only.
+      meetings = withoutMeetingEntry(meetings, sessionId);
+      emit();
+      return snapshot();
+    }
+    if (header.state !== LISTEN_IN_STATE.FINISHED) {
+      error = new Error(LISTEN_IN_MESSAGE.DELETE_UNFINISHED);
+      emit();
+      return snapshot();
+    }
+    deletedIds.add(sessionId);
+    if (session && session.sessionId === sessionId) {
+      disarmRetry();
+      disarmLimitTimer();
+      limitStopping = false;
+      session = null;
+      chunks = [];
+      summary = null;
+      error = null;
+      emit();
+      // Both loops bail at their next check now that it is off show; what is
+      // already mid-write lands BEFORE the delete, never after it.
+      await Promise.all([draining, summarising].map((p) => (p ? p.catch(() => {}) : null)));
+    }
+    try {
+      await data.deleteSession(uid, workspaceId, sessionId);
+    } catch {
+      deletedIds.delete(sessionId);
+      error = new Error(LISTEN_IN_MESSAGE.DELETE_FAILED);
+      emit();
+      return snapshot();
+    }
+    meetings = withoutMeetingEntry(meetings, sessionId);
+    emit();
+    return snapshot();
+  }
+
+  /**
    * The user rewrote the overview. Their words are stored beside the generated
    * result, never over it, and they win everywhere the summary is read or
    * exported. Passing null gives the generated overview back.
@@ -1472,6 +1614,10 @@ export function createListenInEngine({
     summariseNow,
     /** Clear a COMPLETED meeting from view; deletes nothing. */
     clear,
+    /** Show a COMPLETED meeting of this account for review; writes nothing. */
+    view,
+    /** Permanently delete a COMPLETED meeting of this account (confirmed). */
+    deleteMeeting,
     editSummaryText,
     clearError,
     shutdown,

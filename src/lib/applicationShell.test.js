@@ -145,12 +145,15 @@ describe("4/5/6/33. active view visible in both widths, with tooltips/labels in 
 });
 
 describe("7. the workspace/user footer is anchored at the bottom", () => {
-  test("a flexible spacer precedes the footer; the footer is the last child of the aside", () => {
-    const spacerAt = SIDEBAR.indexOf('<div className="flex-1 min-h-0" aria-hidden="true" />');
+  test("the flexible scrolling body precedes the footer; the footer is the last child of the aside", () => {
+    // The body (groups + Projects tree) is the flex-1 region, so it pushes the
+    // footer down in every state; no separate spacer competes with it.
+    const bodyAt = SIDEBAR.indexOf("data-nw-sidebar-body");
     const footerAt = SIDEBAR.indexOf("data-nw-sidebar-footer");
     const asideEnd = SIDEBAR.indexOf("</aside>");
-    expect(spacerAt).toBeGreaterThan(-1);
-    expect(footerAt).toBeGreaterThan(spacerAt);
+    expect(SIDEBAR).not.toContain('<div className="flex-1 min-h-0" aria-hidden="true" />');
+    expect(bodyAt).toBeGreaterThan(-1);
+    expect(footerAt).toBeGreaterThan(bodyAt);
     expect(asideEnd).toBeGreaterThan(footerAt);
     // Nothing else opens a top-level block between the footer and </aside>.
     const tail = SIDEBAR.slice(footerAt, asideEnd);

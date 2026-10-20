@@ -52,6 +52,7 @@ import {
   noteMoveFailureMessage,
 } from "../lib/noteMove";
 import { nextDefaultName } from "../lib/defaultNames";
+import { loadNewNoteDefault, newNoteLayout } from "../lib/newNoteDefaultPreference";
 
 export const AppStateContext = createContext();
 
@@ -262,6 +263,16 @@ export function AppStateProvider({ children }) {
   function setCurrentNoteId(nid) {
     setCurrentNoteIdRaw(nid);
     if (nid) setWorkspaceRaw("projects");
+  }
+  // OPENING A NOTE THAT WAS JUST CREATED. Every creation path (root, project
+  // folder, root folder — and so every desktop and phone surface that calls
+  // them) ends here, so the "New note default" setting is applied by ONE rule
+  // in ONE place: the new note opens in the configured view. Only the
+  // transient view is set; nothing is written to the note, and the user can
+  // switch views straight away.
+  function openNewNote(nid) {
+    setCurrentNoteId(nid);
+    setActiveNoteView(newNoteLayout(loadNewNoteDefault()));
   }
   function setCurrentPdfId(pid) {
     setCurrentPdfIdRaw(pid);
@@ -762,7 +773,7 @@ export function AppStateProvider({ children }) {
     allowNoteId(id);
     setRootNotes((prev) => [...prev, { id, title: name }]);
     // Select it & enable editor
-    setCurrentNoteId(id);
+    openNewNote(id);
     clearActiveSelection();
   }
 
@@ -927,7 +938,7 @@ export function AppStateProvider({ children }) {
     }));
     setActiveProjectId(pid);
     setActiveFolderId(fid);
-    setCurrentNoteId(nid);
+    openNewNote(nid);
   }
 
   // =========================================================
@@ -993,7 +1004,7 @@ export function AppStateProvider({ children }) {
       return { ...prev, [fid]: [...list, { id: nid, title: finalTitle }] };
     });
     setActiveSelection(null, fid);
-    setCurrentNoteId(nid);
+    openNewNote(nid);
   }
 
   // =========================================================

@@ -5,6 +5,7 @@ import {
   FaEllipsisV, FaPen, FaTrash, FaShare, FaFolder, FaFilePdf, FaBookOpen,
   FaClipboardList, FaFileAlt, FaThLarge, FaCog, FaUserCircle,
   FaAngleDoubleLeft, FaAngleDoubleRight, FaMicrophone, FaFolderOpen, FaGripVertical,
+  FaCaretDown, FaCaretRight,
 } from "react-icons/fa";
 import ThreeDotMenu from "./ThreeDotMenu";
 import ShareDialog from "./ShareDialog";
@@ -27,6 +28,7 @@ import {
 import { useTheme } from "../context/ThemeContext";
 import { useLiveTranscriptSession } from "../context/LiveTranscriptContext";
 import { elapsedMs, formatElapsed } from "../lib/listenIn/listenInModel";
+import useMeetingHistory, { meetingRowState } from "../hooks/useMeetingHistory";
 import { actionButtonClass, iconButtonClass, navItemClass } from "../lib/interactionStyles";
 import {
   NOTE_SURFACE,
@@ -96,13 +98,44 @@ function SidebarNavItem({
   );
 }
 
+// The expanded sidebar's three navigation groups, each collapsible on its own
+// (several may be open at once). Presentation state only: it lives in the
+// always-mounted Sidebar for the session and is never persisted.
+export const SIDEBAR_GROUP = {
+  THIS_NOTE: "this-note",
+  CAPTURE: "capture",
+  WORKSPACE: "workspace",
+};
+const SIDEBAR_GROUPS_OPEN = {
+  [SIDEBAR_GROUP.THIS_NOTE]: true,
+  [SIDEBAR_GROUP.CAPTURE]: true,
+  [SIDEBAR_GROUP.WORKSPACE]: true,
+};
+const sidebarGroupItemsId = (group) => `nw-sidebar-group-${group}`;
+
 // A small uppercase group heading — expanded only; the rail separates groups
-// with a hairline instead.
-function SidebarGroupHeading({ children }) {
+// with a hairline instead. It is a disclosure button: it shows or hides its
+// own group's items and never navigates. `status` is optional screen-reader
+// text (with `indicator` as its visual mark) for state the hidden items carry.
+function SidebarGroupHeading({ group, open, onToggle, status, indicator, children }) {
+  const Caret = open ? FaCaretDown : FaCaretRight;
   return (
-    <p className="px-3 pt-1 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 select-none">
-      {children}
-    </p>
+    <button
+      type="button"
+      className={iconButtonClass({
+        className:
+          "w-full flex items-center gap-2 rounded px-3 pt-1 pb-1 text-[11px] font-semibold uppercase tracking-wide text-left select-none",
+      })}
+      onClick={() => onToggle(group)}
+      aria-expanded={open}
+      aria-controls={sidebarGroupItemsId(group)}
+      data-nw-sidebar-group-toggle={group}
+    >
+      <span className="flex-1 truncate">{children}</span>
+      {indicator}
+      {status && <span className="sr-only">{status}</span>}
+      <Caret className="shrink-0" aria-hidden="true" />
+    </button>
   );
 }
 
@@ -123,14 +156,19 @@ function SidebarGroupHeading({ children }) {
  *      red accent and the elapsed time, whether or not its window is open
  *   3. WORKSPACE — Projects | PDFs, and Template Library (a workspace action
  *      that opens the reusable-template dialog owned by App.js)
- *   4. the project / folder / note tree (Projects workspace) — the ONE region
- *      that may scroll, and only if it outgrows the viewport
- *   5. flexible space
- *   6. workspace identity + Settings, anchored at the bottom
+ *   4. PROJECTS — the create actions and the project / folder / note tree,
+ *      in every workspace while expanded
+ *   5. workspace identity + Settings, anchored at the bottom
+ *
+ * Groups 2–4 flow down ONE scrolling body between the header and the footer
+ * (like a chat app's conversation list): a long tree scrolls the whole
+ * sidebar, never a box of its own. Groups 2, 2b and 3 collapse independently
+ * from their headings (SIDEBAR_GROUP) to bring Projects up.
  *
  * `collapsed` renders the icon rail: same items, icon-only, each with its
- * label as tooltip and accessible name; the tree is not shown (it cannot be
- * meaningfully iconified — expand to browse). `overlay` is the narrow-viewport
+ * label as tooltip and accessible name, whatever the groups' open state; the
+ * tree and the meeting list are not shown (they cannot be meaningfully
+ * iconified — expand to browse). `overlay` is the narrow-viewport
  * drawer: the expanded sidebar floats over the workspace above a backdrop.
  *
  * The sidebar owns NO editor, note or view state: it reads application state
@@ -223,8 +261,13 @@ export default function Sidebar({
   const projRefs = useRef({});
   const folderRefs = useRef({});
   const rootFolderRefs = useRef({});
+  const meetingRefs = useRef({});
   const rootNoteRefs = useRef({});
   const [menu, setMenu] = useState({ type: null, id: null });
+  // The saved meetings under Listen In — opening, the confirmed Delete
+  // meeting… and its failure/retry — are the SAME hook the phone navigation
+  // drawer uses (src/hooks/useMeetingHistory.js).
+  const meetingHistory = useMeetingHistory(liveTranscript);
 
   const openMenu = (type, id) => setMenu({ type, id });
   const closeMenu = () => setMenu({ type: null, id: null });
@@ -358,6 +401,13 @@ export default function Sidebar({
     setWorkspace(next);
     if (overlay && typeof onCloseOverlay === "function") onCloseOverlay();
   };
+
+  // ---------- Collapsible navigation groups (expanded sidebar only) ----------
+  const [openGroups, setOpenGroups] = useState(SIDEBAR_GROUPS_OPEN);
+  const toggleGroup = (group) =>
+    setOpenGroups((prev) => ({ ...prev, [group]: !prev[group] }));
+  // The rail always shows every item; the open state is the expanded view's.
+  const groupItemsHidden = (group) => !collapsed && !openGroups[group];
 
   // ---------- Moving a note: drop targets + project hover-reveal ----------
   // The rules live in src/lib/noteMove.js (what accepts) and
@@ -573,6 +623,10 @@ export default function Sidebar({
           </button>
         </div>
 
+        {/* THE ONE SCROLLING BODY. Everything between the header and the
+            footer — the three groups and the Projects tree — flows down this
+            single region; nothing inside it scrolls on its own. */}
+        <div className="nw-tree-scroll flex-1 min-h-0 overflow-y-auto -mx-1 px-1" data-nw-sidebar-body>
         {/* 2. THIS NOTE — the open note's surfaces as ONE navigation group.
             The current one is the surface actually rendered (derived from the
             same state MainArea reads), never a click memory. */}
@@ -581,7 +635,20 @@ export default function Sidebar({
             className={collapsed ? "shrink-0 space-y-1 pb-2 mb-2 border-b border-gray-200 dark:border-gray-800" : "shrink-0 space-y-1 mb-3"}
             aria-label="This note"
           >
-            {!collapsed && <SidebarGroupHeading>This note</SidebarGroupHeading>}
+            {!collapsed && (
+              <SidebarGroupHeading
+                group={SIDEBAR_GROUP.THIS_NOTE}
+                open={openGroups[SIDEBAR_GROUP.THIS_NOTE]}
+                onToggle={toggleGroup}
+              >
+                This note
+              </SidebarGroupHeading>
+            )}
+            <div
+              id={sidebarGroupItemsId(SIDEBAR_GROUP.THIS_NOTE)}
+              className="space-y-1"
+              hidden={groupItemsHidden(SIDEBAR_GROUP.THIS_NOTE)}
+            >
             {NOTE_SURFACE_ORDER.map((surface) => (
               <SidebarNavItem
                 key={surface}
@@ -595,6 +662,7 @@ export default function Sidebar({
                 data-nw-note-surface={surface}
               />
             ))}
+            </div>
           </nav>
         )}
 
@@ -613,7 +681,42 @@ export default function Sidebar({
             className={collapsed ? "shrink-0 space-y-1 pb-2 mb-2 border-b border-gray-200 dark:border-gray-800" : "shrink-0 space-y-1 mb-3"}
             aria-label="Capture"
           >
-            {!collapsed && <SidebarGroupHeading>Capture</SidebarGroupHeading>}
+            {!collapsed && (
+              <SidebarGroupHeading
+                group={SIDEBAR_GROUP.CAPTURE}
+                open={openGroups[SIDEBAR_GROUP.CAPTURE]}
+                onToggle={toggleGroup}
+                // Folded away, an unfinished meeting must still be visible:
+                // the heading carries the row's red/amber mark and says so.
+                status={
+                  !openGroups[SIDEBAR_GROUP.CAPTURE] && liveTranscript.active
+                    ? liveTranscript.recording
+                      ? " — Listen In recording"
+                      : " — Listen In meeting open"
+                    : undefined
+                }
+                indicator={
+                  !openGroups[SIDEBAR_GROUP.CAPTURE] && liveTranscript.active ? (
+                    <span
+                      className={
+                        liveTranscript.recording
+                          ? "h-2 w-2 shrink-0 rounded-full bg-red-600 dark:bg-red-400 nw-listen-in-dot"
+                          : "h-2 w-2 shrink-0 rounded-full bg-amber-500"
+                      }
+                      aria-hidden="true"
+                      data-nw-capture-group-indicator
+                    />
+                  ) : null
+                }
+              >
+                Capture
+              </SidebarGroupHeading>
+            )}
+            <div
+              id={sidebarGroupItemsId(SIDEBAR_GROUP.CAPTURE)}
+              className="space-y-1"
+              hidden={groupItemsHidden(SIDEBAR_GROUP.CAPTURE)}
+            >
             <button
               type="button"
               className={[
@@ -735,6 +838,128 @@ export default function Sidebar({
                 />
               )}
             </button>
+            {/* This account's saved meetings, newest first, from the engine's
+                own uid-scoped store (headers only — no transcript or audio is
+                read to list them). Choosing one shows it in the SAME Listen In
+                window: the active meeting simply opens; a completed one is
+                loaded for review (src/lib/listenIn/listenInEngine.js → view),
+                which never resumes or records. While a meeting is unfinished
+                the others stay listed but cannot displace it. Expanded only.
+                A COMPLETED meeting also has a ⋮ menu whose only action is the
+                permanent Delete meeting…, behind an explicit confirmation; an
+                unfinished one has none (Complete or Discard it in Listen In). */}
+            {!collapsed && liveTranscript.meetings && liveTranscript.meetings.length > 0 && (
+              <ul className="space-y-0.5 pl-6" aria-label="Saved meetings" data-nw-listen-in-meetings>
+                {liveTranscript.meetings.map((meeting) => {
+                  // Current (isActive) = the meeting the open Listen In window is showing.
+                  const { isActive, blocked, status, label, deletable } = meetingRowState(liveTranscript, meeting);
+                  const menuOpen = menu.type === "meeting" && menu.id === meeting.sessionId;
+                  const deleteError = meetingHistory.deleteErrorFor(meeting.sessionId);
+                  return (
+                    <li key={meeting.sessionId} className="flex flex-wrap items-center">
+                      <button
+                        type="button"
+                        className={navItemClass({
+                          active: isActive,
+                          disabled: blocked,
+                          className: "flex-1 min-w-0 flex items-center gap-2 rounded px-2 py-1 text-xs text-left",
+                        })}
+                        onClick={async (e) => {
+                          await meetingHistory.openMeeting(meeting.sessionId, e.currentTarget);
+                          if (overlay && typeof onCloseOverlay === "function") onCloseOverlay();
+                        }}
+                        disabled={blocked}
+                        aria-current={isActive ? "true" : undefined}
+                        aria-haspopup="dialog"
+                        aria-label={status ? `${label} — ${status}` : label}
+                        title={
+                          blocked
+                            ? `${meeting.title} — complete the current meeting to open this one`
+                            : meeting.title
+                        }
+                        data-nw-listen-in-meeting={meeting.sessionId}
+                        data-listen-in-state={meeting.state}
+                      >
+                        <span className="flex-1 truncate">{label}</span>
+                        {status && (
+                          <span
+                            className={
+                              meeting.state === "recording"
+                                ? "shrink-0 text-[11px] text-red-600 dark:text-red-400"
+                                : "shrink-0 text-[11px] text-amber-600 dark:text-amber-400"
+                            }
+                            aria-hidden="true"
+                          >
+                            {status}
+                          </span>
+                        )}
+                      </button>
+                      {deletable && (
+                        <button
+                          type="button"
+                          ref={(el) => (meetingRefs.current[meeting.sessionId] = el)}
+                          className={dotBtnCls}
+                          aria-label={`Actions for ${label}`}
+                          aria-haspopup="menu"
+                          aria-expanded={menuOpen}
+                          data-nw-listen-in-meeting-menu={meeting.sessionId}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (menuOpen) closeMenu();
+                            else openMenu("meeting", meeting.sessionId);
+                          }}
+                        >
+                          <FaEllipsisV />
+                        </button>
+                      )}
+                      {deletable && menuOpen && (
+                        <ThreeDotMenu
+                          anchorRef={meetingRefs.current[meeting.sessionId]}
+                          onClose={closeMenu}
+                          options={[
+                            {
+                              icon: <FaTrash className="mr-2" />,
+                              label: "Delete meeting…",
+                              onClick: () => {
+                                closeMenu();
+                                // Permanent: nothing is deleted without an explicit yes.
+                                meetingHistory.confirmAndDelete(meeting.sessionId);
+                              },
+                              danger: true,
+                            },
+                          ]}
+                          theme={theme}
+                        />
+                      )}
+                      {deleteError && (
+                        <div
+                          role="alert"
+                          className="basis-full flex flex-wrap items-center gap-x-2 gap-y-0.5 px-2 py-1 text-[11px] text-red-700 dark:text-red-300"
+                          data-nw-listen-in-meeting-error={meeting.sessionId}
+                        >
+                          <span className="basis-full">{deleteError.message}</span>
+                          <button
+                            type="button"
+                            className="underline"
+                            onClick={() => void meetingHistory.retryDelete(meeting.sessionId)}
+                          >
+                            Try again
+                          </button>
+                          <button
+                            type="button"
+                            className="underline"
+                            onClick={meetingHistory.dismissDeleteError}
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            </div>
           </nav>
         )}
 
@@ -747,7 +972,20 @@ export default function Sidebar({
           className={collapsed ? "shrink-0 space-y-1 pb-2 mb-2 border-b border-gray-200 dark:border-gray-800" : "shrink-0 space-y-1 mb-2"}
           aria-label="Workspace"
         >
-          {!collapsed && <SidebarGroupHeading>Workspace</SidebarGroupHeading>}
+          {!collapsed && (
+            <SidebarGroupHeading
+              group={SIDEBAR_GROUP.WORKSPACE}
+              open={openGroups[SIDEBAR_GROUP.WORKSPACE]}
+              onToggle={toggleGroup}
+            >
+              Workspace
+            </SidebarGroupHeading>
+          )}
+          <div
+            id={sidebarGroupItemsId(SIDEBAR_GROUP.WORKSPACE)}
+            className="space-y-1"
+            hidden={groupItemsHidden(SIDEBAR_GROUP.WORKSPACE)}
+          >
           <SidebarNavItem
             collapsed={collapsed}
             active={workspace === "projects"}
@@ -782,13 +1020,17 @@ export default function Sidebar({
             <FaThLarge className="shrink-0" aria-hidden="true" />
             {!collapsed && <span className="flex-1 truncate">Template Library</span>}
           </button>
+          </div>
         </nav>
 
-        {/* 4. The project / folder / note tree — the ONE sidebar region that
-            may scroll, and only when it outgrows the viewport. Not shown in
-            the rail: a tree cannot be iconified honestly; expand to browse. */}
-        {!collapsed && workspace === "projects" && (
-          <div className="nw-tree-scroll flex-1 min-h-0 overflow-y-auto -mx-1 px-1 space-y-2">
+        {/* 4. PROJECTS — the create actions and the project / folder / note
+            tree, in the body's flow: no scroll region of its own, so a long
+            tree scrolls the whole sidebar body. Shown in every workspace
+            (choosing a note, folder or project from it returns to the
+            Projects workspace). Not shown in the rail: a tree cannot be
+            iconified honestly; expand to browse. */}
+        {!collapsed && (
+          <div className="space-y-2 pb-2" data-nw-projects>
             <div className="flex items-center justify-between mt-1 mb-2">
               <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Projects</h2>
             </div>
@@ -970,12 +1212,9 @@ export default function Sidebar({
             />
           </div>
         )}
+        </div>
 
-        {/* 5. Flexible space — pushes the identity footer to the bottom in
-            every state (rail, PDFs workspace, short tree). */}
-        <div className="flex-1 min-h-0" aria-hidden="true" />
-
-        {/* 6. Workspace identity + Settings, anchored at the bottom. NoteWise
+        {/* 5. Workspace identity + Settings, anchored at the bottom. NoteWise
             has no accounts: the honest identity is the local, this-browser
             workspace. `data-nw-sidebar-footer` marks the slot a future
             account/workspace menu would attach to; nothing more is implied. */}

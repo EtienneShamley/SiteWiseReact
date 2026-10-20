@@ -31,7 +31,7 @@
 // This shell owns NO recording and NO audio. Native background capture is
 // Phase 8E.2 and will replace the engine's capture adapter beneath the same
 // Listen In hook; nothing here has to change for it.
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./mobileShell.css";
 import MainArea from "../MainArea";
 import { ListenInWindow, LISTEN_IN_PRESENTATION } from "../LiveTranscriptDialog";
@@ -54,6 +54,8 @@ import MobileProjectsScreen from "./MobileProjectsScreen";
 import MobileNoteBar from "./MobileNoteBar";
 import MobilePdfScreen from "./MobilePdfScreen";
 import MobileMoreScreen from "./MobileMoreScreen";
+import MobileDrawer, { MOBILE_DRAWER_GROUPS_OPEN } from "./MobileDrawer";
+import { MobileHeaderBar, PhoneDrawerContext } from "./MobileDrawerTrigger";
 
 /**
  * Track the on-screen keyboard through the visual viewport. The shell's box is
@@ -245,8 +247,94 @@ export default function PhoneShell({
 
   const showMiniBar = shouldShowListenInMiniBar({ listenIn, visibleTab });
 
+  // THE NAVIGATION DRAWER (2026-10-21). Opened from the ☰ in each screen's
+  // header; a presentation over the SAME state the screens use (see
+  // MobileDrawer.js). Which of its groups are open is kept HERE, so it
+  // survives closing the drawer; nothing else about it is state.
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerGroups, setDrawerGroups] = useState(MOBILE_DRAWER_GROUPS_OPEN);
+  const drawerOpenerRef = useRef(null);
+  const drawerOpenRef = useRef(false);
+  drawerOpenRef.current = drawerOpen;
+  const openDrawer = useCallback((trigger = null) => {
+    drawerOpenerRef.current = trigger;
+    setDrawerOpen(true);
+  }, []);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+  const toggleDrawerGroup = useCallback(
+    (group) => setDrawerGroups((prev) => ({ ...prev, [group]: !prev[group] })),
+    []
+  );
+  const drawerContext = useMemo(() => ({ open: openDrawer, isOpen: drawerOpen }), [openDrawer, drawerOpen]);
+
+  // While it is open, everything behind it is INERT — no tap, no scroll, no
+  // focus — but stays mounted: the note, its draft, a recording, the PDF
+  // viewer and the mini-bar carry on exactly as they were.
+  useEffect(() => {
+    const el = shellRef.current;
+    if (!el || !drawerOpen) return undefined;
+    const behind = Array.from(el.children).filter((child) => !child.hasAttribute("data-nw-phone-drawer"));
+    for (const child of behind) child.setAttribute("inert", "");
+    return () => {
+      for (const child of behind) child.removeAttribute("inert");
+    };
+  }, [drawerOpen]);
+
+  // Closing returns focus to the ☰ that opened it — or, when the drawer
+  // navigated to another screen, to that screen's ☰ — unless something the
+  // drawer opened (Settings, the Template Library) has already taken it.
+  const drawerWasOpenRef = useRef(false);
+  useEffect(() => {
+    const wasOpen = drawerWasOpenRef.current;
+    drawerWasOpenRef.current = drawerOpen;
+    if (drawerOpen || !wasOpen) return;
+    const active = typeof document !== "undefined" ? document.activeElement : null;
+    if (active && active !== document.body) return;
+    const opener = drawerOpenerRef.current;
+    const target =
+      opener && opener.isConnected && !opener.closest("[hidden]")
+        ? opener
+        : shellRef.current &&
+          shellRef.current.querySelector(".nw-phone-screen:not([hidden]) [data-nw-phone-drawer-trigger]");
+    if (target && typeof target.focus === "function") target.focus();
+  }, [drawerOpen, visibleTab]);
+
+  // A note opened or CREATED from the drawer is a destination: the drawer
+  // closes and the Note screen shows it (Listen In's screen is closed — one
+  // boolean, never a stop — so the note is what is visible).
+  const drawerNoteRef = useRef(currentNoteId);
+  useEffect(() => {
+    if (drawerNoteRef.current === currentNoteId) return;
+    drawerNoteRef.current = currentNoteId;
+    if (!currentNoteId || !drawerOpenRef.current) return;
+    setDrawerOpen(false);
+    if (listenIn && listenIn.open) listenIn.closeWorkspace();
+  }, [currentNoteId, listenIn]);
+
+  // Drawer destinations that are another screen leave Listen In's screen the
+  // way the bottom navigation does: by its Close, never by touching the meeting.
+  const leaveListenIn = useCallback(() => {
+    if (listenIn && listenIn.open) listenIn.closeWorkspace();
+  }, [listenIn]);
+  const drawerOpenNote = useCallback(
+    (location) => {
+      leaveListenIn();
+      openNote(location);
+    },
+    [leaveListenIn, openNote]
+  );
+  const drawerOpenLinkedPdf = useCallback(
+    (pdfId) => {
+      leaveListenIn();
+      openLinkedPdf(pdfId);
+    },
+    [leaveListenIn, openLinkedPdf]
+  );
+
   return (
     <ShellLayoutContext.Provider value={SHELL_LAYOUT.PHONE}>
+      {/* The ☰ in each screen header opens the drawer through this context. */}
+      <PhoneDrawerContext.Provider value={drawerContext}>
       <div
         ref={shellRef}
         className="nw-phone-shell bg-white dark:bg-gray-950 text-black dark:text-white"
@@ -288,6 +376,11 @@ export default function PhoneShell({
             aria-label="Listen In"
             data-nw-phone-screen={MOBILE_TAB.LISTEN_IN}
           >
+            {/* The ☰ row above the shared Listen In workspace, which is not
+                changed for it. */}
+            <div className="nw-phone-listen-in-bar">
+              <MobileHeaderBar />
+            </div>
             <ListenInWindow presentation={LISTEN_IN_PRESENTATION.PHONE} />
           </section>
 
@@ -320,11 +413,28 @@ export default function PhoneShell({
           />
         )}
 
+        {drawerOpen && (
+          <MobileDrawer
+            groups={drawerGroups}
+            onToggleGroup={toggleDrawerGroup}
+            visibleTab={visibleTab}
+            onClose={closeDrawer}
+            onOpenNote={drawerOpenNote}
+            onShowNote={() => selectTab(MOBILE_TAB.NOTE)}
+            onSelectTab={selectTab}
+            onOpenListenIn={openListenIn}
+            onOpenLinkedPdf={drawerOpenLinkedPdf}
+            onOpenSettings={onOpenSettings}
+            onOpenTemplateLibrary={onOpenTemplateLibrary}
+          />
+        )}
+
         {/* SHELL-LEVEL DIALOGS (App-owned; see `children` above). Fixed
             overlays: they take no space in the column and cover the whole
             screen, navigation included, while open. */}
         {children}
       </div>
+      </PhoneDrawerContext.Provider>
     </ShellLayoutContext.Provider>
   );
 }

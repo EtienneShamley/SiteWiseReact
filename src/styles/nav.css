@@ -1014,3 +1014,24 @@
     animation: none;
   }
 }
+
+/* The phone navigation drawer's slide-in and backdrop fade
+   (src/components/mobile/mobileShell.css → .nw-phone-drawer__panel /
+   __backdrop, which also switch them off under prefers-reduced-motion).
+   Keyframes only: nothing on the desktop uses them. */
+@keyframes nw-phone-drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes nw-phone-drawer-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

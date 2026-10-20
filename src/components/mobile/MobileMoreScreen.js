@@ -10,6 +10,7 @@
 import React from "react";
 import { FaCog, FaMoon } from "react-icons/fa";
 import { useTheme } from "../../context/ThemeContext";
+import { MobileHeaderBar } from "./MobileDrawerTrigger";
 
 export default function MobileMoreScreen({ onOpenSettings }) {
   const { theme, toggleTheme } = useTheme();
@@ -17,6 +18,7 @@ export default function MobileMoreScreen({ onOpenSettings }) {
   return (
     <div className="nw-phone-screen-inner">
       <header className="nw-phone-screen-header">
+        <MobileHeaderBar />
         <h1 className="nw-phone-title">More</h1>
         <p className="nw-phone-subtitle">Settings and preferences</p>
       </header>

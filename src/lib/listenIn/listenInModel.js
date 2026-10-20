@@ -664,6 +664,15 @@ export const LISTEN_IN_MESSAGE = Object.freeze({
   // to, never replaced: a new one begins only after Complete or Discard.
   MEETING_ACTIVE:
     "A Listen In meeting is already in progress. Resume it, or complete it before starting a new one.",
+  // Delete meeting is for SAVED, COMPLETED meetings only. An unfinished one
+  // is completed or discarded in the Listen In window, never deleted from a
+  // history row.
+  DELETE_UNFINISHED:
+    "Only a completed meeting can be deleted. Complete or discard this meeting in Listen In first.",
+  // Deliberately claims nothing about the account: with the cloud bridge on,
+  // its deletes may already be queued when the local delete fails — the local
+  // meeting stays, and the next reconcile re-queues its cloud copy.
+  DELETE_FAILED: "This meeting could not be deleted. It is still saved — try again.",
   // Shown whenever this device cannot store a capture durably (no IndexedDB:
   // a private window, blocked site data, an unusual browser). Listen In still
   // records — refusing to capture a meeting because recovery is unavailable
@@ -737,3 +746,98 @@ export function listenInStatusLabel(session, chunks, { summary = null } = {}) {
 export function stoppedAtDurationLimit(session) {
   return !!session && session.stopReason === LISTEN_IN_STOP_REASON.LIMIT;
 }
+
+/* ------------------------------ meeting list ------------------------------ */
+
+/**
+ * ONE ENTRY OF THE ACCOUNT'S MEETING LIST — what a list row needs and nothing
+ * else: no transcript, no audio, no summary. Built from a session HEADER (the
+ * one row a listing reads), so listing every meeting never loads one.
+ */
+export function meetingListEntry(header) {
+  if (!header || !header.sessionId) return null;
+  return Object.freeze({
+    sessionId: header.sessionId,
+    title: header.title || defaultSessionTitle(header.startedAt),
+    startedAt: Number.isFinite(header.startedAt) ? header.startedAt : 0,
+    state: header.state,
+  });
+}
+
+/** Newest first, then by id — the same deterministic order discovery uses. */
+function byNewest(a, b) {
+  return b.startedAt - a.startedAt || String(a.sessionId).localeCompare(String(b.sessionId));
+}
+
+/**
+ * The list for a set of headers, newest first — ONE entry per meeting id. The
+ * store is keyed by [uid, workspaceId, sessionId], so a listing cannot hold the
+ * same meeting twice; the de-duplication states that invariant at the list
+ * boundary too (a later header for the same id replaces an earlier one).
+ * Recording legs are never list entries: a leg is a pause/resume of the SAME
+ * session and has no header of its own.
+ */
+export function meetingListEntries(headers) {
+  const byId = new Map();
+  for (const entry of (headers || []).map(meetingListEntry)) {
+    if (entry) byId.set(entry.sessionId, entry);
+  }
+  return [...byId.values()].sort(byNewest);
+}
+
+/** The list with one header added or replaced (a header was just saved). */
+export function upsertMeetingEntry(list, header) {
+  const entry = meetingListEntry(header);
+  if (!entry) return list;
+  return [...(list || []).filter((m) => m.sessionId !== entry.sessionId), entry].sort(byNewest);
+}
+
+/** The list without one meeting (it was discarded or deleted). */
+export function withoutMeetingEntry(list, sessionId) {
+  return (list || []).filter((m) => m.sessionId !== sessionId);
+}
+
+/**
+ * A list row's label. A meeting nobody renamed is titled
+ * "Listen In — 12 Sep 2026, 14:05"; listed UNDER Listen In, the prefix says
+ * nothing, so it is dropped. Any other title is shown exactly as stored.
+ */
+export function meetingListLabel(entry) {
+  if (!entry) return "";
+  const prefix = "Listen In — ";
+  return entry.title.startsWith(prefix) ? entry.title.slice(prefix.length) : entry.title;
+}
+
+/**
+ * The word an UNFINISHED meeting's row carries — the same words the sidebar's
+ * Listen In row already uses — or "" for a completed one, which needs none.
+ */
+export function meetingListStatus(entry) {
+  if (!entry) return "";
+  switch (entry.state) {
+    case LISTEN_IN_STATE.RECORDING:
+      return "Recording";
+    case LISTEN_IN_STATE.PAUSED:
+      return "Stopped";
+    case LISTEN_IN_STATE.INTERRUPTED:
+      return "Interrupted";
+    case LISTEN_IN_STATE.STOPPING:
+    case LISTEN_IN_STATE.FINISHING:
+      return "Completing";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Whether a list entry is a SAVED, COMPLETED meeting — the only kind Delete
+ * meeting is offered for. Every unfinished state (recording, stopped,
+ * interrupted, completing) is excluded: those are completed or discarded.
+ */
+export function meetingIsCompleted(entry) {
+  return !!entry && entry.state === LISTEN_IN_STATE.FINISHED;
+}
+
+/** The Delete meeting confirmation: the question, then what it costs. */
+export const MEETING_DELETE_CONFIRM =
+  "Delete this meeting?\n\nIts saved transcript and summary will also be deleted. This cannot be undone.";

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useOptionalDataScope } from "../context/DataScopeContext";
@@ -20,6 +20,7 @@ import {
 import { assetGcAttentionLine, assetGcStatusLine } from "../lib/assetGcSweep";
 import { SESSION_MODE } from "../lib/cloud/workspaceSession";
 import { PHOTO_DETAILS_MODE, loadPhotoDetailsMode, savePhotoDetailsMode } from "../lib/photoDetailsPreference";
+import { NEW_NOTE_DEFAULT, loadNewNoteDefault, saveNewNoteDefault } from "../lib/newNoteDefaultPreference";
 
 export const SIGN_OUT_LABEL = "Sign out";
 export const SIGN_OUT_NOTE =
@@ -41,6 +42,18 @@ export const MIGRATE_LOCAL_LABEL = "Move browser notes into my workspace";
 export const RETRY_SYNC_LABEL = "Retry now";
 // The files Retry label is the component's (src/components/AssetUploadStatus.js) — one string in both places.
 export { RETRY_UPLOADS_LABEL } from "./AssetUploadStatus";
+
+/* ---------------------------- New note default ---------------------------- */
+// Which view a NEWLY CREATED note opens in (src/lib/newNoteDefaultPreference.js).
+// One setting for every surface — desktop and phone alike — and only the
+// starting view: each note still switches between the two views as before.
+export const NEW_NOTE_DEFAULT_LABEL = "New note default";
+export const NEW_NOTE_DEFAULT_OPTION_LABELS = Object.freeze({
+  [NEW_NOTE_DEFAULT.FREEFORM]: "Free-form",
+  [NEW_NOTE_DEFAULT.TEMPLATE]: "Template",
+});
+export const NEW_NOTE_DEFAULT_NOTE =
+  "The view a new note opens in. You can still switch any note between Free-form and Template.";
 
 /* ------------------------------ Photo details ----------------------------- */
 // The visible documentary stamp (date, location, coordinates, map) that Quick
@@ -108,6 +121,16 @@ export default function SettingsModal({ open, onClose }) {
   // per opening), from the active workspace's own scope; written only on an
   // explicit change, so an untouched setting is never written back.
   const [photoDetailsMode, setPhotoDetailsMode] = useState(() => loadPhotoDetailsMode());
+  // Read when Settings opens, so it reflects the workspace that is active NOW.
+  const [newNoteDefault, setNewNoteDefault] = useState(() => loadNewNoteDefault());
+  useEffect(() => {
+    if (open) setNewNoteDefault(loadNewNoteDefault());
+  }, [open]);
+  const changeNewNoteDefault = (value) => {
+    if (!saveNewNoteDefault(value)) return;
+    setNewNoteDefault(value);
+  };
+
   const changePhotoDetailsMode = (mode) => {
     if (!savePhotoDetailsMode(mode)) return;
     setPhotoDetailsMode(mode);
@@ -260,6 +283,37 @@ export default function SettingsModal({ open, onClose }) {
             <span className="sr-only">Toggle Theme</span>
           </button>
         </div>
+
+        {/* New note default — a product preference for every surface (the
+            phone opens this same Settings). Shown signed in or not: it follows
+            the active workspace's scope like the Photo details setting. */}
+        <section className="border-t border-gray-200 dark:border-gray-700 pt-4 mb-4" aria-label="Notes">
+          <label
+            htmlFor="nw-settings-new-note-default"
+            className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1"
+          >
+            {NEW_NOTE_DEFAULT_LABEL}
+          </label>
+          <select
+            id="nw-settings-new-note-default"
+            className="nw-field w-full px-2 py-1 text-xs rounded"
+            value={newNoteDefault}
+            onChange={(e) => changeNewNoteDefault(e.target.value)}
+            aria-describedby="nw-settings-new-note-default-note"
+          >
+            {Object.entries(NEW_NOTE_DEFAULT_OPTION_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <p
+            id="nw-settings-new-note-default-note"
+            className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 leading-snug"
+          >
+            {NEW_NOTE_DEFAULT_NOTE}
+          </p>
+        </section>
 
         {/* Account — the signed-in identity, its verification state and the
             one way out. Account deletion is deliberately NOT offered here: it
