@@ -19,6 +19,15 @@ const FALLBACK_MODEL = "whisper-1";
 // so a slow provider surfaces as a real server response, not a client abort.
 const TRANSCRIBE_TIMEOUT_MS = 45000;
 
+// The route's budget for the WHOLE request, primary attempt and model fallback
+// together, measured from when the upload has been received. Two full
+// attempts (90 s) used to outlive the browser's 60 s deadline, so the user
+// was told transcription failed while the fallback went on, paid, into
+// nothing. The fallback now only starts if TRANSCRIBE_MIN_FALLBACK_MS of this
+// budget remains, and is given no more than what remains.
+const TRANSCRIBE_ROUTE_BUDGET_MS = 55000;
+const TRANSCRIBE_MIN_FALLBACK_MS = 10000;
+
 // The declared part type is only a PRE-FILTER (it stops a non-audio upload
 // before its bytes are buffered). Values are compared without parameters
 // (`audio/webm;codecs=opus` → `audio/webm`) and case-insensitively.
@@ -177,6 +186,8 @@ module.exports = {
   PRIMARY_MODEL,
   FALLBACK_MODEL,
   TRANSCRIBE_TIMEOUT_MS,
+  TRANSCRIBE_ROUTE_BUDGET_MS,
+  TRANSCRIBE_MIN_FALLBACK_MS,
   ACCEPTED_DECLARED_TYPES,
   MIN_SNIFF_BYTES,
   normalizeDeclaredType,

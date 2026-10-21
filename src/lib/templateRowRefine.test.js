@@ -66,7 +66,12 @@ describe("status vocabulary and messages", () => {
   });
 
   test("a message exists for every shared outcome and says THIS FIELD, not the note", () => {
-    for (const outcome of [REFINE_OUTCOME.UNAVAILABLE, REFINE_OUTCOME.FAILURE]) {
+    const failures = Object.values(REFINE_OUTCOME).filter((o) => o !== REFINE_OUTCOME.SUCCESS);
+    // Every failure outcome the client can report has its own field sentence —
+    // offline, rate-limited, timed out and the rest no longer all read as
+    // "could not complete".
+    expect(Object.keys(ROW_REFINE_MESSAGE).sort()).toEqual([...failures].sort());
+    for (const outcome of failures) {
       const msg = rowRefineMessageFor(outcome);
       expect(msg).toBe(ROW_REFINE_MESSAGE[outcome]);
       expect(msg).toMatch(/This field has not been changed/);

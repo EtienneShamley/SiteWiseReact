@@ -20,6 +20,8 @@
 // is what reaches the provider. The note content itself always remains
 // untrusted user content in the USER role.
 
+const { AI_REQUEST_OUTCOME, outcomeForResponseStatus } = require("./aiRequestOutcome");
+
 // ---------------------------------------------------------------------------
 // Style presets
 // ---------------------------------------------------------------------------
@@ -209,10 +211,21 @@ const MAX_REFINE_OUTPUT_CHARS = 40000;
 // before. A completion that reaches this ceiling anyway is REJECTED rather than
 // returned partially — see readRefineCompletion.
 const MAX_REFINE_OUTPUT_TOKENS = 4000;
-// Server-side provider timeout. The client uses a slightly longer deadline so
-// the server's mapped response normally wins the race.
+// Server-side provider timeout, PER ATTEMPT.
 const REFINE_TIMEOUT_MS = 30000;
-const REFINE_CLIENT_TIMEOUT_MS = 35000;
+// The route's budget for the WHOLE request, both attempts together. The route
+// may make a corrective second attempt (routes/refine.js), and two full
+// attempts back to back (60 s) used to outlive the client's 35 s deadline: the
+// user was told Refine had failed while the server went on to spend — and
+// discard — a second paid request. The second attempt now only starts if
+// REFINE_MIN_RETRY_MS of this budget remains, and is given no more than what
+// remains, so the route always answers inside it.
+const REFINE_ROUTE_BUDGET_MS = 45000;
+const REFINE_MIN_RETRY_MS = 10000;
+// The client's deadline sits above the route's whole budget, so the server's
+// mapped answer normally wins the race (the margin covers the upload and the
+// identity check that run before the route's clock starts).
+const REFINE_CLIENT_TIMEOUT_MS = 50000;
 
 // ---------------------------------------------------------------------------
 // Outcomes and user-facing messages
@@ -221,18 +234,28 @@ const REFINE_CLIENT_TIMEOUT_MS = 35000;
 const REFINE_OUTCOME = {
   SUCCESS: "success",
   // Configuration/provider unavailability — retrying immediately will not help.
-  UNAVAILABLE: "unavailable",
-  // Temporary: timeout, network, provider error, malformed response.
-  FAILURE: "failure",
+  UNAVAILABLE: AI_REQUEST_OUTCOME.UNAVAILABLE,
+  // Temporary: provider error, malformed or rejected response.
+  FAILURE: AI_REQUEST_OUTCOME.FAILURE,
   // Identity (since 2026-08-29): no accepted sign-in — the request never
   // left the browser, or the backend refused the session (401).
-  UNAUTHENTICATED: "unauthenticated",
+  UNAUTHENTICATED: AI_REQUEST_OUTCOME.UNAUTHENTICATED,
   // Signed in, but the email is not verified: the account may not spend (403).
-  EMAIL_NOT_VERIFIED: "email_not_verified",
+  EMAIL_NOT_VERIFIED: AI_REQUEST_OUTCOME.EMAIL_NOT_VERIFIED,
+  // Transport outcomes the client distinguishes (src/lib/aiRequestOutcome.js),
+  // so "offline", "the backend did not answer", "too slow", "cancelled",
+  // "rate limited" and "too long" each say what actually happened.
+  OFFLINE: AI_REQUEST_OUTCOME.OFFLINE,
+  UNREACHABLE: AI_REQUEST_OUTCOME.UNREACHABLE,
+  TIMEOUT: AI_REQUEST_OUTCOME.TIMEOUT,
+  CANCELLED: AI_REQUEST_OUTCOME.CANCELLED,
+  RATE_LIMITED: AI_REQUEST_OUTCOME.RATE_LIMITED,
+  TOO_LARGE: AI_REQUEST_OUTCOME.TOO_LARGE,
 };
 
 // The ONLY strings shown to a user. Deliberately free of provider names,
-// status codes, key state and upstream text.
+// status codes, key state and upstream text. Every one ends by saying the
+// note is untouched, because on every failure path it is.
 const REFINE_MESSAGE = {
   [REFINE_OUTCOME.UNAVAILABLE]:
     "AI Refine is currently unavailable. Your note has not been changed.",
@@ -242,6 +265,18 @@ const REFINE_MESSAGE = {
     "Sign in to use AI Refine. Your note has not been changed.",
   [REFINE_OUTCOME.EMAIL_NOT_VERIFIED]:
     "Verify your email address to use AI Refine. Your note has not been changed.",
+  [REFINE_OUTCOME.OFFLINE]:
+    "You're offline. AI Refine needs an internet connection. Your note has not been changed.",
+  [REFINE_OUTCOME.UNREACHABLE]:
+    "NoteWise could not reach the AI service. Check your connection and try again. Your note has not been changed.",
+  [REFINE_OUTCOME.TIMEOUT]:
+    "AI Refine took too long and was stopped. Try again, or refine a shorter passage. Your note has not been changed.",
+  [REFINE_OUTCOME.CANCELLED]:
+    "AI Refine was cancelled. Your note has not been changed.",
+  [REFINE_OUTCOME.RATE_LIMITED]:
+    "Too many AI requests in a short time. Wait a few minutes, then try again. Your note has not been changed.",
+  [REFINE_OUTCOME.TOO_LARGE]:
+    "This text is too long for AI Refine. Select a shorter passage and try again. Your note has not been changed.",
 };
 
 function refineMessageFor(outcome) {
@@ -441,13 +476,16 @@ function httpStatusForOutcome(outcome) {
  * Client-side mapping of a response status onto an outcome.
  * 404 means the refine route is not mounted at all — an unavailable service,
  * not a transient failure. 401 is a session the backend does not accept;
- * 403 is the verified-email requirement (the only 403 the route produces).
+ * 403 is the verified-email requirement unless the body names the origin
+ * gate; 429 is the backend's rate limit; 413 or `text_too_large` is a note
+ * the route will not take. `body` (parsed JSON, or null when the body was not
+ * JSON) lets a gateway's non-JSON 5xx read as "unreachable" — see
+ * src/lib/aiRequestOutcome.js. Omitted, the mapping is the status alone.
  */
-function outcomeForHttpStatus(status) {
-  if (status === 401) return REFINE_OUTCOME.UNAUTHENTICATED;
-  if (status === 403) return REFINE_OUTCOME.EMAIL_NOT_VERIFIED;
-  if (status === 404 || status === 503) return REFINE_OUTCOME.UNAVAILABLE;
-  return REFINE_OUTCOME.FAILURE;
+function outcomeForHttpStatus(status, body) {
+  return outcomeForResponseStatus(status, body, {
+    tooLargeCodes: [REFINE_ERROR_CODE.TEXT_TOO_LARGE],
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -833,6 +871,8 @@ module.exports = {
   MAX_REFINE_OUTPUT_CHARS,
   MAX_REFINE_OUTPUT_TOKENS,
   REFINE_TIMEOUT_MS,
+  REFINE_ROUTE_BUDGET_MS,
+  REFINE_MIN_RETRY_MS,
   REFINE_CLIENT_TIMEOUT_MS,
 
   REFINE_OUTCOME,

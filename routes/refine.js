@@ -5,7 +5,9 @@ const OpenAI = require("openai");
 const {
   MAX_REFINE_OUTPUT_TOKENS,
   PROVIDER_NOT_CONFIGURED,
+  REFINE_MIN_RETRY_MS,
   REFINE_OUTCOME,
+  REFINE_ROUTE_BUDGET_MS,
   REFINE_TIMEOUT_MS,
   buildRefinePrompt,
   buildRefineSourceMessage,
@@ -21,6 +23,7 @@ const {
   refineOutputRatio,
   validateRefineTransform,
 } = require("../src/lib/refineTransform");
+const { clientDisconnectSignal } = require("../server/clientDisconnect");
 
 const router = express.Router();
 
@@ -244,15 +247,28 @@ router.post("/refine", async (req, res) => {
   const system = buildRefinePrompt({ mode, language, shape });
   const source = buildRefineSourceMessage(text);
 
+  // THE TIME BUDGET. Both attempts together must answer inside
+  // REFINE_ROUTE_BUDGET_MS, which the client's own deadline sits above
+  // (src/lib/refineContract.js) — so the browser is never told "failed" while
+  // this route goes on to spend a second paid request it will never deliver.
+  // And if the browser stops waiting anyway, the provider call is aborted.
+  const startedAt = Date.now();
+  const remainingMs = () => REFINE_ROUTE_BUDGET_MS - (Date.now() - startedAt);
+  const clientGone = clientDisconnectSignal(res);
+  const abandoned = (attempts) => {
+    logRefine("final: cancelled (client disconnected)");
+    diag(res, { outcome: "cancelled", attempts });
+  };
+
   // One provider attempt: the same call, optionally carrying one corrective
   // instruction of OURS. It returns the refined text, or the reason it is not
   // usable. Nothing here writes anything.
   let attemptsMade = 0;
-  const attempt = async (corrective, n) => {
+  const attempt = async (corrective, n, timeoutMs) => {
     attemptsMade = n;
     const completion = await getClient().chat.completions.create(
       refineProviderParams({ system, source, corrective }),
-      { timeout: REFINE_TIMEOUT_MS }
+      { timeout: timeoutMs, signal: clientGone }
     );
     logProviderModel(completion, n);
     return readRefineCompletion(completion);
@@ -281,8 +297,10 @@ router.post("/refine", async (req, res) => {
     //    values only: the minimal shared base plus EXACTLY ONE mode contract.
     //    The note goes in the user role, inside a delimited source section, and
     //    is never treated as instructions.
-    output = await attempt(null, 1);
+    output = await attempt(null, 1, REFINE_TIMEOUT_MS);
   } catch (err) {
+    // The browser has gone: there is nobody to answer.
+    if (clientGone.aborted) return abandoned(attemptsMade);
     // Configuration/credential problems are "unavailable"; timeouts, network
     // errors and transient provider errors are "failure". The upstream message
     // is never forwarded to the browser.
@@ -321,11 +339,20 @@ router.post("/refine", async (req, res) => {
 
     // 6. EXACTLY ONE corrective retry. Same source, same mode, same model, same
     //    system prompt, plus one instruction naming the rule that was broken.
-    //    There is no loop: this is the second and last provider call.
+    //    There is no loop: this is the second and last provider call — and it
+    //    is only made while the browser is still waiting AND enough of the
+    //    route's budget remains for it to finish; it is never given more time
+    //    than remains.
+    if (clientGone.aborted) return abandoned(attemptsMade);
+    const retryBudgetMs = Math.min(REFINE_TIMEOUT_MS, remainingMs());
+    if (retryBudgetMs < REFINE_MIN_RETRY_MS) {
+      return failSafely(`mode contract failed, no time left to retry: ${check.code}`, "retry_budget_exhausted");
+    }
     logRefine(`retrying: ${check.code}`);
     try {
-      output = await attempt(corrective, 2);
+      output = await attempt(corrective, 2, retryBudgetMs);
     } catch (err) {
+      if (clientGone.aborted) return abandoned(attemptsMade);
       const outcome = classifyProviderError(err);
       logRefineFailure(outcome, err, text.length);
       logRefine(`final: ${outcome}`);

@@ -26,6 +26,7 @@ import {
   validateListenInSummaryResult,
 } from "../listenInSummaryContract";
 import { ApiAuthError, API_AUTH_OUTCOME, authorizedFetch } from "../apiAuth";
+import { outcomeForThrownRequest, readErrorBody } from "../aiRequestOutcome";
 
 export const DEFAULT_API_BASE = process.env.REACT_APP_API_BASE || "";
 
@@ -47,7 +48,8 @@ function outcomeForAuthError(err) {
  * identity layer may resend the SAME request once with a refreshed token —
  * src/lib/apiAuth.js — which the provider never sees, because an expired token
  * is refused before any provider work.) Re-attempting after a failure is the
- * ENGINE's decision, on its own backoff.
+ * ENGINE's decision, on its own backoff. `isOnline` is injectable for tests;
+ * by default the browser's own `navigator.onLine` decides "offline".
  *
  * @param {object} options
  * @param {"window"|"merge"|"final"} options.mode
@@ -65,6 +67,7 @@ export async function requestListenInSummary({
   getToken,
   timeoutMs = LISTEN_IN_SUMMARY_CLIENT_TIMEOUT_MS,
   signal,
+  isOnline,
 } = {}) {
   // The SAME validator the server runs, against the SAME limits. An oversized
   // window or an empty one never reaches the network, and the caller learns
@@ -78,8 +81,14 @@ export async function requestListenInSummary({
 
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   let timer = null;
+  // Which abort fired is remembered: the deadline is a timeout, the caller's
+  // own abort a cancellation.
+  let timedOut = false;
   if (controller && timeoutMs > 0) {
-    timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
   }
   const onExternalAbort = () => controller && controller.abort();
   if (signal && controller) {
@@ -112,7 +121,8 @@ export async function requestListenInSummary({
     }
 
     if (!resp || !resp.ok) {
-      return failure(summaryOutcomeForHttpStatus(resp ? resp.status : 0));
+      // Status and our backend's machine-readable `code` only; never its words.
+      return failure(summaryOutcomeForHttpStatus(resp ? resp.status : 0, await readErrorBody(resp)));
     }
 
     let data = null;
@@ -131,9 +141,15 @@ export async function requestListenInSummary({
     if (!output.ok) return failure(LISTEN_IN_SUMMARY_OUTCOME.FAILURE);
     return { ok: true, result: output.result };
   } catch {
-    // Network error, abort, or the deadline. All temporary; none of them is a
-    // summary, and none of them retries on its own.
-    return failure(LISTEN_IN_SUMMARY_OUTCOME.FAILURE);
+    // Network error, abort, or the deadline. None of them is a summary, and
+    // none of them retries on its own — but each is named for what it was.
+    return failure(
+      outcomeForThrownRequest({
+        cancelled: !!(signal && signal.aborted),
+        timedOut,
+        online: typeof isOnline === "function" ? isOnline() : undefined,
+      })
+    );
   } finally {
     if (timer) clearTimeout(timer);
     if (signal && controller) signal.removeEventListener("abort", onExternalAbort);

@@ -46,6 +46,8 @@
 // Modes
 // ---------------------------------------------------------------------------
 
+const { AI_REQUEST_OUTCOME, outcomeForResponseStatus } = require("./aiRequestOutcome");
+
 /**
  * The JOB one request performs. Each selects exactly one instruction block
  * below and nothing else. Internal ids — they travel on the wire, but only as
@@ -113,13 +115,21 @@ const LISTEN_IN_SUMMARY_CLIENT_TIMEOUT_MS = 50000;
 const LISTEN_IN_SUMMARY_OUTCOME = Object.freeze({
   SUCCESS: "success",
   /** Configuration/provider unavailability — retrying immediately will not help. */
-  UNAVAILABLE: "unavailable",
-  /** Temporary: timeout, network, provider error, malformed output. */
-  FAILURE: "failure",
+  UNAVAILABLE: AI_REQUEST_OUTCOME.UNAVAILABLE,
+  /** Temporary: provider error, malformed output. */
+  FAILURE: AI_REQUEST_OUTCOME.FAILURE,
   /** No accepted sign-in: the request never left the browser, or a 401. */
-  UNAUTHENTICATED: "unauthenticated",
+  UNAUTHENTICATED: AI_REQUEST_OUTCOME.UNAUTHENTICATED,
   /** Signed in, but the email is not verified: the account may not spend. */
-  EMAIL_NOT_VERIFIED: "email_not_verified",
+  EMAIL_NOT_VERIFIED: AI_REQUEST_OUTCOME.EMAIL_NOT_VERIFIED,
+  /** Transport outcomes (src/lib/aiRequestOutcome.js), each named for what
+   *  actually happened rather than collapsed into FAILURE. */
+  OFFLINE: AI_REQUEST_OUTCOME.OFFLINE,
+  UNREACHABLE: AI_REQUEST_OUTCOME.UNREACHABLE,
+  TIMEOUT: AI_REQUEST_OUTCOME.TIMEOUT,
+  CANCELLED: AI_REQUEST_OUTCOME.CANCELLED,
+  RATE_LIMITED: AI_REQUEST_OUTCOME.RATE_LIMITED,
+  TOO_LARGE: AI_REQUEST_OUTCOME.TOO_LARGE,
 });
 
 // The ONLY sentences a user reads. Every one of them says plainly that the
@@ -134,6 +144,18 @@ const LISTEN_IN_SUMMARY_MESSAGE = Object.freeze({
     "Sign in to summarise this session. The recording and its transcript are unaffected.",
   [LISTEN_IN_SUMMARY_OUTCOME.EMAIL_NOT_VERIFIED]:
     "Verify your email address to summarise this session. The recording and its transcript are unaffected.",
+  [LISTEN_IN_SUMMARY_OUTCOME.OFFLINE]:
+    "You're offline. Summarising needs an internet connection. The recording and its transcript are unaffected.",
+  [LISTEN_IN_SUMMARY_OUTCOME.UNREACHABLE]:
+    "NoteWise could not reach the summary service. Check your connection and try again. The recording and its transcript are unaffected.",
+  [LISTEN_IN_SUMMARY_OUTCOME.TIMEOUT]:
+    "Summarising took too long and was stopped. Try again. The recording and its transcript are unaffected.",
+  [LISTEN_IN_SUMMARY_OUTCOME.CANCELLED]:
+    "Summarising was cancelled. The recording and its transcript are unaffected.",
+  [LISTEN_IN_SUMMARY_OUTCOME.RATE_LIMITED]:
+    "Too many summary requests in a short time. Wait a few minutes, then try again. The recording and its transcript are unaffected.",
+  [LISTEN_IN_SUMMARY_OUTCOME.TOO_LARGE]:
+    "This part of the transcript is too large to summarise in one request. The recording and its transcript are unaffected.",
 });
 
 function listenInSummaryMessageFor(outcome) {
@@ -155,12 +177,15 @@ function httpStatusForSummaryOutcome(outcome) {
  * no retry of the same request will change that. Found for real on
  * 2026-09-13, when a stale dev server answered every summary with 404 and the
  * window reported "could not be generated" four times over.
+ *
+ * The rest of the mapping (403 origin gate, 429, 413, a gateway's non-JSON
+ * 5xx when `body` is passed as null) is the shared one in
+ * src/lib/aiRequestOutcome.js.
  */
-function summaryOutcomeForHttpStatus(status) {
-  if (status === 401) return LISTEN_IN_SUMMARY_OUTCOME.UNAUTHENTICATED;
-  if (status === 403) return LISTEN_IN_SUMMARY_OUTCOME.EMAIL_NOT_VERIFIED;
-  if (status === 404 || status === 503) return LISTEN_IN_SUMMARY_OUTCOME.UNAVAILABLE;
-  return LISTEN_IN_SUMMARY_OUTCOME.FAILURE;
+function summaryOutcomeForHttpStatus(status, body) {
+  return outcomeForResponseStatus(status, body, {
+    tooLargeCodes: [LISTEN_IN_SUMMARY_ERROR_CODE.SOURCE_TOO_LARGE],
+  });
 }
 
 // ---------------------------------------------------------------------------

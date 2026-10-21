@@ -17,6 +17,7 @@
 import {
   LISTEN_IN_CHUNK_MS,
   LISTEN_IN_MAX_AUTO_ATTEMPTS,
+  LISTEN_IN_RATE_LIMIT_WAIT_MS,
   applyListenInIdentity,
   createListenInEngine,
   getListenInEngine,
@@ -1107,5 +1108,105 @@ describe("31. an identity change ends the previous account's capture", () => {
     await settle();
     expect(currentMicrophoneOwner()).toBeNull();
     expect((await store.getSession(UID, WS, id)).state).toBe(LISTEN_IN_STATE.INTERRUPTED);
+  });
+});
+
+/* ============== the backend's rate limit on an offline backlog ============ */
+
+describe("a backlog that meets the rate limit (HTTP 429) waits and resumes by itself (2026-10-22)", () => {
+  const rateLimited = (retryAfterMs) =>
+    Object.assign(new Error("Too many transcription requests"), retryAfterMs ? { retryAfterMs } : {});
+
+  /** Record `count` chunks while offline, then come back online. */
+  async function offlineBacklog(engine, count, setOnline) {
+    await engine.start();
+    setOnline(false);
+    for (let i = 0; i < count; i += 1) {
+      h.advance(LISTEN_IN_CHUNK_MS);
+      h.tickRoll();
+      await settle();
+    }
+    setOnline(true);
+  }
+
+  test("the drain stops at the first refusal, spends no attempt, keeps the audio, and resumes after Retry-After", async () => {
+    let online = true;
+    const engine = makeEngine({ isOnline: () => online });
+    let call = 0;
+    transcribe.mockImplementation(async () => {
+      call += 1;
+      if (call === 2) throw rateLimited(120_000);
+      return `part ${call}`;
+    });
+    await offlineBacklog(engine, 4, (v) => {
+      online = v;
+    });
+    const id = engine.getSnapshot().session.sessionId;
+
+    h.tickRetry();
+    await settle();
+    // One success, one refusal — and NOT a refusal for every chunk behind it.
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    let chunks = engine.getSnapshot().chunks;
+    expect(chunks[0].state).toBe(CHUNK_STATE.TRANSCRIBED);
+    // The refused chunk is waiting, not failed, and no attempt was spent on it.
+    expect(chunks[1].state).toBe(CHUNK_STATE.SEALED);
+    expect(chunks[1].attempts).toBe(0);
+    expect(chunks.filter((c) => c.state === CHUNK_STATE.FAILED)).toHaveLength(0);
+    expect(await store.getChunkAudio(UID, WS, id, 1)).toBeInstanceOf(Blob);
+    expect(h.retryArmed()).toBe(true);
+
+    // Inside the wait, nothing is sent — not by the timer, not by a new chunk.
+    h.advance(60_000);
+    h.tickRetry();
+    await settle();
+    h.tickRoll();
+    await settle();
+    expect(transcribe).toHaveBeenCalledTimes(2);
+
+    // Once the wait is over the backlog drains by itself, in order.
+    h.advance(60_000);
+    h.tickRetry();
+    await settle();
+    chunks = engine.getSnapshot().chunks;
+    expect(chunks.every((c) => c.state === CHUNK_STATE.TRANSCRIBED)).toBe(true);
+    expect(chunks.map((c) => c.text)).toEqual(["part 1", "part 3", "part 4", "part 5", "part 6"]);
+    expect(chunks.every((c) => (c.attempts || 0) === 0)).toBe(true);
+  });
+
+  test("a refusal that names no wait falls back to the engine's default", async () => {
+    let online = true;
+    const engine = makeEngine({ isOnline: () => online });
+    transcribe.mockRejectedValueOnce(rateLimited()).mockResolvedValue("words");
+    await offlineBacklog(engine, 1, (v) => {
+      online = v;
+    });
+    h.tickRetry();
+    await settle();
+    expect(transcribe).toHaveBeenCalledTimes(1);
+
+    h.advance(LISTEN_IN_RATE_LIMIT_WAIT_MS - 1);
+    h.tickRetry();
+    await settle();
+    expect(transcribe).toHaveBeenCalledTimes(1);
+
+    h.advance(1);
+    h.tickRetry();
+    await settle();
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    expect(engine.getSnapshot().chunks[0].text).toBe("words");
+  });
+
+  test("other recoverable transport failures still spend attempts and back off as before", async () => {
+    transcribe.mockRejectedValue(new Error("Device offline"));
+    const engine = makeEngine();
+    await engine.start();
+    h.advance(LISTEN_IN_CHUNK_MS);
+    h.tickRoll();
+    await settle();
+    const chunk = engine.getSnapshot().chunks[0];
+    expect(chunk.state).toBe(CHUNK_STATE.FAILED);
+    expect(chunk.attempts).toBe(1);
+    expect(h.retryArmed()).toBe(true);
   });
 });

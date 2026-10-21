@@ -84,20 +84,22 @@ describe("requestRefine — failure", () => {
     expect(result.message).toBe(REFINE_MESSAGE[REFINE_OUTCOME.FAILURE]);
   });
 
-  test("a network error is a failure, not a silent pass-through", async () => {
+  test("a network error is a failure, not a silent pass-through — and says the backend was unreachable", async () => {
     const result = await requestRefine({
       getToken,
       text: NOTE,
+      isOnline: () => true,
       fetchImpl: async () => {
         throw new TypeError("Failed to fetch");
       },
     });
     expect(result.ok).toBe(false);
-    expect(result.outcome).toBe(REFINE_OUTCOME.FAILURE);
+    expect(result.outcome).toBe(REFINE_OUTCOME.UNREACHABLE);
+    expect(result.message).toBe(REFINE_MESSAGE[REFINE_OUTCOME.UNREACHABLE]);
     expect(result).not.toHaveProperty("refined");
   });
 
-  test("a timeout ends the request and reports a recoverable failure", async () => {
+  test("a timeout ends the request and reports it AS a timeout", async () => {
     jest.useFakeTimers();
     const promise = requestRefine({
       getToken,
@@ -115,7 +117,8 @@ describe("requestRefine — failure", () => {
     const result = await promise;
     jest.useRealTimers();
     expect(result.ok).toBe(false);
-    expect(result.outcome).toBe(REFINE_OUTCOME.FAILURE);
+    expect(result.outcome).toBe(REFINE_OUTCOME.TIMEOUT);
+    expect(result.message).toBe(REFINE_MESSAGE[REFINE_OUTCOME.TIMEOUT]);
   });
 
   test("a 200 that is not JSON is malformed, not a result", async () => {
@@ -143,6 +146,130 @@ describe("requestRefine — failure", () => {
       });
       expect(result.ok).toBe(false);
       expect(result.outcome).toBe(REFINE_OUTCOME.FAILURE);
+    }
+  });
+});
+
+describe("requestRefine — every failure is named for what happened (2026-10-22)", () => {
+  const neverAnswers = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      if (init.signal.aborted) return reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      init.signal.addEventListener("abort", () =>
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" }))
+      );
+    });
+
+  test("the device reports no connection → offline", async () => {
+    const result = await requestRefine({
+      getToken,
+      text: NOTE,
+      isOnline: () => false,
+      fetchImpl: async () => {
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    expect(result.outcome).toBe(REFINE_OUTCOME.OFFLINE);
+    expect(result.message).toBe(REFINE_MESSAGE[REFINE_OUTCOME.OFFLINE]);
+  });
+
+  test("the identity layer failing to refresh a token offline is offline too, not a crash", async () => {
+    const result = await requestRefine({
+      text: NOTE,
+      isOnline: () => false,
+      getToken: async () => {
+        throw Object.assign(new Error("network"), { code: "auth/network-request-failed" });
+      },
+      fetchImpl: jest.fn(),
+    });
+    expect(result.outcome).toBe(REFINE_OUTCOME.OFFLINE);
+  });
+
+  test("the caller's own abort → cancelled, never a timeout", async () => {
+    const controller = new AbortController();
+    const promise = requestRefine({ getToken, text: NOTE, signal: controller.signal, fetchImpl: neverAnswers });
+    controller.abort();
+    const result = await promise;
+    expect(result.outcome).toBe(REFINE_OUTCOME.CANCELLED);
+    expect(result.message).toBe(REFINE_MESSAGE[REFINE_OUTCOME.CANCELLED]);
+  });
+
+  test("our backend's rate limit (429) → rate limited", async () => {
+    const result = await requestRefine({
+      getToken,
+      text: NOTE,
+      fetchImpl: async () => jsonResponse(429, { error: "Too many requests.", code: "rate_limited", retryAfterSeconds: 120 }),
+    });
+    expect(result.outcome).toBe(REFINE_OUTCOME.RATE_LIMITED);
+    expect(result.message).toBe(REFINE_MESSAGE[REFINE_OUTCOME.RATE_LIMITED]);
+    // The server's own words never travel through.
+    expect(result.message).not.toContain("Too many requests.");
+  });
+
+  test("413, or the route's own text_too_large → too large", async () => {
+    for (const [status, body] of [
+      [413, { error: "Request is too large", code: "payload_too_large" }],
+      [400, { error: "This note is too long to refine.", code: "text_too_large" }],
+    ]) {
+      const result = await requestRefine({ getToken, text: NOTE, fetchImpl: async () => jsonResponse(status, body) });
+      expect(result.outcome).toBe(REFINE_OUTCOME.TOO_LARGE);
+    }
+  });
+
+  test("the origin gate's 403 is a configuration problem, not an email to verify", async () => {
+    const result = await requestRefine({
+      getToken,
+      text: NOTE,
+      fetchImpl: async () => jsonResponse(403, { error: "Origin not allowed", code: "origin_not_allowed" }),
+    });
+    expect(result.outcome).toBe(REFINE_OUTCOME.UNAVAILABLE);
+  });
+
+  test("a gateway's non-JSON 5xx (the backend stopped behind the dev proxy) → unreachable; our own JSON 502 stays a failure", async () => {
+    const gateway = await requestRefine({
+      getToken,
+      text: NOTE,
+      fetchImpl: async () => ({
+        ok: false,
+        status: 504,
+        text: async () => "Proxy error: Could not proxy request /api/refine",
+      }),
+    });
+    expect(gateway.outcome).toBe(REFINE_OUTCOME.UNREACHABLE);
+    const ours = await requestRefine({
+      getToken,
+      text: NOTE,
+      fetchImpl: async () => ({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({ error: "AI Refine could not complete.", outcome: "failure" }),
+      }),
+    });
+    expect(ours.outcome).toBe(REFINE_OUTCOME.FAILURE);
+  });
+
+  test("every outcome has its own sentence, and every sentence says the note is unchanged", () => {
+    for (const outcome of Object.values(REFINE_OUTCOME)) {
+      if (outcome === REFINE_OUTCOME.SUCCESS) continue;
+      expect(REFINE_MESSAGE[outcome]).toMatch(/Your note has not been changed\.$/);
+    }
+    const sentences = Object.values(REFINE_MESSAGE);
+    expect(new Set(sentences).size).toBe(sentences.length);
+  });
+
+  test("no failure ever returns the caller's text as a result", async () => {
+    const failures = [
+      async () => jsonResponse(429, {}),
+      async () => jsonResponse(413, {}),
+      async () => ({ ok: false, status: 504, text: async () => "<html>" }),
+      async () => {
+        throw new TypeError("Failed to fetch");
+      },
+    ];
+    for (const fetchImpl of failures) {
+      const result = await requestRefine({ getToken, text: NOTE, fetchImpl });
+      expect(result.ok).toBe(false);
+      expect(result).not.toHaveProperty("refined");
+      expect(JSON.stringify(result)).not.toContain("Rebar");
     }
   });
 });

@@ -23,6 +23,7 @@ import {
 } from "./listenInEngine";
 import { CHUNK_STATE, LISTEN_IN_STATE } from "./listenInModel";
 import { LISTEN_IN_SUMMARY_POLICY } from "./listenInSummaryModel";
+import { LISTEN_IN_SUMMARY_OUTCOME, listenInSummaryMessageFor } from "../listenInSummaryContract";
 import { createListenInMemoryStore } from "./listenInStore";
 import {
   MICROPHONE_OWNER,
@@ -441,7 +442,7 @@ describe("capture and transcription are never blocked by the summary", () => {
     expect(engine.getSnapshot().summary.lastErrorOutcome).toBeNull();
   });
 
-  test("offline sends nothing, and reports the request as unavailable rather than pretending", async () => {
+  test("offline sends nothing, and reports the request as OFFLINE rather than pretending", async () => {
     const summarise = recordingSummariser();
     let online = true;
     const engine = createListenInEngine({
@@ -477,7 +478,13 @@ describe("capture and transcription are never blocked by the summary", () => {
     await engine.flushSummary();
     await settle();
     expect(summarise).not.toHaveBeenCalled();
-    expect(engine.getSnapshot().summary.lastErrorOutcome).toBe("unavailable");
+    // Offline, not "unavailable": the service is fine, the device is not
+    // connected — and the sentence says so, with the transcript unaffected.
+    expect(engine.getSnapshot().summary.lastErrorOutcome).toBe("offline");
+    expect(engine.getSnapshot().summary.lastErrorMessage).toBe(
+      listenInSummaryMessageFor(LISTEN_IN_SUMMARY_OUTCOME.OFFLINE)
+    );
+    expect(engine.getSnapshot().summary.lastErrorMessage).toMatch(/transcript are unaffected/);
     expect(engine.getSnapshot().summary.status).toBe("failed");
   });
 });

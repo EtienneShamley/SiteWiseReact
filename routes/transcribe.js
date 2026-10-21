@@ -26,6 +26,8 @@ const {
   PRIMARY_MODEL,
   FALLBACK_MODEL,
   TRANSCRIBE_TIMEOUT_MS,
+  TRANSCRIBE_ROUTE_BUDGET_MS,
+  TRANSCRIBE_MIN_FALLBACK_MS,
   TRANSCRIBE_MESSAGE,
   PROVIDER_NOT_CONFIGURED,
   isAcceptedDeclaredType,
@@ -35,6 +37,7 @@ const {
   classifyTranscriptionError,
 } = require("../server/transcriptionPolicy");
 const { TRANSCRIBE_AUDIO_LIMIT_BYTES } = require("../server/config");
+const { clientDisconnectSignal } = require("../server/clientDisconnect");
 
 const router = express.Router();
 
@@ -145,6 +148,9 @@ function readTranscript(result) {
 }
 
 router.post("/transcribe", parseAudioUpload, async (req, res) => {
+  // Fires if the browser stops waiting; every provider call is handed it
+  // (server/clientDisconnect.js).
+  const clientGone = clientDisconnectSignal(res);
   try {
     // 1. The multipart shape. Multer has already enforced the part/field
     //    ceilings and the declared-type pre-filter; here the request must
@@ -178,21 +184,33 @@ router.post("/transcribe", parseAudioUpload, async (req, res) => {
       return p;
     };
 
+    // The time budget for both attempts: see TRANSCRIBE_ROUTE_BUDGET_MS.
+    const startedAt = Date.now();
+
     let text;
     try {
       const primary = await client.audio.transcriptions.create(params(PRIMARY_MODEL), {
         timeout: TRANSCRIBE_TIMEOUT_MS,
+        signal: clientGone,
       });
       diag(res, { model: PRIMARY_MODEL, attempts: 1 });
       text = readTranscript(primary);
     } catch (primaryErr) {
       // 4. The fallback policy. A second, paid attempt happens ONLY when the
-      //    first failure says the primary model itself is unusable. Anything
-      //    else is the final answer for this request.
-      if (!shouldFallbackToWhisper(primaryErr)) throw primaryErr;
+      //    first failure says the primary model itself is unusable, the
+      //    browser is still waiting, and enough of the route's budget remains
+      //    for it to finish. Anything else is the final answer for this
+      //    request.
+      if (!shouldFallbackToWhisper(primaryErr) || clientGone.aborted) throw primaryErr;
+      const fallbackBudgetMs = Math.min(
+        TRANSCRIBE_TIMEOUT_MS,
+        TRANSCRIBE_ROUTE_BUDGET_MS - (Date.now() - startedAt)
+      );
+      if (fallbackBudgetMs < TRANSCRIBE_MIN_FALLBACK_MS) throw primaryErr;
       diag(res, { fallback: true, primaryCategory: classifyTranscriptionError(primaryErr).category });
       const fallback = await client.audio.transcriptions.create(params(FALLBACK_MODEL), {
-        timeout: TRANSCRIBE_TIMEOUT_MS,
+        timeout: fallbackBudgetMs,
+        signal: clientGone,
       });
       diag(res, { model: FALLBACK_MODEL, attempts: 2 });
       text = readTranscript(fallback);
@@ -202,6 +220,12 @@ router.post("/transcribe", parseAudioUpload, async (req, res) => {
     diag(res, { outcome: "success", transcriptChars: text.length });
     return res.json({ text });
   } catch (err) {
+    // The browser has gone (its deadline, a cancel, a closed tab): the
+    // provider call was aborted and there is nobody to answer.
+    if (clientGone.aborted) {
+      diag(res, { outcome: "cancelled" });
+      return undefined;
+    }
     // 6. Every provider problem becomes one of two stable outcomes. The
     //    provider's own message, status body and stack never reach the
     //    browser; the log gets a category.

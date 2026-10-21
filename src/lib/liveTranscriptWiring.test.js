@@ -194,7 +194,12 @@ describe("5/12. one session, owned above the sidebar and the workspace", () => {
     // only saved after the microphone actually opened.
     const start = ENGINE.slice(ENGINE.indexOf("async function start("), ENGINE.indexOf("async function endCapture("));
     expect(start.indexOf("await openCapture()")).toBeLessThan(start.indexOf("await saveSession(fresh)"));
-    expect(TRANSPORT).toContain('e?.name === "AbortError" ? "Request timed out" : "Network error"');
+    // The transport's thrown-request literals (an abort is the deadline unless
+    // the caller cancelled; anything else is the network, or "offline" when the
+    // device says so) — behaviour is asserted in transcriptionTransport.test.js.
+    expect(TRANSPORT).toContain('timedOut: e?.name === "AbortError"');
+    expect(TRANSPORT).toContain('TIMEOUT: "Request timed out"');
+    expect(TRANSPORT).toContain('NETWORK: "Network error"');
   });
 
   test("11. an empty session is handled: Export disabled, an honest EMPTY message on Copy", () => {

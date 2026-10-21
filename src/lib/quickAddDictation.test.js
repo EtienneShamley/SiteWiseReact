@@ -20,6 +20,7 @@ import {
   dictationFailed,
   dictationFinished,
   dictationLanguageTitle,
+  dictationPartFailedMessage,
   dictationResultAccepted,
   isDictating,
   mergeDictationIntoDraft,
@@ -254,5 +255,42 @@ describe("a part that could not be transcribed", () => {
     // because Live transcript is literally what is holding the microphone.)
     expect(DICTATION_MESSAGE.PART_FAILED).not.toMatch(/Live transcript|segment|part of the recording/i);
     expect(DICTATION_MESSAGE.PART_FAILED).toMatch(/dictation/i);
+  });
+
+  test("names a rate limit or an unavailable service instead of blaming the connection (2026-10-22)", () => {
+    expect(dictationPartFailedMessage(new Error("Too many transcription requests"))).toBe(
+      DICTATION_MESSAGE.PART_RATE_LIMITED
+    );
+    expect(dictationPartFailedMessage(new Error("Transcription is currently unavailable."))).toBe(
+      DICTATION_MESSAGE.PART_UNAVAILABLE
+    );
+    for (const raw of ["Network error", "Request timed out", "Device offline", "Transcription failed"]) {
+      expect(dictationPartFailedMessage(new Error(raw))).toBe(DICTATION_MESSAGE.PART_FAILED);
+    }
+    expect(dictationPartFailedMessage(null)).toBe(DICTATION_MESSAGE.PART_FAILED);
+    for (const message of [DICTATION_MESSAGE.PART_RATE_LIMITED, DICTATION_MESSAGE.PART_UNAVAILABLE]) {
+      expect(message).toMatch(/none of it was added to your draft/);
+      expect(message).toMatch(/was not kept/);
+      expect(message).not.toMatch(/check your connection/i);
+      expect(dictationErrorMessage(new Error(message))).toBe(message);
+    }
+  });
+});
+
+describe("the transport's newer literals reach the user as sentences", () => {
+  test("offline, rate limited and too large each have their own wording", () => {
+    expect(dictationErrorMessage(new Error("Device offline"))).toBe(LIVE_TRANSCRIPT_MESSAGE.OFFLINE);
+    expect(dictationErrorMessage(new Error("Too many transcription requests"))).toBe(
+      LIVE_TRANSCRIPT_MESSAGE.RATE_LIMITED
+    );
+    expect(dictationErrorMessage(new Error("Recording too large"))).toBe(LIVE_TRANSCRIPT_MESSAGE.TOO_LARGE);
+    // None of them names Live transcript, so they are safe in the composer.
+    for (const message of [
+      LIVE_TRANSCRIPT_MESSAGE.OFFLINE,
+      LIVE_TRANSCRIPT_MESSAGE.RATE_LIMITED,
+      LIVE_TRANSCRIPT_MESSAGE.TOO_LARGE,
+    ]) {
+      expect(message).not.toMatch(/Live transcript/i);
+    }
   });
 });

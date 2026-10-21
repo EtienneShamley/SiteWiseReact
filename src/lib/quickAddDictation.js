@@ -199,7 +199,26 @@ export const DICTATION_MESSAGE = Object.freeze({
   // memory only and there is no retry to come back to.
   PART_FAILED:
     "Part of this dictation could not be transcribed, so none of it was added to your draft — a partly-transcribed dictation is not offered. The recording was not kept. Check your connection and dictate it again.",
+  // The same outcome when the cause was NOT the connection, so the last
+  // sentence does not send the user to check a network that is fine.
+  PART_RATE_LIMITED:
+    "Part of this dictation could not be transcribed because too many transcription requests were made in a short time, so none of it was added to your draft. The recording was not kept. Wait a few minutes, then dictate it again.",
+  PART_UNAVAILABLE:
+    "Part of this dictation could not be transcribed because transcription is currently unavailable, so none of it was added to your draft. The recording was not kept.",
 });
+
+/**
+ * The whole-dictation sentence for a part that failed, by the transport's
+ * fixed literal (src/hooks/useTranscription.js): a rate limit or an
+ * unavailable service is named as such; every other cause keeps the
+ * connection wording.
+ */
+export function dictationPartFailedMessage(failure) {
+  const raw = failure && typeof failure.message === "string" ? failure.message : "";
+  if (raw === "Too many transcription requests") return DICTATION_MESSAGE.PART_RATE_LIMITED;
+  if (raw === "Transcription is currently unavailable.") return DICTATION_MESSAGE.PART_UNAVAILABLE;
+  return DICTATION_MESSAGE.PART_FAILED;
+}
 
 /** The refusal to show when the microphone belongs to `owner`. */
 export function microphoneOwnedMessage(owner) {

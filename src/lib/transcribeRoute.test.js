@@ -85,7 +85,9 @@ describe("a valid request", () => {
     const [params, options] = mockAudioCreate.mock.calls[0];
     expect(params.model).toBe("gpt-4o-mini-transcribe");
     expect(params.language).toBeUndefined();
-    expect(options).toEqual({ timeout: 45000 });
+    // …and the signal that aborts the provider call if the browser goes.
+    expect(options).toEqual({ timeout: 45000, signal: expect.any(AbortSignal) });
+    expect(options.signal.aborted).toBe(false);
   });
 
   test("the file handed to the provider is named and typed from the BYTES, not the client's label", async () => {

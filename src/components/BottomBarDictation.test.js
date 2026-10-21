@@ -1151,6 +1151,20 @@ describe("M10. a failed part never becomes an apparently-complete dictation", ()
     expect(textarea().value).toBe("field notes so far");
     expect(alertLine().textContent).toBe(DICTATION_MESSAGE.PART_FAILED);
   });
+
+  test("a part refused by the rate limit says so, rather than sending the user to check their connection", async () => {
+    mount();
+    typeInto(textarea(), "field notes so far");
+    let call = 0;
+    mockTranscribeBlob.mockImplementation(async () => {
+      call += 1;
+      if (call === 2) throw new Error("Too many transcription requests");
+      return `part ${call}`;
+    });
+    await dictateParts(3);
+    expect(textarea().value).toBe("field notes so far");
+    expect(alertLine().textContent).toBe(DICTATION_MESSAGE.PART_RATE_LIMITED);
+  });
 });
 
 describe("M11. Live transcript is still a separate workflow beside a multi-part dictation", () => {

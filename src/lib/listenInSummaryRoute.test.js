@@ -117,7 +117,9 @@ describe("a valid window request", () => {
     await post(port, WINDOW);
     const [params, options] = mockChatCreate.mock.calls[0];
     expect(params.max_completion_tokens).toBe(2000);
-    expect(options).toEqual({ timeout: 45000 });
+    // …and the signal that aborts the provider call if the browser goes.
+    expect(options).toEqual({ timeout: 45000, signal: expect.any(AbortSignal) });
+    expect(options.signal.aborted).toBe(false);
   });
 
   test("ONE request per call — the route never retries a summary by itself", async () => {

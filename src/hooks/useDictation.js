@@ -69,6 +69,7 @@ import {
   createDictationState,
   dictationFailed,
   dictationFinished,
+  dictationPartFailedMessage,
   microphoneOwnedMessage,
   requestDictationStop,
 } from "../lib/quickAddDictation";
@@ -233,7 +234,7 @@ export default function useDictation({ partMs = DICTATION_PART_MS } = {}) {
       // More was spoken than will ever be delivered — the in-progress part is
       // being dropped — so this is always the whole-dictation sentence, never
       // the single-clip wording.
-      safeSet((s) => dictationFailed(s, new Error(DICTATION_MESSAGE.PART_FAILED)));
+      safeSet((s) => dictationFailed(s, new Error(dictationPartFailedMessage(parts.failure))));
     },
     [abortPending, release, safeSet]
   );
@@ -445,7 +446,10 @@ export default function useDictation({ partMs = DICTATION_PART_MS } = {}) {
       // consequence; a single-part one keeps the wording it always had, since
       // there is no partial result for the user to wonder about.
       safeSet((s) =>
-        dictationFailed(s, parts.count > 1 ? new Error(DICTATION_MESSAGE.PART_FAILED) : parts.failure)
+        dictationFailed(
+          s,
+          parts.count > 1 ? new Error(dictationPartFailedMessage(parts.failure)) : parts.failure
+        )
       );
       return null;
     }

@@ -38,6 +38,7 @@ const {
   readListenInSummaryCompletion,
   validateListenInSummaryRequest,
 } = require("../src/lib/listenInSummaryContract");
+const { clientDisconnectSignal } = require("../server/clientDisconnect");
 
 const router = express.Router();
 
@@ -171,13 +172,21 @@ router.post("/listen-in/summary", async (req, res) => {
   //    malformed object or a truncation — neither of which a second identical
   //    request is likely to fix, and both of which the engine re-attempts on
   //    its own schedule without the user waiting.
+  //    If the browser stops waiting, the provider call is aborted rather than
+  //    finished and paid for on nobody's behalf (server/clientDisconnect.js).
+  const clientGone = clientDisconnectSignal(res);
   let completion;
   try {
     completion = await getClient().chat.completions.create(
       listenInSummaryProviderParams({ system, source }),
-      { timeout: LISTEN_IN_SUMMARY_TIMEOUT_MS }
+      { timeout: LISTEN_IN_SUMMARY_TIMEOUT_MS, signal: clientGone }
     );
   } catch (err) {
+    if (clientGone.aborted) {
+      logSummary("final: cancelled (client disconnected)");
+      diag(res, { outcome: "cancelled" });
+      return undefined;
+    }
     const outcome = classifySummaryProviderError(err);
     logSummary(`final: ${outcome}`);
     diag(res, { outcome, errorCategory: "provider", ...providerDiag(err) });

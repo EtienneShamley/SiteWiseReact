@@ -175,14 +175,42 @@ export const LISTEN_IN_RETRY_BACKOFF_MS = Object.freeze([2000, 5000, 15000, 4500
 /** After this many automatic attempts a chunk waits for an explicit retry. */
 export const LISTEN_IN_MAX_AUTO_ATTEMPTS = 5;
 
-/** Transport failures that are worth trying again; anything else is actionable. */
-const RECOVERABLE_MESSAGES = new Set(["Network error", "Request timed out"]);
+/**
+ * Transport failures that are worth trying again; anything else is actionable.
+ * The transport's fixed literals (src/hooks/useTranscription.js →
+ * TRANSCRIBE_TRANSPORT_ERROR), written out here because the engine's tests
+ * replace that module with a double that carries only the transport function.
+ */
+const RECOVERABLE_MESSAGES = new Set([
+  "Network error",
+  "Request timed out",
+  "Device offline",
+  // The route's own 503 wording: the provider is unreachable, not the audio bad.
+  "Transcription is currently unavailable.",
+]);
+
+/** The transport's literal for the backend's rate limit (HTTP 429). */
+const RATE_LIMITED_MESSAGE = "Too many transcription requests";
 
 function isRecoverable(error) {
   const message = error && typeof error.message === "string" ? error.message : "";
-  if (RECOVERABLE_MESSAGES.has(message)) return true;
-  // The route's own 503 wording: the provider is unreachable, not the audio bad.
-  return message === "Transcription is currently unavailable.";
+  return RECOVERABLE_MESSAGES.has(message);
+}
+
+/**
+ * How long the drain waits after the backend's rate limit refused a request
+ * when the refusal named no usable Retry-After (the transport clamps one that
+ * it did name — src/lib/aiRequestOutcome.js).
+ */
+export const LISTEN_IN_RATE_LIMIT_WAIT_MS = 60000;
+
+function isRateLimited(error) {
+  return !!error && error.message === RATE_LIMITED_MESSAGE;
+}
+
+function rateLimitWaitMs(error) {
+  const ms = error && error.retryAfterMs;
+  return typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : LISTEN_IN_RATE_LIMIT_WAIT_MS;
 }
 
 function defaultStore(persistence) {
@@ -298,6 +326,10 @@ export function createListenInEngine({
   let draining = null;
   let drainAgain = false;
   let retryTimer = null;
+  // Until when the backend's rate limit has asked the drain to wait (epoch
+  // ms; 0 = not limited). Engine-wide, not per chunk: the limit is per user,
+  // so every chunk would be refused alike until it has passed.
+  let rateLimitedUntil = 0;
   let removeOnline = null;
 
   // ---- summary ----
@@ -643,6 +675,13 @@ export function createListenInEngine({
     const id = session.sessionId;
     let soonest = null;
 
+    if (rateLimitedUntil > now()) {
+      // Still inside the rate limit's wait: sending anything now would only be
+      // refused again. Nothing is spent; the drain comes back when it is over.
+      scheduleRetry(rateLimitedUntil - now());
+      return;
+    }
+
     for (const chunk of drainableChunks(chunks, { maxAttempts: maxAutoAttempts })) {
       if (stopped || !session || session.sessionId !== id) return;
       if (chunk.state === CHUNK_STATE.TRANSCRIBING) continue;
@@ -679,6 +718,27 @@ export function createListenInEngine({
         failure = e instanceof Error ? e : new Error("Transcription failed");
       }
       if (stopped || !session || session.sessionId !== id) return;
+
+      if (failure && isRateLimited(failure)) {
+        // THE BACKEND'S RATE LIMIT (HTTP 429). Not this chunk's fault, and not
+        // a reason to spend one of its attempts: a backlog left by an offline
+        // stretch drains at full speed and meets the per-user limit by design.
+        // Before this, every chunk after the first refusal was failed outright
+        // one after another and left waiting for a manual Try again. Now the
+        // chunk goes back to waiting — its audio untouched, its attempt count
+        // unchanged — and the WHOLE drain pauses for the limit's own
+        // Retry-After, then resumes by itself.
+        const wait = rateLimitWaitMs(failure);
+        rateLimitedUntil = now() + wait;
+        await data.patchChunk(owner, workspace, id, chunk.seq, {
+          state: CHUNK_STATE.SEALED,
+          lastCode: failure.message,
+        });
+        await reloadChunks();
+        emit();
+        scheduleRetry(wait);
+        return;
+      }
 
       if (failure) {
         const attempts = (chunk.attempts || 0) + 1;
@@ -909,8 +969,9 @@ export function createListenInEngine({
       if (!isOnline()) {
         // Offline: the request the user made cannot be served now. Nothing is
         // sent, the transcript is safe and the capture is unaffected; the
-        // outcome is recorded so the window can say so and offer a retry.
-        await saveSummary(withSummaryFailure(summary, { outcome: LISTEN_IN_SUMMARY_OUTCOME.UNAVAILABLE, message: listenInSummaryMessageFor(LISTEN_IN_SUMMARY_OUTCOME.UNAVAILABLE), now: now(), policy: summaryPolicy }));
+        // outcome is recorded AS OFFLINE (not "unavailable", which would blame
+        // the service) so the window can say so and offer a retry.
+        await saveSummary(withSummaryFailure(summary, { outcome: LISTEN_IN_SUMMARY_OUTCOME.OFFLINE, message: listenInSummaryMessageFor(LISTEN_IN_SUMMARY_OUTCOME.OFFLINE), now: now(), policy: summaryPolicy }));
         return;
       }
 
@@ -956,7 +1017,7 @@ export function createListenInEngine({
       return;
     }
     if (!isOnline()) {
-      await saveSummary(withSummaryFailure(summary, { outcome: LISTEN_IN_SUMMARY_OUTCOME.UNAVAILABLE, message: listenInSummaryMessageFor(LISTEN_IN_SUMMARY_OUTCOME.UNAVAILABLE), now: now(), policy: summaryPolicy }));
+      await saveSummary(withSummaryFailure(summary, { outcome: LISTEN_IN_SUMMARY_OUTCOME.OFFLINE, message: listenInSummaryMessageFor(LISTEN_IN_SUMMARY_OUTCOME.OFFLINE), now: now(), policy: summaryPolicy }));
       return;
     }
     await saveSummary(summaryRequestStarted(summary, { now: now() }));

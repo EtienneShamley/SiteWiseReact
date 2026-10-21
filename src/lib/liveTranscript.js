@@ -258,6 +258,12 @@ export const LIVE_TRANSCRIPT_MESSAGE = Object.freeze({
     "Transcription is currently unavailable. Your recording could not be transcribed; nothing has been added to your note.",
   NETWORK:
     "The transcription service could not be reached. Check your connection and try again.",
+  OFFLINE:
+    "This device is offline, so the recording could not be transcribed. Check your connection and try again.",
+  RATE_LIMITED:
+    "Too many transcription requests in a short time. Wait a few minutes, then try again.",
+  TOO_LARGE: "This recording is too large to transcribe in one request.",
+  CANCELLED: "Transcription was cancelled. Nothing has been added to your note.",
   TIMEOUT: "Transcribing took too long and was stopped. Try a shorter recording.",
   FAILED: "This part of the recording could not be transcribed. Nothing has been added to your note.",
   SIGN_IN_REQUIRED:
@@ -302,6 +308,10 @@ export function liveTranscriptErrorMessage(error) {
   if (raw === "No audio captured") return LIVE_TRANSCRIPT_MESSAGE.NO_AUDIO;
   if (raw === "Request timed out") return LIVE_TRANSCRIPT_MESSAGE.TIMEOUT;
   if (raw === "Network error") return LIVE_TRANSCRIPT_MESSAGE.NETWORK;
+  if (raw === "Device offline") return LIVE_TRANSCRIPT_MESSAGE.OFFLINE;
+  if (raw === "Too many transcription requests") return LIVE_TRANSCRIPT_MESSAGE.RATE_LIMITED;
+  if (raw === "Recording too large") return LIVE_TRANSCRIPT_MESSAGE.TOO_LARGE;
+  if (raw === "Request cancelled") return LIVE_TRANSCRIPT_MESSAGE.CANCELLED;
   if (raw === "Transcription is currently unavailable.") return LIVE_TRANSCRIPT_MESSAGE.UNAVAILABLE;
   if (raw === "Transcription failed") return LIVE_TRANSCRIPT_MESSAGE.FAILED;
   if (raw === "Sign in required") return LIVE_TRANSCRIPT_MESSAGE.SIGN_IN_REQUIRED;

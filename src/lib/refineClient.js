@@ -20,6 +20,7 @@ import {
   validateRefineRequest,
 } from "./refineContract";
 import { ApiAuthError, API_AUTH_OUTCOME, authorizedFetch } from "./apiAuth";
+import { outcomeForThrownRequest, readErrorBody } from "./aiRequestOutcome";
 
 export const DEFAULT_API_BASE = process.env.REACT_APP_API_BASE || "";
 
@@ -46,7 +47,8 @@ function outcomeForAuthError(err) {
  * Identity travels with the request through `authorizedFetch`: a session that
  * does not exist is reported as UNAUTHENTICATED without touching the network.
  * `getToken` is injectable for tests; production uses the provider the auth
- * context registered.
+ * context registered. `isOnline` is injectable for the same reason; by
+ * default the browser's own `navigator.onLine` decides "offline".
  *
  * @returns {Promise<{ok: true, refined: string}
  *                 | {ok: false, outcome: string, message: string}>}
@@ -60,6 +62,7 @@ export async function requestRefine({
   getToken,
   timeoutMs = REFINE_CLIENT_TIMEOUT_MS,
   signal,
+  isOnline,
 } = {}) {
   // Validate before spending a request. An empty or oversized note never
   // reaches the network.
@@ -74,11 +77,17 @@ export async function requestRefine({
 
   // A client deadline guarantees the loading state always ends, even if the
   // server never answers. Timing out is not a reason to try again by itself.
+  // Which of the two aborts fired is remembered, so the deadline reads as a
+  // timeout and the caller's own abort as a cancellation.
   const controller =
     typeof AbortController === "function" ? new AbortController() : null;
   let timer = null;
+  let timedOut = false;
   if (controller && timeoutMs > 0) {
-    timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
   }
   const onExternalAbort = () => controller && controller.abort();
   if (signal && controller) {
@@ -110,7 +119,9 @@ export async function requestRefine({
 
     if (!resp || !resp.ok) {
       const status = resp ? resp.status : 0;
-      return failure(outcomeForHttpStatus(status));
+      // Only the status and our backend's machine-readable `code` are read;
+      // the body's wording is never shown.
+      return failure(outcomeForHttpStatus(status, await readErrorBody(resp)));
     }
 
     let data = null;
@@ -126,9 +137,16 @@ export async function requestRefine({
 
     return { ok: true, refined: output.refined };
   } catch {
-    // Network error, abort, or timeout. All temporary failures; none of them
-    // may be presented as a refinement, and none of them retries on its own.
-    return failure(REFINE_OUTCOME.FAILURE);
+    // Network error, abort, or timeout. None of them may be presented as a
+    // refinement, and none of them retries on its own — but each is named for
+    // what it was: cancelled, timed out, offline, or the backend unreachable.
+    return failure(
+      outcomeForThrownRequest({
+        cancelled: !!(signal && signal.aborted),
+        timedOut,
+        online: typeof isOnline === "function" ? isOnline() : undefined,
+      })
+    );
   } finally {
     if (timer) clearTimeout(timer);
     if (signal && controller) signal.removeEventListener("abort", onExternalAbort);

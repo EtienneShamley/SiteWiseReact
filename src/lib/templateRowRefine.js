@@ -67,6 +67,22 @@ export const ROW_REFINE_MESSAGE = {
     "AI refinement is currently unavailable. This field has not been changed.",
   [REFINE_OUTCOME.FAILURE]:
     "AI refinement could not complete. This field has not been changed.",
+  [REFINE_OUTCOME.UNAUTHENTICATED]:
+    "Sign in to use AI refinement. This field has not been changed.",
+  [REFINE_OUTCOME.EMAIL_NOT_VERIFIED]:
+    "Verify your email address to use AI refinement. This field has not been changed.",
+  [REFINE_OUTCOME.OFFLINE]:
+    "You're offline. AI refinement needs an internet connection. This field has not been changed.",
+  [REFINE_OUTCOME.UNREACHABLE]:
+    "NoteWise could not reach the AI service. Check your connection and try again. This field has not been changed.",
+  [REFINE_OUTCOME.TIMEOUT]:
+    "AI refinement took too long and was stopped. Try again. This field has not been changed.",
+  [REFINE_OUTCOME.CANCELLED]:
+    "AI refinement was cancelled. This field has not been changed.",
+  [REFINE_OUTCOME.RATE_LIMITED]:
+    "Too many AI requests in a short time. Wait a few minutes, then try again. This field has not been changed.",
+  [REFINE_OUTCOME.TOO_LARGE]:
+    "This text is too long for AI refinement. This field has not been changed.",
 };
 
 export function rowRefineMessageFor(outcome) {
